@@ -111,17 +111,26 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         });
 
     // -- Graphs --
-    let graph_names = p.graph.list_graphs(branch_id).unwrap_or_else(|e| {
-        warn!("describe: list_graphs failed: {}", e);
-        Vec::new()
-    });
+    // Phase 6: `describe` summarizes the default space's graphs only.
+    // Multi-space describe is a separate concern (would need to enumerate
+    // all spaces with graph data and aggregate). The default space is
+    // where new code lands by default; existing `_graph_` legacy data
+    // requires the caller to switch space first.
+    let graph_space = strata_graph::keys::GRAPH_SPACE;
+    let graph_names = p
+        .graph
+        .list_graphs(branch_id, graph_space)
+        .unwrap_or_else(|e| {
+            warn!("describe: list_graphs failed: {}", e);
+            Vec::new()
+        });
 
     let graphs: Vec<GraphSummaryEntry> = graph_names
         .into_iter()
         .map(|name| {
             let stats = p
                 .graph
-                .snapshot_stats(branch_id, &name)
+                .snapshot_stats(branch_id, graph_space, &name)
                 .unwrap_or_else(|e| {
                     warn!("describe: snapshot_stats for '{}' failed: {}", name, e);
                     strata_graph::types::GraphStats {
@@ -131,11 +140,11 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
                 });
             let object_types = p
                 .graph
-                .list_object_types(branch_id, &name)
+                .list_object_types(branch_id, graph_space, &name)
                 .unwrap_or_default();
             let link_types = p
                 .graph
-                .list_link_types(branch_id, &name)
+                .list_link_types(branch_id, graph_space, &name)
                 .unwrap_or_default();
             GraphSummaryEntry {
                 name,

@@ -33,25 +33,30 @@ pub(crate) fn read_edge_type_count(
     }
 }
 
-/// Idempotently register the reserved `_graph_` space on `branch_id` from
-/// inside an open transaction.
+/// Idempotently register the given `space` on `branch_id` from inside an
+/// open transaction.
 ///
-/// Graph data lives exclusively in the reserved `_graph_` space, but the
-/// `SpaceIndex` (which `branch_ops::merge_branches` and other space-aware
-/// callers iterate via `space_index.list()`) only tracks spaces that have
-/// been explicitly registered. Without this hook, branches with graph data
-/// have an empty space list, and `merge_branches` silently skips graph
-/// state entirely — which means Phase 3's graph divergence safety check
-/// never fires either. This is the same gap PR #2331 closed for EventLog.
+/// The `SpaceIndex` (which `branch_ops::merge_branches` and other
+/// space-aware callers iterate via `space_index.list()`) only tracks
+/// spaces that have been explicitly registered. Without this hook,
+/// branches with graph data have an empty space list, and
+/// `merge_branches` silently skips graph state entirely — which means
+/// Phase 3's graph divergence safety check never fires either. This is
+/// the same gap PR #2331 closed for EventLog.
 ///
-/// Skip the read+write if the metadata key already exists to avoid bloating
-/// the WAL with no-op puts on every graph mutation. The conditional `txn.get`
-/// is a memtable hit on the hot path.
+/// Phase 6: takes the target `space` as a parameter (was hardwired to
+/// `keys::GRAPH_SPACE` before). Callers pass the user space they want to
+/// write graph data into.
+///
+/// Skip the read+write if the metadata key already exists to avoid
+/// bloating the WAL with no-op puts on every graph mutation. The
+/// conditional `txn.get` is a memtable hit on the hot path.
 pub(crate) fn ensure_graph_space_registered(
     txn: &mut TransactionContext,
     branch_id: BranchId,
+    space: &str,
 ) -> StrataResult<()> {
-    let space_meta_key = Key::new_space(branch_id, keys::GRAPH_SPACE);
+    let space_meta_key = Key::new_space(branch_id, space);
     if txn.get(&space_meta_key)?.is_none() {
         txn.put(space_meta_key, Value::String("{}".to_string()))?;
     }
@@ -84,6 +89,7 @@ pub trait GraphStoreExt {
     fn graph_create(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         meta: GraphMeta,
     ) -> StrataResult<()>;
@@ -92,11 +98,12 @@ pub trait GraphStoreExt {
     fn graph_get_meta(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
     ) -> StrataResult<Option<GraphMeta>>;
 
-    /// List all graph names on a branch (from catalog).
-    fn graph_list(&mut self, branch_id: BranchId) -> StrataResult<Vec<String>>;
+    /// List all graph names on a branch within the given space (from catalog).
+    fn graph_list(&mut self, branch_id: BranchId, space: &str) -> StrataResult<Vec<String>>;
 
     // --- Nodes ---
 
@@ -104,6 +111,7 @@ pub trait GraphStoreExt {
     fn graph_add_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         data: &NodeData,
@@ -113,6 +121,7 @@ pub trait GraphStoreExt {
     fn graph_get_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) -> StrataResult<Option<NodeData>>;
@@ -121,19 +130,27 @@ pub trait GraphStoreExt {
     fn graph_remove_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) -> StrataResult<()>;
 
     /// List all node IDs in a graph.
-    fn graph_list_nodes(&mut self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>>;
+    fn graph_list_nodes(
+        &mut self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<Vec<String>>;
 
     // --- Edges ---
 
     /// Add or update an edge. Returns true if created, false if updated.
+    #[allow(clippy::too_many_arguments)]
     fn graph_add_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
@@ -145,6 +162,7 @@ pub trait GraphStoreExt {
     fn graph_remove_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
@@ -155,6 +173,7 @@ pub trait GraphStoreExt {
     fn graph_get_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
@@ -165,6 +184,7 @@ pub trait GraphStoreExt {
     fn graph_outgoing_neighbors(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
@@ -174,6 +194,7 @@ pub trait GraphStoreExt {
     fn graph_incoming_neighbors(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
@@ -190,16 +211,17 @@ impl GraphStoreExt for TransactionContext {
     fn graph_create(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         meta: GraphMeta,
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
-        ensure_graph_space_registered(self, branch_id)?;
+        ensure_graph_space_registered(self, branch_id, space)?;
         let meta_json =
             serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::meta_key(graph);
-        let storage_key = keys::storage_key(branch_id, &user_key);
-        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
+        let catalog_sk = keys::storage_key(branch_id, space, keys::graph_catalog_key());
 
         self.put(storage_key, Value::String(meta_json))?;
 
@@ -220,10 +242,11 @@ impl GraphStoreExt for TransactionContext {
     fn graph_get_meta(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
     ) -> StrataResult<Option<GraphMeta>> {
         let user_key = keys::meta_key(graph);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         match self.get(&storage_key)? {
             Some(Value::String(s)) => {
@@ -238,8 +261,8 @@ impl GraphStoreExt for TransactionContext {
         }
     }
 
-    fn graph_list(&mut self, branch_id: BranchId) -> StrataResult<Vec<String>> {
-        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
+    fn graph_list(&mut self, branch_id: BranchId, space: &str) -> StrataResult<Vec<String>> {
+        let catalog_sk = keys::storage_key(branch_id, space, keys::graph_catalog_key());
 
         // Try catalog first (fast path)
         if let Some(Value::String(s)) = self.get(&catalog_sk)? {
@@ -249,7 +272,7 @@ impl GraphStoreExt for TransactionContext {
         }
 
         // Fallback: scan for __meta__ keys (legacy data without catalog)
-        let ns = keys::graph_namespace(branch_id);
+        let ns = keys::graph_namespace(branch_id, space);
         let prefix_key = Key::new_graph(ns, "");
 
         let results = self.scan_prefix(&prefix_key)?;
@@ -279,28 +302,29 @@ impl GraphStoreExt for TransactionContext {
     fn graph_add_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         data: &NodeData,
     ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
-        ensure_graph_space_registered(self, branch_id)?;
+        ensure_graph_space_registered(self, branch_id, space)?;
         let node_json =
             serde_json::to_string(data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         // Build ref index key if entity_ref is present
         let ref_key = data.entity_ref.as_ref().map(|uri| {
             let rk = keys::ref_index_key(uri, graph, node_id);
-            keys::storage_key(branch_id, &rk)
+            keys::storage_key(branch_id, space, &rk)
         });
 
         // Build type index key if object_type is present
         let type_key = data.object_type.as_ref().map(|ot| {
             let tk = keys::type_index_key(graph, ot, node_id);
-            keys::storage_key(branch_id, &tk)
+            keys::storage_key(branch_id, space, &tk)
         });
 
         // If updating, clean up old ref index and type index entries
@@ -310,12 +334,12 @@ impl GraphStoreExt for TransactionContext {
             if let Ok(old_data) = serde_json::from_str::<NodeData>(&old_json) {
                 if let Some(old_uri) = old_data.entity_ref {
                     let old_rk = keys::ref_index_key(&old_uri, graph, node_id);
-                    let old_sk = keys::storage_key(branch_id, &old_rk);
+                    let old_sk = keys::storage_key(branch_id, space, &old_rk);
                     self.delete(old_sk)?;
                 }
                 if let Some(old_ot) = old_data.object_type {
                     let old_tk = keys::type_index_key(graph, &old_ot, node_id);
-                    let old_sk = keys::storage_key(branch_id, &old_tk);
+                    let old_sk = keys::storage_key(branch_id, space, &old_tk);
                     self.delete(old_sk)?;
                 }
             }
@@ -339,11 +363,12 @@ impl GraphStoreExt for TransactionContext {
     fn graph_get_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) -> StrataResult<Option<NodeData>> {
         let user_key = keys::node_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         match self.get(&storage_key)? {
             Some(Value::String(s)) => {
@@ -361,16 +386,17 @@ impl GraphStoreExt for TransactionContext {
     fn graph_remove_node(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) -> StrataResult<()> {
-        ensure_graph_space_registered(self, branch_id)?;
+        ensure_graph_space_registered(self, branch_id, space)?;
         let node_user_key = keys::node_key(graph, node_id);
-        let node_storage_key = keys::storage_key(branch_id, &node_user_key);
+        let node_storage_key = keys::storage_key(branch_id, space, &node_user_key);
         let fwd_adj_uk = keys::forward_adj_key(graph, node_id);
-        let fwd_adj_sk = keys::storage_key(branch_id, &fwd_adj_uk);
+        let fwd_adj_sk = keys::storage_key(branch_id, space, &fwd_adj_uk);
         let rev_adj_uk = keys::reverse_adj_key(graph, node_id);
-        let rev_adj_sk = keys::storage_key(branch_id, &rev_adj_uk);
+        let rev_adj_sk = keys::storage_key(branch_id, space, &rev_adj_uk);
 
         // Read node to get entity_ref for ref index cleanup
         let node_val = self.get(&node_storage_key)?;
@@ -383,12 +409,12 @@ impl GraphStoreExt for TransactionContext {
             if let Ok(data) = serde_json::from_str::<NodeData>(json) {
                 if let Some(uri) = data.entity_ref {
                     let rk = keys::ref_index_key(&uri, graph, node_id);
-                    let sk = keys::storage_key(branch_id, &rk);
+                    let sk = keys::storage_key(branch_id, space, &rk);
                     self.delete(sk)?;
                 }
                 if let Some(ot) = data.object_type {
                     let tk = keys::type_index_key(graph, &ot, node_id);
-                    let sk = keys::storage_key(branch_id, &tk);
+                    let sk = keys::storage_key(branch_id, space, &tk);
                     self.delete(sk)?;
                 }
             }
@@ -403,7 +429,7 @@ impl GraphStoreExt for TransactionContext {
             for (dst, edge_type, _) in &outgoing {
                 *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
                 let dst_rev_uk = keys::reverse_adj_key(graph, dst);
-                let dst_rev_sk = keys::storage_key(branch_id, &dst_rev_uk);
+                let dst_rev_sk = keys::storage_key(branch_id, space, &dst_rev_uk);
                 if let Some(Value::Bytes(dst_rev_bytes)) = self.get(&dst_rev_sk)? {
                     if let Some(new_bytes) = packed::remove_edge(&dst_rev_bytes, node_id, edge_type)
                     {
@@ -426,7 +452,7 @@ impl GraphStoreExt for TransactionContext {
                     *edge_type_decrements.entry(edge_type.clone()).or_insert(0) += 1;
                 }
                 let src_fwd_uk = keys::forward_adj_key(graph, src);
-                let src_fwd_sk = keys::storage_key(branch_id, &src_fwd_uk);
+                let src_fwd_sk = keys::storage_key(branch_id, space, &src_fwd_uk);
                 if let Some(Value::Bytes(src_fwd_bytes)) = self.get(&src_fwd_sk)? {
                     if let Some(new_bytes) = packed::remove_edge(&src_fwd_bytes, node_id, edge_type)
                     {
@@ -443,7 +469,7 @@ impl GraphStoreExt for TransactionContext {
         // Decrement edge type counters
         for (et, dec) in &edge_type_decrements {
             let count_uk = keys::edge_type_count_key(graph, et);
-            let count_sk = keys::storage_key(branch_id, &count_uk);
+            let count_sk = keys::storage_key(branch_id, space, &count_uk);
             let count = read_edge_type_count(self, &count_sk)?;
             write_edge_type_count(self, &count_sk, count.saturating_sub(*dec))?;
         }
@@ -455,9 +481,14 @@ impl GraphStoreExt for TransactionContext {
         Ok(())
     }
 
-    fn graph_list_nodes(&mut self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>> {
+    fn graph_list_nodes(
+        &mut self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<Vec<String>> {
         let prefix = keys::all_nodes_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         let results = self.scan_prefix(&prefix_key)?;
         let mut nodes = Vec::new();
@@ -476,6 +507,7 @@ impl GraphStoreExt for TransactionContext {
     fn graph_add_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
@@ -486,19 +518,19 @@ impl GraphStoreExt for TransactionContext {
         keys::validate_node_id(src)?;
         keys::validate_node_id(dst)?;
         keys::validate_edge_type(edge_type)?;
-        ensure_graph_space_registered(self, branch_id)?;
+        ensure_graph_space_registered(self, branch_id, space)?;
         let src_node_uk = keys::node_key(graph, src);
         let dst_node_uk = keys::node_key(graph, dst);
-        let src_node_key = keys::storage_key(branch_id, &src_node_uk);
-        let dst_node_key = keys::storage_key(branch_id, &dst_node_uk);
+        let src_node_key = keys::storage_key(branch_id, space, &src_node_uk);
+        let dst_node_key = keys::storage_key(branch_id, space, &dst_node_uk);
 
         let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch_id, space, &fwd_uk);
         let rev_uk = keys::reverse_adj_key(graph, dst);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
+        let rev_sk = keys::storage_key(branch_id, space, &rev_uk);
 
         let count_uk = keys::edge_type_count_key(graph, edge_type);
-        let count_sk = keys::storage_key(branch_id, &count_uk);
+        let count_sk = keys::storage_key(branch_id, space, &count_uk);
 
         // Validate both nodes exist (prevents TOCTOU race)
         if self.get(&src_node_key)?.is_none() {
@@ -551,18 +583,19 @@ impl GraphStoreExt for TransactionContext {
     fn graph_remove_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<()> {
-        ensure_graph_space_registered(self, branch_id)?;
+        ensure_graph_space_registered(self, branch_id, space)?;
         let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch_id, space, &fwd_uk);
         let rev_uk = keys::reverse_adj_key(graph, dst);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
+        let rev_sk = keys::storage_key(branch_id, space, &rev_uk);
         let count_uk = keys::edge_type_count_key(graph, edge_type);
-        let count_sk = keys::storage_key(branch_id, &count_uk);
+        let count_sk = keys::storage_key(branch_id, space, &count_uk);
 
         // Remove from forward adjacency list
         let mut removed = false;
@@ -602,13 +635,14 @@ impl GraphStoreExt for TransactionContext {
     fn graph_get_edge(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<Option<EdgeData>> {
         let fwd_uk = keys::forward_adj_key(graph, src);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch_id, space, &fwd_uk);
 
         match self.get(&fwd_sk)? {
             Some(Value::Bytes(bytes)) => Ok(packed::find_edge(&bytes, dst, edge_type)),
@@ -619,12 +653,13 @@ impl GraphStoreExt for TransactionContext {
     fn graph_outgoing_neighbors(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
         let fwd_uk = keys::forward_adj_key(graph, node_id);
-        let fwd_sk = keys::storage_key(branch_id, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch_id, space, &fwd_uk);
 
         match self.get(&fwd_sk)? {
             Some(Value::Bytes(bytes)) => {
@@ -651,12 +686,13 @@ impl GraphStoreExt for TransactionContext {
     fn graph_incoming_neighbors(
         &mut self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
         let rev_uk = keys::reverse_adj_key(graph, node_id);
-        let rev_sk = keys::storage_key(branch_id, &rev_uk);
+        let rev_sk = keys::storage_key(branch_id, space, &rev_uk);
 
         match self.get(&rev_sk)? {
             Some(Value::Bytes(bytes)) => {

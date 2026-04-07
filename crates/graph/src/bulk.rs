@@ -15,6 +15,7 @@ impl GraphStore {
     pub fn bulk_insert(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         nodes: &[(String, NodeData)],
         edges: &[(String, String, String, EdgeData)], // (src, dst, edge_type, data)
@@ -22,30 +23,30 @@ impl GraphStore {
     ) -> StrataResult<(usize, usize)> {
         keys::validate_graph_name(graph)?;
 
-        // Ensure the reserved `_graph_` space is registered with SpaceIndex
-        // before any bulk chunks run. Same gap as #2331's EventLog fix —
-        // without this, branches with bulk-inserted graph data are invisible
-        // to `merge_branches` and other space-iterating callers. The chunk
+        // Ensure the target space is registered with SpaceIndex before any
+        // bulk chunks run. Same gap as #2331's EventLog fix — without this,
+        // branches with bulk-inserted graph data are invisible to
+        // `merge_branches` and other space-iterating callers. The chunk
         // transactions below would each pay the cost of an idempotent check
         // anyway; centralizing it here in one small transaction is cheaper.
         self.db.transaction(branch_id, |txn| {
-            crate::ext::ensure_graph_space_registered(txn, branch_id)
+            crate::ext::ensure_graph_space_registered(txn, branch_id, space)
         })?;
 
         // Read ontology status once before the loop
         let is_frozen = self
-            .get_graph_meta(branch_id, graph)?
+            .get_graph_meta(branch_id, space, graph)?
             .and_then(|m| m.ontology_status)
             == Some(types::OntologyStatus::Frozen);
 
         // Cache type definitions once for bulk validation (G-13).
         let obj_type_cache = if is_frozen {
-            Some(self.load_object_type_cache(branch_id, graph)?)
+            Some(self.load_object_type_cache(branch_id, space, graph)?)
         } else {
             None
         };
         let link_type_cache = if is_frozen {
-            Some(self.load_link_type_cache(branch_id, graph)?)
+            Some(self.load_link_type_cache(branch_id, space, graph)?)
         } else {
             None
         };
@@ -54,7 +55,7 @@ impl GraphStore {
         let empty_json = "{}";
 
         // Hoist namespace once — avoids DashMap lookup per key in inner loops.
-        let ns = keys::graph_namespace(branch_id);
+        let ns = keys::graph_namespace(branch_id, space);
 
         // Insert nodes in chunks
         let mut nodes_inserted = 0usize;
@@ -131,7 +132,7 @@ impl GraphStore {
 
             // Post-commit: update search index for this chunk
             for (node_id, data) in chunk {
-                self.index_node_for_search(branch_id, graph, node_id, data);
+                self.index_node_for_search(branch_id, space, graph, node_id, data);
             }
 
             nodes_inserted += chunk.len();
@@ -153,7 +154,9 @@ impl GraphStore {
 
             if is_frozen {
                 if let Some(ref cache) = link_type_cache {
-                    self.validate_edge_cached(branch_id, graph, src, dst, edge_type, data, cache)?;
+                    self.validate_edge_cached(
+                        branch_id, space, graph, src, dst, edge_type, data, cache,
+                    )?;
                 }
             }
 
@@ -263,6 +266,7 @@ impl GraphStore {
     pub fn batch_add_edges(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         edges: &[(String, String, String, EdgeData)], // (src, dst, edge_type, data)
         chunk_size: Option<usize>,
@@ -280,24 +284,25 @@ impl GraphStore {
             keys::validate_edge_type(edge_type)?;
         }
 
-        // Auto-register the reserved `_graph_` space with SpaceIndex so
-        // `merge_branches` and other space-aware callers can see graph
-        // data on this branch. Mirrors the bulk_insert pattern above.
+        // Auto-register the target space with SpaceIndex so `merge_branches`
+        // and other space-aware callers can see graph data on this branch.
+        // Mirrors the bulk_insert pattern above.
         self.db.transaction(branch_id, |txn| {
-            crate::ext::ensure_graph_space_registered(txn, branch_id)
+            crate::ext::ensure_graph_space_registered(txn, branch_id, space)
         })?;
 
         // Check ontology constraints if frozen
         let is_frozen = self
-            .get_graph_meta(branch_id, graph)?
+            .get_graph_meta(branch_id, space, graph)?
             .and_then(|m| m.ontology_status)
             == Some(types::OntologyStatus::Frozen);
 
         if is_frozen {
-            let link_type_cache = self.load_link_type_cache(branch_id, graph)?;
+            let link_type_cache = self.load_link_type_cache(branch_id, space, graph)?;
             for (src, dst, edge_type, data) in edges {
                 self.validate_edge_cached(
                     branch_id,
+                    space,
                     graph,
                     src,
                     dst,
@@ -311,7 +316,7 @@ impl GraphStore {
         let chunk_size = chunk_size
             .unwrap_or(Self::DEFAULT_BATCH_EDGE_CHUNK_SIZE)
             .max(1);
-        let ns = keys::graph_namespace(branch_id);
+        let ns = keys::graph_namespace(branch_id, space);
         let mut total_inserted = 0;
 
         for chunk in edges.chunks(chunk_size) {
@@ -436,7 +441,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             ("A".into(), NodeData::default()),
@@ -448,42 +453,50 @@ mod tests {
             ("B".into(), "C".into(), "KNOWS".into(), EdgeData::default()),
         ];
 
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "default", "bg", &nodes, &edges, None)
+            .unwrap();
         assert_eq!(ni, 3);
         assert_eq!(ei, 2);
 
         // Verify nodes exist and deserialize correctly
         for id in &["A", "B", "C"] {
-            let node = gs.get_node(branch, "bg", id).unwrap().unwrap();
+            let node = gs.get_node(branch, "default", "bg", id).unwrap().unwrap();
             assert!(node.entity_ref.is_none());
             assert!(node.properties.is_none());
         }
 
         // Verify forward edges
         let edge_ab = gs
-            .get_edge(branch, "bg", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "bg", "A", "B", "KNOWS")
             .unwrap()
             .unwrap();
         assert_eq!(edge_ab.weight, 1.0);
         assert!(edge_ab.properties.is_none());
 
         let edge_bc = gs
-            .get_edge(branch, "bg", "B", "C", "KNOWS")
+            .get_edge(branch, "default", "bg", "B", "C", "KNOWS")
             .unwrap()
             .unwrap();
         assert_eq!(edge_bc.weight, 1.0);
 
         // Verify outgoing neighbors (forward keys)
-        let out_a = gs.outgoing_neighbors(branch, "bg", "A", None).unwrap();
+        let out_a = gs
+            .outgoing_neighbors(branch, "default", "bg", "A", None)
+            .unwrap();
         assert_eq!(out_a.len(), 1);
         assert_eq!(out_a[0].node_id, "B");
 
         // Verify incoming neighbors (reverse keys)
-        let in_b = gs.incoming_neighbors(branch, "bg", "B", None).unwrap();
+        let in_b = gs
+            .incoming_neighbors(branch, "default", "bg", "B", None)
+            .unwrap();
         assert_eq!(in_b.len(), 1);
         assert_eq!(in_b[0].node_id, "A");
 
-        let in_c = gs.incoming_neighbors(branch, "bg", "C", None).unwrap();
+        let in_c = gs
+            .incoming_neighbors(branch, "default", "bg", "C", None)
+            .unwrap();
         assert_eq!(in_c.len(), 1);
         assert_eq!(in_c[0].node_id, "B");
     }
@@ -493,7 +506,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             (
@@ -523,22 +536,29 @@ mod tests {
             ),
         ];
 
-        gs.bulk_insert(branch, "bg", &nodes, &[], None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &[], None)
+            .unwrap();
 
         // Verify both ref index entries for key1
-        let mut refs1 = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
+        let mut refs1 = gs
+            .nodes_for_entity(branch, "default", "kv://main/key1")
+            .unwrap();
         refs1.sort();
         assert_eq!(refs1.len(), 2);
         assert_eq!(refs1[0], ("bg".to_string(), "n1".to_string()));
         assert_eq!(refs1[1], ("bg".to_string(), "n4".to_string()));
 
         // Verify ref index for key2
-        let refs2 = gs.nodes_for_entity(branch, "kv://main/key2").unwrap();
+        let refs2 = gs
+            .nodes_for_entity(branch, "default", "kv://main/key2")
+            .unwrap();
         assert_eq!(refs2.len(), 1);
         assert_eq!(refs2[0], ("bg".to_string(), "n2".to_string()));
 
         // n3 has no entity_ref — should not appear
-        let refs_none = gs.nodes_for_entity(branch, "kv://main/key3").unwrap();
+        let refs_none = gs
+            .nodes_for_entity(branch, "default", "kv://main/key3")
+            .unwrap();
         assert!(refs_none.is_empty());
     }
 
@@ -547,7 +567,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![(
             "n1".into(),
@@ -567,10 +587,11 @@ mod tests {
             },
         )];
 
-        gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &edges, None)
+            .unwrap();
 
         // Verify node data round-trips completely
-        let node = gs.get_node(branch, "bg", "n1").unwrap().unwrap();
+        let node = gs.get_node(branch, "default", "bg", "n1").unwrap().unwrap();
         assert_eq!(node.entity_ref, Some("kv://main/p1".to_string()));
         let props = node.properties.unwrap();
         assert_eq!(props["name"], "Alice");
@@ -578,7 +599,7 @@ mod tests {
 
         // Verify edge data round-trips completely
         let edge = gs
-            .get_edge(branch, "bg", "n1", "n1", "SELF")
+            .get_edge(branch, "default", "bg", "n1", "n1", "SELF")
             .unwrap()
             .unwrap();
         assert_eq!(edge.weight, 0.5);
@@ -593,7 +614,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             ("A".into(), NodeData::default()),
@@ -602,20 +623,28 @@ mod tests {
         let edges: Vec<(String, String, String, EdgeData)> =
             vec![("A".into(), "B".into(), "E".into(), EdgeData::default())];
 
-        gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &edges, None)
+            .unwrap();
 
         // The optimized path must produce data identical to the normal path
-        let edge = gs.get_edge(branch, "bg", "A", "B", "E").unwrap().unwrap();
+        let edge = gs
+            .get_edge(branch, "default", "bg", "A", "B", "E")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge.weight, 1.0);
         assert!(edge.properties.is_none());
 
         // Also check that outgoing/incoming see the correct weight
-        let out = gs.outgoing_neighbors(branch, "bg", "A", None).unwrap();
+        let out = gs
+            .outgoing_neighbors(branch, "default", "bg", "A", None)
+            .unwrap();
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].edge_data.weight, 1.0);
         assert!(out[0].edge_data.properties.is_none());
 
-        let inc = gs.incoming_neighbors(branch, "bg", "B", None).unwrap();
+        let inc = gs
+            .incoming_neighbors(branch, "default", "bg", "B", None)
+            .unwrap();
         assert_eq!(inc.len(), 1);
         assert_eq!(inc[0].edge_data.weight, 1.0);
     }
@@ -625,7 +654,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         // 7 nodes, chunk_size=3 → chunks of [3, 3, 1]
         let nodes: Vec<(String, NodeData)> = (0..7)
@@ -654,13 +683,13 @@ mod tests {
             .collect();
 
         let (ni, ei) = gs
-            .bulk_insert(branch, "bg", &nodes, &edges, Some(3))
+            .bulk_insert(branch, "default", "bg", &nodes, &edges, Some(3))
             .unwrap();
         assert_eq!(ni, 7);
         assert_eq!(ei, 5);
 
         // Verify all nodes
-        let mut listed = gs.list_nodes(branch, "bg").unwrap();
+        let mut listed = gs.list_nodes(branch, "default", "bg").unwrap();
         listed.sort();
         assert_eq!(listed.len(), 7);
 
@@ -669,6 +698,7 @@ mod tests {
             let edge = gs
                 .get_edge(
                     branch,
+                    "default",
                     "bg",
                     &format!("n{}", i),
                     &format!("n{}", i + 1),
@@ -679,7 +709,9 @@ mod tests {
         }
 
         // Verify reverse edges work for middle node
-        let in_n3 = gs.incoming_neighbors(branch, "bg", "n3", None).unwrap();
+        let in_n3 = gs
+            .incoming_neighbors(branch, "default", "bg", "n3", None)
+            .unwrap();
         assert_eq!(in_n3.len(), 1);
         assert_eq!(in_n3[0].node_id, "n2");
     }
@@ -689,14 +721,16 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![("A".into(), NodeData::default())];
 
         // chunk_size=0 should be clamped to 1, not panic
-        let (ni, _) = gs.bulk_insert(branch, "bg", &nodes, &[], Some(0)).unwrap();
+        let (ni, _) = gs
+            .bulk_insert(branch, "default", "bg", &nodes, &[], Some(0))
+            .unwrap();
         assert_eq!(ni, 1);
-        assert!(gs.get_node(branch, "bg", "A").unwrap().is_some());
+        assert!(gs.get_node(branch, "default", "bg", "A").unwrap().is_some());
     }
 
     #[test]
@@ -704,7 +738,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             ("A".into(), NodeData::default()),
@@ -715,12 +749,15 @@ mod tests {
 
         // chunk_size=1 → each node/edge in its own transaction
         let (ni, ei) = gs
-            .bulk_insert(branch, "bg", &nodes, &edges, Some(1))
+            .bulk_insert(branch, "default", "bg", &nodes, &edges, Some(1))
             .unwrap();
         assert_eq!(ni, 2);
         assert_eq!(ei, 1);
 
-        assert!(gs.get_edge(branch, "bg", "A", "B", "E").unwrap().is_some());
+        assert!(gs
+            .get_edge(branch, "default", "bg", "A", "B", "E")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -728,7 +765,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             ("good1".into(), NodeData::default()),
@@ -736,7 +773,7 @@ mod tests {
             ("good2".into(), NodeData::default()),
         ];
 
-        let result = gs.bulk_insert(branch, "bg", &nodes, &[], None);
+        let result = gs.bulk_insert(branch, "default", "bg", &nodes, &[], None);
         assert!(result.is_err());
     }
 
@@ -745,27 +782,27 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         // Invalid src (empty)
         let edges_bad_src: Vec<(String, String, String, EdgeData)> =
             vec![("".into(), "B".into(), "E".into(), EdgeData::default())];
         assert!(gs
-            .bulk_insert(branch, "bg", &[], &edges_bad_src, None)
+            .bulk_insert(branch, "default", "bg", &[], &edges_bad_src, None)
             .is_err());
 
         // Invalid dst (empty)
         let edges_bad_dst: Vec<(String, String, String, EdgeData)> =
             vec![("A".into(), "".into(), "E".into(), EdgeData::default())];
         assert!(gs
-            .bulk_insert(branch, "bg", &[], &edges_bad_dst, None)
+            .bulk_insert(branch, "default", "bg", &[], &edges_bad_dst, None)
             .is_err());
 
         // Invalid edge_type (empty)
         let edges_bad_type: Vec<(String, String, String, EdgeData)> =
             vec![("A".into(), "B".into(), "".into(), EdgeData::default())];
         assert!(gs
-            .bulk_insert(branch, "bg", &[], &edges_bad_type, None)
+            .bulk_insert(branch, "default", "bg", &[], &edges_bad_type, None)
             .is_err());
 
         // Invalid edge_type (contains /)
@@ -776,7 +813,7 @@ mod tests {
             EdgeData::default(),
         )];
         assert!(gs
-            .bulk_insert(branch, "bg", &[], &edges_slash, None)
+            .bulk_insert(branch, "default", "bg", &[], &edges_slash, None)
             .is_err());
     }
 
@@ -785,9 +822,11 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &[], &[], None).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "default", "bg", &[], &[], None)
+            .unwrap();
         assert_eq!(ni, 0);
         assert_eq!(ei, 0);
     }
@@ -797,10 +836,14 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        assert!(gs.bulk_insert(branch, "", &[], &[], None).is_err());
-        assert!(gs.bulk_insert(branch, "has/slash", &[], &[], None).is_err());
         assert!(gs
-            .bulk_insert(branch, "__reserved", &[], &[], None)
+            .bulk_insert(branch, "default", "", &[], &[], None)
+            .is_err());
+        assert!(gs
+            .bulk_insert(branch, "default", "has/slash", &[], &[], None)
+            .is_err());
+        assert!(gs
+            .bulk_insert(branch, "default", "__reserved", &[], &[], None)
             .is_err());
     }
 
@@ -809,7 +852,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         // Build a small graph: A -> B -> C -> D
         let nodes: Vec<(String, NodeData)> = vec![
@@ -824,12 +867,14 @@ mod tests {
             ("C".into(), "D".into(), "NEXT".into(), EdgeData::default()),
         ];
 
-        gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &edges, None)
+            .unwrap();
 
         // BFS from A with unlimited depth should find all nodes
         let result = gs
             .bfs(
                 branch,
+                "default",
                 "bg",
                 "A",
                 BfsOptions {
@@ -851,6 +896,7 @@ mod tests {
         let result_shallow = gs
             .bfs(
                 branch,
+                "default",
                 "bg",
                 "A",
                 BfsOptions {
@@ -869,7 +915,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = (0..100)
             .map(|i| {
@@ -884,11 +930,13 @@ mod tests {
             })
             .collect();
 
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &nodes, &[], Some(10)).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "default", "bg", &nodes, &[], Some(10))
+            .unwrap();
         assert_eq!(ni, 100);
         assert_eq!(ei, 0);
 
-        let listed = gs.list_nodes(branch, "bg").unwrap();
+        let listed = gs.list_nodes(branch, "default", "bg").unwrap();
         assert_eq!(listed.len(), 100);
     }
 
@@ -897,17 +945,22 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         // bulk_insert bypasses add_edge() node existence checks for performance
         let edges: Vec<(String, String, String, EdgeData)> =
             vec![("X".into(), "Y".into(), "E".into(), EdgeData::default())];
 
-        let (ni, ei) = gs.bulk_insert(branch, "bg", &[], &edges, None).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(branch, "default", "bg", &[], &edges, None)
+            .unwrap();
         assert_eq!(ni, 0);
         assert_eq!(ei, 1);
 
-        assert!(gs.get_edge(branch, "bg", "X", "Y", "E").unwrap().is_some());
+        assert!(gs
+            .get_edge(branch, "default", "bg", "X", "Y", "E")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -915,7 +968,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = vec![
             ("A".into(), NodeData::default()),
@@ -931,9 +984,10 @@ mod tests {
             },
         )];
 
-        gs.bulk_insert(branch, "bg", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &edges, None)
+            .unwrap();
 
-        let snap = gs.snapshot(branch, "bg").unwrap();
+        let snap = gs.snapshot(branch, "default", "bg").unwrap();
         assert_eq!(snap.nodes.len(), 2);
         assert!(snap.nodes.contains_key("A"));
         assert!(snap.nodes.contains_key("B"));
@@ -952,31 +1006,45 @@ mod tests {
     fn bulk_insert_merges_with_existing_edges() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
 
         // Insert nodes and an initial edge via add_edge
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "C", NodeData::default()).unwrap();
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "default", "g", "C", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         // Now bulk_insert a new edge from the same source A
         let edges = vec![("A".into(), "C".into(), "LIKES".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &[], &edges, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &[], &edges, None)
+            .unwrap();
 
         // Both edges should exist
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
             .unwrap()
             .is_some());
         assert!(gs
-            .get_edge(branch, "g", "A", "C", "LIKES")
+            .get_edge(branch, "default", "g", "A", "C", "LIKES")
             .unwrap()
             .is_some());
 
         // A should have 2 outgoing neighbors
-        let outgoing = gs.outgoing_neighbors(branch, "g", "A", None).unwrap();
+        let outgoing = gs
+            .outgoing_neighbors(branch, "default", "g", "A", None)
+            .unwrap();
         assert_eq!(outgoing.len(), 2);
     }
 
@@ -984,7 +1052,7 @@ mod tests {
     fn bulk_insert_two_batches_merge() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
 
         let nodes = vec![
             ("A".into(), NodeData::default()),
@@ -993,21 +1061,35 @@ mod tests {
             ("D".into(), NodeData::default()),
         ];
         let edges1 = vec![("A".into(), "B".into(), "E1".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &nodes, &edges1, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &nodes, &edges1, None)
+            .unwrap();
 
         // Second batch adds another edge from A
         let edges2 = vec![("A".into(), "C".into(), "E2".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &[], &edges2, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &[], &edges2, None)
+            .unwrap();
 
         // Third batch adds edge from A to D
         let edges3 = vec![("A".into(), "D".into(), "E3".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &[], &edges3, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &[], &edges3, None)
+            .unwrap();
 
         // All edges should coexist
-        assert!(gs.get_edge(branch, "g", "A", "B", "E1").unwrap().is_some());
-        assert!(gs.get_edge(branch, "g", "A", "C", "E2").unwrap().is_some());
-        assert!(gs.get_edge(branch, "g", "A", "D", "E3").unwrap().is_some());
-        let outgoing = gs.outgoing_neighbors(branch, "g", "A", None).unwrap();
+        assert!(gs
+            .get_edge(branch, "default", "g", "A", "B", "E1")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(branch, "default", "g", "A", "C", "E2")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(branch, "default", "g", "A", "D", "E3")
+            .unwrap()
+            .is_some());
+        let outgoing = gs
+            .outgoing_neighbors(branch, "default", "g", "A", None)
+            .unwrap();
         assert_eq!(outgoing.len(), 3);
     }
 
@@ -1015,7 +1097,7 @@ mod tests {
     fn bulk_insert_reverse_adj_lists_merge_correctly() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
 
         let nodes = vec![
             ("A".into(), NodeData::default()),
@@ -1024,14 +1106,18 @@ mod tests {
         ];
         // Batch 1: A→C
         let edges1 = vec![("A".into(), "C".into(), "E1".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &nodes, &edges1, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &nodes, &edges1, None)
+            .unwrap();
 
         // Batch 2: B→C (same destination, different source)
         let edges2 = vec![("B".into(), "C".into(), "E2".into(), EdgeData::default())];
-        gs.bulk_insert(branch, "g", &[], &edges2, None).unwrap();
+        gs.bulk_insert(branch, "default", "g", &[], &edges2, None)
+            .unwrap();
 
         // C should have 2 incoming neighbors
-        let incoming = gs.incoming_neighbors(branch, "g", "C", None).unwrap();
+        let incoming = gs
+            .incoming_neighbors(branch, "default", "g", "C", None)
+            .unwrap();
         assert_eq!(incoming.len(), 2);
         let src_ids: Vec<&str> = incoming.iter().map(|n| n.node_id.as_str()).collect();
         assert!(src_ids.contains(&"A"));
@@ -1042,13 +1128,14 @@ mod tests {
     fn bulk_insert_replace_mode_prevents_version_accumulation() {
         let (db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "bg", None).unwrap();
+        gs.create_graph(branch, "default", "bg", None).unwrap();
 
         // Insert nodes
         let nodes: Vec<(String, NodeData)> = (0..10)
             .map(|i| (format!("n{}", i), NodeData::default()))
             .collect();
-        gs.bulk_insert(branch, "bg", &nodes, &[], None).unwrap();
+        gs.bulk_insert(branch, "default", "bg", &nodes, &[], None)
+            .unwrap();
 
         // Insert edges in 5 separate batches to the same nodes
         for batch in 0..5 {
@@ -1062,7 +1149,8 @@ mod tests {
                     )
                 })
                 .collect();
-            gs.bulk_insert(branch, "bg", &[], &edges, Some(3)).unwrap();
+            gs.bulk_insert(branch, "default", "bg", &[], &edges, Some(3))
+                .unwrap();
         }
 
         // Check version counts — adj lists should have 1 version each (replaced, not accumulated)
@@ -1086,6 +1174,7 @@ mod tests {
                 let edge = gs
                     .get_edge(
                         branch,
+                        "default",
                         "bg",
                         &format!("n{}", i),
                         &format!("n{}", i + 5),
@@ -1112,7 +1201,7 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = (0..5)
             .map(|i| (format!("n{}", i), NodeData::default()))
@@ -1144,10 +1233,17 @@ mod tests {
             ),
         ];
 
-        gs.bulk_insert(b, "g", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(b, "default", "g", &nodes, &edges, None)
+            .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 3);
-        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            3
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "TRUSTS").unwrap(),
+            1
+        );
     }
 
     // =========================================================================
@@ -1159,10 +1255,10 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         // Create 10 nodes
         for i in 0..10 {
-            gs.add_node(b, "g", &format!("n{}", i), NodeData::default())
+            gs.add_node(b, "default", "g", &format!("n{}", i), NodeData::default())
                 .unwrap();
         }
 
@@ -1180,13 +1276,15 @@ mod tests {
             })
             .collect();
 
-        let inserted = gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        let inserted = gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
         assert_eq!(inserted, 90);
 
         // Verify all edges exist
         for (src, dst, et, _) in &edges {
             assert!(
-                gs.get_edge(b, "g", src, dst, et).unwrap().is_some(),
+                gs.get_edge(b, "default", "g", src, dst, et)
+                    .unwrap()
+                    .is_some(),
                 "Edge {} -> {} should exist",
                 src,
                 dst
@@ -1199,8 +1297,9 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
         // B does not exist — should fail atomically
 
         let edges = vec![(
@@ -1210,11 +1309,11 @@ mod tests {
             EdgeData::default(),
         )];
 
-        let result = gs.batch_add_edges(b, "g", &edges, None);
+        let result = gs.batch_add_edges(b, "default", "g", &edges, None);
         assert!(result.is_err());
 
         // No partial state: A should have no outgoing edges
-        let neighbors = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        let neighbors = gs.outgoing_neighbors(b, "default", "g", "A", None).unwrap();
         assert!(neighbors.is_empty());
     }
 
@@ -1223,11 +1322,15 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "D", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "D", NodeData::default())
+            .unwrap();
 
         // Multiple edges from same source
         let edges = vec![
@@ -1251,9 +1354,9 @@ mod tests {
             ),
         ];
 
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
-        let neighbors = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        let neighbors = gs.outgoing_neighbors(b, "default", "g", "A", None).unwrap();
         assert_eq!(neighbors.len(), 3);
     }
 
@@ -1262,10 +1365,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
         let edges = vec![
             (
@@ -1282,10 +1388,10 @@ mod tests {
             ),
         ];
 
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
         // C should have 2 incoming edges
-        let incoming = gs.incoming_neighbors(b, "g", "C", None).unwrap();
+        let incoming = gs.incoming_neighbors(b, "default", "g", "C", None).unwrap();
         assert_eq!(incoming.len(), 2);
     }
 
@@ -1294,8 +1400,9 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
         // "X" does not exist
 
         let edges = vec![(
@@ -1305,7 +1412,7 @@ mod tests {
             EdgeData::default(),
         )];
 
-        let result = gs.batch_add_edges(b, "g", &edges, None);
+        let result = gs.batch_add_edges(b, "default", "g", &edges, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("does not exist"));
     }
@@ -1315,10 +1422,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
         let edges = vec![
             (
@@ -1341,14 +1451,14 @@ mod tests {
             ),
         ];
 
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
         // Verify correct counts via neighbor queries
-        let a_out = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        let a_out = gs.outgoing_neighbors(b, "default", "g", "A", None).unwrap();
         assert_eq!(a_out.len(), 2); // A→B, A→C
-        let b_out = gs.outgoing_neighbors(b, "g", "B", None).unwrap();
+        let b_out = gs.outgoing_neighbors(b, "default", "g", "B", None).unwrap();
         assert_eq!(b_out.len(), 1); // B→C
-        let c_in = gs.incoming_neighbors(b, "g", "C", None).unwrap();
+        let c_in = gs.incoming_neighbors(b, "default", "g", "C", None).unwrap();
         assert_eq!(c_in.len(), 2); // A→C, B→C
     }
 
@@ -1357,9 +1467,9 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
-        let result = gs.batch_add_edges(b, "g", &[], None).unwrap();
+        let result = gs.batch_add_edges(b, "default", "g", &[], None).unwrap();
         assert_eq!(result, 0);
     }
 
@@ -1368,7 +1478,7 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         // Invalid edge type (empty)
         let edges = vec![(
@@ -1377,7 +1487,7 @@ mod tests {
             "".to_string(),
             EdgeData::default(),
         )];
-        assert!(gs.batch_add_edges(b, "g", &edges, None).is_err());
+        assert!(gs.batch_add_edges(b, "default", "g", &edges, None).is_err());
 
         // Invalid node ID (contains slash)
         let edges = vec![(
@@ -1386,7 +1496,7 @@ mod tests {
             "KNOWS".to_string(),
             EdgeData::default(),
         )];
-        assert!(gs.batch_add_edges(b, "g", &edges, None).is_err());
+        assert!(gs.batch_add_edges(b, "default", "g", &edges, None).is_err());
     }
 
     #[test]
@@ -1394,9 +1504,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
         let data = EdgeData {
             weight: 0.5,
@@ -1404,9 +1516,12 @@ mod tests {
         };
         let edges = vec![("A".to_string(), "B".to_string(), "KNOWS".to_string(), data)];
 
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
-        let edge = gs.get_edge(b, "g", "A", "B", "KNOWS").unwrap().unwrap();
+        let edge = gs
+            .get_edge(b, "default", "g", "A", "B", "KNOWS")
+            .unwrap()
+            .unwrap();
         assert!((edge.weight - 0.5).abs() < f64::EPSILON);
         assert!(edge.properties.is_some());
     }
@@ -1416,9 +1531,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
         let edges = vec![
             (
@@ -1441,11 +1558,20 @@ mod tests {
             ),
         ];
 
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
-        assert!(gs.get_edge(b, "g", "A", "B", "KNOWS").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "A", "B", "LIKES").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "B", "A", "FOLLOWS").unwrap().is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "B", "LIKES")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "B", "A", "FOLLOWS")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1453,13 +1579,16 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
         // Add one edge via single-edge API
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
         // Add more edges via batch — should append, not replace
@@ -1469,12 +1598,18 @@ mod tests {
             "KNOWS".to_string(),
             EdgeData::default(),
         )];
-        gs.batch_add_edges(b, "g", &edges, None).unwrap();
+        gs.batch_add_edges(b, "default", "g", &edges, None).unwrap();
 
         // Both edges should exist
-        assert!(gs.get_edge(b, "g", "A", "B", "KNOWS").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "A", "C", "KNOWS").unwrap().is_some());
-        let out = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "B", "KNOWS")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "C", "KNOWS")
+            .unwrap()
+            .is_some());
+        let out = gs.outgoing_neighbors(b, "default", "g", "A", None).unwrap();
         assert_eq!(out.len(), 2);
     }
 
@@ -1487,10 +1622,10 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         // Create 100 nodes
         for i in 0..100 {
-            gs.add_node(b, "g", &format!("n{}", i), NodeData::default())
+            gs.add_node(b, "default", "g", &format!("n{}", i), NodeData::default())
                 .unwrap();
         }
 
@@ -1509,12 +1644,20 @@ mod tests {
             .collect();
 
         assert_eq!(edges.len(), 9900);
-        let inserted = gs.batch_add_edges(b, "g", &edges, Some(100)).unwrap();
+        let inserted = gs
+            .batch_add_edges(b, "default", "g", &edges, Some(100))
+            .unwrap();
         assert_eq!(inserted, 9900);
 
         // Spot-check some edges
-        assert!(gs.get_edge(b, "g", "n0", "n1", "EDGE").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "n99", "n0", "EDGE").unwrap().is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "n0", "n1", "EDGE")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "n99", "n0", "EDGE")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1522,9 +1665,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
         let edges = vec![(
             "A".to_string(),
@@ -1534,9 +1679,14 @@ mod tests {
         )];
 
         // chunk_size=0 should not panic — clamped to 1
-        let inserted = gs.batch_add_edges(b, "g", &edges, Some(0)).unwrap();
+        let inserted = gs
+            .batch_add_edges(b, "default", "g", &edges, Some(0))
+            .unwrap();
         assert_eq!(inserted, 1);
-        assert!(gs.get_edge(b, "g", "A", "B", "E").unwrap().is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "B", "E")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -1544,10 +1694,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
         // 3 edges with chunk_size=2 → 2 chunks (2 + 1)
         let edges = vec![
@@ -1571,12 +1724,23 @@ mod tests {
             ),
         ];
 
-        let inserted = gs.batch_add_edges(b, "g", &edges, Some(2)).unwrap();
+        let inserted = gs
+            .batch_add_edges(b, "default", "g", &edges, Some(2))
+            .unwrap();
         assert_eq!(inserted, 3);
 
-        assert!(gs.get_edge(b, "g", "A", "B", "E1").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "A", "C", "E2").unwrap().is_some());
-        assert!(gs.get_edge(b, "g", "B", "C", "E3").unwrap().is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "B", "E1")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "A", "C", "E2")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_edge(b, "default", "g", "B", "C", "E3")
+            .unwrap()
+            .is_some());
     }
 
     // =========================================================================
@@ -1599,11 +1763,17 @@ mod tests {
                 std::thread::spawn(move || {
                     // Each thread uses a different branch
                     let branch = BranchId::from_bytes([t as u8; 16]);
-                    gs.create_graph(branch, "g", None).unwrap();
+                    gs.create_graph(branch, "default", "g", None).unwrap();
 
                     for i in 0..entries_per_thread {
-                        gs.add_node(branch, "g", &format!("n{}", i), NodeData::default())
-                            .unwrap();
+                        gs.add_node(
+                            branch,
+                            "default",
+                            "g",
+                            &format!("n{}", i),
+                            NodeData::default(),
+                        )
+                        .unwrap();
                     }
                     entries_per_thread
                 })
@@ -1616,7 +1786,7 @@ mod tests {
         // Verify each branch has its data
         for t in 0..num_threads {
             let branch = BranchId::from_bytes([t as u8; 16]);
-            let nodes = gs.list_nodes(branch, "g").unwrap();
+            let nodes = gs.list_nodes(branch, "default", "g").unwrap();
             assert_eq!(nodes.len(), entries_per_thread);
         }
     }
@@ -1633,12 +1803,18 @@ mod tests {
                 let gs = Arc::clone(&gs);
                 std::thread::spawn(move || {
                     let branch = BranchId::from_bytes([t as u8; 16]);
-                    gs.create_graph(branch, "g", None).unwrap();
+                    gs.create_graph(branch, "default", "g", None).unwrap();
 
                     // Each branch gets unique node names
                     for i in 0..100 {
-                        gs.add_node(branch, "g", &format!("t{}_n{}", t, i), NodeData::default())
-                            .unwrap();
+                        gs.add_node(
+                            branch,
+                            "default",
+                            "g",
+                            &format!("t{}_n{}", t, i),
+                            NodeData::default(),
+                        )
+                        .unwrap();
                     }
                 })
             })
@@ -1651,7 +1827,7 @@ mod tests {
         // Verify isolation: each branch only has its own nodes
         for t in 0..4u8 {
             let branch = BranchId::from_bytes([t; 16]);
-            let nodes = gs.list_nodes(branch, "g").unwrap();
+            let nodes = gs.list_nodes(branch, "default", "g").unwrap();
             assert_eq!(nodes.len(), 100);
             for node in &nodes {
                 assert!(
@@ -1672,7 +1848,7 @@ mod tests {
     fn scale_10k_nodes_bulk_insert() {
         let (_db, gs) = setup();
         let b = default_branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         let nodes: Vec<(String, NodeData)> = (0..10_000)
             .map(|i| (format!("n{:05}", i), NodeData::default()))
@@ -1688,23 +1864,25 @@ mod tests {
             })
             .collect();
 
-        let (ni, ei) = gs.bulk_insert(b, "g", &nodes, &edges, Some(5_000)).unwrap();
+        let (ni, ei) = gs
+            .bulk_insert(b, "default", "g", &nodes, &edges, Some(5_000))
+            .unwrap();
         assert_eq!(ni, 10_000);
         assert_eq!(ei, 9_999);
 
         // Verify counts
-        let stats = gs.snapshot_stats(b, "g").unwrap();
+        let stats = gs.snapshot_stats(b, "default", "g").unwrap();
         assert_eq!(stats.node_count, 10_000);
         assert_eq!(stats.edge_count, 9_999);
 
         // Spot-check first, middle, and last
-        assert!(gs.get_node(b, "g", "n00000").unwrap().is_some());
-        assert!(gs.get_node(b, "g", "n05000").unwrap().is_some());
-        assert!(gs.get_node(b, "g", "n09999").unwrap().is_some());
+        assert!(gs.get_node(b, "default", "g", "n00000").unwrap().is_some());
+        assert!(gs.get_node(b, "default", "g", "n05000").unwrap().is_some());
+        assert!(gs.get_node(b, "default", "g", "n09999").unwrap().is_some());
 
         // Verify edge at chunk boundary
         assert!(gs
-            .get_edge(b, "g", "n04999", "n05000", "NEXT")
+            .get_edge(b, "default", "g", "n04999", "n05000", "NEXT")
             .unwrap()
             .is_some());
     }
@@ -1713,14 +1891,15 @@ mod tests {
     fn scale_high_degree_node_1000_edges() {
         let (_db, gs) = setup();
         let b = default_branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         // Create hub node + 1000 leaf nodes
         let mut nodes: Vec<(String, NodeData)> = vec![("hub".into(), NodeData::default())];
         for i in 0..1_000 {
             nodes.push((format!("leaf{:04}", i), NodeData::default()));
         }
-        gs.bulk_insert(b, "g", &nodes, &[], None).unwrap();
+        gs.bulk_insert(b, "default", "g", &nodes, &[], None)
+            .unwrap();
 
         // Add 1000 edges from hub to each leaf via batch
         let edges: Vec<(String, String, String, EdgeData)> = (0..1_000)
@@ -1733,31 +1912,45 @@ mod tests {
                 )
             })
             .collect();
-        let inserted = gs.batch_add_edges(b, "g", &edges, Some(200)).unwrap();
+        let inserted = gs
+            .batch_add_edges(b, "default", "g", &edges, Some(200))
+            .unwrap();
         assert_eq!(inserted, 1_000);
 
         // Verify all outgoing edges
-        let out = gs.outgoing_neighbors(b, "g", "hub", None).unwrap();
+        let out = gs
+            .outgoing_neighbors(b, "default", "g", "hub", None)
+            .unwrap();
         assert_eq!(out.len(), 1_000);
 
         // Verify reverse: each leaf has exactly 1 incoming
         for i in [0, 499, 999] {
             let inc = gs
-                .incoming_neighbors(b, "g", &format!("leaf{:04}", i), None)
+                .incoming_neighbors(b, "default", "g", &format!("leaf{:04}", i), None)
                 .unwrap();
             assert_eq!(inc.len(), 1);
             assert_eq!(inc[0].node_id, "hub");
         }
 
         // Verify edge type counter
-        assert_eq!(gs.count_edges_by_type(b, "g", "CONNECTS").unwrap(), 1_000);
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "CONNECTS")
+                .unwrap(),
+            1_000
+        );
 
         // Remove hub — should clean up all 1000 edges
-        gs.remove_node(b, "g", "hub").unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "CONNECTS").unwrap(), 0);
+        gs.remove_node(b, "default", "g", "hub").unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "CONNECTS")
+                .unwrap(),
+            0
+        );
 
         // Verify leaves have no incoming edges
-        let inc = gs.incoming_neighbors(b, "g", "leaf0500", None).unwrap();
+        let inc = gs
+            .incoming_neighbors(b, "default", "g", "leaf0500", None)
+            .unwrap();
         assert!(inc.is_empty());
     }
 }

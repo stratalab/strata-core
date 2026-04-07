@@ -57,9 +57,14 @@ impl GraphStore {
     }
 
     /// Build a snapshot of the entire graph.
-    pub fn snapshot(&self, branch_id: BranchId, graph: &str) -> StrataResult<GraphSnapshot> {
-        let nodes = self.all_nodes(branch_id, graph)?;
-        let edges = self.all_edges(branch_id, graph)?;
+    pub fn snapshot(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<GraphSnapshot> {
+        let nodes = self.all_nodes(branch_id, space, graph)?;
+        let edges = self.all_edges(branch_id, space, graph)?;
         Ok(GraphSnapshot { nodes, edges })
     }
 
@@ -68,11 +73,16 @@ impl GraphStore {
     /// Uses `packed::edge_count()` on each forward adjacency entry (header-only,
     /// no full decode) and counts node keys via prefix scan.
     /// Both counts are read in a single transaction for consistency.
-    pub fn snapshot_stats(&self, branch_id: BranchId, graph: &str) -> StrataResult<GraphStats> {
+    pub fn snapshot_stats(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<GraphStats> {
         let node_prefix = keys::all_nodes_prefix(graph);
-        let node_prefix_key = keys::storage_key(branch_id, &node_prefix);
+        let node_prefix_key = keys::storage_key(branch_id, space, &node_prefix);
         let fwd_prefix = keys::all_forward_adj_prefix(graph);
-        let fwd_prefix_key = keys::storage_key(branch_id, &fwd_prefix);
+        let fwd_prefix_key = keys::storage_key(branch_id, space, &fwd_prefix);
 
         self.db.transaction(branch_id, |txn| {
             // Count nodes via prefix scan (no decode — just count keys)
@@ -101,9 +111,10 @@ impl GraphStore {
     pub fn build_adjacency_index(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
     ) -> StrataResult<AdjacencyIndex> {
-        let edges = self.all_edges(branch_id, graph)?;
+        let edges = self.all_edges(branch_id, space, graph)?;
         let mut index = AdjacencyIndex::new();
         for edge in edges {
             index.add_edge(&edge.src, &edge.dst, &edge.edge_type, edge.data);
@@ -168,8 +179,12 @@ impl strata_engine::search::Searchable for GraphStore {
 
                 // Extract snippet from graph node data.
                 // The key format is "{graph}/n/{node_id}" (from keys::node_key).
+                // Phase 6: snippet read scopes to the search request's space.
+                // Same caveat as `index_node_for_search`: cross-space identical
+                // node IDs collide in the index because EntityRef::Graph
+                // doesn't carry space.
                 let snippet = if let EntityRef::Graph { ref key, .. } = entity_ref {
-                    self.extract_graph_snippet(&req.branch_id, key)
+                    self.extract_graph_snippet(&req.branch_id, &req.space, key)
                 } else {
                     None
                 };
@@ -213,9 +228,18 @@ impl GraphStore {
     /// Index a graph node's text into the inverted index for BM25 search.
     ///
     /// Called after successful add_node/bulk_insert commits.
+    ///
+    /// Phase 6 note: `EntityRef::Graph` does NOT carry the space, so two
+    /// graphs with the same `graph/node_id` in different spaces produce
+    /// colliding entries in the index. This matches the existing
+    /// cross-space limitation for KV / JSON / Vector. Tracked as separate
+    /// follow-up work; the `space` parameter here is preserved for forward
+    /// compatibility (so callers don't need to be touched again when the
+    /// search index gains space awareness).
     pub fn index_node_for_search(
         &self,
         branch_id: BranchId,
+        _space: &str,
         graph: &str,
         node_id: &str,
         data: &NodeData,
@@ -238,8 +262,16 @@ impl GraphStore {
 
     /// Remove a graph node from the inverted index.
     ///
-    /// Called after successful remove_node/delete_graph commits.
-    pub fn deindex_node_for_search(&self, branch_id: BranchId, graph: &str, node_id: &str) {
+    /// Called after successful remove_node/delete_graph commits. See the
+    /// note on [`Self::index_node_for_search`] about the cross-space
+    /// limitation in `EntityRef::Graph`.
+    pub fn deindex_node_for_search(
+        &self,
+        branch_id: BranchId,
+        _space: &str,
+        graph: &str,
+        node_id: &str,
+    ) {
         let Ok(index) = self.db.extension::<strata_engine::search::InvertedIndex>() else {
             return;
         };
@@ -277,8 +309,14 @@ impl GraphStore {
     /// Extract a search snippet from a graph node's data.
     ///
     /// Parses the storage key to find the graph name and node ID,
-    /// fetches the node, and builds a snippet from object_type + properties.
-    fn extract_graph_snippet(&self, branch_id: &BranchId, storage_key: &str) -> Option<String> {
+    /// fetches the node from the given `space`, and builds a snippet from
+    /// object_type + properties.
+    fn extract_graph_snippet(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+        storage_key: &str,
+    ) -> Option<String> {
         // Storage key format: "{graph}/n/{node_id}"
         let parts: Vec<&str> = storage_key.splitn(3, '/').collect();
         if parts.len() < 3 || parts[1] != "n" {
@@ -287,7 +325,7 @@ impl GraphStore {
         let graph = parts[0];
         let node_id = parts[2];
 
-        let data = self.get_node(*branch_id, graph, node_id).ok()??;
+        let data = self.get_node(*branch_id, space, graph, node_id).ok()??;
 
         let mut text = String::new();
         if let Some(ref ot) = data.object_type {

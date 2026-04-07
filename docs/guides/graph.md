@@ -279,9 +279,13 @@ Delete the entire graph and all its data:
 db.graph_delete("social")?;
 ```
 
-## Branch Isolation (Not Space-Scoped)
+## Branch and Space Isolation
 
-Graph data is **branch-scoped only** — unlike KV, JSON, and other primitives, graphs are not isolated by space. All graphs on a branch are visible regardless of which space is active. This is intentional: graphs model cross-cutting relationships across your data, and entity refs can point into any space (e.g. `kv://default/key`, `json://other-space/doc`). Graph names serve as the namespace boundary within a branch.
+Graph data is **branch- AND space-scoped** — graphs honor `Strata::current_space` exactly like KV, JSON, Vector, and Event primitives do. As of Phase 6, calling `db.graph_create("social")` creates the graph in the currently-active space (default `"default"`), and switching spaces via `db.set_space("tenant_a")?` makes subsequent graph calls operate on `tenant_a`. Two graphs with the same name in different spaces are fully independent — same node IDs can carry different data in each space without collision.
+
+Entity refs can still point into any space (e.g. `kv://default/key`, `json://other-space/doc`) — they're a logical pointer mechanism, not tied to the graph's own space. Graph names serve as the namespace boundary within a `(branch, space)` pair.
+
+> **Migration note (Phase 6):** before Phase 6, all graph data lived in a reserved `_graph_` space regardless of `current_space`. Existing databases with graph data in `_graph_` need a one-line migration: call `db.set_space("_graph_")?` before any graph call to read the legacy data, or migrate the data forward by reading from `_graph_` and writing to your preferred user space.
 
 Each branch has its own independent copy of graph state, and graphs created on one branch are not visible on others:
 

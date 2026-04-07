@@ -704,33 +704,69 @@ Add a JSON diff helper that, given `(ancestor_doc, source_doc, target_doc)`, ret
 
 ## Phase 6 — Graph space symmetry
 
+**Status:** implemented.
+
 **Goal:** remove the hard-wired `_graph_` reservation so Graph is space-symmetric with the other primitives.
 
-### Step 6.1: Parameterize `GRAPH_SPACE`
+### What shipped
 
-**File:** `crates/graph/src/keys.rs`
+1. **`crates/graph/src/keys.rs`** — `pub const GRAPH_SPACE: &str = "_graph_";` is kept but its meaning narrowed: it's now the well-known space name where the system branch DAG (`branch_dag.rs`) lives, NOT the default for user graph CRUD. The three core helpers (`graph_namespace`, `graph_key`, `storage_key`) gained a `space: &str` parameter and are threaded through every callsite. `NS_CACHE` is rekeyed by `(BranchId, String)` so different spaces get distinct cached namespaces.
 
-Replace `pub const GRAPH_SPACE: &str = "_graph_";` with a per-operation `space: &str` parameter, threaded through the Graph API surface. Default to `_graph_` for backward compatibility.
+2. **`crates/graph/src/ext.rs`** — every method on the `GraphStoreExt` trait gained `space: &str` after `branch_id`. `ensure_graph_space_registered` accepts the target space and registers it with the SpaceIndex (so user-space graphs become visible to `merge_branches`). All internal `keys::storage_key(...)` calls thread `space` through.
 
-### Step 6.2: Graph API updates
+3. **`crates/graph/src/{nodes, edges, lifecycle, bulk, ontology, snapshot, traversal, integrity, analytics, boost}.rs`** — every public CRUD method on `GraphStore` gained `space: &str` after `branch_id`. ~25 methods updated.
 
-Graph executor commands accept an optional `space` argument. When absent, they use the default. When present, they operate on the caller's user space.
+4. **`crates/graph/src/branch_dag.rs`** — pinned to `keys::GRAPH_SPACE` explicitly. The system DAG keeps living in `_graph_`, isolated from user-space graphs.
 
-### Step 6.3: Merge handler update
+5. **`crates/executor/src/command.rs`** — every Graph* command variant gained `#[serde(default, skip_serializing_if = "Option::is_none")] space: Option<String>` matching the existing KV/JSON/Vector pattern exactly. Default-skip serde keeps backwards compatibility with persisted commands.
 
-`GraphMergeHandler` already iterates `(space, TypeTag::Graph)` tuples from the diff — no change needed beyond removing any code paths that assume `_graph_` is the only graph space.
+6. **`crates/executor/src/api/graph.rs`** — every `Strata::graph_*` method now passes `space: self.space_id()` when constructing the command, so graph operations honor `Strata::current_space` (default `"default"`) just like `kv_put` / `json_set` / `vector_upsert`. Method signatures didn't change — existing user code keeps compiling.
 
-### Step 6.4: Tests
+7. **`crates/executor/src/handlers/graph.rs`** — every Graph handler accepts `space: String` as its second argument and threads it into the GraphStore call.
 
-- `graph_in_user_space_survives_fork`
-- `graph_in_user_space_survives_merge`
-- `graph_in_multiple_spaces_independent`
+8. **`crates/executor/src/executor.rs`** — every Graph dispatch arm destructures `space` from the command, resolves `let space = space.unwrap_or_else(|| "default".to_string());`, and passes it to the handler.
 
-### Phase 6 acceptance bar
+9. **`crates/executor/src/session.rs`** — `dispatch_in_txn` takes `space: &str` and threads it into `ctx.graph_*` calls. `PostCommitOp::GraphIndexNode` / `GraphDeindexNode` carry the space through to post-commit search index updates. The `extract space from command` match arm covers all 32 Graph* variants.
 
-- Graph data can live in any user space.
-- Fork and merge treat graph data in user spaces identically to graph data in `_graph_`.
-- Claim 4's "Graph is not space-symmetric" caveat in docs/12 can be removed.
+10. **Search integration (`lib.rs`)** — `index_node_for_search` and `deindex_node_for_search` accept `space: &str` for forward-compat. `EntityRef::Graph` does NOT yet carry the space — that's a known cross-primitive limitation (KV / JSON / Vector all have the same issue with same-key cross-space collisions in the search index) and is tracked separately.
+
+### Behavior change for users
+
+After Phase 6, `db.graph_create("g")` writes to `current_space/g` (default `"default"/g`), NOT `_graph_/g`. Existing databases with graph data in `_graph_` need a one-line migration: `db.set_space("_graph_")?` before any graph call. This matches how KV/JSON/Vector/Event already work.
+
+### Migration story
+
+Migration is opt-in and one-liner:
+
+```rust
+let mut db = Strata::open("/path/to/data")?;
+db.set_space("_graph_")?;  // restore pre-Phase-6 behavior for legacy graph data
+let graphs = db.graph_list()?;
+```
+
+The lower-level `GraphStore::*` API takes `space: &str` as a required parameter — no defaults — so test fixtures and `branch_dag.rs` are explicit about which space they target.
+
+### Phase 6 acceptance bar (met)
+
+- ✅ Graph data can live in any user space (`graph_in_user_space_create_and_query_succeeds`).
+- ✅ Two graphs with the same name in different spaces are independent (`graph_in_two_spaces_independent`).
+- ✅ Fork inherits user-space graph data (`graph_in_user_space_survives_fork`).
+- ✅ Phase 3b semantic merge applies to user-space graphs (`graph_in_user_space_phase_3b_semantic_merge_succeeds`).
+- ✅ Phase 3b referential-integrity rejection applies to user-space graphs (`graph_in_user_space_referential_integrity_rejects_dangling`).
+- ✅ Legacy `_graph_` space still works when callers pass `keys::GRAPH_SPACE` explicitly (`graph_in_legacy_graph_space_still_works`).
+- ✅ Claim 4's "Graph is not space-symmetric" caveat removed from docs/12.
+
+### Tests
+
+- 6 new integration tests in `tests/integration/branching.rs::Phase 6: Graph space symmetry`.
+- All ~466 graph crate unit tests pass with mechanical signature updates (added `"default"` argument at every call site).
+- All Phase 1–3c regression tests pass (the existing tests use `"default"` space, which is what `current_space` resolves to).
+
+### Out of scope
+
+- **`EntityRef::Graph` carrying space**: same cross-primitive limitation as KV/JSON/Vector. Adding a `space` field to `EntityRef` is a breaking change to the search index format and ripples through the recovery path. Tracked separately.
+- **Multi-space graph in `describe` / `export` handlers**: Phase 6 keeps these handlers reading from `_graph_` (legacy default). Multi-space describe / export would need to enumerate every space with graph data, which is a separate concern.
+- **strata-python SDK API parity**: lives in a separate repo; coordination is a follow-up.
 
 ---
 

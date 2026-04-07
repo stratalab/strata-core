@@ -12,10 +12,15 @@ use strata_core::types::TypeTag;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::{StrataError, StrataResult};
 
-/// Global cache of `Arc<Namespace>` per branch.  One heap allocation per branch,
-/// ever — all subsequent calls return `Arc::clone()` (atomic refcount bump, zero
-/// heap allocation).  Fixes graph OOM (#1297).
-static NS_CACHE: Lazy<DashMap<BranchId, Arc<Namespace>>> = Lazy::new(DashMap::new);
+/// Global cache of `Arc<Namespace>` per `(branch, space)` pair. One heap
+/// allocation per pair, ever — all subsequent calls return `Arc::clone()`
+/// (atomic refcount bump, zero heap allocation). Fixes graph OOM (#1297).
+///
+/// Phase 6: rekeyed from `BranchId` to `(BranchId, String)` so different
+/// spaces on the same branch get distinct namespaces. The `String` allocation
+/// per lookup is regrettable but necessary for hash key equality; profile if
+/// it shows up as a bottleneck.
+static NS_CACHE: Lazy<DashMap<(BranchId, String), Arc<Namespace>>> = Lazy::new(DashMap::new);
 
 /// Separator used between path segments in graph keys.
 const SEP: char = '/';
@@ -89,28 +94,41 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
 // Key Construction
 // =============================================================================
 
-/// The reserved space name for graph data.
+/// The well-known space name for the system branch DAG graph.
+///
+/// Phase 6 changed the meaning of this constant. Before Phase 6 it was
+/// "the only space graph data could live in". After Phase 6 it's still
+/// the well-known name where `branch_dag.rs` keeps the system DAG, and
+/// it's a sensible value to pass when you want to stay backwards-compatible
+/// with pre-Phase-6 graph data — but it is no longer a default for user
+/// graph CRUD. User graph CRUD goes through `Strata::current_space`
+/// (default `"default"`), exactly like KV / JSON / Vector / Event.
 pub const GRAPH_SPACE: &str = "_graph_";
 
-/// Build a namespace for graph operations on a given branch.
+/// Build a namespace for graph operations on `(branch_id, space)`.
 ///
-/// Returns a cached `Arc<Namespace>` — one heap allocation per branch, ever.
-/// Subsequent calls return `Arc::clone()` (atomic refcount bump only).
-pub fn graph_namespace(branch_id: BranchId) -> Arc<Namespace> {
+/// Returns a cached `Arc<Namespace>` — one heap allocation per
+/// `(branch, space)` pair, ever. Subsequent calls return `Arc::clone()`
+/// (atomic refcount bump only).
+pub fn graph_namespace(branch_id: BranchId, space: &str) -> Arc<Namespace> {
     NS_CACHE
-        .entry(branch_id)
-        .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, GRAPH_SPACE)))
+        .entry((branch_id, space.to_string()))
+        .or_insert_with(|| Arc::new(Namespace::for_branch_space(branch_id, space)))
         .clone()
 }
 
-/// Remove a cached namespace entry (call on branch deletion).
-pub fn invalidate_namespace_cache(branch_id: &BranchId) {
-    NS_CACHE.remove(branch_id);
+/// Remove a cached namespace entry for `(branch, space)`.
+///
+/// Phase 6: removes a single `(branch, space)` entry. Callers that want to
+/// invalidate every space for a branch must iterate the cache themselves.
+pub fn invalidate_namespace_cache(branch_id: &BranchId, space: &str) {
+    NS_CACHE.remove(&(*branch_id, space.to_string()));
 }
 
-/// Build a full storage Key from a user_key string in the graph namespace.
-pub fn graph_key(branch_id: BranchId, user_key: &str) -> Key {
-    Key::new_graph(graph_namespace(branch_id), user_key)
+/// Build a full storage Key from a `user_key` string in the graph namespace
+/// for `(branch_id, space)`.
+pub fn graph_key(branch_id: BranchId, space: &str, user_key: &str) -> Key {
+    Key::new_graph(graph_namespace(branch_id, space), user_key)
 }
 
 // --- Packed adjacency list keys ---
@@ -361,9 +379,9 @@ pub fn graph_prefix(graph: &str) -> String {
 // Helpers
 // =============================================================================
 
-/// Build a storage Key for a graph user_key on a specific branch.
-pub fn storage_key(branch_id: BranchId, user_key: &str) -> Key {
-    graph_key(branch_id, user_key)
+/// Build a storage Key for a graph `user_key` on `(branch_id, space)`.
+pub fn storage_key(branch_id: BranchId, space: &str, user_key: &str) -> Key {
+    graph_key(branch_id, space, user_key)
 }
 
 /// Check that a storage key has the expected TypeTag::Graph.
@@ -533,7 +551,7 @@ mod tests {
     #[test]
     fn storage_key_has_graph_type_tag() {
         let branch = BranchId::from_bytes([0u8; 16]);
-        let key = storage_key(branch, "test/key");
+        let key = storage_key(branch, GRAPH_SPACE, "test/key");
         assert_graph_tag(&key);
     }
 
@@ -736,8 +754,8 @@ mod tests {
         // Use a unique branch ID to avoid interference from other tests
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let ns1 = graph_namespace(branch);
-        let ns2 = graph_namespace(branch);
+        let ns1 = graph_namespace(branch, GRAPH_SPACE);
+        let ns2 = graph_namespace(branch, GRAPH_SPACE);
         // Must be the *same* heap allocation (Arc pointer equality), not just
         // value-equal — this is the whole point of the cache.
         assert!(Arc::ptr_eq(&ns1, &ns2));
@@ -749,8 +767,8 @@ mod tests {
             BranchId::from_bytes([0xCA, 0xCE, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let branch_b =
             BranchId::from_bytes([0xCA, 0xCE, 0x03, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let ns_a = graph_namespace(branch_a);
-        let ns_b = graph_namespace(branch_b);
+        let ns_a = graph_namespace(branch_a, GRAPH_SPACE);
+        let ns_b = graph_namespace(branch_b, GRAPH_SPACE);
         // Different branches → different namespace content
         assert_ne!(*ns_a, *ns_b);
         assert_eq!(ns_a.branch_id, branch_a);
@@ -761,18 +779,56 @@ mod tests {
     }
 
     #[test]
+    fn namespace_cache_different_spaces_return_different_namespaces() {
+        // Phase 6: same branch, two different spaces → distinct cache entries
+        // and distinct Namespace contents.
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns_default = graph_namespace(branch, "default");
+        let ns_tenant = graph_namespace(branch, "tenant_a");
+        // Same branch, different spaces → different namespace contents.
+        assert_ne!(*ns_default, *ns_tenant);
+        assert_eq!(ns_default.space, "default");
+        assert_eq!(ns_tenant.space, "tenant_a");
+        // And both must be the same instance on subsequent lookups.
+        let ns_default_again = graph_namespace(branch, "default");
+        let ns_tenant_again = graph_namespace(branch, "tenant_a");
+        assert!(Arc::ptr_eq(&ns_default, &ns_default_again));
+        assert!(Arc::ptr_eq(&ns_tenant, &ns_tenant_again));
+    }
+
+    #[test]
     fn invalidate_namespace_cache_forces_new_allocation() {
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x04, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let ns_before = graph_namespace(branch);
+        let ns_before = graph_namespace(branch, GRAPH_SPACE);
 
-        invalidate_namespace_cache(&branch);
+        invalidate_namespace_cache(&branch, GRAPH_SPACE);
 
-        let ns_after = graph_namespace(branch);
+        let ns_after = graph_namespace(branch, GRAPH_SPACE);
         // Value must be identical (same branch, same space)
         assert_eq!(*ns_before, *ns_after);
         // But must be a *new* heap allocation (different Arc pointer)
         assert!(!Arc::ptr_eq(&ns_before, &ns_after));
+    }
+
+    #[test]
+    fn invalidate_namespace_cache_only_evicts_target_space() {
+        // Phase 6: invalidating one space must not evict another space's
+        // namespace entry on the same branch.
+        let branch =
+            BranchId::from_bytes([0xCA, 0xCE, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        let ns_default = graph_namespace(branch, "default");
+        let ns_tenant = graph_namespace(branch, "tenant_a");
+
+        invalidate_namespace_cache(&branch, "default");
+
+        // tenant_a's entry must still be the same Arc — no eviction.
+        let ns_tenant_after = graph_namespace(branch, "tenant_a");
+        assert!(Arc::ptr_eq(&ns_tenant, &ns_tenant_after));
+        // default's entry must be a new allocation now.
+        let ns_default_after = graph_namespace(branch, "default");
+        assert!(!Arc::ptr_eq(&ns_default, &ns_default_after));
     }
 
     #[test]
@@ -810,7 +866,7 @@ mod tests {
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x05, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         // Should not panic or error
-        invalidate_namespace_cache(&branch);
+        invalidate_namespace_cache(&branch, GRAPH_SPACE);
     }
 
     #[test]
@@ -820,7 +876,7 @@ mod tests {
         // the standard path (storage_key(branch_id, ...)).
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x06, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        let ns = graph_namespace(branch);
+        let ns = graph_namespace(branch, GRAPH_SPACE);
 
         // Test with various user_key patterns used in graph operations
         let user_keys = [
@@ -833,7 +889,7 @@ mod tests {
         ];
 
         for user_key in &user_keys {
-            let via_storage = storage_key(branch, user_key);
+            let via_storage = storage_key(branch, GRAPH_SPACE, user_key);
             let via_hoisted = Key::new_graph(ns.clone(), user_key);
             assert_eq!(
                 via_storage, via_hoisted,

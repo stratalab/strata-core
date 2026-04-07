@@ -1170,12 +1170,14 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     // Seed the target branch with two nodes before fork.
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
     // Fork target → source.
@@ -1185,11 +1187,12 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     // Both branches modify graph state since the fork.
     // Source adds a new node "carol" and an edge alice→carol.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1199,11 +1202,12 @@ fn graph_merge_disjoint_node_additions_succeeds() {
         .unwrap();
     // Target adds a different new node "dave" and edge bob→dave.
     p.graph
-        .add_node(target_id, "g", "dave", NodeData::default())
+        .add_node(target_id, "default", "g", "dave", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             target_id,
+            "default",
             "g",
             "bob",
             "dave",
@@ -1226,15 +1230,31 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     .expect("disjoint divergent graph merge should succeed under Phase 3b");
 
     // After the merge, target has BOTH source's additions AND its own.
-    assert!(p.graph.get_node(target_id, "g", "alice").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "bob").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "dave").unwrap().is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "alice")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "bob")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "carol")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "dave")
+        .unwrap()
+        .is_some());
 
     // Bidirectional consistency: alice→carol visible from both sides.
     let alice_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     let alice_targets: std::collections::HashSet<String> =
         alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
@@ -1245,7 +1265,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
 
     let carol_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "carol", None)
+        .incoming_neighbors(target_id, "default", "g", "carol", None)
         .unwrap();
     let carol_sources: std::collections::HashSet<String> =
         carol_incoming.iter().map(|n| n.node_id.clone()).collect();
@@ -1257,7 +1277,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     // bob→dave (target's edge) also intact.
     let bob_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "bob", None)
+        .outgoing_neighbors(target_id, "default", "g", "bob", None)
         .unwrap();
     let bob_targets: std::collections::HashSet<String> =
         bob_outgoing.iter().map(|n| n.node_id.clone()).collect();
@@ -1265,7 +1285,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
 
     let dave_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "dave", None)
+        .incoming_neighbors(target_id, "default", "g", "dave", None)
         .unwrap();
     let dave_sources: std::collections::HashSet<String> =
         dave_incoming.iter().map(|n| n.node_id.clone()).collect();
@@ -1283,12 +1303,14 @@ fn graph_merge_single_sided_source_succeeds() {
     // Seed target with two pre-fork nodes.
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
     // Fork.
@@ -1297,11 +1319,12 @@ fn graph_merge_single_sided_source_succeeds() {
 
     // Only source modifies graph state — adds carol and an edge alice→carol.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1313,6 +1336,7 @@ fn graph_merge_single_sided_source_succeeds() {
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "bob",
@@ -1332,13 +1356,17 @@ fn graph_merge_single_sided_source_succeeds() {
     .expect("single-sided graph merge should succeed");
 
     // Target now has carol.
-    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "carol")
+        .unwrap()
+        .is_some());
 
     // Bidirectional consistency: outgoing_neighbors(alice) and
     // incoming_neighbors(carol) must agree on the alice→carol edge.
     let alice_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     let alice_targets: std::collections::HashSet<String> =
         alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
@@ -1353,7 +1381,7 @@ fn graph_merge_single_sided_source_succeeds() {
 
     let carol_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "carol", None)
+        .incoming_neighbors(target_id, "default", "g", "carol", None)
         .unwrap();
     let carol_sources: std::collections::HashSet<String> =
         carol_incoming.iter().map(|n| n.node_id.clone()).collect();
@@ -1364,7 +1392,7 @@ fn graph_merge_single_sided_source_succeeds() {
 
     let bob_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "bob", None)
+        .incoming_neighbors(target_id, "default", "g", "bob", None)
         .unwrap();
     let bob_sources: std::collections::HashSet<String> =
         bob_incoming.iter().map(|n| n.node_id.clone()).collect();
@@ -1388,20 +1416,23 @@ fn graph_merge_single_sided_target_succeeds() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
 
     // Only target modifies graph state.
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             target_id,
+            "default",
             "g",
             "alice",
             "bob",
@@ -1421,16 +1452,20 @@ fn graph_merge_single_sided_target_succeeds() {
 
     // Target's post-fork additions must still be present and bidirectionally
     // consistent.
-    assert!(p.graph.get_node(target_id, "g", "bob").unwrap().is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "bob")
+        .unwrap()
+        .is_some());
     let alice_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     assert_eq!(alice_outgoing.len(), 1);
     assert_eq!(alice_outgoing[0].node_id, "bob");
     let bob_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "bob", None)
+        .incoming_neighbors(target_id, "default", "g", "bob", None)
         .unwrap();
     assert_eq!(bob_incoming.len(), 1);
     assert_eq!(bob_incoming[0].node_id, "alice");
@@ -1494,23 +1529,28 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes alice.
-    p.graph.remove_node(source_id, "g", "alice").unwrap();
+    p.graph
+        .remove_node(source_id, "default", "g", "alice")
+        .unwrap();
     // Target adds an edge alice→bob (alice still exists on target).
     p.graph
         .add_edge(
             target_id,
+            "default",
             "g",
             "alice",
             "bob",
@@ -1551,10 +1591,14 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     );
 
     // Target state untouched: alice still exists, alice→bob edge intact.
-    assert!(p.graph.get_node(target_id, "g", "alice").unwrap().is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "alice")
+        .unwrap()
+        .is_some());
     let alice_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     assert_eq!(alice_outgoing.len(), 1);
     assert_eq!(alice_outgoing[0].node_id, "bob");
@@ -1577,10 +1621,12 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
     for n in &["alice", "bob", "carol", "dave"] {
         p.graph
-            .add_node(target_id, "g", n, NodeData::default())
+            .add_node(target_id, "default", "g", n, NodeData::default())
             .unwrap();
     }
 
@@ -1590,6 +1636,7 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1600,6 +1647,7 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
     p.graph
         .add_edge(
             target_id,
+            "default",
             "g",
             "bob",
             "dave",
@@ -1620,28 +1668,28 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
     // Both edges present and bidirectionally consistent on target.
     let alice_out = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     assert_eq!(alice_out.len(), 1);
     assert_eq!(alice_out[0].node_id, "carol");
 
     let carol_in = p
         .graph
-        .incoming_neighbors(target_id, "g", "carol", None)
+        .incoming_neighbors(target_id, "default", "g", "carol", None)
         .unwrap();
     assert_eq!(carol_in.len(), 1);
     assert_eq!(carol_in[0].node_id, "alice");
 
     let bob_out = p
         .graph
-        .outgoing_neighbors(target_id, "g", "bob", None)
+        .outgoing_neighbors(target_id, "default", "g", "bob", None)
         .unwrap();
     assert_eq!(bob_out.len(), 1);
     assert_eq!(bob_out[0].node_id, "dave");
 
     let dave_in = p
         .graph
-        .incoming_neighbors(target_id, "g", "dave", None)
+        .incoming_neighbors(target_id, "default", "g", "dave", None)
         .unwrap();
     assert_eq!(dave_in.len(), 1);
     assert_eq!(dave_in[0].node_id, "bob");
@@ -1662,12 +1710,14 @@ fn graph_merge_dangling_edge_rejected() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "carol", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "carol", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
@@ -1676,6 +1726,7 @@ fn graph_merge_dangling_edge_rejected() {
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1683,7 +1734,9 @@ fn graph_merge_dangling_edge_rejected() {
             EdgeData::default(),
         )
         .unwrap();
-    p.graph.remove_node(target_id, "g", "carol").unwrap();
+    p.graph
+        .remove_node(target_id, "default", "g", "carol")
+        .unwrap();
 
     let err = branch_ops::merge_branches(
         &test_db.db,
@@ -1718,13 +1771,17 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
     let original = NodeData {
         entity_ref: None,
         properties: Some(serde_json::json!({"role": "user"})),
         object_type: None,
     };
-    p.graph.add_node(target_id, "g", "alice", original).unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", original)
+        .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
@@ -1740,10 +1797,10 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
         object_type: None,
     };
     p.graph
-        .add_node(source_id, "g", "alice", source_data.clone())
+        .add_node(source_id, "default", "g", "alice", source_data.clone())
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", target_data)
+        .add_node(target_id, "default", "g", "alice", target_data)
         .unwrap();
 
     let info = branch_ops::merge_branches(
@@ -1764,7 +1821,7 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
     // Source's value won.
     let alice = p
         .graph
-        .get_node(target_id, "g", "alice")
+        .get_node(target_id, "default", "g", "alice")
         .unwrap()
         .expect("alice still exists post-merge");
     assert_eq!(alice, source_data);
@@ -1780,14 +1837,16 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
     let original = NodeData {
         entity_ref: None,
         properties: Some(serde_json::json!({"role": "user"})),
         object_type: None,
     };
     p.graph
-        .add_node(target_id, "g", "alice", original.clone())
+        .add_node(target_id, "default", "g", "alice", original.clone())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
@@ -1796,6 +1855,7 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
     p.graph
         .add_node(
             source_id,
+            "default",
             "g",
             "alice",
             NodeData {
@@ -1808,6 +1868,7 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
     p.graph
         .add_node(
             target_id,
+            "default",
             "g",
             "alice",
             NodeData {
@@ -1846,12 +1907,14 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     // Pre-fork: target has alice and bob.
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
@@ -1859,11 +1922,12 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
 
     // Source: adds carol + alice→carol.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1873,11 +1937,12 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
         .unwrap();
     // Target: adds dave + bob→dave (disjoint from source's changes).
     p.graph
-        .add_node(target_id, "g", "dave", NodeData::default())
+        .add_node(target_id, "default", "g", "dave", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             target_id,
+            "default",
             "g",
             "bob",
             "dave",
@@ -1900,13 +1965,25 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
 
     // Target now has all four nodes, with bidirectional consistency on the
     // alice→carol edge that source added.
-    assert!(p.graph.get_node(target_id, "g", "alice").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "carol").unwrap().is_some());
-    assert!(p.graph.get_node(target_id, "g", "dave").unwrap().is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "alice")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "carol")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "dave")
+        .unwrap()
+        .is_some());
 
     let alice_outgoing = p
         .graph
-        .outgoing_neighbors(target_id, "g", "alice", None)
+        .outgoing_neighbors(target_id, "default", "g", "alice", None)
         .unwrap();
     let alice_targets: std::collections::HashSet<String> =
         alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
@@ -1916,7 +1993,7 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     );
     let carol_incoming = p
         .graph
-        .incoming_neighbors(target_id, "g", "carol", None)
+        .incoming_neighbors(target_id, "default", "g", "carol", None)
         .unwrap();
     let carol_sources: std::collections::HashSet<String> =
         carol_incoming.iter().map(|n| n.node_id.clone()).collect();
@@ -1940,12 +2017,14 @@ fn cherry_pick_graph_dangling_edge_rejected() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "carol", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "carol", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
@@ -1955,6 +2034,7 @@ fn cherry_pick_graph_dangling_edge_rejected() {
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -1965,7 +2045,9 @@ fn cherry_pick_graph_dangling_edge_rejected() {
     // Target: deletes carol. After cherry-pick, the projected edge set would
     // include alice→carol but the projected node set would lack carol →
     // dangling edge / orphan reference, both fatal.
-    p.graph.remove_node(target_id, "g", "carol").unwrap();
+    p.graph
+        .remove_node(target_id, "default", "g", "carol")
+        .unwrap();
 
     let err = branch_ops::cherry_pick_from_diff(
         &test_db.db,
@@ -1999,12 +2081,14 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
         .unwrap();
     p.graph
-        .add_node(target_id, "g", "bob", NodeData::default())
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
@@ -2016,11 +2100,12 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
     // include the node but exclude the adjacency entries — exactly the
     // partial-graph scenario the atomicity guard exists to catch.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -2060,9 +2145,11 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
         .unwrap();
     kv.put(&target_id, "default", "before_fork", Value::Int(1))
         .unwrap();
@@ -2072,11 +2159,12 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
 
     // Source: divergent graph + new KV.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -2104,7 +2192,10 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
         Some(Value::Int(42))
     );
     assert!(
-        p.graph.get_node(target_id, "g", "carol").unwrap().is_none(),
+        p.graph
+            .get_node(target_id, "default", "g", "carol")
+            .unwrap()
+            .is_none(),
         "graph data must NOT have been applied under primitives=[KV] filter"
     );
 }
@@ -2130,9 +2221,11 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g", None).unwrap();
     p.graph
-        .add_node(target_id, "g", "alice", NodeData::default())
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
         .unwrap();
     kv.put(&target_id, "default", "doc/foo", Value::Int(1))
         .unwrap();
@@ -2143,11 +2236,12 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     // Source diverges in BOTH graph (adds carol + alice→carol) AND KV
     // (adds doc/bar). The graph plan will produce multiple actions.
     p.graph
-        .add_node(source_id, "g", "carol", NodeData::default())
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
         .unwrap();
     p.graph
         .add_edge(
             source_id,
+            "default",
             "g",
             "alice",
             "carol",
@@ -2177,7 +2271,10 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     );
     // Graph side is untouched on target.
     assert!(
-        p.graph.get_node(target_id, "g", "carol").unwrap().is_none(),
+        p.graph
+            .get_node(target_id, "default", "g", "carol")
+            .unwrap()
+            .is_none(),
         "graph data must NOT have been cherry-picked"
     );
 }
@@ -2232,23 +2329,41 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g_pre", None).unwrap();
     p.graph
-        .add_node(target_id, "g_pre", "x", NodeData::default())
+        .create_graph(target_id, "default", "g_pre", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g_pre", "x", NodeData::default())
         .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source creates a brand new graph "g_src".
-    p.graph.create_graph(source_id, "g_src", None).unwrap();
     p.graph
-        .add_node(source_id, "g_src", "src_node", NodeData::default())
+        .create_graph(source_id, "default", "g_src", None)
+        .unwrap();
+    p.graph
+        .add_node(
+            source_id,
+            "default",
+            "g_src",
+            "src_node",
+            NodeData::default(),
+        )
         .unwrap();
     // Target creates a brand new graph "g_tgt".
-    p.graph.create_graph(target_id, "g_tgt", None).unwrap();
     p.graph
-        .add_node(target_id, "g_tgt", "tgt_node", NodeData::default())
+        .create_graph(target_id, "default", "g_tgt", None)
+        .unwrap();
+    p.graph
+        .add_node(
+            target_id,
+            "default",
+            "g_tgt",
+            "tgt_node",
+            NodeData::default(),
+        )
         .unwrap();
 
     branch_ops::merge_branches(
@@ -2261,7 +2376,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
     .expect("Phase 3c additive catalog must merge concurrent creates of different graphs");
 
     // Target now lists all three graphs.
-    let graphs = p.graph.list_graphs(target_id).unwrap();
+    let graphs = p.graph.list_graphs(target_id, "default").unwrap();
     let graph_set: std::collections::HashSet<String> = graphs.into_iter().collect();
     assert!(
         graph_set.contains("g_pre") && graph_set.contains("g_src") && graph_set.contains("g_tgt"),
@@ -2271,12 +2386,12 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
     // The new graphs' data is materialized too.
     assert!(p
         .graph
-        .get_node(target_id, "g_src", "src_node")
+        .get_node(target_id, "default", "g_src", "src_node")
         .unwrap()
         .is_some());
     assert!(p
         .graph
-        .get_node(target_id, "g_tgt", "tgt_node")
+        .get_node(target_id, "default", "g_tgt", "tgt_node")
         .unwrap()
         .is_some());
 }
@@ -2294,19 +2409,27 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
 
     branch_index.create_branch("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
-    p.graph.create_graph(target_id, "g_keep", None).unwrap();
     p.graph
-        .add_node(target_id, "g_keep", "x", NodeData::default())
+        .create_graph(target_id, "default", "g_keep", None)
         .unwrap();
-    p.graph.create_graph(target_id, "g_drop", None).unwrap();
+    p.graph
+        .add_node(target_id, "default", "g_keep", "x", NodeData::default())
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g_drop", None)
+        .unwrap();
 
     branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes g_drop.
-    p.graph.delete_graph(source_id, "g_drop").unwrap();
+    p.graph
+        .delete_graph(source_id, "default", "g_drop")
+        .unwrap();
     // Target creates g_new.
-    p.graph.create_graph(target_id, "g_new", None).unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g_new", None)
+        .unwrap();
 
     branch_ops::merge_branches(
         &test_db.db,
@@ -2319,7 +2442,7 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
 
     let graphs: std::collections::HashSet<String> = p
         .graph
-        .list_graphs(target_id)
+        .list_graphs(target_id, "default")
         .unwrap()
         .into_iter()
         .collect();
@@ -3203,4 +3326,373 @@ fn cow_diff_matches_expected_complex() {
         !modified_keys.contains("shared"),
         "shared should not appear"
     );
+}
+
+// ============================================================================
+// Phase 6: Graph space symmetry
+// ============================================================================
+//
+// These tests verify that graph data can live in any user-named space, not
+// just the legacy `_graph_` space. Phase 6 made `Strata::graph_*` honor
+// `current_space` exactly like KV/JSON/Vector/Event do, removing the last
+// asymmetry in Claim 4.
+
+/// Phase 6: create a graph in a custom user space and verify it's queryable
+/// only from that space.
+#[test]
+fn graph_in_user_space_create_and_query_succeeds() {
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("main").unwrap();
+    let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
+
+    // Create the graph in "tenant_a" space.
+    p.graph
+        .create_graph(branch_id, "tenant_a", "patients", None)
+        .unwrap();
+    p.graph
+        .add_node(branch_id, "tenant_a", "patients", "p1", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(branch_id, "tenant_a", "patients", "p2", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            branch_id,
+            "tenant_a",
+            "patients",
+            "p1",
+            "p2",
+            "knows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    // Same space → readable.
+    assert!(p
+        .graph
+        .get_node(branch_id, "tenant_a", "patients", "p1")
+        .unwrap()
+        .is_some());
+    let nodes = p
+        .graph
+        .list_nodes(branch_id, "tenant_a", "patients")
+        .unwrap();
+    let node_set: std::collections::HashSet<String> = nodes.into_iter().collect();
+    assert!(node_set.contains("p1") && node_set.contains("p2"));
+
+    // Different space (default) → not visible. The graph "patients" simply
+    // doesn't exist in the default space, so list_graphs is empty there.
+    let default_graphs = p.graph.list_graphs(branch_id, "default").unwrap();
+    assert!(
+        !default_graphs.contains(&"patients".to_string()),
+        "tenant_a's 'patients' must not appear in default space, got {default_graphs:?}"
+    );
+    let legacy_graphs = p.graph.list_graphs(branch_id, "_graph_").unwrap();
+    assert!(
+        !legacy_graphs.contains(&"patients".to_string()),
+        "tenant_a's 'patients' must not appear in _graph_ space, got {legacy_graphs:?}"
+    );
+}
+
+/// Phase 6: two graphs with the same name in different spaces are
+/// fully independent — same node IDs, different data, no cross-contamination.
+#[test]
+fn graph_in_two_spaces_independent() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("main").unwrap();
+    let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
+
+    let alice_a = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"tenant": "a"})),
+        object_type: None,
+    };
+    let alice_b = NodeData {
+        entity_ref: None,
+        properties: Some(serde_json::json!({"tenant": "b"})),
+        object_type: None,
+    };
+
+    p.graph
+        .create_graph(branch_id, "tenant_a", "users", None)
+        .unwrap();
+    p.graph
+        .create_graph(branch_id, "tenant_b", "users", None)
+        .unwrap();
+    p.graph
+        .add_node(branch_id, "tenant_a", "users", "alice", alice_a.clone())
+        .unwrap();
+    p.graph
+        .add_node(branch_id, "tenant_b", "users", "alice", alice_b.clone())
+        .unwrap();
+
+    // Each space sees its own alice with its own properties.
+    let from_a = p
+        .graph
+        .get_node(branch_id, "tenant_a", "users", "alice")
+        .unwrap()
+        .unwrap();
+    assert_eq!(from_a.properties, alice_a.properties);
+    let from_b = p
+        .graph
+        .get_node(branch_id, "tenant_b", "users", "alice")
+        .unwrap()
+        .unwrap();
+    assert_eq!(from_b.properties, alice_b.properties);
+    // And NEITHER bleeds into the other.
+    assert_ne!(from_a.properties, from_b.properties);
+}
+
+/// Phase 6: a graph in a user space survives a fork — the child branch
+/// inherits the data via COW exactly like KV/JSON.
+#[test]
+fn graph_in_user_space_survives_fork() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("parent").unwrap();
+    let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
+
+    p.graph
+        .create_graph(parent_id, "tenant_a", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(parent_id, "tenant_a", "g", "alice", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
+
+    // Child inherits the parent's graph in tenant_a space.
+    assert!(p
+        .graph
+        .get_node(child_id, "tenant_a", "g", "alice")
+        .unwrap()
+        .is_some());
+
+    // Child can mutate independently.
+    p.graph
+        .add_node(child_id, "tenant_a", "g", "bob", NodeData::default())
+        .unwrap();
+    assert!(p
+        .graph
+        .get_node(child_id, "tenant_a", "g", "bob")
+        .unwrap()
+        .is_some());
+    // Parent doesn't see child's addition (branch isolation).
+    assert!(p
+        .graph
+        .get_node(parent_id, "tenant_a", "g", "bob")
+        .unwrap()
+        .is_none());
+}
+
+/// Phase 6: Phase 3b semantic merge applies to user-space graphs identically
+/// to legacy `_graph_` graphs. Disjoint additions on a user-space graph
+/// merge cleanly with bidirectional consistency.
+#[test]
+fn graph_in_user_space_phase_3b_semantic_merge_succeeds() {
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph
+        .create_graph(target_id, "tenant_a", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "tenant_a", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "tenant_a", "g", "bob", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Disjoint additions on both sides.
+    p.graph
+        .add_node(source_id, "tenant_a", "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "tenant_a",
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    p.graph
+        .add_node(target_id, "tenant_a", "g", "dave", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            target_id,
+            "tenant_a",
+            "g",
+            "bob",
+            "dave",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("Phase 3b semantic merge must work for user-space graphs");
+
+    // All four nodes present after merge.
+    for n in &["alice", "bob", "carol", "dave"] {
+        assert!(
+            p.graph
+                .get_node(target_id, "tenant_a", "g", n)
+                .unwrap()
+                .is_some(),
+            "{n} missing from merged user-space graph"
+        );
+    }
+
+    // Bidirectional consistency: alice→carol visible from both sides.
+    let alice_outgoing = p
+        .graph
+        .outgoing_neighbors(target_id, "tenant_a", "g", "alice", None)
+        .unwrap();
+    let alice_targets: std::collections::HashSet<String> =
+        alice_outgoing.iter().map(|n| n.node_id.clone()).collect();
+    assert!(alice_targets.contains("carol"));
+    let carol_incoming = p
+        .graph
+        .incoming_neighbors(target_id, "tenant_a", "g", "carol", None)
+        .unwrap();
+    let carol_sources: std::collections::HashSet<String> =
+        carol_incoming.iter().map(|n| n.node_id.clone()).collect();
+    assert!(carol_sources.contains("alice"));
+}
+
+/// Phase 6: Phase 3b referential integrity rejection still applies to
+/// user-space graphs.
+#[test]
+fn graph_in_user_space_referential_integrity_rejects_dangling() {
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph
+        .create_graph(target_id, "tenant_a", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "tenant_a", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "tenant_a", "g", "carol", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source adds an edge alice→carol; target deletes carol.
+    p.graph
+        .add_edge(
+            source_id,
+            "tenant_a",
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+    p.graph
+        .remove_node(target_id, "tenant_a", "g", "carol")
+        .unwrap();
+
+    let err = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect_err("dangling edge in user-space graph must be rejected");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("graph referential integrity violation")
+            || msg.contains("dangling")
+            || msg.contains("orphaned"),
+        "expected referential-integrity error, got: {msg}"
+    );
+}
+
+/// Phase 6 regression: graphs in the legacy `_graph_` space still work the
+/// same way they did before Phase 6 — as long as the caller passes
+/// `keys::GRAPH_SPACE` explicitly.
+#[test]
+fn graph_in_legacy_graph_space_still_works() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("main").unwrap();
+    let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
+
+    p.graph
+        .create_graph(branch_id, strata_graph::keys::GRAPH_SPACE, "g", None)
+        .unwrap();
+    p.graph
+        .add_node(
+            branch_id,
+            strata_graph::keys::GRAPH_SPACE,
+            "g",
+            "alice",
+            NodeData::default(),
+        )
+        .unwrap();
+
+    let alice = p
+        .graph
+        .get_node(branch_id, strata_graph::keys::GRAPH_SPACE, "g", "alice")
+        .unwrap();
+    assert!(alice.is_some());
+
+    // Default space and tenant_a space are isolated from _graph_.
+    assert!(p
+        .graph
+        .get_node(branch_id, "default", "g", "alice")
+        .unwrap()
+        .is_none());
+    assert!(p
+        .graph
+        .get_node(branch_id, "tenant_a", "g", "alice")
+        .unwrap()
+        .is_none());
 }

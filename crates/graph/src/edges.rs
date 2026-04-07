@@ -8,9 +8,11 @@ impl GraphStore {
     /// Appends to packed forward and reverse adjacency lists atomically.
     ///
     /// Returns `true` if a new edge was created, `false` if an existing edge was updated.
+    #[allow(clippy::too_many_arguments)]
     pub fn add_edge(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
@@ -23,14 +25,14 @@ impl GraphStore {
         keys::validate_edge_type(edge_type)?;
 
         // Validate against frozen ontology
-        if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
+        if let Some(meta) = self.get_graph_meta(branch_id, space, graph)? {
             if meta.ontology_status == Some(types::OntologyStatus::Frozen) {
-                self.validate_edge(branch_id, graph, src, dst, edge_type, &data)?;
+                self.validate_edge(branch_id, space, graph, src, dst, edge_type, &data)?;
             }
         }
 
         self.db.transaction(branch_id, |txn| {
-            txn.graph_add_edge(branch_id, graph, src, dst, edge_type, &data)
+            txn.graph_add_edge(branch_id, space, graph, src, dst, edge_type, &data)
         })
     }
 
@@ -38,13 +40,14 @@ impl GraphStore {
     pub fn get_edge(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<Option<EdgeData>> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_get_edge(branch_id, graph, src, dst, edge_type)
+            txn.graph_get_edge(branch_id, space, graph, src, dst, edge_type)
         })
     }
 
@@ -52,13 +55,14 @@ impl GraphStore {
     pub fn remove_edge(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         src: &str,
         dst: &str,
         edge_type: &str,
     ) -> StrataResult<()> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_remove_edge(branch_id, graph, src, dst, edge_type)
+            txn.graph_remove_edge(branch_id, space, graph, src, dst, edge_type)
         })
     }
 
@@ -70,12 +74,13 @@ impl GraphStore {
     pub fn outgoing_neighbors(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_outgoing_neighbors(branch_id, graph, node_id, edge_type_filter)
+            txn.graph_outgoing_neighbors(branch_id, space, graph, node_id, edge_type_filter)
         })
     }
 
@@ -83,12 +88,13 @@ impl GraphStore {
     pub fn incoming_neighbors(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
     ) -> StrataResult<Vec<Neighbor>> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_incoming_neighbors(branch_id, graph, node_id, edge_type_filter)
+            txn.graph_incoming_neighbors(branch_id, space, graph, node_id, edge_type_filter)
         })
     }
 
@@ -100,9 +106,11 @@ impl GraphStore {
     ///
     /// Reads the packed adjacency list from the storage version chain at the
     /// given timestamp. This is a non-transactional read.
+    #[allow(clippy::too_many_arguments)]
     pub fn neighbors_at(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         direction: Direction,
@@ -110,15 +118,26 @@ impl GraphStore {
         as_of_ts: u64,
     ) -> StrataResult<Vec<Neighbor>> {
         match direction {
-            Direction::Outgoing => {
-                self.outgoing_neighbors_at(branch_id, graph, node_id, edge_type_filter, as_of_ts)
-            }
-            Direction::Incoming => {
-                self.incoming_neighbors_at(branch_id, graph, node_id, edge_type_filter, as_of_ts)
-            }
+            Direction::Outgoing => self.outgoing_neighbors_at(
+                branch_id,
+                space,
+                graph,
+                node_id,
+                edge_type_filter,
+                as_of_ts,
+            ),
+            Direction::Incoming => self.incoming_neighbors_at(
+                branch_id,
+                space,
+                graph,
+                node_id,
+                edge_type_filter,
+                as_of_ts,
+            ),
             Direction::Both => {
                 let mut out = self.outgoing_neighbors_at(
                     branch_id,
+                    space,
                     graph,
                     node_id,
                     edge_type_filter,
@@ -126,6 +145,7 @@ impl GraphStore {
                 )?;
                 let inc = self.incoming_neighbors_at(
                     branch_id,
+                    space,
                     graph,
                     node_id,
                     edge_type_filter,
@@ -140,13 +160,14 @@ impl GraphStore {
     fn outgoing_neighbors_at(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
         as_of_ts: u64,
     ) -> StrataResult<Vec<Neighbor>> {
         let user_key = keys::forward_adj_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
         match self.db.get_at_timestamp(&storage_key, as_of_ts)? {
             Some(vv) => {
                 if let Value::Bytes(bytes) = vv.value {
@@ -171,13 +192,14 @@ impl GraphStore {
     fn incoming_neighbors_at(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         edge_type_filter: Option<&str>,
         as_of_ts: u64,
     ) -> StrataResult<Vec<Neighbor>> {
         let user_key = keys::reverse_adj_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
         match self.db.get_at_timestamp(&storage_key, as_of_ts)? {
             Some(vv) => {
                 if let Value::Bytes(bytes) = vv.value {
@@ -200,9 +222,14 @@ impl GraphStore {
     }
 
     /// Get all edges in a graph (for snapshot).
-    pub fn all_edges(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<Edge>> {
+    pub fn all_edges(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<Vec<Edge>> {
         let prefix = keys::all_forward_adj_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -235,6 +262,7 @@ impl GraphStore {
     pub fn for_each_edge<F>(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         mut callback: F,
     ) -> StrataResult<()>
@@ -242,7 +270,7 @@ impl GraphStore {
         F: FnMut(Edge),
     {
         let prefix = keys::all_forward_adj_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -317,13 +345,25 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "eg",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
-        let edge = gs.get_edge(branch, "eg", "A", "B", "KNOWS").unwrap();
+        let edge = gs
+            .get_edge(branch, "default", "eg", "A", "B", "KNOWS")
+            .unwrap();
         assert!(edge.is_some());
         assert_eq!(edge.unwrap().weight, 1.0);
     }
@@ -333,11 +373,14 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
         gs.add_edge(
             branch,
+            "default",
             "eg",
             "A",
             "B",
@@ -350,7 +393,7 @@ mod tests {
         .unwrap();
 
         let edge = gs
-            .get_edge(branch, "eg", "A", "B", "SCORED")
+            .get_edge(branch, "default", "eg", "A", "B", "SCORED")
             .unwrap()
             .unwrap();
         assert_eq!(edge.weight, 0.95);
@@ -365,17 +408,27 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "eg",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         // Verify via raw key reads — packed adjacency lists
         let fwd_uk = keys::forward_adj_key("eg", "A");
         let rev_uk = keys::reverse_adj_key("eg", "B");
-        let fwd_sk = keys::storage_key(branch, &fwd_uk);
-        let rev_sk = keys::storage_key(branch, &rev_uk);
+        let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
+        let rev_sk = keys::storage_key(branch, "default", &rev_uk);
 
         let fwd_exists = gs.db.transaction(branch, |txn| txn.get(&fwd_sk)).unwrap();
         let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
@@ -395,21 +448,32 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "eg", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
             .unwrap();
-        gs.remove_edge(branch, "eg", "A", "B", "KNOWS").unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "eg",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
+        gs.remove_edge(branch, "default", "eg", "A", "B", "KNOWS")
+            .unwrap();
 
         assert!(gs
-            .get_edge(branch, "eg", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "eg", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
 
         // Verify reverse adjacency list no longer contains the edge
         let rev_uk = keys::reverse_adj_key("eg", "B");
-        let rev_sk = keys::storage_key(branch, &rev_uk);
+        let rev_sk = keys::storage_key(branch, "default", &rev_uk);
         let rev_val = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
         // Should be deleted entirely (last edge was removed)
         assert!(rev_val.is_none());
@@ -420,14 +484,24 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "X", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "Y", NodeData::default()).unwrap();
-        gs.add_edge(branch, "eg", "X", "Y", "LINKS", EdgeData::default())
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "X", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "eg", "Y", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "eg",
+            "X",
+            "Y",
+            "LINKS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         let edge = gs
-            .get_edge(branch, "eg", "X", "Y", "LINKS")
+            .get_edge(branch, "default", "eg", "X", "Y", "LINKS")
             .unwrap()
             .unwrap();
         assert_eq!(edge.weight, 1.0);
@@ -438,12 +512,15 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
         let created1 = gs
             .add_edge(
                 branch,
+                "default",
                 "eg",
                 "A",
                 "B",
@@ -459,6 +536,7 @@ mod tests {
         let created2 = gs
             .add_edge(
                 branch,
+                "default",
                 "eg",
                 "A",
                 "B",
@@ -471,7 +549,10 @@ mod tests {
             .unwrap();
         assert!(!created2, "second add_edge should return created=false");
 
-        let edge = gs.get_edge(branch, "eg", "A", "B", "E").unwrap().unwrap();
+        let edge = gs
+            .get_edge(branch, "default", "eg", "A", "B", "E")
+            .unwrap()
+            .unwrap();
         assert_eq!(edge.weight, 2.0);
     }
 
@@ -480,11 +561,14 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "eg", None).unwrap();
-        gs.add_node(branch, "eg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "eg", "B", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "eg", None).unwrap();
+        gs.add_node(branch, "default", "eg", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "default", "eg", "B", NodeData::default())
+            .unwrap();
         gs.add_edge(
             branch,
+            "default",
             "eg",
             "A",
             "B",
@@ -497,7 +581,7 @@ mod tests {
         .unwrap();
 
         let edge = gs
-            .get_edge(branch, "eg", "A", "B", "SCORED")
+            .get_edge(branch, "default", "eg", "A", "B", "SCORED")
             .unwrap()
             .unwrap();
         assert_eq!(edge.weight, 0.75);
@@ -514,22 +598,32 @@ mod tests {
     fn test_corrupt_edge_data_returns_error() {
         let (db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         // Corrupt the packed forward adjacency list with truncated bytes
         let fwd_uk = keys::forward_adj_key("g", "A");
-        let fwd_sk = keys::storage_key(branch, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
         db.transaction(branch, |txn| {
             // Header says 1 edge, but no actual edge data follows
             txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
         })
         .unwrap();
 
-        let result = gs.outgoing_neighbors(branch, "g", "A", None);
+        let result = gs.outgoing_neighbors(branch, "default", "g", "A", None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -543,21 +637,31 @@ mod tests {
     fn test_corrupt_edge_data_incoming_returns_error() {
         let (db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         // Corrupt the packed reverse adjacency list
         let rev_uk = keys::reverse_adj_key("g", "B");
-        let rev_sk = keys::storage_key(branch, &rev_uk);
+        let rev_sk = keys::storage_key(branch, "default", &rev_uk);
         db.transaction(branch, |txn| {
             txn.put(rev_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
         })
         .unwrap();
 
-        let result = gs.incoming_neighbors(branch, "g", "B", None);
+        let result = gs.incoming_neighbors(branch, "default", "g", "B", None);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -571,21 +675,31 @@ mod tests {
     fn test_corrupt_edge_data_all_edges_returns_error() {
         let (db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
         // Corrupt the packed forward adjacency list
         let fwd_uk = keys::forward_adj_key("g", "A");
-        let fwd_sk = keys::storage_key(branch, &fwd_uk);
+        let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
         db.transaction(branch, |txn| {
             txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
         })
         .unwrap();
 
-        let result = gs.all_edges(branch, "g");
+        let result = gs.all_edges(branch, "default", "g");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -603,10 +717,19 @@ mod tests {
     fn test_add_edge_rejects_nonexistent_source() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
 
-        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -617,7 +740,7 @@ mod tests {
 
         // Verify no partial writes — neither forward nor reverse edge should exist
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
     }
@@ -626,10 +749,19 @@ mod tests {
     fn test_add_edge_rejects_nonexistent_target() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
+            .unwrap();
 
-        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -640,7 +772,7 @@ mod tests {
 
         // Verify no partial writes
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
     }
@@ -649,9 +781,17 @@ mod tests {
     fn test_add_edge_rejects_both_nonexistent() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
 
-        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -665,15 +805,27 @@ mod tests {
     fn test_add_edge_succeeds_when_both_nodes_exist() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
+            .unwrap();
 
-        let result = gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        );
         assert!(result.is_ok());
 
         // Verify edge was actually created
-        let edge = gs.get_edge(branch, "g", "A", "B", "KNOWS").unwrap();
+        let edge = gs
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
+            .unwrap();
         assert!(edge.is_some());
     }
 
@@ -681,14 +833,25 @@ mod tests {
     fn test_add_edge_self_loop_succeeds() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
+            .unwrap();
 
         // Self-edge: src == dst, node exists — should succeed
-        let result = gs.add_edge(branch, "g", "A", "A", "SELF", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "A",
+            "SELF",
+            EdgeData::default(),
+        );
         assert!(result.is_ok());
 
-        let edge = gs.get_edge(branch, "g", "A", "A", "SELF").unwrap();
+        let edge = gs
+            .get_edge(branch, "default", "g", "A", "A", "SELF")
+            .unwrap();
         assert!(edge.is_some());
     }
 
@@ -696,10 +859,18 @@ mod tests {
     fn test_add_edge_self_loop_nonexistent_node() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
 
         // Self-edge to nonexistent node
-        let result = gs.add_edge(branch, "g", "X", "X", "SELF", EdgeData::default());
+        let result = gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "X",
+            "X",
+            "SELF",
+            EdgeData::default(),
+        );
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -718,21 +889,34 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "HATES", EdgeData::default())
+        gs.add_node(b, "default", "g", "C", NodeData::default())
             .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
-        assert_eq!(gs.count_edges_by_type(b, "g", "HATES").unwrap(), 1);
-        assert_eq!(gs.count_edges_by_type(b, "g", "MISSING").unwrap(), 0);
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "C", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "B", "C", "HATES", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            2
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "HATES").unwrap(),
+            1
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "MISSING")
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -740,15 +924,18 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
         // Upsert same edge with different weight
         gs.add_edge(
             b,
+            "default",
             "g",
             "A",
             "B",
@@ -761,7 +948,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            gs.count_edges_by_type(b, "g", "KNOWS").unwrap(),
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
             1,
             "upsert should not double-count"
         );
@@ -772,23 +959,37 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
             .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "C", "KNOWS", EdgeData::default())
+            .unwrap();
 
-        gs.remove_edge(b, "g", "A", "B", "KNOWS").unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 1);
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            2
+        );
 
-        gs.remove_edge(b, "g", "A", "C", "KNOWS").unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 0);
+        gs.remove_edge(b, "default", "g", "A", "B", "KNOWS")
+            .unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            1
+        );
+
+        gs.remove_edge(b, "default", "g", "A", "C", "KNOWS")
+            .unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -796,13 +997,19 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
         // Remove an edge that was never added — should not underflow
-        gs.remove_edge(b, "g", "A", "B", "GHOST").unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "GHOST").unwrap(), 0);
+        gs.remove_edge(b, "default", "g", "A", "B", "GHOST")
+            .unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "GHOST").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -810,15 +1017,22 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "A", "SELF", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 1);
 
-        gs.remove_edge(b, "g", "A", "A", "SELF").unwrap();
-        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 0);
+        gs.add_edge(b, "default", "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "SELF").unwrap(),
+            1
+        );
+
+        gs.remove_edge(b, "default", "g", "A", "A", "SELF").unwrap();
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "SELF").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -826,21 +1040,30 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
         // A→B (KNOWS), A→B (TRUSTS) are different edges (different types)
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "B", "TRUSTS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "TRUSTS", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "KNOWS", EdgeData::default())
             .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
-        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            2
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "TRUSTS").unwrap(),
+            1
+        );
     }
 
     // =========================================================================
@@ -861,12 +1084,13 @@ mod tests {
         let gs = Arc::new(GraphStore::new(db));
         let b = BranchId::from_bytes([0u8; 16]);
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         // Create hub + 40 target nodes
-        gs.add_node(b, "g", "hub", NodeData::default()).unwrap();
+        gs.add_node(b, "default", "g", "hub", NodeData::default())
+            .unwrap();
         for i in 0..40 {
-            gs.add_node(b, "g", &format!("t{}", i), NodeData::default())
+            gs.add_node(b, "default", "g", &format!("t{}", i), NodeData::default())
                 .unwrap();
         }
 
@@ -885,6 +1109,7 @@ mod tests {
                         loop {
                             match gs.add_edge(
                                 b,
+                                "default",
                                 "g",
                                 "hub",
                                 &target,
@@ -915,7 +1140,9 @@ mod tests {
         }
 
         // All 40 edges should exist
-        let out = gs.outgoing_neighbors(b, "g", "hub", None).unwrap();
+        let out = gs
+            .outgoing_neighbors(b, "default", "g", "hub", None)
+            .unwrap();
         assert_eq!(
             out.len(),
             40,
@@ -941,30 +1168,33 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
 
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts1 = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        gs.add_edge(b, "g", "A", "C", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "C", "KNOWS", EdgeData::default())
             .unwrap();
 
         // At ts1: A should have only B as outgoing neighbor
         let old = gs
-            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts1)
+            .neighbors_at(b, "default", "g", "A", Direction::Outgoing, None, ts1)
             .unwrap();
         assert_eq!(old.len(), 1);
         assert_eq!(old[0].node_id, "B");
 
         // Current: A should have B and C
-        let current = gs.outgoing_neighbors(b, "g", "A", None).unwrap();
+        let current = gs.outgoing_neighbors(b, "default", "g", "A", None).unwrap();
         assert_eq!(current.len(), 2);
     }
 
@@ -973,30 +1203,49 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts_before_remove = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        gs.remove_edge(b, "g", "A", "B", "KNOWS").unwrap();
+        gs.remove_edge(b, "default", "g", "A", "B", "KNOWS")
+            .unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts_after_remove = now_micros();
 
         // Before removal: edge exists
         let before = gs
-            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts_before_remove)
+            .neighbors_at(
+                b,
+                "default",
+                "g",
+                "A",
+                Direction::Outgoing,
+                None,
+                ts_before_remove,
+            )
             .unwrap();
         assert_eq!(before.len(), 1);
 
         // After removal: no edges
         let after = gs
-            .neighbors_at(b, "g", "A", Direction::Outgoing, None, ts_after_remove)
+            .neighbors_at(
+                b,
+                "default",
+                "g",
+                "A",
+                Direction::Outgoing,
+                None,
+                ts_after_remove,
+            )
             .unwrap();
         assert!(after.is_empty());
     }
@@ -1006,11 +1255,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
 
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1018,7 +1269,7 @@ mod tests {
 
         // B should have A as incoming neighbor at ts
         let incoming = gs
-            .neighbors_at(b, "g", "B", Direction::Incoming, None, ts)
+            .neighbors_at(b, "default", "g", "B", Direction::Incoming, None, ts)
             .unwrap();
         assert_eq!(incoming.len(), 1);
         assert_eq!(incoming[0].node_id, "A");
@@ -1029,14 +1280,17 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "TRUSTS", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
+
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "C", "TRUSTS", EdgeData::default())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -1044,14 +1298,30 @@ mod tests {
 
         // Filter to KNOWS only
         let knows_only = gs
-            .neighbors_at(b, "g", "A", Direction::Outgoing, Some("KNOWS"), ts)
+            .neighbors_at(
+                b,
+                "default",
+                "g",
+                "A",
+                Direction::Outgoing,
+                Some("KNOWS"),
+                ts,
+            )
             .unwrap();
         assert_eq!(knows_only.len(), 1);
         assert_eq!(knows_only[0].node_id, "B");
 
         // Filter to TRUSTS only
         let trusts_only = gs
-            .neighbors_at(b, "g", "A", Direction::Outgoing, Some("TRUSTS"), ts)
+            .neighbors_at(
+                b,
+                "default",
+                "g",
+                "A",
+                Direction::Outgoing,
+                Some("TRUSTS"),
+                ts,
+            )
             .unwrap();
         assert_eq!(trusts_only.len(), 1);
         assert_eq!(trusts_only[0].node_id, "C");
@@ -1062,21 +1332,24 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "C", "A", "FOLLOWS", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
+
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "C", "A", "FOLLOWS", EdgeData::default())
             .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts = now_micros();
 
         let both = gs
-            .neighbors_at(b, "g", "A", Direction::Both, None, ts)
+            .neighbors_at(b, "default", "g", "A", Direction::Both, None, ts)
             .unwrap();
         assert_eq!(both.len(), 2, "Should have 1 outgoing + 1 incoming");
     }

@@ -23,8 +23,10 @@ fn enrich_graph_error(
 ) -> Error {
     match &err {
         Error::ConstraintViolation { .. } | Error::InvalidInput { .. } | Error::Internal { .. } => {
-            // Check if this might be a "graph not found" scenario
-            let graphs = match p.graph.list_graphs(branch_id) {
+            // Check if this might be a "graph not found" scenario.
+            // Phase 6: probe the default space; this enrichment is best-effort
+            // and used only for hint formatting.
+            let graphs = match p.graph.list_graphs(branch_id, "default") {
                 Ok(g) => g,
                 Err(_) => return err,
             };
@@ -59,15 +61,20 @@ fn enrich_ontology_error(
 
     // Pattern: "Object type 'X' is not declared in frozen ontology for graph 'G'"
     if msg.contains("is not declared in frozen ontology") {
+        // Best-effort hint enrichment: probe the default space for matching
+        // type definitions. Phase 6 made graph data space-aware but the
+        // error enrichment path doesn't have a space in scope; hint
+        // misses are non-fatal so this is acceptable until enrich_graph_error
+        // is plumbed with the caller's space.
         if msg.starts_with("Object type") {
-            if let Ok(types) = p.graph.list_object_types(branch_id, graph) {
+            if let Ok(types) = p.graph.list_object_types(branch_id, "default", graph) {
                 if let Some(type_name) = extract_quoted(&msg) {
                     let hint = crate::suggest::format_hint("object types", &types, &type_name, 2);
                     return Error::InvalidInput { reason: msg, hint };
                 }
             }
         } else if msg.starts_with("Edge type") {
-            if let Ok(types) = p.graph.list_link_types(branch_id, graph) {
+            if let Ok(types) = p.graph.list_link_types(branch_id, "default", graph) {
                 if let Some(type_name) = extract_quoted(&msg) {
                     let hint = crate::suggest::format_hint("link types", &types, &type_name, 2);
                     return Error::InvalidInput { reason: msg, hint };
@@ -122,6 +129,7 @@ pub(crate) fn parse_cascade_policy(s: Option<&str>) -> Result<CascadePolicy> {
 pub fn graph_create(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     cascade_policy: Option<String>,
 ) -> Result<Output> {
@@ -131,28 +139,41 @@ pub fn graph_create(
         cascade_policy: policy,
         ..Default::default()
     };
-    convert_result(p.graph.create_graph(core_branch, &graph, Some(meta)))?;
+    convert_result(
+        p.graph
+            .create_graph(core_branch, &space, &graph, Some(meta)),
+    )?;
     Ok(Output::Unit)
 }
 
 /// Handle GraphDelete command.
-pub fn graph_delete(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
+pub fn graph_delete(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    graph: String,
+) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.delete_graph(core_branch, &graph))?;
+    convert_result(p.graph.delete_graph(core_branch, &space, &graph))?;
     Ok(Output::Unit)
 }
 
 /// Handle GraphList command.
-pub fn graph_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+pub fn graph_list(p: &Arc<Primitives>, branch: BranchId, space: String) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let graphs = convert_result(p.graph.list_graphs(core_branch))?;
+    let graphs = convert_result(p.graph.list_graphs(core_branch, &space))?;
     Ok(Output::Keys(graphs))
 }
 
 /// Handle GraphGetMeta command.
-pub fn graph_get_meta(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
+pub fn graph_get_meta(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    graph: String,
+) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let meta = convert_result(p.graph.get_graph_meta(core_branch, &graph))
+    let meta = convert_result(p.graph.get_graph_meta(core_branch, &space, &graph))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     match meta {
         Some(m) => {
@@ -170,6 +191,7 @@ pub fn graph_get_meta(p: &Arc<Primitives>, branch: BranchId, graph: String) -> R
 pub fn graph_add_node(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
     entity_ref: Option<String>,
@@ -189,9 +211,12 @@ pub fn graph_add_node(
         properties: props,
         object_type,
     };
-    let created = convert_result(p.graph.add_node(core_branch, &graph, &node_id, data))
-        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))
-        .map_err(|e| enrich_ontology_error(p, core_branch, &graph, e))?;
+    let created = convert_result(
+        p.graph
+            .add_node(core_branch, &space, &graph, &node_id, data),
+    )
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))
+    .map_err(|e| enrich_ontology_error(p, core_branch, &graph, e))?;
     Ok(Output::GraphWriteResult { node_id, created })
 }
 
@@ -199,11 +224,12 @@ pub fn graph_add_node(
 pub fn graph_get_node(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let node = convert_result(p.graph.get_node(core_branch, &graph, &node_id))
+    let node = convert_result(p.graph.get_node(core_branch, &space, &graph, &node_id))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     match node {
         Some(data) => {
@@ -220,13 +246,17 @@ pub fn graph_get_node(
 pub fn graph_get_node_at(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
     as_of_ts: u64,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let node = convert_result(p.graph.get_node_at(core_branch, &graph, &node_id, as_of_ts))
-        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+    let node = convert_result(
+        p.graph
+            .get_node_at(core_branch, &space, &graph, &node_id, as_of_ts),
+    )
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     match node {
         Some(data) => {
             let json = serde_json::to_value(&data).map_err(|e| Error::Serialization {
@@ -242,19 +272,25 @@ pub fn graph_get_node_at(
 pub fn graph_remove_node(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.remove_node(core_branch, &graph, &node_id))
+    convert_result(p.graph.remove_node(core_branch, &space, &graph, &node_id))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
 }
 
 /// Handle GraphListNodes command.
-pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) -> Result<Output> {
+pub fn graph_list_nodes(
+    p: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    graph: String,
+) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let nodes = convert_result(p.graph.list_nodes(core_branch, &graph))
+    let nodes = convert_result(p.graph.list_nodes(core_branch, &space, &graph))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Keys(nodes))
 }
@@ -263,11 +299,12 @@ pub fn graph_list_nodes(p: &Arc<Primitives>, branch: BranchId, graph: String) ->
 pub fn graph_list_nodes_at(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     as_of_ts: u64,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let nodes = convert_result(p.graph.list_nodes_at(core_branch, &graph, as_of_ts))
+    let nodes = convert_result(p.graph.list_nodes_at(core_branch, &space, &graph, as_of_ts))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Keys(nodes))
 }
@@ -276,6 +313,7 @@ pub fn graph_list_nodes_at(
 pub fn graph_list_nodes_paginated(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     limit: usize,
     cursor: Option<String>,
@@ -283,8 +321,11 @@ pub fn graph_list_nodes_paginated(
     use strata_graph::types::PageRequest;
     let core_branch = to_core_branch_id(&branch)?;
     let page = PageRequest { limit, cursor };
-    let result = convert_result(p.graph.list_nodes_paginated(core_branch, &graph, page))
-        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+    let result = convert_result(
+        p.graph
+            .list_nodes_paginated(core_branch, &space, &graph, page),
+    )
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::GraphPage {
         items: result.items,
         next_cursor: result.next_cursor,
@@ -296,6 +337,7 @@ pub fn graph_list_nodes_paginated(
 pub fn graph_add_edge(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     src: String,
     dst: String,
@@ -318,7 +360,7 @@ pub fn graph_add_edge(
     let created =
         convert_result(
             p.graph
-                .add_edge(core_branch, &graph, &src, &dst, &edge_type, data),
+                .add_edge(core_branch, &space, &graph, &src, &dst, &edge_type, data),
         )
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))
         .map_err(|e| enrich_ontology_error(p, core_branch, &graph, e))?;
@@ -334,6 +376,7 @@ pub fn graph_add_edge(
 pub fn graph_remove_edge(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     src: String,
     dst: String,
@@ -342,7 +385,7 @@ pub fn graph_remove_edge(
     let core_branch = to_core_branch_id(&branch)?;
     convert_result(
         p.graph
-            .remove_edge(core_branch, &graph, &src, &dst, &edge_type),
+            .remove_edge(core_branch, &space, &graph, &src, &dst, &edge_type),
     )
     .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
     Ok(Output::Unit)
@@ -352,6 +395,7 @@ pub fn graph_remove_edge(
 pub fn graph_neighbors(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
     direction: Option<String>,
@@ -359,12 +403,15 @@ pub fn graph_neighbors(
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
     let dir = parse_direction(direction.as_deref())?;
-    let neighbors =
-        convert_result(
-            p.graph
-                .neighbors(core_branch, &graph, &node_id, dir, edge_type.as_deref()),
-        )
-        .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
+    let neighbors = convert_result(p.graph.neighbors(
+        core_branch,
+        &space,
+        &graph,
+        &node_id,
+        dir,
+        edge_type.as_deref(),
+    ))
+    .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
 
     let hits: Vec<crate::types::GraphNeighborHit> = neighbors
         .into_iter()
@@ -383,6 +430,7 @@ pub fn graph_neighbors(
 pub fn graph_neighbors_at(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     node_id: String,
     direction: Option<String>,
@@ -393,6 +441,7 @@ pub fn graph_neighbors_at(
     let dir = parse_direction(direction.as_deref())?;
     let neighbors = convert_result(p.graph.neighbors_at(
         core_branch,
+        &space,
         &graph,
         &node_id,
         dir,
@@ -418,6 +467,7 @@ pub fn graph_neighbors_at(
 pub fn graph_bfs(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     start: String,
     max_depth: usize,
@@ -434,7 +484,7 @@ pub fn graph_bfs(
         direction: dir,
     };
 
-    let result = convert_result(p.graph.bfs(core_branch, &graph, &start, opts))
+    let result = convert_result(p.graph.bfs(core_branch, &space, &graph, &start, opts))
         .map_err(|e| enrich_graph_error(p, core_branch, &graph, e))?;
 
     Ok(Output::GraphBfs(crate::types::GraphBfsResult {
@@ -448,6 +498,7 @@ pub fn graph_bfs(
 pub fn graph_bulk_insert(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     nodes: Vec<crate::types::BulkGraphNode>,
     edges: Vec<crate::types::BulkGraphEdge>,
@@ -496,6 +547,7 @@ pub fn graph_bulk_insert(
 
     let (ni, ei) = convert_result(p.graph.bulk_insert(
         core_branch,
+        &space,
         &graph,
         &node_data,
         &edge_data,
@@ -516,6 +568,7 @@ pub fn graph_bulk_insert(
 pub fn graph_define_object_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     definition: Value,
 ) -> Result<Output> {
@@ -525,7 +578,7 @@ pub fn graph_define_object_type(
         reason: format!("Invalid object type definition: {}", e),
         hint: None,
     })?;
-    convert_result(p.graph.define_object_type(core_branch, &graph, def))?;
+    convert_result(p.graph.define_object_type(core_branch, &space, &graph, def))?;
     Ok(Output::Unit)
 }
 
@@ -533,11 +586,12 @@ pub fn graph_define_object_type(
 pub fn graph_get_object_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     name: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let def = convert_result(p.graph.get_object_type(core_branch, &graph, &name))?;
+    let def = convert_result(p.graph.get_object_type(core_branch, &space, &graph, &name))?;
     match def {
         Some(d) => {
             let json = serde_json::to_value(&d).map_err(|e| Error::Serialization {
@@ -553,10 +607,11 @@ pub fn graph_get_object_type(
 pub fn graph_list_object_types(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let names = convert_result(p.graph.list_object_types(core_branch, &graph))?;
+    let names = convert_result(p.graph.list_object_types(core_branch, &space, &graph))?;
     Ok(Output::Keys(names))
 }
 
@@ -564,11 +619,15 @@ pub fn graph_list_object_types(
 pub fn graph_delete_object_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     name: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.delete_object_type(core_branch, &graph, &name))?;
+    convert_result(
+        p.graph
+            .delete_object_type(core_branch, &space, &graph, &name),
+    )?;
     Ok(Output::Unit)
 }
 
@@ -576,6 +635,7 @@ pub fn graph_delete_object_type(
 pub fn graph_define_link_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     definition: Value,
 ) -> Result<Output> {
@@ -585,7 +645,7 @@ pub fn graph_define_link_type(
         reason: format!("Invalid link type definition: {}", e),
         hint: None,
     })?;
-    convert_result(p.graph.define_link_type(core_branch, &graph, def))?;
+    convert_result(p.graph.define_link_type(core_branch, &space, &graph, def))?;
     Ok(Output::Unit)
 }
 
@@ -593,11 +653,12 @@ pub fn graph_define_link_type(
 pub fn graph_get_link_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     name: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let def = convert_result(p.graph.get_link_type(core_branch, &graph, &name))?;
+    let def = convert_result(p.graph.get_link_type(core_branch, &space, &graph, &name))?;
     match def {
         Some(d) => {
             let json = serde_json::to_value(&d).map_err(|e| Error::Serialization {
@@ -613,10 +674,11 @@ pub fn graph_get_link_type(
 pub fn graph_list_link_types(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let names = convert_result(p.graph.list_link_types(core_branch, &graph))?;
+    let names = convert_result(p.graph.list_link_types(core_branch, &space, &graph))?;
     Ok(Output::Keys(names))
 }
 
@@ -624,11 +686,12 @@ pub fn graph_list_link_types(
 pub fn graph_delete_link_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     name: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.delete_link_type(core_branch, &graph, &name))?;
+    convert_result(p.graph.delete_link_type(core_branch, &space, &graph, &name))?;
     Ok(Output::Unit)
 }
 
@@ -636,10 +699,11 @@ pub fn graph_delete_link_type(
 pub fn graph_freeze_ontology(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    convert_result(p.graph.freeze_ontology(core_branch, &graph))?;
+    convert_result(p.graph.freeze_ontology(core_branch, &space, &graph))?;
     Ok(Output::Unit)
 }
 
@@ -647,10 +711,11 @@ pub fn graph_freeze_ontology(
 pub fn graph_ontology_status(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let status = convert_result(p.graph.ontology_status(core_branch, &graph))?;
+    let status = convert_result(p.graph.ontology_status(core_branch, &space, &graph))?;
     match status {
         Some(s) => {
             let json = serde_json::to_value(s).map_err(|e| Error::Serialization {
@@ -666,10 +731,11 @@ pub fn graph_ontology_status(
 pub fn graph_ontology_summary(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let summary = convert_result(p.graph.ontology_summary(core_branch, &graph))?;
+    let summary = convert_result(p.graph.ontology_summary(core_branch, &space, &graph))?;
     match summary {
         Some(s) => {
             let json = serde_json::to_value(&s).map_err(|e| Error::Serialization {
@@ -685,11 +751,12 @@ pub fn graph_ontology_summary(
 pub fn graph_list_ontology_types(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let mut names = convert_result(p.graph.list_object_types(core_branch, &graph))?;
-    let link_names = convert_result(p.graph.list_link_types(core_branch, &graph))?;
+    let mut names = convert_result(p.graph.list_object_types(core_branch, &space, &graph))?;
+    let link_names = convert_result(p.graph.list_link_types(core_branch, &space, &graph))?;
     names.extend(link_names);
     names.sort();
     names.dedup();
@@ -700,11 +767,16 @@ pub fn graph_list_ontology_types(
 pub fn graph_nodes_by_type(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     object_type: String,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let node_ids = convert_result(p.graph.nodes_by_type(core_branch, &graph, &object_type))?;
+    let node_ids =
+        convert_result(
+            p.graph
+                .nodes_by_type(core_branch, &space, &graph, &object_type),
+        )?;
     Ok(Output::Keys(node_ids))
 }
 
@@ -872,20 +944,23 @@ fn build_score_summary(
 pub fn graph_wcc(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     top_n: Option<usize>,
     include_all: Option<bool>,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let result = convert_result(p.graph.wcc(core_branch, &graph))?;
+    let result = convert_result(p.graph.wcc(core_branch, &space, &graph))?;
     let summary = build_group_summary("wcc", &graph, result.components, top_n, include_all);
     Ok(Output::GraphGroupSummary(summary))
 }
 
 /// Handle GraphCdlp command.
+#[allow(clippy::too_many_arguments)]
 pub fn graph_cdlp(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     max_iterations: usize,
     direction: Option<String>,
@@ -898,7 +973,7 @@ pub fn graph_cdlp(
         max_iterations,
         direction: dir,
     };
-    let result = convert_result(p.graph.cdlp(core_branch, &graph, opts))?;
+    let result = convert_result(p.graph.cdlp(core_branch, &space, &graph, opts))?;
     let summary = build_group_summary("cdlp", &graph, result.labels, top_n, include_all);
     Ok(Output::GraphGroupSummary(summary))
 }
@@ -908,6 +983,7 @@ pub fn graph_cdlp(
 pub fn graph_pagerank(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     damping: Option<f64>,
     max_iterations: Option<usize>,
@@ -923,7 +999,7 @@ pub fn graph_pagerank(
         max_iterations: max_iter,
         tolerance: tolerance.unwrap_or(defaults.tolerance),
     };
-    let result = convert_result(p.graph.pagerank(core_branch, &graph, opts))?;
+    let result = convert_result(p.graph.pagerank(core_branch, &space, &graph, opts))?;
     let mut summary =
         build_score_summary("pagerank", &graph, result.ranks, top_n, include_all, true);
     summary.iterations = Some(result.iterations);
@@ -935,12 +1011,13 @@ pub fn graph_pagerank(
 pub fn graph_lcc(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     top_n: Option<usize>,
     include_all: Option<bool>,
 ) -> Result<Output> {
     let core_branch = to_core_branch_id(&branch)?;
-    let result = convert_result(p.graph.lcc(core_branch, &graph))?;
+    let result = convert_result(p.graph.lcc(core_branch, &space, &graph))?;
     let zero_count = result.coefficients.values().filter(|&&v| v == 0.0).count();
     let gcc = if result.coefficients.is_empty() {
         0.0
@@ -956,9 +1033,11 @@ pub fn graph_lcc(
 }
 
 /// Handle GraphSssp command.
+#[allow(clippy::too_many_arguments)]
 pub fn graph_sssp(
     p: &Arc<Primitives>,
     branch: BranchId,
+    space: String,
     graph: String,
     source: String,
     direction: Option<String>,
@@ -968,7 +1047,7 @@ pub fn graph_sssp(
     let core_branch = to_core_branch_id(&branch)?;
     let dir = parse_direction(direction.as_deref())?;
     let opts = SsspOptions { direction: dir };
-    let result = convert_result(p.graph.sssp(core_branch, &graph, &source, opts))?;
+    let result = convert_result(p.graph.sssp(core_branch, &space, &graph, &source, opts))?;
     let top_n_val = top_n.unwrap_or(DEFAULT_TOP_N);
 
     // Filter out non-finite distances (unreachable nodes) for summary/farthest,

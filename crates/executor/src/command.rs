@@ -1501,6 +1501,9 @@ pub enum Command {
         /// Target branch (resolved from context if absent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Optional cascade policy: `"cascade"`, `"detach"`, or `"ignore"`.
@@ -1514,6 +1517,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1524,6 +1530,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
     },
 
     /// Get graph metadata.
@@ -1532,6 +1541,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1542,6 +1554,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Node identifier.
@@ -1563,6 +1578,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Node identifier.
@@ -1578,6 +1596,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Node identifier.
@@ -1590,6 +1611,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Optional timestamp for time-travel reads (microseconds since epoch).
@@ -1603,6 +1627,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Maximum number of items per page.
@@ -1618,6 +1645,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Source node ID.
@@ -1640,6 +1670,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Source node ID.
@@ -1656,6 +1689,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Node identifier.
@@ -1677,6 +1713,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Nodes to insert.
@@ -1694,6 +1733,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Start node ID.
@@ -1718,6 +1760,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Object type definition as JSON.
@@ -1730,6 +1775,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Type name.
@@ -1742,6 +1790,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1752,6 +1803,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Type name.
@@ -1764,6 +1818,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Link type definition as JSON.
@@ -1776,6 +1833,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Type name.
@@ -1788,6 +1848,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1798,6 +1861,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Type name.
@@ -1810,6 +1876,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1820,6 +1889,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1830,6 +1902,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1840,6 +1915,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
     },
@@ -1850,6 +1928,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Object type name.
@@ -1863,6 +1944,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Number of top groups to return (default 10).
@@ -1879,6 +1963,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Maximum number of iterations.
@@ -1900,6 +1987,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Damping factor (default 0.85).
@@ -1925,6 +2015,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Number of top nodes to return (default 10).
@@ -1941,6 +2034,9 @@ pub enum Command {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         /// Graph name.
         graph: String,
         /// Source node ID.

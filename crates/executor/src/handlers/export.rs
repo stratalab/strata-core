@@ -119,7 +119,11 @@ fn collect_graph(
     prefix: Option<&str>,
     limit: Option<u64>,
 ) -> Result<Vec<ExportRow>> {
-    let graphs = convert_result(p.graph.list_graphs(branch_id))?;
+    // Phase 6: export graph data from the legacy `_graph_` space. Multi-space
+    // graph export is a separate concern and would require enumerating all
+    // spaces with graph data.
+    let graph_space = strata_graph::keys::GRAPH_SPACE;
+    let graphs = convert_result(p.graph.list_graphs(branch_id, graph_space))?;
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
 
@@ -129,12 +133,17 @@ fn collect_graph(
                 continue;
             }
         }
-        let nodes = convert_result(p.graph.list_nodes(branch_id, graph_name))?;
+        let nodes = convert_result(p.graph.list_nodes(branch_id, graph_space, graph_name))?;
         for node_id in nodes {
             if rows.len() >= max {
                 return Ok(rows);
             }
-            if let Some(data) = convert_result(p.graph.get_node(branch_id, graph_name, &node_id))? {
+            if let Some(data) =
+                convert_result(
+                    p.graph
+                        .get_node(branch_id, graph_space, graph_name, &node_id),
+                )?
+            {
                 let key = format!("{}/{}", graph_name, node_id);
                 let value = serde_json::to_string(&data)
                     .map(Value::String)
