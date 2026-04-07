@@ -117,23 +117,52 @@ fn generate_expansions(
     }
 }
 
-/// Filter expansions via hallucination guard.
+/// Resolve the `expansion.strategy` recipe field to the set of allowed query types.
 ///
-/// Discards expansions sharing fewer than `min_shared_stems` stemmed terms
-/// with the original query. Hyde variants are exempt (they use different vocabulary).
+/// Valid values: `"lex"`, `"vec"`, `"hyde"`, `"full"`. `None` and any unknown
+/// value default to `"full"` (all three types). Unknown values log a warning
+/// but do not fail — graceful degradation matches the codebase pattern for
+/// other Option<String> recipe fields (e.g. `fusion.method`).
+fn parse_strategy(strategy: &Option<String>) -> Vec<QueryType> {
+    match strategy.as_deref() {
+        Some("lex") => vec![QueryType::Lex],
+        Some("vec") => vec![QueryType::Vec],
+        Some("hyde") => vec![QueryType::Hyde],
+        Some("full") | None => vec![QueryType::Lex, QueryType::Vec, QueryType::Hyde],
+        Some(other) => {
+            tracing::warn!(
+                target: "strata::expand",
+                strategy = %other,
+                "Unknown expansion strategy, defaulting to 'full'"
+            );
+            vec![QueryType::Lex, QueryType::Vec, QueryType::Hyde]
+        }
+    }
+}
+
+/// Filter expansions via the strategy filter and the hallucination guard.
+///
+/// Two passes:
+/// 1. **Strategy filter**: drop variants whose `query_type` is not in the
+///    recipe's allowed strategy (`"lex"`, `"vec"`, `"hyde"`, or `"full"`).
+/// 2. **Hallucination guard**: drop Lex/Vec variants sharing fewer than
+///    `min_shared_stems` stemmed terms with the original query. Hyde variants
+///    use different vocabulary by design and are exempt.
 fn filter_expansions(
     original_query: &str,
     expansions: Vec<ExpandedQuery>,
     config: &ExpansionConfig,
 ) -> Vec<ExpandedQuery> {
+    let allowed = parse_strategy(&config.strategy);
     let min_shared = config.min_shared_stems.unwrap_or(2);
     let original_stems = tokenize_unique(original_query);
 
     expansions
         .into_iter()
+        .filter(|eq| allowed.contains(&eq.query_type))
         .filter(|eq| {
             if eq.query_type == QueryType::Hyde {
-                return true; // Hyde is exempt
+                return true; // Hyde is exempt from the hallucination guard
             }
             let exp_stems = tokenize_unique(&eq.text);
             let shared = original_stems
@@ -215,5 +244,191 @@ mod tests {
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].query_type, QueryType::Lex);
         assert_eq!(filtered[1].query_type, QueryType::Hyde);
+    }
+
+    /// Helper: build a 3-variant expansion list (Lex/Vec/Hyde) that all share
+    /// at least one stem with "ssh setup", so the hallucination guard never
+    /// drops anything — strategy is the only filter under test.
+    fn three_variant_expansions() -> Vec<ExpandedQuery> {
+        vec![
+            ExpandedQuery {
+                query_type: QueryType::Lex,
+                text: "ssh keygen".into(),
+            },
+            ExpandedQuery {
+                query_type: QueryType::Vec,
+                text: "ssh key authentication".into(),
+            },
+            ExpandedQuery {
+                query_type: QueryType::Hyde,
+                text: "Run ssh-keygen -t ed25519 to create a new key pair.".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn test_parse_strategy_variants() {
+        assert_eq!(parse_strategy(&Some("lex".into())), vec![QueryType::Lex]);
+        assert_eq!(parse_strategy(&Some("vec".into())), vec![QueryType::Vec]);
+        assert_eq!(parse_strategy(&Some("hyde".into())), vec![QueryType::Hyde]);
+        assert_eq!(
+            parse_strategy(&Some("full".into())),
+            vec![QueryType::Lex, QueryType::Vec, QueryType::Hyde]
+        );
+        assert_eq!(
+            parse_strategy(&None),
+            vec![QueryType::Lex, QueryType::Vec, QueryType::Hyde]
+        );
+        assert_eq!(
+            parse_strategy(&Some("garbage".into())),
+            vec![QueryType::Lex, QueryType::Vec, QueryType::Hyde]
+        );
+    }
+
+    #[test]
+    fn test_filter_strategy_lex_only() {
+        let config = ExpansionConfig {
+            strategy: Some("lex".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].query_type, QueryType::Lex);
+    }
+
+    #[test]
+    fn test_filter_strategy_vec_only() {
+        let config = ExpansionConfig {
+            strategy: Some("vec".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].query_type, QueryType::Vec);
+    }
+
+    #[test]
+    fn test_filter_strategy_hyde_only() {
+        let config = ExpansionConfig {
+            strategy: Some("hyde".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].query_type, QueryType::Hyde);
+    }
+
+    /// Assert the filtered list contains exactly one variant of each query type.
+    /// Stronger than `len == 3` — would catch a bug returning `[Lex, Lex, Lex]`.
+    fn assert_one_of_each_type(filtered: &[ExpandedQuery]) {
+        assert_eq!(filtered.len(), 3, "expected three variants");
+        assert!(
+            filtered.iter().any(|eq| eq.query_type == QueryType::Lex),
+            "missing Lex variant"
+        );
+        assert!(
+            filtered.iter().any(|eq| eq.query_type == QueryType::Vec),
+            "missing Vec variant"
+        );
+        assert!(
+            filtered.iter().any(|eq| eq.query_type == QueryType::Hyde),
+            "missing Hyde variant"
+        );
+    }
+
+    #[test]
+    fn test_filter_strategy_full_keeps_all() {
+        let config = ExpansionConfig {
+            strategy: Some("full".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_one_of_each_type(&filtered);
+    }
+
+    #[test]
+    fn test_filter_strategy_none_defaults_to_full() {
+        let config = ExpansionConfig {
+            strategy: None,
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_one_of_each_type(&filtered);
+    }
+
+    #[test]
+    fn test_filter_strategy_invalid_defaults_to_full() {
+        let config = ExpansionConfig {
+            strategy: Some("not-a-strategy".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", three_variant_expansions(), &config);
+        assert_one_of_each_type(&filtered);
+    }
+
+    #[test]
+    fn test_filter_expansions_empty_input() {
+        // Empty input → empty output, regardless of strategy or guard config.
+        let config = ExpansionConfig {
+            strategy: Some("full".into()),
+            min_shared_stems: Some(2),
+            ..Default::default()
+        };
+        let filtered = filter_expansions("ssh setup", vec![], &config);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_strategy_drops_to_empty() {
+        // strategy="lex" with no Lex variants in the input → empty output.
+        // Proves the strategy filter can fully drain the candidate list,
+        // not just shrink it.
+        let config = ExpansionConfig {
+            strategy: Some("lex".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let expansions = vec![
+            ExpandedQuery {
+                query_type: QueryType::Vec,
+                text: "ssh key authentication".into(),
+            },
+            ExpandedQuery {
+                query_type: QueryType::Hyde,
+                text: "Run ssh-keygen -t ed25519 to create a new key pair.".into(),
+            },
+        ];
+        let filtered = filter_expansions("ssh setup", expansions, &config);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_strategy_lex_drops_vec_even_when_relevant() {
+        // Strategy filter runs BEFORE the hallucination guard, so a relevant Vec
+        // variant is dropped purely on type, not on stem overlap.
+        let config = ExpansionConfig {
+            strategy: Some("lex".into()),
+            min_shared_stems: Some(1),
+            ..Default::default()
+        };
+        let expansions = vec![
+            ExpandedQuery {
+                query_type: QueryType::Vec,
+                text: "ssh setup guide".into(), // shares "ssh", "setup" — would pass guard
+            },
+            ExpandedQuery {
+                query_type: QueryType::Lex,
+                text: "ssh keygen".into(),
+            },
+        ];
+        let filtered = filter_expansions("ssh setup", expansions, &config);
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].query_type, QueryType::Lex);
     }
 }
