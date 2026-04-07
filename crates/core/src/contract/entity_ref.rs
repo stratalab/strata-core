@@ -95,6 +95,12 @@ pub enum EntityRef {
     Graph {
         /// Branch scope
         branch_id: BranchId,
+        /// Space the graph lives in (e.g. `"default"`, `"tenant_a"`, or
+        /// `"_graph_"` for the system DAG). Two graphs with the same
+        /// `(branch_id, key)` in different spaces are distinct entities;
+        /// dropping the `space` field would let them collide in the
+        /// search index, leaking data across tenants.
+        space: String,
         /// Graph name and key (e.g., "mygraph/n/node1")
         key: String,
     },
@@ -135,10 +141,13 @@ impl EntityRef {
         EntityRef::Json { branch_id, doc_id }
     }
 
-    /// Create a graph entity reference
-    pub fn graph(branch_id: BranchId, key: impl Into<String>) -> Self {
+    /// Create a graph entity reference. `space` identifies which
+    /// per-branch namespace the graph lives in (e.g. `"default"`,
+    /// `"tenant_a"`, or `"_graph_"` for the system DAG).
+    pub fn graph(branch_id: BranchId, space: impl Into<String>, key: impl Into<String>) -> Self {
         EntityRef::Graph {
             branch_id,
+            space: space.into(),
             key: key.into(),
         }
     }
@@ -299,8 +308,12 @@ impl std::fmt::Display for EntityRef {
             } => {
                 write!(f, "vector://{}/{}/{}", branch_id, collection, key)
             }
-            EntityRef::Graph { branch_id, key } => {
-                write!(f, "graph://{}/{}", branch_id, key)
+            EntityRef::Graph {
+                branch_id,
+                space,
+                key,
+            } => {
+                write!(f, "graph://{}/{}/{}", branch_id, space, key)
             }
         }
     }
@@ -373,7 +386,7 @@ mod tests {
     #[test]
     fn test_entity_ref_graph() {
         let branch_id = BranchId::new();
-        let ref_ = EntityRef::graph(branch_id, "mygraph/n/node1");
+        let ref_ = EntityRef::graph(branch_id, "default", "mygraph/n/node1");
 
         assert!(ref_.is_graph());
         assert!(!ref_.is_kv());
@@ -401,7 +414,7 @@ mod tests {
         let vector = EntityRef::vector(branch_id, "col", "key");
         assert!(format!("{}", vector).starts_with("vector://"));
 
-        let graph = EntityRef::graph(branch_id, "g/n/1");
+        let graph = EntityRef::graph(branch_id, "default", "g/n/1");
         assert!(format!("{}", graph).starts_with("graph://"));
     }
 
@@ -440,7 +453,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test-doc"),
             EntityRef::vector(branch_id, "col", "key"),
-            EntityRef::graph(branch_id, "g/n/1"),
+            EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
         for ref_ in refs {
@@ -473,7 +486,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
-            EntityRef::graph(branch_id, "g/n/1"),
+            EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
         // Verify they map to all 6 primitive types
@@ -498,7 +511,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "j"),
             EntityRef::vector(branch_id, "c", "k"),
-            EntityRef::graph(branch_id, "g/n/1"),
+            EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
         for r in &refs {

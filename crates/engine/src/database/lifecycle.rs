@@ -260,6 +260,7 @@ impl Database {
                                 if let Some(user_key) = key.user_key_string() {
                                     let entity_ref = strata_core::EntityRef::Graph {
                                         branch_id,
+                                        space: key.namespace.space.to_string(),
                                         key: user_key,
                                     };
                                     index.index_document(&entity_ref, &text, None);
@@ -309,6 +310,7 @@ impl Database {
                             if let Some(user_key) = key.user_key_string() {
                                 let entity_ref = strata_core::EntityRef::Graph {
                                     branch_id,
+                                    space: key.namespace.space.to_string(),
                                     key: user_key,
                                 };
                                 index.remove_document(&entity_ref);

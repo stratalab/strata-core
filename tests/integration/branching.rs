@@ -3700,3 +3700,264 @@ fn graph_store_accepts_reserved_system_dag_space() {
         .unwrap()
         .is_none());
 }
+
+// ============================================================================
+// Known bugs — failing tests pinned for follow-up
+// ============================================================================
+//
+// Each test in this section asserts the *correct* behavior and currently
+// fails. They are marked `#[ignore]` so CI stays green; remove the ignore
+// attribute once the corresponding fix lands.
+
+/// A whole-graph delete on one side merged against a target-side node
+/// addition resolves atomically: catalog and storage stay in sync.
+///
+/// Setup:
+///   - Pre-fork: target has graph "g" with node "alice".
+///   - Source: `delete_graph("g")` — wipes all `g/*` keys, drops "g" from
+///     `__catalog__`.
+///   - Target: `add_node("g", "bob")`.
+///
+/// `compute_graph_merge` detects the wholesale-delete on source (ancestor
+/// had data, source's `PerGraphState` is empty) and emits a
+/// `WholeGraphDeleteConflict`. Under LWW source's delete wins (matching
+/// the convention in `merge_meta`'s `DeleteModifyConflict` arm) and the
+/// per-graph state is fully dropped, including target-side adds.
+///
+/// Post-merge state must satisfy:
+///   `catalog contains "g"` ⇔ `any g/* keys exist in storage`.
+#[test]
+fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    // Pre-fork: target has graph "g" with alice.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source wipes the whole graph.
+    p.graph.delete_graph(source_id, "default", "g").unwrap();
+
+    // Target concurrently adds a new node.
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
+        .unwrap();
+
+    // Merge under LWW.
+    let result = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    );
+
+    // The merge should either succeed atomically (one side wins fully) or
+    // be rejected with a structured error. Whatever it does, the result
+    // must be internally consistent: `g` is either fully present (in the
+    // catalog AND the node bob exists) or fully absent (catalog excludes
+    // `g` AND no `g/*` storage rows remain).
+    match result {
+        Ok(_) => {
+            let graphs: std::collections::HashSet<String> = p
+                .graph
+                .list_graphs(target_id, "default")
+                .unwrap()
+                .into_iter()
+                .collect();
+            let has_bob = p
+                .graph
+                .get_node(target_id, "default", "g", "bob")
+                .unwrap()
+                .is_some();
+            let has_alice = p
+                .graph
+                .get_node(target_id, "default", "g", "alice")
+                .unwrap()
+                .is_some();
+            let g_in_catalog = graphs.contains("g");
+            let any_storage_rows = has_bob || has_alice;
+
+            assert_eq!(
+                g_in_catalog, any_storage_rows,
+                "post-merge state is inconsistent: catalog_has_g={g_in_catalog}, \
+                 has_alice={has_alice}, has_bob={has_bob} — \
+                 catalog and storage must agree on whether 'g' exists"
+            );
+        }
+        Err(e) => {
+            // Rejection is fine as long as target state is unchanged.
+            let msg = e.to_string();
+            assert!(
+                msg.contains("graph") || msg.contains("conflict") || msg.contains("merge"),
+                "rejection should mention the graph conflict, got: {msg}"
+            );
+        }
+    }
+}
+
+/// Under LWW, when a node-level conflict resolves in one side's favor,
+/// the `__ref__` / `__by_type__` indexes match the merged `NodeData`.
+///
+/// Setup:
+///   - Pre-fork: alice with `entity_ref=patient/p1`, `object_type=Patient`.
+///   - Source: changes alice's properties only (refs unchanged).
+///   - Target: changes alice's `entity_ref → patient/p2` and
+///     `object_type → Doctor`.
+///
+/// LWW picks source for the node. The merge runs `project_node_index_writes`
+/// after the per-key node merge, deriving the canonical index keys from
+/// `projected_nodes` and reconciling them against target's existing
+/// entries — so the indexes always reflect the projected `NodeData`.
+#[test]
+fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    // Pre-fork: alice with refs/type set.
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    let alice_pre = NodeData {
+        entity_ref: Some("patient/p1".to_string()),
+        properties: Some(serde_json::json!({"v": 1})),
+        object_type: Some("Patient".to_string()),
+    };
+    p.graph
+        .add_node(target_id, "default", "g", "alice", alice_pre.clone())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: change properties only.
+    let alice_source = NodeData {
+        entity_ref: Some("patient/p1".to_string()),
+        properties: Some(serde_json::json!({"v": 2})),
+        object_type: Some("Patient".to_string()),
+    };
+    p.graph
+        .add_node(source_id, "default", "g", "alice", alice_source.clone())
+        .unwrap();
+
+    // Target: change entity_ref + object_type, keep properties at v=1.
+    let alice_target = NodeData {
+        entity_ref: Some("patient/p2".to_string()),
+        properties: Some(serde_json::json!({"v": 1})),
+        object_type: Some("Doctor".to_string()),
+    };
+    p.graph
+        .add_node(target_id, "default", "g", "alice", alice_target.clone())
+        .unwrap();
+
+    // Merge under LWW. With both sides differing from ancestor and from
+    // each other, the node lands as a Conflict and source wins.
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("merge with concurrent node edits should succeed under LWW");
+
+    // The merged node JSON: source won, so entity_ref=p1, type=Patient.
+    let merged = p
+        .graph
+        .get_node(target_id, "default", "g", "alice")
+        .unwrap()
+        .expect("alice must still exist after merge");
+    assert_eq!(
+        merged.entity_ref.as_deref(),
+        Some("patient/p1"),
+        "LWW source side should win the node merge"
+    );
+    assert_eq!(merged.object_type.as_deref(), Some("Patient"));
+
+    // The __ref__ index must agree with the merged node. p1 should
+    // resolve to alice; p2 should NOT — but the bug keeps the target's
+    // p2 index live.
+    let by_p1 = p
+        .graph
+        .nodes_for_entity(target_id, "default", "patient/p1")
+        .unwrap();
+    assert!(
+        by_p1.iter().any(|(g, n)| g == "g" && n == "alice"),
+        "nodes_for_entity(patient/p1) must contain alice (her merged \
+         entity_ref is patient/p1), got {by_p1:?}"
+    );
+    let by_p2 = p
+        .graph
+        .nodes_for_entity(target_id, "default", "patient/p2")
+        .unwrap();
+    assert!(
+        !by_p2.iter().any(|(g, n)| g == "g" && n == "alice"),
+        "nodes_for_entity(patient/p2) must NOT contain alice (her merged \
+         entity_ref is patient/p1, not p2), got {by_p2:?}"
+    );
+
+    // Same for the __by_type__ index.
+    let patients = p
+        .graph
+        .nodes_by_type(target_id, "default", "g", "Patient")
+        .unwrap();
+    assert!(
+        patients.contains(&"alice".to_string()),
+        "nodes_by_type(Patient) must contain alice (her merged type is \
+         Patient), got {patients:?}"
+    );
+    let doctors = p
+        .graph
+        .nodes_by_type(target_id, "default", "g", "Doctor")
+        .unwrap();
+    assert!(
+        !doctors.contains(&"alice".to_string()),
+        "nodes_by_type(Doctor) must NOT contain alice (her merged type \
+         is Patient, not Doctor), got {doctors:?}"
+    );
+}
+
+/// `EntityRef::Graph` carries the space, so two nodes from different
+/// spaces with the same `(graph, node_id)` are distinct documents in
+/// the search index — multi-tenant graphs don't collide.
+#[test]
+fn entity_ref_graph_distinguishes_spaces() {
+    use strata_engine::search::EntityRef;
+
+    let branch_id = strata_core::types::BranchId::new();
+
+    let tenant_a_alice = EntityRef::Graph {
+        branch_id,
+        space: "tenant_a".to_string(),
+        key: "social/n/alice".to_string(),
+    };
+    let tenant_b_alice = EntityRef::Graph {
+        branch_id,
+        space: "tenant_b".to_string(),
+        key: "social/n/alice".to_string(),
+    };
+
+    assert_ne!(
+        tenant_a_alice, tenant_b_alice,
+        "EntityRef::Graph for two different spaces must not be equal \
+         (otherwise they collide in the inverted index, leaking search \
+         results across tenants)"
+    );
+}

@@ -1272,7 +1272,7 @@ pub mod core_types {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test_doc"),
             EntityRef::vector(branch_id, "test_collection", "test_vector"),
-            EntityRef::graph(branch_id, "test_graph/n/test_node"),
+            EntityRef::graph(branch_id, "default", "test_graph/n/test_node"),
         ]
     }
 

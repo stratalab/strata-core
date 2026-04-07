@@ -77,7 +77,7 @@ pub struct GraphCellState {
 
 /// Per-graph decoded state for one side. The merge algorithm operates on
 /// one of these per (graph_name, side) tuple.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq)]
 pub struct PerGraphState {
     /// Live nodes, keyed by node_id.
     pub nodes: HashMap<String, NodeData>,
@@ -93,6 +93,26 @@ pub struct PerGraphState {
     /// but are *overwritten* by the projected counters during the merge
     /// (we derive counts from the projected edge set).
     pub other: HashMap<Vec<u8>, Value>,
+}
+
+impl PerGraphState {
+    /// True iff this side has no live data for the graph: no nodes, no
+    /// edges, no metadata, and no other keys (ontology, type index,
+    /// counters, etc.).
+    ///
+    /// Used by the wholesale-delete detector in `compute_graph_merge`:
+    /// if `ancestor` is non-empty and one side is empty, that side did
+    /// `delete_graph` (or equivalent). This signal is reliable because
+    /// branches are COW — an *untouched* side inherits ancestor's data
+    /// via the version chain and decodes back to a non-empty
+    /// `PerGraphState`, while a side that explicitly wiped the graph
+    /// has zero entries to decode.
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+            && self.edges.is_empty()
+            && self.meta.is_none()
+            && self.other.is_empty()
+    }
 }
 
 /// Identity of an edge: `(src_node_id, dst_node_id, edge_type)`. The
@@ -185,6 +205,19 @@ pub enum GraphMergeConflict {
         source: Option<Value>,
         target: Option<Value>,
     },
+    /// One side wholesale-deleted the graph (`delete_graph` or
+    /// equivalent) while the other side made post-fork modifications to
+    /// the same graph. Honors strategy.
+    ///
+    /// Without this detection, target-side additions would silently
+    /// survive a source-side wholesale delete (or vice versa), leaving
+    /// the catalog and storage out of sync. Under `LastWriterWins`, the
+    /// source side wins (matching the convention in
+    /// [`merge_meta`] / [`merge_other`] for `ModifyDeleteConflict`):
+    /// source-deleted means the whole graph is dropped from the
+    /// projection; source-modified means source's per-graph state
+    /// is restored on top of target's empty state.
+    WholeGraphDeleteConflict { graph: String },
 }
 
 impl GraphMergeConflict {
@@ -439,10 +472,20 @@ fn ingest_entry(
             }
         }
         KeyShape::Other { graph } => {
-            let key = graph.clone().unwrap_or_default();
+            // Reverse-ref index keys (`__ref__/{uri}/{graph}/{node_id}`)
+            // are top-level (no graph prefix in the key shape) but
+            // logically belong to a specific graph. Route them to the
+            // per-graph slot so they participate in `merge_per_graph`'s
+            // index-consistency post-pass alongside `__by_type__` keys.
+            let routed_graph = match graph {
+                Some(g) => g,
+                None => keys::parse_ref_index_key(user_key_str)
+                    .map(|(_, graph, _)| graph)
+                    .unwrap_or_default(),
+            };
             state
                 .graphs
-                .entry(key)
+                .entry(routed_graph)
                 .or_default()
                 .other
                 .insert(user_key_bytes, value);
@@ -543,10 +586,13 @@ pub fn compute_graph_merge(
 ) -> GraphMergeOutput {
     let mut output = GraphMergeOutput::default();
 
-    // 1. Catalog
-    merge_catalog(ancestor, source, target, &mut output);
+    // The set of graph names that have any live data after the per-graph
+    // merge. Drives the catalog post-pass below — a graph is in the
+    // projected catalog iff it has live per-graph state, ensuring the
+    // catalog and storage stay in sync.
+    let mut alive_graphs: BTreeSet<String> = BTreeSet::new();
 
-    // 2. Per-graph merge for every graph that appears on any side.
+    // Per-graph merge for every graph that appears on any side.
     let mut all_graphs: BTreeSet<String> = BTreeSet::new();
     all_graphs.extend(ancestor.graphs.keys().cloned());
     all_graphs.extend(source.graphs.keys().cloned());
@@ -557,66 +603,267 @@ pub fn compute_graph_merge(
         let anc = ancestor.graphs.get(graph_name).unwrap_or(&empty);
         let src = source.graphs.get(graph_name).unwrap_or(&empty);
         let tgt = target.graphs.get(graph_name).unwrap_or(&empty);
-        merge_per_graph(graph_name, anc, src, tgt, strategy, &mut output);
+
+        // Wholesale-delete detection. Ancestor had data and one side has
+        // none → that side did `delete_graph` (or equivalent). The
+        // signal is reliable because branches are COW: an *untouched*
+        // side inherits ancestor's data via the version chain and
+        // decodes back to a non-empty `PerGraphState`, while a side that
+        // explicitly wiped the graph has zero entries to decode.
+        let src_wiped = !anc.is_empty() && src.is_empty();
+        let tgt_wiped = !anc.is_empty() && tgt.is_empty();
+
+        // If both sides wholesale-deleted the same graph, that's a
+        // convergent merge — no conflict, no writes. Fall through to
+        // normal per-graph merge: the per-key 14-case matrix produces
+        // `BothDeleted` for every entry and the projected state is
+        // empty.
+        if src_wiped && !tgt_wiped && !tgt.is_empty() {
+            // Source wholesale-deleted; target still has data AND that
+            // data differs from the ancestor (otherwise there's nothing
+            // to conflict with — the normal merge would just produce
+            // SourceDeleted everywhere). Without this branch,
+            // target-side additions would be silently kept by the
+            // per-key merge as `TargetAdded`, leaving orphaned data
+            // with the catalog dropping the graph name.
+            //
+            // Note we don't need an explicit `tgt != anc` check here
+            // because `tgt_wiped == false && tgt non-empty` already
+            // implies tgt has SOMETHING; if tgt == anc the normal
+            // merge produces SourceDeleted for every entry which is
+            // also correct. We fire the conflict only when target has
+            // data; whether that data is post-fork modifications or
+            // unchanged-from-ancestor, the LWW outcome is the same
+            // (drop everything to match source's intent).
+            if tgt != anc {
+                output
+                    .conflicts
+                    .push(GraphMergeConflict::WholeGraphDeleteConflict {
+                        graph: graph_name.clone(),
+                    });
+                if strategy == MergeStrategy::LastWriterWins {
+                    // Source's delete wins (matching the LWW convention
+                    // in `merge_meta` for `DeleteModifyConflict`). Drop
+                    // everything for this graph from target's storage.
+                    project_full_drop(graph_name, tgt, &mut output);
+                }
+                // Strict: don't write anything; the outer strict check
+                // rejects the merge before any actions are applied.
+                continue;
+            }
+            // tgt == anc → fall through; normal per-key merge produces
+            // SourceDeleted everywhere, which is exactly right.
+        }
+
+        if tgt_wiped && !src_wiped && !src.is_empty() && src != anc {
+            // Target wholesale-deleted; source has post-fork
+            // modifications. Symmetric case.
+            output
+                .conflicts
+                .push(GraphMergeConflict::WholeGraphDeleteConflict {
+                    graph: graph_name.clone(),
+                });
+            if strategy == MergeStrategy::LastWriterWins {
+                // Source's modifications win (matching the LWW
+                // convention in `merge_meta` for `ModifyDeleteConflict`).
+                // Restore source's per-graph state on top of target's
+                // empty state and mark the graph alive so the catalog
+                // post-pass adds it back.
+                project_full_restore(graph_name, src, &mut output);
+                alive_graphs.insert(graph_name.clone());
+            }
+            continue;
+        }
+
+        // Normal per-graph merge — neither side wholesale-deleted (or
+        // they did and the other side is also empty/unchanged, in which
+        // case the per-key merge produces the right result naturally).
+        let alive = merge_per_graph(graph_name, anc, src, tgt, strategy, &mut output);
+        if alive {
+            alive_graphs.insert(graph_name.clone());
+        }
     }
+
+    // Catalog projection.
+    project_catalog(ancestor, source, target, &alive_graphs, &mut output);
 
     output
 }
 
 // =============================================================================
-// Catalog merge
+// Whole-graph drop / restore (used by wholesale-delete LWW resolution)
 // =============================================================================
 
-/// Additive set-union catalog merge.
+/// Emit deletes for every storage key that makes up `target`'s state for
+/// `graph_name`. Used when source wholesale-deleted the graph and source
+/// wins under LWW: target's per-graph state must be wiped to match
+/// source's intent.
 ///
-/// The catalog (`__catalog__`) is a `Value::String` containing a JSON array
-/// of graph names. Treating it as opaque KV would mean two branches that
-/// each independently called `create_graph` for different names could
-/// never merge — both writes would land on the same `__catalog__` key
-/// with different JSON values, looking like a conflict to the generic
-/// three-way merge.
+/// Covers: nodes, packed forward/reverse adjacency lists, edge counters,
+/// graph metadata, and per-graph "other" keys. The "other" set includes
+/// ontology rows, `{graph}/__by_type__/...` type-index entries, and the
+/// top-level `__ref__/...` reverse-ref index entries (which `ingest_entry`
+/// routes to the per-graph slot via `parse_ref_index_key`).
+fn project_full_drop(graph_name: &str, target: &PerGraphState, output: &mut GraphMergeOutput) {
+    // Nodes.
+    for node_id in target.nodes.keys() {
+        output.deletes.push(keys::node_key(graph_name, node_id));
+    }
+    // Forward / reverse adjacency lists. One per unique src / dst.
+    let fwd_srcs: HashSet<&String> = target.edges.keys().map(|(s, _, _)| s).collect();
+    for src in fwd_srcs {
+        output.deletes.push(keys::forward_adj_key(graph_name, src));
+    }
+    let rev_dsts: HashSet<&String> = target.edges.keys().map(|(_, d, _)| d).collect();
+    for dst in rev_dsts {
+        output.deletes.push(keys::reverse_adj_key(graph_name, dst));
+    }
+    // Edge counters: one per unique edge type that target had.
+    let edge_types: HashSet<&String> = target.edges.keys().map(|(_, _, et)| et).collect();
+    for edge_type in edge_types {
+        output
+            .deletes
+            .push(keys::edge_type_count_key(graph_name, edge_type));
+    }
+    // Graph metadata (`{graph}/__meta__`).
+    if target.meta.is_some() {
+        output.deletes.push(keys::meta_key(graph_name));
+    }
+    // Other graph keys (ontology, `{graph}/__by_type__/...`, etc.). All
+    // of these live under the `{graph}/...` prefix and are decoded into
+    // `target.other` keyed by their raw user-key bytes.
+    for key_bytes in target.other.keys() {
+        if let Ok(s) = std::str::from_utf8(key_bytes) {
+            output.deletes.push(s.to_string());
+        }
+    }
+}
+
+/// Emit puts for every storage key that makes up `source`'s state for
+/// `graph_name`. Used when target wholesale-deleted the graph and source
+/// wins under LWW: source's per-graph state must be restored on top of
+/// target's empty state.
 ///
-/// Instead, decode both sides into `BTreeSet<String>` and project per-name
-/// presence: a graph name is in the merged catalog iff it isn't dropped
-/// by a delete-without-readd on either side. This is the natural set
-/// semantics for a catalog of names — each name's presence is independent
-/// of every other name's, so concurrent independent `create_graph` /
-/// `delete_graph` calls always merge cleanly.
+/// Re-encodes the packed adjacency lists from source's decoded edge map
+/// (the same canonical encoding `project_adjacency_writes` uses) so the
+/// restored state is byte-equal to what a fresh write would produce.
+fn project_full_restore(graph_name: &str, source: &PerGraphState, output: &mut GraphMergeOutput) {
+    // Nodes.
+    for (node_id, data) in &source.nodes {
+        let user_key = keys::node_key(graph_name, node_id);
+        match serde_json::to_string(data) {
+            Ok(json) => output.puts.push((user_key, Value::String(json))),
+            Err(e) => output
+                .conflicts
+                .push(GraphMergeConflict::NodeModifyDeleteConflict {
+                    graph: graph_name.to_string(),
+                    node_id: format!("{node_id} (serialize error: {e})"),
+                }),
+        }
+    }
+    // Forward / reverse adjacency lists, grouped by src / dst.
+    let mut fwd_by_src: HashMap<&str, Vec<(&str, &str, &EdgeData)>> = HashMap::new();
+    let mut rev_by_dst: HashMap<&str, Vec<(&str, &str, &EdgeData)>> = HashMap::new();
+    for ((src, dst, edge_type), data) in &source.edges {
+        fwd_by_src
+            .entry(src.as_str())
+            .or_default()
+            .push((dst.as_str(), edge_type.as_str(), data));
+        rev_by_dst
+            .entry(dst.as_str())
+            .or_default()
+            .push((src.as_str(), edge_type.as_str(), data));
+    }
+    // Sort for deterministic encoding.
+    for edges in fwd_by_src.values_mut() {
+        edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+    }
+    for edges in rev_by_dst.values_mut() {
+        edges.sort_by(|a, b| a.0.cmp(b.0).then_with(|| a.1.cmp(b.1)));
+    }
+    for (src, edges) in &fwd_by_src {
+        let bytes = packed::encode(edges);
+        output
+            .puts
+            .push((keys::forward_adj_key(graph_name, src), Value::Bytes(bytes)));
+    }
+    for (dst, edges) in &rev_by_dst {
+        let bytes = packed::encode(edges);
+        output
+            .puts
+            .push((keys::reverse_adj_key(graph_name, dst), Value::Bytes(bytes)));
+    }
+    // Edge counters: one per unique edge type, derived from source's
+    // decoded edge set.
+    let mut counts: HashMap<&str, u64> = HashMap::new();
+    for (_, _, edge_type) in source.edges.keys() {
+        *counts.entry(edge_type.as_str()).or_insert(0) += 1;
+    }
+    for (edge_type, count) in counts {
+        output.puts.push((
+            keys::edge_type_count_key(graph_name, edge_type),
+            Value::String(count.to_string()),
+        ));
+    }
+    // Graph metadata.
+    if let Some(meta) = &source.meta {
+        match serde_json::to_string(meta) {
+            Ok(json) => output
+                .puts
+                .push((keys::meta_key(graph_name), Value::String(json))),
+            Err(_) => output.conflicts.push(GraphMergeConflict::MetaConflict {
+                graph: graph_name.to_string(),
+            }),
+        }
+    }
+    // Other graph keys.
+    for (key_bytes, value) in &source.other {
+        if let Ok(s) = std::str::from_utf8(key_bytes) {
+            output.puts.push((s.to_string(), value.clone()));
+        }
+    }
+}
+
+// =============================================================================
+// Catalog projection
+// =============================================================================
+
+/// Project the post-merge `__catalog__` value.
 ///
-/// Per-name rule (for each name in `anc ∪ src ∪ tgt`):
-/// - If src deleted it (in anc, not in src) AND tgt didn't add it back → drop
-/// - If tgt deleted it (in anc, not in tgt) AND src didn't add it back → drop
-/// - Otherwise → keep
+/// The catalog is a `Value::String` containing a JSON array of graph
+/// names. Two paths produce its contents:
 ///
-/// Equivalently: `projected = (anc - deleted_by_source - deleted_by_target)
-/// ∪ added_by_source ∪ added_by_target`.
+/// 1. **Per-graph alive set.** Any graph with live data after the
+///    per-graph merge (nodes / edges / meta / other) is in the catalog.
+///    This is the source of truth — it's derived from the actual
+///    storage state, so the catalog can never disagree with what
+///    `list_graphs` would see by scanning per-graph rows.
 ///
-/// Because the projection is purely set-membership and the values being
-/// compared are unit (presence/absence), no conflict variant ever fires
-/// from this function. `GraphMergeConflict::CatalogDivergence` remains
-/// in the enum for backwards-compat (it's `pub`) but is unreachable from
-/// the current algorithm.
-fn merge_catalog(
+/// 2. **Catalog-only set semantics** for graph names that have NO
+///    per-graph state on any side (artificial test scenarios where the
+///    catalog is the only signal, or transient states during recipe
+///    application). For each such name we apply the additive
+///    set-union rule: a name survives unless one side deleted it
+///    without the other side re-adding it.
+///
+/// Concurrent independent `create_graph` / `delete_graph` calls fall
+/// into category 1 (because both wrote at least a `__meta__` row), so
+/// the additive merge property is preserved automatically. The
+/// catalog-only path is the fallback for edge cases.
+fn project_catalog(
     ancestor: &GraphCellState,
     source: &GraphCellState,
     target: &GraphCellState,
+    alive_graphs: &BTreeSet<String>,
     output: &mut GraphMergeOutput,
 ) {
     let key = keys::graph_catalog_key().to_string();
 
-    // Decode each side as a BTreeSet of graph names. The fallback semantics
-    // matter: a side with no catalog value at all (`None`) means "this side
-    // has not touched the catalog", NOT "this side deleted the catalog".
-    // Conflating those would silently drop entries on legacy data
-    // (graphs created before the catalog key existed). Fall back to the
-    // ancestor's set so an absent value contributes nothing to the additive
-    // merge — equivalent to treating the side as unchanged for catalog
-    // purposes while still letting the per-graph data merge run normally.
-    //
-    // The same fallback applies to malformed catalog values (wrong Value
-    // type, JSON parse failure): we don't know what was intended, so we
-    // refuse to silently drop entries. The per-graph merge will still
-    // surface any data-level conflicts.
+    // Decode each side's catalog as a BTreeSet. The fallback semantics
+    // matter: a side with no catalog value at all (`None`) means "this
+    // side has not touched the catalog", NOT "this side deleted the
+    // catalog". Conflating those would silently drop entries on legacy
+    // data (graphs created before the catalog key existed).
     let parse_or = |v: Option<&Value>, fallback: &BTreeSet<String>| -> BTreeSet<String> {
         match v {
             Some(Value::String(s)) => serde_json::from_str(s).unwrap_or_else(|_| fallback.clone()),
@@ -625,25 +872,38 @@ fn merge_catalog(
         }
     };
     let empty: BTreeSet<String> = BTreeSet::new();
-    let anc = parse_or(ancestor.catalog.as_ref(), &empty);
-    let src = parse_or(source.catalog.as_ref(), &anc);
-    let tgt = parse_or(target.catalog.as_ref(), &anc);
+    let anc_catalog = parse_or(ancestor.catalog.as_ref(), &empty);
+    let src_catalog = parse_or(source.catalog.as_ref(), &anc_catalog);
+    let tgt_catalog = parse_or(target.catalog.as_ref(), &anc_catalog);
 
-    // Project per-name presence. Iterate the union of all three sides and
-    // decide membership for each unique name. Skip duplicates that the chain
-    // iterator may yield when a name appears on multiple sides.
-    let mut projected: BTreeSet<String> = BTreeSet::new();
-    for name in anc.iter().chain(src.iter()).chain(tgt.iter()) {
+    // Start with all alive graphs (path 1).
+    let mut projected: BTreeSet<String> = alive_graphs.clone();
+
+    // Walk the union of catalog entries; for any name that has NO
+    // per-graph state on any side, fall through to the additive set
+    // semantics (path 2).
+    for name in anc_catalog
+        .iter()
+        .chain(src_catalog.iter())
+        .chain(tgt_catalog.iter())
+    {
+        // Skip names already decided by the alive set.
         if projected.contains(name) {
             continue;
         }
-        let in_anc = anc.contains(name);
-        let in_src = src.contains(name);
-        let in_tgt = tgt.contains(name);
-        // A name is in the projected set iff at least one side has it AND
-        // neither side deleted it (i.e. it wasn't in ancestor and removed by
-        // exactly one of source/target). The additive set merge:
-        //   projected = (anc ∪ src ∪ tgt) - source_only_deletes - target_only_deletes
+        // Skip names that have per-graph state on any side — those are
+        // already accounted for by the alive set (and were deliberately
+        // dropped if they ended up empty).
+        if ancestor.graphs.contains_key(name)
+            || source.graphs.contains_key(name)
+            || target.graphs.contains_key(name)
+        {
+            continue;
+        }
+        // Catalog-only fallback: additive set rule.
+        let in_anc = anc_catalog.contains(name);
+        let in_src = src_catalog.contains(name);
+        let in_tgt = tgt_catalog.contains(name);
         let deleted_by_source = in_anc && !in_src;
         let deleted_by_target = in_anc && !in_tgt;
         if !deleted_by_source && !deleted_by_target && (in_anc || in_src || in_tgt) {
@@ -651,12 +911,28 @@ fn merge_catalog(
         }
     }
 
-    // Emit a Put only when the projected catalog actually differs from
-    // target's current decoded catalog. The wire format is the same JSON
-    // array shape `list_graphs` / `create_graph` use; the BTreeSet gives
-    // deterministic sorted order, so equivalent merges produce byte-equal
-    // output.
-    if projected != tgt {
+    // Compute target's "effective" catalog: the explicit `__catalog__`
+    // value if one was written, or the implicit lazy-fallback set
+    // derived from target's per-graph data otherwise. Comparing against
+    // the effective catalog (rather than just the explicit value)
+    // preserves the no-op-merge property for legacy data — a no-op
+    // merge against a target that has graph data but no catalog row
+    // must NOT lazily write a catalog as a side effect.
+    let effective_target_catalog: BTreeSet<String> = match target.catalog.as_ref() {
+        Some(Value::String(_)) => tgt_catalog.clone(),
+        _ => target
+            .graphs
+            .iter()
+            .filter(|(_, state)| !state.is_empty())
+            .map(|(name, _)| name.clone())
+            .collect(),
+    };
+
+    // Emit a Put only when the projected catalog differs from target's
+    // effective catalog. The wire format mirrors `list_graphs` /
+    // `create_graph`; BTreeSet → Vec preserves deterministic sorted
+    // order so equivalent merges produce byte-equal output.
+    if projected != effective_target_catalog {
         let projected_vec: Vec<String> = projected.into_iter().collect();
         let json = serde_json::to_string(&projected_vec)
             .expect("BTreeSet<String> JSON serialization is infallible");
@@ -668,6 +944,10 @@ fn merge_catalog(
 // Per-graph merge
 // =============================================================================
 
+/// Run the per-graph merge for one graph name. Returns `true` if the
+/// projected per-graph state has any live data after the merge (used by
+/// `compute_graph_merge` to populate the alive set that drives catalog
+/// projection).
 fn merge_per_graph(
     graph_name: &str,
     ancestor: &PerGraphState,
@@ -675,7 +955,7 @@ fn merge_per_graph(
     target: &PerGraphState,
     strategy: MergeStrategy,
     output: &mut GraphMergeOutput,
-) {
+) -> bool {
     // Step 1: Project nodes.
     let projected_nodes = merge_nodes(graph_name, ancestor, source, target, strategy, output);
 
@@ -701,12 +981,100 @@ fn merge_per_graph(
     // Step 6: Project edge counter writes (derived from projected edges).
     project_edge_counter_writes(graph_name, &projected_edges, target, output);
 
-    // Step 7: Merge meta (raw 14-case).
-    merge_meta(graph_name, ancestor, source, target, strategy, output);
+    // Step 7: Project secondary index writes (`__ref__/...` and
+    // `{graph}/__by_type__/...`). Derived from `projected_nodes` so that
+    // a node-level conflict resolution under LWW can never leave the
+    // indexes pointing at the losing version. Skipped in `merge_other`.
+    project_node_index_writes(graph_name, target, &projected_nodes, output);
 
-    // Step 8: Merge other graph keys (raw 14-case per key, but exclude
-    // edge counters — those are derived from the projected edge set).
-    merge_other(graph_name, ancestor, source, target, strategy, output);
+    // Step 8: Merge meta (raw 14-case). Returns whether projected meta is
+    // present after the merge.
+    let projected_meta_alive = merge_meta(graph_name, ancestor, source, target, strategy, output);
+
+    // Step 9: Merge other graph keys (raw 14-case per key, but exclude
+    // edge counters and node-derived secondary indexes). Returns whether
+    // any non-index "other" key has a non-deleted projected value.
+    let projected_other_alive = merge_other(graph_name, ancestor, source, target, strategy, output);
+
+    // The graph is alive iff anything in the projected state is non-empty.
+    // (Index writes don't need their own aliveness check — they're derived
+    // from projected_nodes, so they're alive iff projected_nodes is alive.)
+    !projected_nodes.is_empty()
+        || !projected_edges.is_empty()
+        || projected_meta_alive
+        || projected_other_alive
+}
+
+/// Project secondary node-index writes (`__ref__/...`, `{graph}/__by_type__/...`)
+/// from the merged node set.
+///
+/// Both index families derive deterministically from `NodeData`:
+///
+///   - `__ref__/{encoded_uri}/{graph}/{node_id}` exists iff the node has
+///     `entity_ref = uri`.
+///   - `{graph}/__by_type__/{object_type}/{node_id}` exists iff the node
+///     has `object_type = object_type`.
+///
+/// Without this post-pass, the merge would route those keys through the
+/// raw 14-case matrix in `merge_other`, treating them as opaque KV. That
+/// breaks the invariant that the indexes match the live `NodeData` after
+/// any conflict where one side modified the node body and the other side
+/// modified the indexes (e.g. source changed `properties` while target
+/// changed `entity_ref`): LWW would pick source's NodeData but keep
+/// target's index entries, so `nodes_for_entity` would point at a
+/// node whose `entity_ref` says something else.
+///
+/// The fix derives the canonical index set from `projected_nodes`,
+/// compares against target's current index entries, and emits puts /
+/// deletes to make them match. Stale indexes (target had them, the
+/// projected node doesn't justify them anymore) get dropped; missing
+/// canonical indexes (projected node has the field but target's storage
+/// lacks the row) get added.
+fn project_node_index_writes(
+    graph_name: &str,
+    target: &PerGraphState,
+    projected_nodes: &HashMap<String, NodeData>,
+    output: &mut GraphMergeOutput,
+) {
+    // Step 1: build the canonical set of secondary-index keys from the
+    // projected node data.
+    let mut canonical: HashSet<String> = HashSet::new();
+    for (node_id, data) in projected_nodes {
+        if let Some(uri) = &data.entity_ref {
+            canonical.insert(keys::ref_index_key(uri, graph_name, node_id));
+        }
+        if let Some(object_type) = &data.object_type {
+            canonical.insert(keys::type_index_key(graph_name, object_type, node_id));
+        }
+    }
+
+    // Step 2: walk target's current index entries (filtered out of
+    // `merge_other` and routed to `target.other` by `ingest_entry`) and
+    // emit deletes for any that aren't in the canonical set.
+    let type_index_prefix_str = format!("{graph_name}/__by_type__/");
+    for key_bytes in target.other.keys() {
+        let Ok(key_str) = std::str::from_utf8(key_bytes) else {
+            continue;
+        };
+        let is_index =
+            key_str.starts_with("__ref__/") || key_str.starts_with(&type_index_prefix_str);
+        if !is_index {
+            continue;
+        }
+        if !canonical.contains(key_str) {
+            output.deletes.push(key_str.to_string());
+        }
+    }
+
+    // Step 3: emit puts for canonical entries that target doesn't already
+    // have. Index values are always `Value::Null` — the key's *presence*
+    // is the signal.
+    for canonical_key in &canonical {
+        let already_present = target.other.contains_key(canonical_key.as_bytes());
+        if !already_present {
+            output.puts.push((canonical_key.clone(), Value::Null));
+        }
+    }
 }
 
 // =============================================================================
@@ -1185,6 +1553,8 @@ fn project_edge_counter_writes(
 // Meta merge
 // =============================================================================
 
+/// Returns `true` if the projected meta after the merge is `Some` (used
+/// by `merge_per_graph` to decide whether the graph is alive).
 fn merge_meta(
     graph_name: &str,
     ancestor: &PerGraphState,
@@ -1192,7 +1562,7 @@ fn merge_meta(
     target: &PerGraphState,
     strategy: MergeStrategy,
     output: &mut GraphMergeOutput,
-) {
+) -> bool {
     let key = keys::meta_key(graph_name);
 
     // Serialize-or-flag helper. `serde_json::to_string(&GraphMeta)` is
@@ -1221,27 +1591,33 @@ fn merge_meta(
         source.meta.as_ref(),
         target.meta.as_ref(),
     ) {
+        // The projected value equals target's value: alive iff target had
+        // meta. (`Unchanged` collapses both "all None" and "all Some(equal)";
+        // the bool below distinguishes them.)
         ThreeWay::Unchanged
         | ThreeWay::TargetChanged
         | ThreeWay::BothChangedSame
         | ThreeWay::TargetAdded
-        | ThreeWay::BothAddedSame
-        | ThreeWay::TargetDeleted
-        | ThreeWay::BothDeleted => {}
+        | ThreeWay::BothAddedSame => target.meta.is_some(),
+        ThreeWay::TargetDeleted | ThreeWay::BothDeleted => false,
         ThreeWay::SourceChanged(value) | ThreeWay::SourceAdded(value) => {
-            try_push_put(value, output);
+            try_push_put(value, output)
         }
         ThreeWay::SourceDeleted => {
             output.deletes.push(key);
+            false
         }
         ThreeWay::Conflict { source, target } | ThreeWay::BothAddedDifferent { source, target } => {
             output.conflicts.push(GraphMergeConflict::MetaConflict {
                 graph: graph_name.to_string(),
             });
             if strategy == MergeStrategy::LastWriterWins {
-                try_push_put(source, output);
+                try_push_put(source, output)
+            } else {
+                // Strict — target's value persists in storage.
+                let _ = target;
+                true
             }
-            let _ = target;
         }
         ThreeWay::DeleteModifyConflict { target } => {
             output.conflicts.push(GraphMergeConflict::MetaConflict {
@@ -1249,15 +1625,22 @@ fn merge_meta(
             });
             if strategy == MergeStrategy::LastWriterWins {
                 output.deletes.push(key);
+                false
+            } else {
+                // Strict — target's value persists.
+                let _ = target;
+                true
             }
-            let _ = target;
         }
         ThreeWay::ModifyDeleteConflict { source } => {
             output.conflicts.push(GraphMergeConflict::MetaConflict {
                 graph: graph_name.to_string(),
             });
             if strategy == MergeStrategy::LastWriterWins {
-                try_push_put(source, output);
+                try_push_put(source, output)
+            } else {
+                // Strict — target had no meta and we don't write one.
+                false
             }
         }
     }
@@ -1271,6 +1654,9 @@ fn merge_meta(
 /// raw KV level. Edge counter keys are SKIPPED here because the
 /// `project_edge_counter_writes` step derives them from the projected edge
 /// set instead.
+///
+/// Returns `true` if any "other" key has a non-deleted projected value
+/// (used by `merge_per_graph` to decide whether the graph is alive).
 fn merge_other(
     graph_name: &str,
     ancestor: &PerGraphState,
@@ -1278,40 +1664,62 @@ fn merge_other(
     target: &PerGraphState,
     strategy: MergeStrategy,
     output: &mut GraphMergeOutput,
-) {
+) -> bool {
     let counter_prefix = format!("{graph_name}/__edge_count__/");
+    let type_index_prefix_str = format!("{graph_name}/__by_type__/");
     let mut all_keys: HashSet<&Vec<u8>> = HashSet::new();
     all_keys.extend(ancestor.other.keys());
     all_keys.extend(source.other.keys());
     all_keys.extend(target.other.keys());
 
+    let mut any_alive = false;
     for key_bytes in all_keys {
-        // Skip edge counters; handled by project_edge_counter_writes.
-        if let Ok(key_str) = std::str::from_utf8(key_bytes) {
+        let key_str_opt = std::str::from_utf8(key_bytes).ok();
+        if let Some(key_str) = key_str_opt {
+            // Skip edge counters; handled by `project_edge_counter_writes`.
+            // (Counters don't count toward "alive" because they're derived
+            // from edges, which we already check.)
             if key_str.starts_with(&counter_prefix) {
                 continue;
             }
+            // Skip secondary indexes derived from node data — they're
+            // handled by `project_node_index_writes` after the per-graph
+            // merge so they stay consistent with the projected node set
+            // even when LWW resolves a node conflict in source's favor
+            // while target was the only side that touched the indexes.
+            if key_str.starts_with(&type_index_prefix_str) || key_str.starts_with("__ref__/") {
+                // Track aliveness for these keys via the projected node
+                // set: if any projected node has a corresponding index,
+                // the graph is alive. Computed by the caller.
+                continue;
+            }
         }
+
+        let user_key_str = match key_str_opt {
+            Some(s) => s.to_string(),
+            None => continue, // shouldn't happen for graph keys
+        };
 
         let a = ancestor.other.get(key_bytes);
         let s = source.other.get(key_bytes);
         let t = target.other.get(key_bytes);
 
-        let user_key_str = match std::str::from_utf8(key_bytes) {
-            Ok(s) => s.to_string(),
-            Err(_) => continue, // shouldn't happen for graph keys
-        };
-
         match classify_three_way(a, s, t) {
+            // Target's value (or absence) persists. Alive iff target had
+            // a value.
             ThreeWay::Unchanged
             | ThreeWay::TargetChanged
             | ThreeWay::BothChangedSame
             | ThreeWay::TargetAdded
-            | ThreeWay::BothAddedSame
-            | ThreeWay::TargetDeleted
-            | ThreeWay::BothDeleted => {}
+            | ThreeWay::BothAddedSame => {
+                if t.is_some() {
+                    any_alive = true;
+                }
+            }
+            ThreeWay::TargetDeleted | ThreeWay::BothDeleted => {}
             ThreeWay::SourceChanged(value) | ThreeWay::SourceAdded(value) => {
                 output.puts.push((user_key_str, value.clone()));
+                any_alive = true;
             }
             ThreeWay::SourceDeleted => {
                 output.deletes.push(user_key_str);
@@ -1326,6 +1734,8 @@ fn merge_other(
                 if strategy == MergeStrategy::LastWriterWins {
                     output.puts.push((user_key_str, source.clone()));
                 }
+                // Both sides have a value either way → alive.
+                any_alive = true;
             }
             ThreeWay::DeleteModifyConflict { target } => {
                 output.conflicts.push(GraphMergeConflict::OtherKeyConflict {
@@ -1335,6 +1745,9 @@ fn merge_other(
                 });
                 if strategy == MergeStrategy::LastWriterWins {
                     output.deletes.push(user_key_str);
+                } else {
+                    // Strict: target's value persists.
+                    any_alive = true;
                 }
             }
             ThreeWay::ModifyDeleteConflict { source } => {
@@ -1345,10 +1758,13 @@ fn merge_other(
                 });
                 if strategy == MergeStrategy::LastWriterWins {
                     output.puts.push((user_key_str, source.clone()));
+                    any_alive = true;
                 }
+                // Strict: target had no value, none written.
             }
         }
     }
+    any_alive
 }
 
 // =============================================================================
@@ -1976,6 +2392,50 @@ mod tests {
         assert!(result.puts.is_empty());
         assert!(result.deletes.is_empty());
         assert!(result.conflicts.is_empty());
+    }
+
+    #[test]
+    fn both_sides_wholesale_delete_is_convergent_no_conflict() {
+        // Both branches concurrently `delete_graph("g")` after fork —
+        // a convergent intent. The merge must produce zero conflicts
+        // and zero writes; under Strict it must NOT reject the merge.
+        // Earlier the wholesale-delete branch fired spuriously when
+        // both sides were wiped because `tgt != anc` was true (tgt
+        // empty, anc non-empty).
+        let ancestor = state_with_nodes("g", &[("alice", node(serde_json::json!({})))]);
+        let source = empty_state();
+        let target = empty_state();
+
+        // LWW must succeed cleanly with no conflicts.
+        let lww = compute_graph_merge(&ancestor, &source, &target, MergeStrategy::LastWriterWins);
+        assert!(
+            lww.conflicts.is_empty(),
+            "convergent wholesale-delete must not produce conflicts under LWW; got {:?}",
+            lww.conflicts
+        );
+        // No writes either — target is already empty for "g".
+        let g_puts: Vec<_> = lww
+            .puts
+            .iter()
+            .filter(|(k, _)| k.starts_with("g/"))
+            .collect();
+        let g_deletes: Vec<_> = lww.deletes.iter().filter(|k| k.starts_with("g/")).collect();
+        assert!(
+            g_puts.is_empty(),
+            "convergent wholesale-delete must not emit puts for graph; got {g_puts:?}"
+        );
+        assert!(
+            g_deletes.is_empty(),
+            "convergent wholesale-delete must not emit deletes for graph; got {g_deletes:?}"
+        );
+
+        // Strict must also succeed cleanly — no conflict to reject on.
+        let strict = compute_graph_merge(&ancestor, &source, &target, MergeStrategy::Strict);
+        assert!(
+            strict.conflicts.is_empty(),
+            "convergent wholesale-delete must not produce conflicts under Strict; got {:?}",
+            strict.conflicts
+        );
     }
 
     #[test]
