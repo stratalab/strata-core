@@ -97,9 +97,43 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
     // Iterate all branch_ids in storage
     for branch_id in db.storage().branch_ids() {
-        // Scan both "default" (user collections) and "_system_" (shadow collections)
-        let spaces = ["default", strata_engine::system_space::SYSTEM_SPACE];
-        for space in spaces {
+        // Enumerate every space registered in this branch's metadata, plus
+        // "default" (always implicit) and `_system_` (shadow collections live
+        // there but `SpaceIndex::list` strips it). Without enumerating all
+        // spaces, vector collections in non-default user spaces would be
+        // silently invisible to startup recovery and only resurface via the
+        // lazy reload fallback — see space-correctness-fix-plan §4.5.
+        //
+        // We scan space metadata directly via the storage layer rather than
+        // calling `SpaceIndex::list`, because that helper requires
+        // `Arc<Database>` and recovery only has `&Database`. The scan logic
+        // mirrors `SpaceIndex::list` (`crates/engine/src/primitives/space.rs`).
+        let space_prefix = Key::new_space_prefix(branch_id);
+        let mut spaces: Vec<String> = match db
+            .storage()
+            .scan_prefix(&space_prefix, snapshot_version)
+        {
+            Ok(entries) => entries
+                .into_iter()
+                .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
+                .filter(|s| s != strata_engine::system_space::SYSTEM_SPACE)
+                .collect(),
+            Err(e) => {
+                tracing::warn!(
+                    target: "strata::vector",
+                    branch_id = ?branch_id,
+                    error = %e,
+                    "Failed to list spaces during vector recovery; falling back to default + system",
+                );
+                Vec::new()
+            }
+        };
+        if !spaces.iter().any(|s| s == "default") {
+            spaces.insert(0, "default".to_string());
+        }
+        spaces.push(strata_engine::system_space::SYSTEM_SPACE.to_string());
+        for space in &spaces {
+            let space = space.as_str();
             let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
 
             // Scan for vector config entries in this run
@@ -571,18 +605,14 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
 
         for entry in self.state.backends.iter() {
             let (cid, backend) = (entry.key(), entry.value());
-            let branch_hex = format!("{:032x}", u128::from_be_bytes(*cid.branch_id.as_bytes()));
-            let vec_path = data_dir
-                .join("vectors")
-                .join(&branch_hex)
-                .join(format!("{}.vec", cid.name));
+            // Use the space-aware path helpers so freeze writes to the same
+            // location recovery reads from. Without `cid.space` in the path,
+            // two collections sharing `(branch_id, name)` across different
+            // spaces would clobber each other's `.vec` and `_graphs/` files.
+            let vec_path = mmap_path(data_dir, cid.branch_id, &cid.space, &cid.name);
             backend.freeze_heap_to_disk(&vec_path)?;
 
-            // Also freeze graphs
-            let gdir = data_dir
-                .join("vectors")
-                .join(&branch_hex)
-                .join(format!("{}_graphs", cid.name));
+            let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.space, &cid.name);
             backend.freeze_graphs_to_disk(&gdir)?;
         }
         Ok(())
