@@ -10,6 +10,8 @@ pub mod embed;
 #[cfg(feature = "embed")]
 pub mod expand;
 #[cfg(feature = "embed")]
+pub mod expand_cache;
+#[cfg(feature = "embed")]
 pub mod generate;
 #[cfg(feature = "embed")]
 pub mod rerank;
