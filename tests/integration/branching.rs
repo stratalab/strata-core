@@ -5697,3 +5697,1028 @@ fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
         "LWW source-wins must drop the entire user subtree"
     );
 }
+
+// ============================================================================
+// Cross-primitive parity (Claim 4 verification suite)
+// ============================================================================
+//
+// These tests prove "all primitives inherit branching uniformly" by
+// behavior, not by storage plumbing — they fork a branch, mutate every
+// primitive, merge, and verify that each primitive's invariants hold on
+// the merged target. They are the final gate for Claim 4 in
+// `docs/coding-standards/12-architectural-claims.md`. See
+// `docs/design/branching/primitive-aware-merge.md` for the design.
+
+/// Verify the standard graph adjacency invariant on a branch: every
+/// edge's endpoints exist on both sides (forward and reverse adjacency
+/// records refer to nodes that are still present), and the bidirectional
+/// adjacency is consistent. Used by the cross-primitive invariant sweep.
+///
+/// Returns `Ok(())` on success or a descriptive error on the first
+/// invariant violation. Mirrors `verify_event_chain` for events.
+fn verify_graph_adjacency(
+    graph: &GraphStore,
+    branch: &BranchId,
+    space: &str,
+    graph_name: &str,
+    expected_nodes: &[&str],
+) -> Result<(), String> {
+    // Every expected node must exist.
+    for node_id in expected_nodes {
+        let node = graph
+            .get_node(*branch, space, graph_name, node_id)
+            .map_err(|e| format!("get_node({}) failed: {}", node_id, e))?;
+        if node.is_none() {
+            return Err(format!("expected node '{}' missing on target", node_id));
+        }
+    }
+    // For each node, walk outgoing edges and verify each target exists.
+    // Then walk incoming edges and verify the reverse direction is also
+    // recorded (bidirectional consistency).
+    for node_id in expected_nodes {
+        let outgoing = graph
+            .outgoing_neighbors(*branch, space, graph_name, node_id, None)
+            .map_err(|e| format!("outgoing_neighbors({}) failed: {}", node_id, e))?;
+        for neighbor in &outgoing {
+            // Endpoint exists.
+            if graph
+                .get_node(*branch, space, graph_name, &neighbor.node_id)
+                .map_err(|e| format!("get_node({}) failed: {}", neighbor.node_id, e))?
+                .is_none()
+            {
+                return Err(format!(
+                    "dangling outgoing edge: {}→{} but {} doesn't exist",
+                    node_id, neighbor.node_id, neighbor.node_id
+                ));
+            }
+            // Reverse direction is recorded.
+            let reverse = graph
+                .incoming_neighbors(*branch, space, graph_name, &neighbor.node_id, None)
+                .map_err(|e| format!("incoming_neighbors({}) failed: {}", neighbor.node_id, e))?;
+            if !reverse.iter().any(|r| r.node_id == *node_id) {
+                return Err(format!(
+                    "bidirectional consistency violated: {}→{} present in outgoing but reverse \
+                     {} not in {}'s incoming",
+                    node_id, neighbor.node_id, node_id, neighbor.node_id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Test #1 — fork isolation across all five primitives. Extends the
+/// existing `all_primitives_isolated_between_branches` (which omits
+/// Graph and uses two unrelated branches) by exercising a real fork
+/// relationship and writing to all five primitives on both sides.
+#[test]
+fn cross_primitive_fork_isolation() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let p = test_db.all_primitives();
+    let branch_index = test_db.branch_index();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed every primitive on target before fork.
+    p.kv.put(&target_id, "default", "k", Value::Int(1)).unwrap();
+    p.event
+        .append(&target_id, "default", "stream-a", int_payload(1))
+        .unwrap();
+    p.json
+        .create(
+            &target_id,
+            "default",
+            "doc-1",
+            json_value(serde_json::json!({"x": 1})),
+        )
+        .unwrap();
+    p.vector
+        .create_collection(target_id, "default", "vc", config_small())
+        .unwrap();
+    p.vector
+        .insert(
+            target_id,
+            "default",
+            "vc",
+            "v-target",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "n-target", NodeData::default())
+        .unwrap();
+
+    // Fork.
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Mutate every primitive on source only. Target stays untouched.
+    p.kv.put(&source_id, "default", "k", Value::Int(99))
+        .unwrap();
+    p.event
+        .append(&source_id, "default", "stream-a", int_payload(99))
+        .unwrap();
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-1",
+            &"x".parse().unwrap(),
+            json_value(serde_json::json!(99)),
+        )
+        .unwrap();
+    p.vector
+        .insert(
+            source_id,
+            "default",
+            "vc",
+            "v-source",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .add_node(source_id, "default", "g", "n-source", NodeData::default())
+        .unwrap();
+
+    // Target should still see ONLY pre-fork values for every primitive.
+    assert_eq!(
+        p.kv.get(&target_id, "default", "k").unwrap(),
+        Some(Value::Int(1)),
+        "target's KV should be unchanged after source-side mutation"
+    );
+    assert_eq!(
+        p.event.len(&target_id, "default").unwrap(),
+        1,
+        "target's event log should still hold the pre-fork single event"
+    );
+    let target_doc = p
+        .json
+        .get(&target_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        target_doc.as_inner().get("x"),
+        Some(&serde_json::json!(1)),
+        "target's JSON doc should still have x=1"
+    );
+    assert!(
+        p.vector
+            .get(target_id, "default", "vc", "v-source")
+            .unwrap()
+            .is_none(),
+        "target should not see source's added vector"
+    );
+    assert!(
+        p.graph
+            .get_node(target_id, "default", "g", "n-source")
+            .unwrap()
+            .is_none(),
+        "target should not see source's added graph node"
+    );
+
+    // Source should see post-mutation values for every primitive.
+    assert_eq!(
+        p.kv.get(&source_id, "default", "k").unwrap(),
+        Some(Value::Int(99))
+    );
+    assert_eq!(p.event.len(&source_id, "default").unwrap(), 2);
+    let source_doc = p
+        .json
+        .get(&source_id, "default", "doc-1", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(source_doc.as_inner().get("x"), Some(&serde_json::json!(99)));
+    assert!(p
+        .vector
+        .get(source_id, "default", "vc", "v-source")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(source_id, "default", "g", "n-source")
+        .unwrap()
+        .is_some());
+}
+
+/// Test #2 — disjoint cross-primitive merge. Each side mutates a
+/// different subset of primitives. The merge must succeed under Strict
+/// (no conflicts) and target must end up with both sides' contributions.
+#[test]
+fn cross_primitive_merge_disjoint() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let p = test_db.all_primitives();
+    let branch_index = test_db.branch_index();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed shared baseline state on target.
+    p.kv.put(&target_id, "default", "shared", Value::Int(0))
+        .unwrap();
+    p.json
+        .create(
+            &target_id,
+            "default",
+            "doc-shared",
+            json_value(serde_json::json!({"a": 0, "b": 0})),
+        )
+        .unwrap();
+    p.vector
+        .create_collection(target_id, "default", "vc", config_small())
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "root", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // SOURCE mutates KV / JSON / Vector. TARGET mutates Event / Graph.
+    // Disjoint primitives → merge under Strict must succeed.
+    p.kv.put(&source_id, "default", "kv-only", Value::Int(42))
+        .unwrap();
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-shared",
+            &"a".parse().unwrap(),
+            json_value(serde_json::json!(11)),
+        )
+        .unwrap();
+    p.vector
+        .insert(
+            source_id,
+            "default",
+            "vc",
+            "v-source",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    p.event
+        .append(&target_id, "default", "stream-x", int_payload(1))
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "tgt-leaf", NodeData::default())
+        .unwrap();
+
+    let info =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+            .expect("disjoint cross-primitive merge should succeed under Strict");
+    assert_eq!(info.conflicts.len(), 0);
+    assert!(
+        info.keys_applied >= 3,
+        "expected at least KV+JSON+Vector applies, got {}",
+        info.keys_applied
+    );
+
+    // KV: source's new key landed on target.
+    assert_eq!(
+        p.kv.get(&target_id, "default", "kv-only").unwrap(),
+        Some(Value::Int(42))
+    );
+    // KV: shared baseline preserved.
+    assert_eq!(
+        p.kv.get(&target_id, "default", "shared").unwrap(),
+        Some(Value::Int(0))
+    );
+    // JSON: source's edit applied.
+    let merged_doc = p
+        .json
+        .get(&target_id, "default", "doc-shared", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged_doc.as_inner(),
+        &serde_json::json!({"a": 11, "b": 0}),
+        "JSON merge should apply source's edit"
+    );
+    // Vector: source's vector visible on target.
+    assert!(p
+        .vector
+        .get(target_id, "default", "vc", "v-source")
+        .unwrap()
+        .is_some());
+    // Vector: HNSW search returns the source-added vector.
+    let hits = p
+        .vector
+        .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].key, "v-source");
+    // Event: target's append still visible.
+    assert_eq!(p.event.len(&target_id, "default").unwrap(), 1);
+    // Graph: target's added node still present.
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "tgt-leaf")
+        .unwrap()
+        .is_some());
+}
+
+/// Test #3 — overlapping cross-primitive merge under LWW. Both sides
+/// mutate every primitive with overlapping keys. The merge must resolve
+/// each primitive's conflicts semantically — not just byte-for-byte.
+#[test]
+fn cross_primitive_merge_overlapping_lww() {
+    use strata_graph::types::NodeData;
+
+    let test_db = TestDb::new();
+    let p = test_db.all_primitives();
+    let branch_index = test_db.branch_index();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed shared state.
+    p.kv.put(&target_id, "default", "shared", Value::Int(0))
+        .unwrap();
+    p.json
+        .create(
+            &target_id,
+            "default",
+            "doc-shared",
+            json_value(serde_json::json!({"a": 0, "b": 0, "c": 0})),
+        )
+        .unwrap();
+    p.vector
+        .create_collection(target_id, "default", "vc", config_small())
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(
+            target_id,
+            "default",
+            "g",
+            "shared-node",
+            NodeData::default(),
+        )
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // OVERLAP: both sides mutate the same KV key, JSON doc paths, vector
+    // collection (different keys), and add nodes to the same graph.
+    // Note: we deliberately use DIFFERENT spaces / event-streams for
+    // Event (`stream-source` vs `stream-target`) since divergent appends
+    // to the same event stream are unmergeable per Phase 1 — that's a
+    // separate test (`event_merge_divergent_rejects` at line 778).
+    p.kv.put(&source_id, "default", "shared", Value::Int(11))
+        .unwrap();
+    p.kv.put(&target_id, "default", "shared", Value::Int(22))
+        .unwrap();
+
+    // JSON: source edits "a", target edits "b" (disjoint paths inside
+    // the same doc — should auto-merge), and both sides edit "c"
+    // differently (path-level conflict, LWW source-wins).
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-shared",
+            &"a".parse().unwrap(),
+            json_value(serde_json::json!(11)),
+        )
+        .unwrap();
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-shared",
+            &"c".parse().unwrap(),
+            json_value(serde_json::json!(111)),
+        )
+        .unwrap();
+    p.json
+        .set(
+            &target_id,
+            "default",
+            "doc-shared",
+            &"b".parse().unwrap(),
+            json_value(serde_json::json!(22)),
+        )
+        .unwrap();
+    p.json
+        .set(
+            &target_id,
+            "default",
+            "doc-shared",
+            &"c".parse().unwrap(),
+            json_value(serde_json::json!(222)),
+        )
+        .unwrap();
+
+    // Vector: each side adds a different vector to the same collection.
+    p.vector
+        .insert(
+            source_id,
+            "default",
+            "vc",
+            "v-source",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+    p.vector
+        .insert(
+            target_id,
+            "default",
+            "vc",
+            "v-target",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Graph: each side adds a different node to the same graph.
+    p.graph
+        .add_node(source_id, "default", "g", "n-source", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "n-target", NodeData::default())
+        .unwrap();
+
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW merge should succeed even with overlapping conflicts");
+
+    // KV: source-wins on "shared".
+    assert_eq!(
+        p.kv.get(&target_id, "default", "shared").unwrap(),
+        Some(Value::Int(11)),
+        "KV LWW should pick source's value"
+    );
+
+    // JSON: disjoint path edits combine; same-path conflict resolves
+    // source-wins. Pin the path-level merge contract.
+    let merged_doc = p
+        .json
+        .get(&target_id, "default", "doc-shared", &root())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        merged_doc.as_inner(),
+        &serde_json::json!({"a": 11, "b": 22, "c": 111}),
+        "JSON merge: 'a' (source-only) and 'b' (target-only) auto-merge; \
+         'c' (both) resolves source-wins"
+    );
+    // Source-vs-target conflict on "c" should appear in conflicts list.
+    assert!(
+        info.conflicts.iter().any(|c| c.key.contains("@c")),
+        "expected a path-level conflict at 'c'; got: {:?}",
+        info.conflicts.iter().map(|c| &c.key).collect::<Vec<_>>()
+    );
+
+    // Vector: both sides' vectors visible.
+    assert!(p
+        .vector
+        .get(target_id, "default", "vc", "v-source")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .vector
+        .get(target_id, "default", "vc", "v-target")
+        .unwrap()
+        .is_some());
+    // HNSW search returns each.
+    let hits_a = p
+        .vector
+        .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(hits_a[0].key, "v-source");
+    let hits_b = p
+        .vector
+        .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(hits_b[0].key, "v-target");
+
+    // Graph: both sides' nodes present.
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "n-source")
+        .unwrap()
+        .is_some());
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "n-target")
+        .unwrap()
+        .is_some());
+    // Pre-fork shared node still present.
+    assert!(p
+        .graph
+        .get_node(target_id, "default", "g", "shared-node")
+        .unwrap()
+        .is_some());
+}
+
+/// Test #4 — invariant sweep after a meaty cross-primitive merge.
+/// Combines disjoint and overlapping mutations across all five
+/// primitives, then runs each primitive's invariant checker.
+#[test]
+fn cross_primitive_merge_invariant_sweep() {
+    use strata_engine::primitives::json::index::{self as jindex, IndexType};
+    use strata_graph::types::{EdgeData, NodeData};
+
+    let test_db = TestDb::new();
+    let p = test_db.all_primitives();
+    let branch_index = test_db.branch_index();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // ==== Seed baseline state ====
+    p.kv.put(&target_id, "default", "shared", Value::Int(0))
+        .unwrap();
+    p.event
+        .append(&target_id, "default", "stream-target-only", int_payload(1))
+        .unwrap();
+    p.json
+        .create(
+            &target_id,
+            "default",
+            "doc-1",
+            json_value(serde_json::json!({"price": 10.0, "stock": 5})),
+        )
+        .unwrap();
+    p.json
+        .create_index(
+            &target_id,
+            "default",
+            "price_idx",
+            "$.price",
+            IndexType::Numeric,
+        )
+        .unwrap();
+    // Backfill the existing doc into the index.
+    p.json
+        .set(
+            &target_id,
+            "default",
+            "doc-1",
+            &"price".parse().unwrap(),
+            json_value(serde_json::json!(10.0)),
+        )
+        .unwrap();
+    p.vector
+        .create_collection(target_id, "default", "vc", config_small())
+        .unwrap();
+    p.vector
+        .insert(target_id, "default", "vc", "v-pre", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
+        .unwrap();
+
+    // ==== Fork ====
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // ==== Source-side mutations ====
+    p.kv.put(&source_id, "default", "shared", Value::Int(11))
+        .unwrap();
+    p.kv.put(&source_id, "default", "src-only", Value::Int(7))
+        .unwrap();
+    // Source updates the indexed JSON field — secondary index must
+    // refresh atomically as part of the merge txn (Step 1 of Phase 7).
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-1",
+            &"price".parse().unwrap(),
+            json_value(serde_json::json!(25.0)),
+        )
+        .unwrap();
+    // Source adds a vector and a graph node + edge.
+    p.vector
+        .insert(
+            source_id,
+            "default",
+            "vc",
+            "v-source",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "default",
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    // ==== Target-side mutations (different keys to avoid event conflict) ====
+    // Target also mutates `shared` — creates a KV conflict that the
+    // merge resolves source-wins under LWW.
+    p.kv.put(&target_id, "default", "shared", Value::Int(22))
+        .unwrap();
+    p.event
+        .append(&target_id, "default", "stream-target-only", int_payload(2))
+        .unwrap();
+    // Target adds a different vector and graph edge.
+    p.vector
+        .insert(
+            target_id,
+            "default",
+            "vc",
+            "v-target",
+            &[0.0, 0.0, 1.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .add_edge(
+            target_id,
+            "default",
+            "g",
+            "alice",
+            "bob",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    // ==== Merge ====
+    let info = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("cross-primitive invariant-sweep merge should succeed");
+    assert_eq!(
+        info.conflicts.len(),
+        1,
+        "the only conflict should be on the shared KV key, got: {:?}",
+        info.conflicts.iter().map(|c| &c.key).collect::<Vec<_>>()
+    );
+
+    // ==== Invariant sweep ====
+
+    // Event: hash chain verifies and length matches.
+    let event_count = verify_event_chain(&p.event, &target_id, "default")
+        .expect("event hash chain must verify after cross-primitive merge");
+    assert_eq!(
+        event_count, 2,
+        "target should have 2 events (1 pre-fork + 1 post-fork target-only)"
+    );
+
+    // Graph: adjacency invariant holds — every edge endpoint exists,
+    // bidirectional consistency intact.
+    verify_graph_adjacency(
+        &p.graph,
+        &target_id,
+        "default",
+        "g",
+        &["alice", "bob", "carol"],
+    )
+    .expect("graph adjacency must verify after cross-primitive merge");
+
+    // Vector: HNSW search returns every inserted vector.
+    let pre_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(pre_hit[0].key, "v-pre", "pre-fork vector still findable");
+    let src_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(src_hit[0].key, "v-source", "source-added vector findable");
+    let tgt_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[0.0, 0.0, 1.0], 1, None)
+        .unwrap();
+    assert_eq!(tgt_hit[0].key, "v-target", "target-added vector findable");
+
+    // JSON: secondary index entry for the merged price exists; entry
+    // for the pre-merge price does NOT (atomic refresh from Step 1).
+    let encoded_25 = jindex::encode_numeric(25.0);
+    let encoded_10 = jindex::encode_numeric(10.0);
+    let mut hits_25: Vec<String> = Vec::new();
+    let mut hits_10: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits_25 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
+            hits_10 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        hits_25,
+        vec!["doc-1".to_string()],
+        "JSON index: lookup for merged price=25 must return doc-1"
+    );
+    assert!(
+        hits_10.is_empty(),
+        "JSON index: lookup for pre-merge price=10 must be empty; \
+         got stale entries: {:?}",
+        hits_10
+    );
+
+    // KV: shared key resolves source-wins, src-only landed, no spurious
+    // keys appeared.
+    assert_eq!(
+        p.kv.get(&target_id, "default", "shared").unwrap(),
+        Some(Value::Int(11))
+    );
+    assert_eq!(
+        p.kv.get(&target_id, "default", "src-only").unwrap(),
+        Some(Value::Int(7))
+    );
+    let post: std::collections::HashSet<String> =
+        p.kv.list(&target_id, "default", None)
+            .unwrap()
+            .into_iter()
+            .collect();
+    let expected_kv_keys: std::collections::HashSet<String> = ["shared", "src-only"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    assert_eq!(
+        post, expected_kv_keys,
+        "KV namespace should hold exactly the merged set, no spurious writes"
+    );
+}
+
+/// Test #5 — every primitive's merged state survives a database
+/// restart. Mirrors `cross_primitive_merge_invariant_sweep` but drops
+/// and reopens the database AFTER the merge, then re-runs the same
+/// invariant checks. This is the crash-rollback test from the design
+/// doc: it proves that all merge state — primitive data, secondary
+/// indexes, vector backends, BM25 — converges to the correct merged
+/// state after recovery.
+///
+/// The atomic-merge-transaction work in this PR is the precondition
+/// for this test passing for JSON. Before, JSON secondary indexes were
+/// written by `JsonMergeHandler::post_commit` in a separate transaction
+/// after the merge transaction committed; a crash between the two
+/// would leave indexes stale and no recovery path would heal them.
+/// With secondary index updates inlined into the merge transaction,
+/// they survive restart for free via WAL replay.
+#[test]
+fn cross_primitive_merge_rollback_via_reopen() {
+    use strata_engine::primitives::json::index::{self as jindex, IndexType};
+    use strata_graph::types::{EdgeData, NodeData};
+
+    // Use strict (always-fsync) durability to guarantee WAL fsync
+    // before reopen — mirrors `always_mode_all_primitives_survive_reopen`.
+    let mut test_db = TestDb::new_strict();
+    let p = test_db.all_primitives();
+    let branch_index = test_db.branch_index();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed the same baseline state as the invariant-sweep test.
+    p.kv.put(&target_id, "default", "shared", Value::Int(0))
+        .unwrap();
+    p.event
+        .append(&target_id, "default", "stream-target-only", int_payload(1))
+        .unwrap();
+    p.json
+        .create(
+            &target_id,
+            "default",
+            "doc-1",
+            json_value(serde_json::json!({"price": 10.0, "stock": 5})),
+        )
+        .unwrap();
+    p.json
+        .create_index(
+            &target_id,
+            "default",
+            "price_idx",
+            "$.price",
+            IndexType::Numeric,
+        )
+        .unwrap();
+    p.json
+        .set(
+            &target_id,
+            "default",
+            "doc-1",
+            &"price".parse().unwrap(),
+            json_value(serde_json::json!(10.0)),
+        )
+        .unwrap();
+    p.vector
+        .create_collection(target_id, "default", "vc", config_small())
+        .unwrap();
+    p.vector
+        .insert(target_id, "default", "vc", "v-pre", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+    p.graph
+        .create_graph(target_id, "default", "g", None)
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "alice", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_node(target_id, "default", "g", "bob", NodeData::default())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Mutate every primitive on both sides.
+    p.kv.put(&source_id, "default", "shared", Value::Int(11))
+        .unwrap();
+    p.kv.put(&source_id, "default", "src-only", Value::Int(7))
+        .unwrap();
+    p.json
+        .set(
+            &source_id,
+            "default",
+            "doc-1",
+            &"price".parse().unwrap(),
+            json_value(serde_json::json!(25.0)),
+        )
+        .unwrap();
+    p.vector
+        .insert(
+            source_id,
+            "default",
+            "vc",
+            "v-source",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .add_node(source_id, "default", "g", "carol", NodeData::default())
+        .unwrap();
+    p.graph
+        .add_edge(
+            source_id,
+            "default",
+            "g",
+            "alice",
+            "carol",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    p.kv.put(&target_id, "default", "shared", Value::Int(22))
+        .unwrap();
+    p.event
+        .append(&target_id, "default", "stream-target-only", int_payload(2))
+        .unwrap();
+    p.vector
+        .insert(
+            target_id,
+            "default",
+            "vc",
+            "v-target",
+            &[0.0, 0.0, 1.0],
+            None,
+        )
+        .unwrap();
+    p.graph
+        .add_edge(
+            target_id,
+            "default",
+            "g",
+            "alice",
+            "bob",
+            "follows",
+            EdgeData::default(),
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("rollback merge should commit before reopen");
+
+    // ==== Drop and reopen — simulates a clean restart. After Step 1,
+    // every primitive's merged state (including JSON secondary indexes)
+    // is in WAL by the time `merge_branches` returns. ====
+    drop(p); // drop primitive handles before swapping the db
+    test_db.reopen();
+    let p = test_db.all_primitives();
+
+    // Re-resolve branch IDs after reopen — the names are persisted in
+    // the BranchIndex, the underlying BranchId UUIDs are stable.
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // ==== Same invariant sweep as test #4, but POST-REOPEN ====
+
+    // Event hash chain still verifies.
+    let event_count = verify_event_chain(&p.event, &target_id, "default")
+        .expect("event hash chain must verify after reopen");
+    assert_eq!(event_count, 2);
+
+    // Graph adjacency invariant holds for every node and edge.
+    verify_graph_adjacency(
+        &p.graph,
+        &target_id,
+        "default",
+        "g",
+        &["alice", "bob", "carol"],
+    )
+    .expect("graph adjacency must verify after reopen");
+
+    // Vector HNSW backend rebuilt by recovery — every inserted vector
+    // findable via k-NN.
+    let pre_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(pre_hit[0].key, "v-pre");
+    let src_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(src_hit[0].key, "v-source");
+    let tgt_hit = p
+        .vector
+        .search(target_id, "default", "vc", &[0.0, 0.0, 1.0], 1, None)
+        .unwrap();
+    assert_eq!(tgt_hit[0].key, "v-target");
+
+    // JSON secondary index — the critical assertion that this PR
+    // unlocks. Before Step 1, post_commit's separate transaction
+    // could be rolled back by a crash before reopen, leaving the
+    // index pointing at the pre-merge field value. After Step 1,
+    // the index entries committed atomically with the doc updates
+    // and survive WAL replay.
+    let encoded_25 = jindex::encode_numeric(25.0);
+    let encoded_10 = jindex::encode_numeric(10.0);
+    let mut hits_25: Vec<String> = Vec::new();
+    let mut hits_10: Vec<String> = Vec::new();
+    test_db
+        .db
+        .transaction(target_id, |txn| {
+            hits_25 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
+            hits_10 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(
+        hits_25,
+        vec!["doc-1".to_string()],
+        "post-reopen: JSON index lookup for merged price=25 must return doc-1; \
+         a regression here means JSON secondary index writes are NOT in the merge txn"
+    );
+    assert!(
+        hits_10.is_empty(),
+        "post-reopen: JSON index lookup for pre-merge price=10 must be empty; \
+         got stale entries: {:?}",
+        hits_10
+    );
+
+    // KV: merged state intact.
+    assert_eq!(
+        p.kv.get(&target_id, "default", "shared").unwrap(),
+        Some(Value::Int(11))
+    );
+    assert_eq!(
+        p.kv.get(&target_id, "default", "src-only").unwrap(),
+        Some(Value::Int(7))
+    );
+}

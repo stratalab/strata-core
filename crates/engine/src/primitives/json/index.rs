@@ -191,10 +191,26 @@ pub fn index_meta_space_name(collection_space: &str) -> String {
     format!("_idx_meta/{}", collection_space)
 }
 
+/// Build the user_key bytes for an index entry.
+///
+/// Format: `encoded_value ++ 0xFF ++ doc_id`
+/// This ensures entries sort by value, then by doc_id within the same value.
+///
+/// Exported separately from `index_entry_key` so callers that need just
+/// the raw bytes (e.g. `branch_ops::primitive_merge::JsonMergeHandler`
+/// building `MergeAction`s) don't need to build a full `Key` only to
+/// destructure it.
+pub fn index_entry_user_key(encoded_value: &[u8], doc_id: &str) -> Vec<u8> {
+    let mut user_key = Vec::with_capacity(encoded_value.len() + 1 + doc_id.len());
+    user_key.extend_from_slice(encoded_value);
+    user_key.push(INDEX_KEY_SEPARATOR);
+    user_key.extend_from_slice(doc_id.as_bytes());
+    user_key
+}
+
 /// Build an index entry key.
 ///
-/// The user_key portion is: `encoded_value ++ 0xFF ++ doc_id`
-/// This ensures entries sort by value, then by doc_id within the same value.
+/// The user_key portion is `index_entry_user_key(encoded_value, doc_id)`.
 pub fn index_entry_key(
     branch_id: &BranchId,
     collection_space: &str,
@@ -204,13 +220,7 @@ pub fn index_entry_key(
 ) -> Key {
     let space = index_space_name(collection_space, index_name);
     let ns = Arc::new(Namespace::for_branch_space(*branch_id, &space));
-
-    // Build composite user key: encoded_value ++ 0xFF ++ doc_id
-    let mut user_key = Vec::with_capacity(encoded_value.len() + 1 + doc_id.len());
-    user_key.extend_from_slice(encoded_value);
-    user_key.push(INDEX_KEY_SEPARATOR);
-    user_key.extend_from_slice(doc_id.as_bytes());
-
+    let user_key = index_entry_user_key(encoded_value, doc_id);
     Key::new(ns, TypeTag::Json, user_key)
 }
 

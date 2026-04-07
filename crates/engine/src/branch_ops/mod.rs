@@ -666,6 +666,25 @@ fn type_tag_to_primitive(tag: TypeTag) -> PrimitiveType {
     }
 }
 
+/// Decide whether a space name belongs in the user-visible `SpaceIndex`.
+///
+/// Internal namespaces used by primitive secondary indexes (e.g.
+/// `_idx/{collection_space}/{index_name}` for JSON secondary index
+/// entries, `_idx_meta/{collection_space}` for JSON index metadata)
+/// are written through normal `Key::new(...)` plumbing during a merge,
+/// so they would otherwise show up as MergeAction.space values and get
+/// auto-registered with `SpaceIndex` like any user space. They are
+/// implementation details that should not pollute `db.list_spaces()` /
+/// `SpaceIndex::list(...)`.
+///
+/// Used by `merge_branches` and `cherry_pick_from_diff` to filter the
+/// `spaces_touched` set before calling `space_index.register`. The
+/// underlying KV writes still happen — only the SpaceIndex bookkeeping
+/// is suppressed.
+pub(crate) fn is_user_visible_space(space: &str) -> bool {
+    !(space.starts_with("_idx/") || space.starts_with("_idx_meta/"))
+}
+
 /// Format a user key as a readable string (UTF-8 or hex for binary).
 pub(crate) fn format_user_key(user_key: &[u8]) -> String {
     match std::str::from_utf8(user_key) {
@@ -1857,12 +1876,16 @@ pub fn merge_branches(
     }
 
     // Each handler produces its own per-primitive write plan.
-    // KV / JSON / Vector / Event use the trait's default `plan` impl
-    // which delegates to `classify_typed_entries_for_tag` (the 14-case
-    // decision matrix). GraphMergeHandler::plan overrides with the real
+    // KV / Vector / Event use the trait's default `plan` impl which
+    // delegates to `classify_typed_entries_for_tag` (the 14-case
+    // decision matrix). `GraphMergeHandler::plan` overrides with the
     // semantic merge that decodes packed adjacency lists, validates
     // referential integrity, and re-encodes the projected state.
+    // `JsonMergeHandler::plan` overrides with per-document path-level
+    // merge AND emits secondary index `MergeAction`s for `_idx/...`
+    // namespaces so doc + index updates commit atomically.
     let plan_ctx = MergePlanCtx {
+        db,
         source_id,
         target_id,
         merge_base: &merge_base,
@@ -1893,18 +1916,29 @@ pub fn merge_branches(
     let mut spaces_touched: HashSet<String> = HashSet::new();
     let mut merge_version: Option<u64> = None;
 
-    // Group actions by space for space registration
+    // Group actions by space for space registration. Internal
+    // namespaces used by secondary indexes (`_idx/...`, `_idx_meta/...`)
+    // are filtered via `is_user_visible_space` so they don't pollute
+    // SpaceIndex — they're implementation details, not user spaces.
     for action in &actions {
         spaces_touched.insert(action.space.clone());
     }
     for space in &spaces_touched {
-        if space != "default" {
+        if space != "default" && is_user_visible_space(space) {
             space_index.register(target_id, space)?;
         }
     }
 
     if !actions.is_empty() {
-        // Build puts, deletes, and expected target values for validation (#1917)
+        // Build puts, deletes, and expected target values for validation (#1917).
+        // OCC is enforced for user-visible namespaces (the actual primitive
+        // data) but skipped for internal namespaces (`_idx/...`,
+        // `_idx_meta/...`) used by secondary indexes — those entries are
+        // derived from the doc-level actions whose OCC IS enforced, so
+        // duplicating the check would be redundant and would also fail
+        // spuriously when a concurrent JSON write modifies the index
+        // entries between gather and apply (the doc-level OCC catches
+        // that race correctly).
         let mut puts: Vec<(Key, Value)> = Vec::new();
         let mut deletes: Vec<Key> = Vec::new();
         let mut expected_targets: Vec<(Key, Option<Value>)> = Vec::new();
@@ -1912,7 +1946,9 @@ pub fn merge_branches(
         for action in &actions {
             let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
             let key = Key::new(ns, action.type_tag, action.raw_key.clone());
-            expected_targets.push((key.clone(), action.expected_target.clone()));
+            if is_user_visible_space(&action.space) {
+                expected_targets.push((key.clone(), action.expected_target.clone()));
+            }
             match &action.action {
                 MergeActionKind::Put(value) => {
                     puts.push((key, value.clone()));
@@ -2962,6 +2998,7 @@ pub fn cherry_pick_from_diff(
     }
 
     let plan_ctx = MergePlanCtx {
+        db,
         source_id,
         target_id,
         merge_base: &merge_base,
@@ -3025,7 +3062,9 @@ pub fn cherry_pick_from_diff(
         })
         .collect();
 
-    // Register spaces and build puts/deletes
+    // Register spaces and build puts/deletes. Internal namespaces
+    // (`_idx/...`, `_idx_meta/...`) are filtered out via
+    // `is_user_visible_space` so they don't pollute SpaceIndex.
     let mut puts: Vec<(Key, Value)> = Vec::new();
     let mut deletes: Vec<Key> = Vec::new();
     let mut spaces_touched: HashSet<String> = HashSet::new();
@@ -3034,16 +3073,22 @@ pub fn cherry_pick_from_diff(
         spaces_touched.insert(action.space.clone());
     }
     for space in &spaces_touched {
-        if space != "default" {
+        if space != "default" && is_user_visible_space(space) {
             space_index.register(target_id, space)?;
         }
     }
 
+    // OCC validation is enforced for user-visible namespaces only;
+    // internal namespaces (`_idx/...`, `_idx_meta/...`) are derived
+    // from the doc-level actions whose OCC IS validated. See the
+    // matching comment in `merge_branches` for the rationale.
     let mut expected_targets: Vec<(Key, Option<Value>)> = Vec::new();
     for action in &filtered_actions {
         let ns = Arc::new(Namespace::for_branch_space(target_id, &action.space));
         let key = Key::new(ns, action.type_tag, action.raw_key.clone());
-        expected_targets.push((key.clone(), action.expected_target.clone()));
+        if is_user_visible_space(&action.space) {
+            expected_targets.push((key.clone(), action.expected_target.clone()));
+        }
         match &action.action {
             MergeActionKind::Put(value) => {
                 puts.push((key, value.clone()));
