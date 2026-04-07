@@ -188,10 +188,20 @@ impl From<VectorError> for StrataError {
 
         match e {
             VectorError::CollectionNotFound { name } => StrataError::NotFound {
-                entity_ref: Box::new(EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, name, "")),
+                entity_ref: Box::new(EntityRef::vector(
+                    placeholder_branch_id,
+                    UNKNOWN_SPACE,
+                    name,
+                    "",
+                )),
             },
             VectorError::CollectionAlreadyExists { name } => StrataError::InvalidOperation {
-                entity_ref: Box::new(EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, name, "")),
+                entity_ref: Box::new(EntityRef::vector(
+                    placeholder_branch_id,
+                    UNKNOWN_SPACE,
+                    name,
+                    "",
+                )),
                 reason: "Collection already exists".to_string(),
             },
             VectorError::DimensionMismatch { expected, got } => {
@@ -201,7 +211,12 @@ impl From<VectorError> for StrataError {
                 message: format!("Invalid dimension: {} (must be > 0)", dimension),
             },
             VectorError::VectorNotFound { key } => StrataError::NotFound {
-                entity_ref: Box::new(EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, "unknown", key)),
+                entity_ref: Box::new(EntityRef::vector(
+                    placeholder_branch_id,
+                    UNKNOWN_SPACE,
+                    "unknown",
+                    key,
+                )),
             },
             VectorError::EmptyEmbedding => StrataError::InvalidInput {
                 message: "Empty embedding".to_string(),
@@ -216,7 +231,12 @@ impl From<VectorError> for StrataError {
                 message: format!("Invalid key '{}': {}", key, reason),
             },
             VectorError::ConfigMismatch { collection, field } => StrataError::InvalidOperation {
-                entity_ref: Box::new(EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, collection, "")),
+                entity_ref: Box::new(EntityRef::vector(
+                    placeholder_branch_id,
+                    UNKNOWN_SPACE,
+                    collection,
+                    "",
+                )),
                 reason: format!("Config field '{}' cannot be changed", field),
             },
             VectorError::SearchLimitExceeded { requested, max } => StrataError::CapacityExceeded {
