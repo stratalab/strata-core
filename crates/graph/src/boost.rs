@@ -47,6 +47,7 @@ impl Default for GraphBoost {
 pub fn compute_proximity_map(
     gs: &GraphStore,
     branch_id: BranchId,
+    space: &str,
     boost: &GraphBoost,
 ) -> StrataResult<HashMap<String, f64>> {
     let mut proximity: HashMap<String, f64> = HashMap::new();
@@ -54,6 +55,7 @@ pub fn compute_proximity_map(
     for anchor in &boost.anchors {
         let result = gs.bfs(
             branch_id,
+            space,
             &boost.graph,
             anchor,
             BfsOptions {
@@ -73,7 +75,7 @@ pub fn compute_proximity_map(
             };
 
             // Look up the node's entity_ref to map it
-            if let Some(data) = gs.get_node(branch_id, &boost.graph, node_id)? {
+            if let Some(data) = gs.get_node(branch_id, space, &boost.graph, node_id)? {
                 if let Some(uri) = data.entity_ref {
                     let existing = proximity.get(&uri).copied().unwrap_or(0.0);
                     // Use the closest anchor (maximum proximity)
@@ -114,7 +116,7 @@ mod tests {
 
     fn build_chain(gs: &GraphStore, b: BranchId) {
         // A → B → C → D, each with entity_ref
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for (id, uri) in &[
             ("A", "kv://main/A"),
             ("B", "kv://main/B"),
@@ -123,6 +125,7 @@ mod tests {
         ] {
             gs.add_node(
                 b,
+                "default",
                 "g",
                 id,
                 NodeData {
@@ -133,11 +136,11 @@ mod tests {
             )
             .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "C", "D", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "C", "D", "E", EdgeData::default())
             .unwrap();
     }
 
@@ -150,6 +153,7 @@ mod tests {
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into()],
@@ -171,6 +175,7 @@ mod tests {
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into()],
@@ -192,6 +197,7 @@ mod tests {
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into()],
@@ -213,6 +219,7 @@ mod tests {
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into()],
@@ -248,11 +255,12 @@ mod tests {
     fn empty_anchors_empty_map() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec![],
@@ -273,7 +281,7 @@ mod tests {
         // Anchors: A and D
         // B is 1-hop from A, 2-hop from D → proximity 0.5 (closest)
         // C is 2-hop from A, 1-hop from D → proximity 0.5 (closest)
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for (id, uri) in &[
             ("A", "kv://main/A"),
             ("B", "kv://main/B"),
@@ -282,6 +290,7 @@ mod tests {
         ] {
             gs.add_node(
                 b,
+                "default",
                 "g",
                 id,
                 NodeData {
@@ -292,16 +301,17 @@ mod tests {
             )
             .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "D", "C", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "D", "C", "E", EdgeData::default())
             .unwrap();
 
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into(), "D".into()],
@@ -324,9 +334,10 @@ mod tests {
     fn node_without_entity_ref_not_in_proximity_map() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "A",
             NodeData {
@@ -336,13 +347,15 @@ mod tests {
             },
         )
         .unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
 
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "g".into(),
                 anchors: vec!["A".into()],
@@ -371,6 +384,7 @@ mod tests {
         let prox = compute_proximity_map(
             &gs,
             b,
+            "default",
             &GraphBoost {
                 graph: "nonexistent".into(),
                 anchors: vec!["X".into()],

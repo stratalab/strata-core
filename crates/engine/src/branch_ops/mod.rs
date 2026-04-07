@@ -12,8 +12,7 @@
 //! ## Submodules
 //!
 //! - [`primitive_merge`] — `PrimitiveMergeHandler` trait and per-primitive
-//!   handlers (Phase 2 of primitive-aware merge). See
-//!   `docs/design/branching/primitive-aware-merge.md`.
+//!   handlers. See `docs/design/branching/primitive-aware-merge.md`.
 
 pub mod primitive_merge;
 
@@ -156,20 +155,20 @@ fn build_live_space_map(entries: &[(Key, VersionedValue)]) -> HashMap<(String, V
 }
 
 // =============================================================================
-// Event merge safety (Phase 1 of primitive-aware merge)
+// Event merge safety
 // =============================================================================
 //
 // See docs/design/branching/primitive-aware-merge.md for context. The generic
 // three-way merge treats EventLog records as opaque `(space, TypeTag::Event,
 // user_key)` triples, which silently corrupts the hash chain and per-type
-// index when both sides of a fork have appended to the same space. Phase 1
-// detects this case and refuses the merge before any writes happen.
+// index when both sides of a fork have appended to the same space. The
+// `check_event_merge_divergence` helper detects this case and refuses the
+// merge before any writes happen.
 //
-// The detection lives inside `three_way_diff` (see below) and piggybacks on
-// the version-scoped reads the diff already performs, so there is no extra
-// storage cost. Single-sided merges and merges where the divergence is
-// across different spaces continue through the existing generic path
-// unchanged.
+// The detection piggybacks on the version-scoped reads the diff already
+// performs, so there is no extra storage cost. Single-sided merges and
+// merges where the divergence is across different spaces continue through
+// the existing generic path unchanged.
 
 /// The fixed user_key bytes used by `EventLog` for its per-(branch, space)
 /// metadata row. Keep in sync with `Key::new_event_meta` in core.
@@ -229,8 +228,8 @@ fn extract_event_meta_from_live(
 }
 
 /// Return `Err` if both source and target have appended events to `space`
-/// since the merge base. This is the Phase 1 "refuse divergent Event merge"
-/// check described in docs/design/branching/primitive-aware-merge.md.
+/// since the merge base. This is the "refuse divergent Event merge" check
+/// described in docs/design/branching/primitive-aware-merge.md.
 ///
 /// The rule is per-space: cross-space divergence (e.g. source wrote to
 /// "orders" while target wrote to "users") is allowed because each space's
@@ -282,13 +281,20 @@ fn check_event_merge_divergence(
 }
 
 // =============================================================================
-// Graph merge safety (Phase 3 of primitive-aware merge)
+// Graph merge safety: tactical divergence refusal
 // =============================================================================
 //
-// See docs/design/branching/primitive-aware-merge.md §Phase 3. The generic
-// three-way merge treats `_graph_` keys as opaque KV under `TypeTag::Graph`,
-// which produces two distinct corruption modes when both branches modify
-// graph state since the merge base:
+// The graph crate ships a real semantic merge that handles divergent
+// branches correctly (decoded edge diffing, additive merging of disjoint
+// edges, referential integrity validation). Production builds register
+// it via `register_graph_merge_plan`. The fallback in this file is the
+// tactical "refuse any divergent graph merge" rule, used only by engine
+// unit tests that don't load the graph crate.
+//
+// Without the semantic merge, the generic three-way merge would treat
+// `(space, TypeTag::Graph)` cells as opaque KV, producing two distinct
+// corruption modes when both branches modify graph state since the merge
+// base:
 //
 //   1. **Bidirectional adjacency inconsistency under LWW.** Edges live as
 //      packed binary in two physical locations: `{graph}/fwd/{src}` and
@@ -307,17 +313,13 @@ fn check_event_merge_divergence(
 //      classified `TargetAdded` and survives — leaving a dangling reference
 //      to the now-deleted node X.
 //
-// Phase 3 closes both with a tactical refusal: if BOTH source and target
-// have any graph writes since the merge base, we abort the merge before
-// any classification or write happens. Single-sided graph merges (only
-// one branch touched graph state) continue working unchanged because each
-// edge addition writes both `fwd/{src}` and `rev/{dst}` together as one
-// transactional unit, so the generic merge transports them as a coherent
-// group.
-//
-// Phase 3b (future) implements the real semantic merge — decoded-edge
-// diffing, additive merging of disjoint edges, referential integrity
-// validation. See docs/design/branching/primitive-aware-merge.md §Phase 3b.
+// The fallback closes both with a tactical refusal: if BOTH source and
+// target have any graph writes since the merge base, we abort the merge
+// before any classification or write happens. Single-sided graph merges
+// (only one branch touched graph state) continue working unchanged
+// because each edge addition writes both `fwd/{src}` and `rev/{dst}`
+// together as one transactional unit, so the generic merge transports
+// them as a coherent group.
 
 /// Returns `true` if `side` differs from `ancestor` at any key. Used by
 /// `check_graph_merge_divergence` to detect "this branch made any graph
@@ -356,16 +358,17 @@ fn graph_side_modified(
 }
 
 /// Return `Err` if both source and target have made any modifications to
-/// graph data in `space` since the merge base. This is the Phase 3
+/// graph data in `space` since the merge base. This is the
 /// "refuse divergent Graph merge" check described in
 /// docs/design/branching/primitive-aware-merge.md.
 ///
 /// The rule is per-space: cross-space divergence (source touched space A,
 /// target touched space B) is allowed because each space's graph keys
-/// classify cleanly under the generic three-way merge. Today Graph is
-/// hardwired to the reserved `_graph_` space (Phase 6 will lift this), so
-/// in practice only one space is checked per merge — but the rule is
-/// space-agnostic by construction.
+/// classify cleanly under the generic three-way merge.
+///
+/// This helper is only reachable from `GraphMergeHandler::precheck`'s
+/// fallback when no semantic merge is registered (engine-only unit
+/// tests). In production the graph crate's semantic merge runs instead.
 ///
 /// Single-sided graph merges (only one of source/target has graph writes
 /// since the merge base) intentionally pass through this check unchanged.
@@ -386,9 +389,10 @@ fn check_graph_merge_divergence(
         return Err(StrataError::invalid_input(format!(
             "merge unsupported: divergent graph writes in space '{space}' since fork. \
              Graph branch merge with concurrent writes on both sides of the fork is \
-             not yet semantically safe — single-sided graph merges still work. \
+             not semantically safe under the fallback divergence-refusal path — \
+             single-sided graph merges still work. \
              See docs/design/branching/primitive-aware-merge.md for the full design \
-             and the path to a semantic graph merge (Phase 3b)."
+             and the semantic graph merge that handles this case."
         )));
     }
 
@@ -1340,10 +1344,10 @@ fn classify_change(
 /// A merge action to apply to the target branch.
 ///
 /// `pub` (re-exported from `strata_engine`) so primitive crates that
-/// register graph plan callbacks can construct one directly. Phase 3b
-/// graph semantic merge produces these from inside the graph crate.
+/// register graph plan callbacks can construct one directly — the graph
+/// crate's semantic merge produces these from inside its plan function.
 pub struct MergeAction {
-    /// Space name within the branch (e.g., `"_graph_"` for graph data).
+    /// Space name within the branch.
     pub space: String,
     /// Raw user-key bytes (the format depends on `type_tag`).
     pub raw_key: Vec<u8>,
@@ -1567,9 +1571,10 @@ pub(crate) fn gather_typed_entries(
 ///
 /// Extracted as a helper so `classify_typed_entries_for_tag` (used by the
 /// per-handler `plan` default impl) has a single per-cell classification
-/// implementation. Phase 3c removed the unfiltered `classify_typed_entries`
-/// wrapper since the only remaining caller (cherry-pick) now uses the
-/// per-handler `plan` dispatch directly.
+/// implementation. The unfiltered `classify_typed_entries` wrapper that
+/// once existed has been removed — both `merge_branches` and
+/// `cherry_pick_from_diff` go through the per-handler `plan` dispatch
+/// instead, which calls `classify_typed_entries_for_tag` per primitive.
 fn classify_cell(
     space: &str,
     type_tag: TypeTag,
@@ -1746,12 +1751,10 @@ pub(crate) fn classify_typed_entries_for_tag(
     (actions, conflicts)
 }
 
-// Note: the legacy `three_way_diff` wrapper was removed as part of Phase 2.
-// `merge_branches` and (since Phase 3c) `cherry_pick_from_diff` both call
-// `gather_typed_entries` followed by the per-handler `precheck` + `plan`
-// dispatch via `MergeHandlerRegistry`. The unfiltered `classify_typed_entries`
-// wrapper was removed in Phase 3c — its only remaining caller (cherry-pick)
-// now uses the per-handler plan dispatch.
+// Note: there's no `three_way_diff` wrapper. `merge_branches` and
+// `cherry_pick_from_diff` both call `gather_typed_entries` followed by
+// the per-handler `precheck` + `plan` dispatch via `MergeHandlerRegistry`,
+// which calls `classify_typed_entries_for_tag` per primitive.
 
 /// Reload secondary index backends after merge.
 fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id: BranchId) {
@@ -1820,9 +1823,9 @@ pub fn merge_branches(
     // Capture snapshot version for consistent reads during diff (#1917)
     let snapshot_version = db.current_version();
 
-    // Phase 2: gather typed entries once, then route through the
+    // Gather typed entries once, then route through the
     // PrimitiveMergeHandler registry. The registry's `precheck` step is
-    // where Phase 1's Event divergence safety check now lives — see
+    // where the Event divergence safety check lives — see
     // `EventMergeHandler::precheck` and the design doc at
     // docs/design/branching/primitive-aware-merge.md.
     let typed = gather_typed_entries(
@@ -1846,10 +1849,10 @@ pub fn merge_branches(
         registry.get(tag).precheck(&precheck_ctx)?;
     }
 
-    // Phase 3b: each handler now produces its own per-primitive write plan.
-    // KV / JSON / Vector / Event use the trait's default `plan` impl which
-    // delegates to `classify_typed_entries_for_tag` (the same 14-case
-    // matrix as Phase 2). GraphMergeHandler::plan overrides with the real
+    // Each handler produces its own per-primitive write plan.
+    // KV / JSON / Vector / Event use the trait's default `plan` impl
+    // which delegates to `classify_typed_entries_for_tag` (the 14-case
+    // decision matrix). GraphMergeHandler::plan overrides with the real
     // semantic merge that decodes packed adjacency lists, validates
     // referential integrity, and re-encodes the projected state.
     let plan_ctx = MergePlanCtx {
@@ -1942,10 +1945,13 @@ pub fn merge_branches(
         merge_version = Some(version);
     }
 
-    // Phase 2: post-commit handlers run before the existing reload sweep.
-    // All Phase 2 handlers are no-ops here; Phases 3 (Graph adjacency) and
-    // 5 (JSON per-key index refresh) will fill them in and incrementally
-    // retire `reload_secondary_backends`.
+    // Per-primitive post-commit handlers run before the existing reload
+    // sweep. All handlers are no-ops today; secondary index refresh
+    // currently happens via the `reload_secondary_backends` call below.
+    // The per-primitive hook is preserved so individual primitives can
+    // take ownership of their own post-merge refresh incrementally
+    // (e.g. JSON inverted-index refresh, which is still a TODO inside
+    // `JsonMergeHandler`).
     let post_ctx = MergePostCommitCtx {
         db,
         source_id,
@@ -2777,7 +2783,7 @@ pub fn cherry_pick_keys(
     })
 }
 
-/// Phase 3c — graph cherry-pick atomicity guard.
+/// Graph cherry-pick atomicity guard.
 ///
 /// Graph plan actions for the same `(space, Graph)` cell are interdependent
 /// (`n/X`, `fwd/X`, `rev/Y`, `__edge_count__/T` for the same logical change
@@ -2788,9 +2794,10 @@ pub fn cherry_pick_keys(
 ///   cell is either entirely in or entirely out, regardless of which actions
 ///   it produced.
 /// - `keys` is the dangerous one: a user-supplied set of `user_key` strings
-///   could include `g/n/alice` but exclude `g/fwd/alice`, leaving target with
-///   the node but no outgoing adjacency entry — the exact bidirectional
-///   inconsistency Phase 3 originally guarded against.
+///   could include `g/n/alice` but exclude `g/fwd/alice`, leaving target
+///   with the node but no outgoing adjacency entry — the same bidirectional
+///   inconsistency the `check_graph_merge_divergence` fallback exists to
+///   prevent.
 ///
 /// Rule: for each `(space, Graph)` cell that produced actions, count how many
 /// of the cell's graph actions pass the full filter. If 0 pass, drop them all
@@ -2912,20 +2919,17 @@ pub fn cherry_pick_from_diff(
     // Capture snapshot for consistent reads (#1917)
     let snapshot_version = db.current_version();
 
-    // Phase 3c: cherry-pick uses the same per-handler `precheck` + `plan`
-    // dispatch as `merge_branches`, so it inherits the semantic graph merge
-    // (Phase 3b) and the additive catalog merge (Phase 3c). Before Phase 3c,
-    // this path called `check_graph_merge_divergence` directly and ran the
-    // generic `classify_typed_entries`, which both rejected divergent graph
-    // cherry-picks unconditionally and ignored Phase 3b's semantic merge.
+    // Cherry-pick uses the same per-handler `precheck` + `plan` dispatch
+    // as `merge_branches`, so it inherits the semantic graph merge and
+    // the additive catalog merge for free.
     //
     // Strategy is always LastWriterWins for cherry-pick — non-fatal cell
-    // conflicts (NodeProperty / EdgeData / etc.) get silently resolved by the
-    // graph handler under LWW, matching cherry-pick's existing
-    // "ignore conflicts" semantics. Fatal conflicts (DanglingEdge,
+    // conflicts (NodeProperty / EdgeData / etc.) get silently resolved by
+    // the graph handler under LWW, matching cherry-pick's "ignore
+    // conflicts" semantics. Fatal conflicts (DanglingEdge,
     // OrphanedReference) propagate as `Err` from `plan` and abort the
-    // cherry-pick before any writes happen. (CatalogDivergence is reserved
-    // but no longer produced after Phase 3c made `merge_catalog` additive.)
+    // cherry-pick before any writes happen. (CatalogDivergence is
+    // reserved but unreachable from the current additive catalog merge.)
     let typed = gather_typed_entries(
         db,
         source_id,
@@ -2962,12 +2966,12 @@ pub fn cherry_pick_from_diff(
         // place). Fatal conflicts already propagated via `plan(...)?` above.
     }
 
-    // Phase 3c: graph plan actions are interdependent (n/X, fwd/X, rev/Y,
-    // __edge_count__/T must apply atomically for one logical change). If the
-    // user's CherryPickFilter would accept some but not all graph actions for
-    // the same (space, Graph) cell, refuse with a clear error so the caller
-    // can either widen their filter or use --primitives/--spaces instead of
-    // --keys.
+    // Graph plan actions are interdependent (n/X, fwd/X, rev/Y,
+    // __edge_count__/T must apply atomically for one logical change). If
+    // the user's CherryPickFilter would accept some but not all graph
+    // actions for the same (space, Graph) cell, refuse with a clear
+    // error so the caller can either widen their filter or use
+    // --primitives/--spaces instead of --keys.
     check_graph_action_atomicity(&actions, &filter)?;
 
     // Filter by CherryPickFilter

@@ -24,26 +24,28 @@ impl GraphStore {
     pub fn on_entity_deleted(
         &self,
         branch_id: BranchId,
+        space: &str,
         entity_ref_uri: &str,
     ) -> StrataResult<CascadeResult> {
-        let bindings = self.nodes_for_entity(branch_id, entity_ref_uri)?;
+        let bindings = self.nodes_for_entity(branch_id, space, entity_ref_uri)?;
 
         let mut succeeded = 0usize;
         let mut failed = Vec::new();
 
         for (graph, node_id) in bindings {
             let policy = self
-                .get_graph_meta(branch_id, &graph)?
+                .get_graph_meta(branch_id, space, &graph)?
                 .map(|m| m.cascade_policy)
                 .unwrap_or(CascadePolicy::Ignore);
 
             let result = match policy {
-                CascadePolicy::Cascade => self.remove_node(branch_id, &graph, &node_id),
+                CascadePolicy::Cascade => self.remove_node(branch_id, space, &graph, &node_id),
                 CascadePolicy::Detach => {
                     // Read current node, clear entity_ref, re-write
-                    if let Some(mut data) = self.get_node(branch_id, &graph, &node_id)? {
+                    if let Some(mut data) = self.get_node(branch_id, space, &graph, &node_id)? {
                         data.entity_ref = None;
-                        self.add_node(branch_id, &graph, &node_id, data).map(|_| ())
+                        self.add_node(branch_id, space, &graph, &node_id, data)
+                            .map(|_| ())
                     } else {
                         Ok(())
                     }
@@ -98,6 +100,7 @@ mod tests {
 
         gs.create_graph(
             b,
+            "default",
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Cascade,
@@ -107,6 +110,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -116,18 +120,24 @@ mod tests {
             },
         )
         .unwrap();
-        gs.add_node(b, "g", "n2", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "n1", "n2", "E", EdgeData::default())
+        gs.add_node(b, "default", "g", "n2", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "n1", "n2", "E", EdgeData::default())
             .unwrap();
 
-        let result = gs.on_entity_deleted(b, "kv://main/key1").unwrap();
+        let result = gs
+            .on_entity_deleted(b, "default", "kv://main/key1")
+            .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.succeeded, 1);
 
-        assert!(gs.get_node(b, "g", "n1").unwrap().is_none());
-        assert!(gs.get_edge(b, "g", "n1", "n2", "E").unwrap().is_none());
+        assert!(gs.get_node(b, "default", "g", "n1").unwrap().is_none());
+        assert!(gs
+            .get_edge(b, "default", "g", "n1", "n2", "E")
+            .unwrap()
+            .is_none());
         // n2 survives
-        assert!(gs.get_node(b, "g", "n2").unwrap().is_some());
+        assert!(gs.get_node(b, "default", "g", "n2").unwrap().is_some());
     }
 
     #[test]
@@ -137,6 +147,7 @@ mod tests {
 
         gs.create_graph(
             b,
+            "default",
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Detach,
@@ -146,6 +157,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -156,11 +168,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = gs.on_entity_deleted(b, "kv://main/key1").unwrap();
+        let result = gs
+            .on_entity_deleted(b, "default", "kv://main/key1")
+            .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.succeeded, 1);
 
-        let node = gs.get_node(b, "g", "n1").unwrap().unwrap();
+        let node = gs.get_node(b, "default", "g", "n1").unwrap().unwrap();
         assert!(node.entity_ref.is_none());
         assert_eq!(
             node.properties,
@@ -175,6 +189,7 @@ mod tests {
 
         gs.create_graph(
             b,
+            "default",
             "g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Ignore,
@@ -184,6 +199,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -194,11 +210,13 @@ mod tests {
         )
         .unwrap();
 
-        let result = gs.on_entity_deleted(b, "kv://main/key1").unwrap();
+        let result = gs
+            .on_entity_deleted(b, "default", "kv://main/key1")
+            .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.succeeded, 1);
 
-        let node = gs.get_node(b, "g", "n1").unwrap().unwrap();
+        let node = gs.get_node(b, "default", "g", "n1").unwrap().unwrap();
         assert_eq!(node.entity_ref, Some("kv://main/key1".to_string()));
     }
 
@@ -209,6 +227,7 @@ mod tests {
 
         gs.create_graph(
             b,
+            "default",
             "cascade_g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Cascade,
@@ -218,6 +237,7 @@ mod tests {
         .unwrap();
         gs.create_graph(
             b,
+            "default",
             "detach_g",
             Some(GraphMeta {
                 cascade_policy: CascadePolicy::Detach,
@@ -229,6 +249,7 @@ mod tests {
         let uri = "kv://main/shared";
         gs.add_node(
             b,
+            "default",
             "cascade_g",
             "n1",
             NodeData {
@@ -240,6 +261,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             b,
+            "default",
             "detach_g",
             "n1",
             NodeData {
@@ -250,14 +272,20 @@ mod tests {
         )
         .unwrap();
 
-        let result = gs.on_entity_deleted(b, uri).unwrap();
+        let result = gs.on_entity_deleted(b, "default", uri).unwrap();
         assert!(result.is_ok());
         assert_eq!(result.succeeded, 2);
 
         // cascade_g: node removed
-        assert!(gs.get_node(b, "cascade_g", "n1").unwrap().is_none());
+        assert!(gs
+            .get_node(b, "default", "cascade_g", "n1")
+            .unwrap()
+            .is_none());
         // detach_g: node kept, ref cleared
-        let node = gs.get_node(b, "detach_g", "n1").unwrap().unwrap();
+        let node = gs
+            .get_node(b, "default", "detach_g", "n1")
+            .unwrap()
+            .unwrap();
         assert!(node.entity_ref.is_none());
     }
 
@@ -310,9 +338,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         // No nodes bound to this URI
-        let result = gs.on_entity_deleted(b, "kv://main/nothing").unwrap();
+        let result = gs
+            .on_entity_deleted(b, "default", "kv://main/nothing")
+            .unwrap();
         assert!(result.is_ok());
         assert_eq!(result.succeeded, 0);
     }

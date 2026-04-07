@@ -20,6 +20,7 @@ use strata_core::contract::Timestamp;
 use strata_core::{StrataError, StrataResult};
 use tracing::warn;
 
+use crate::keys::GRAPH_SPACE;
 use crate::types::{Direction, EdgeData, NodeData};
 use crate::GraphStore;
 use strata_engine::primitives::branch::{resolve_branch_name, BranchIndex};
@@ -43,10 +44,10 @@ fn ensure_branch_dag(db: &Arc<Database>) -> Result<(), String> {
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
-    match graph_store.get_graph_meta(branch_id, BRANCH_DAG_GRAPH) {
+    match graph_store.get_graph_meta(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH) {
         Ok(Some(_)) => Ok(()),
         Ok(None) => graph_store
-            .create_graph(branch_id, BRANCH_DAG_GRAPH, None)
+            .create_graph(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, None)
             .map_err(|e| format!("failed to create _branch_dag graph: {e}")),
         Err(e) => Err(format!("failed to check _branch_dag graph: {e}")),
     }
@@ -57,7 +58,7 @@ fn seed_default_branch(db: &Arc<Database>) -> Result<(), String> {
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
-    match graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, "default") {
+    match graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default") {
         Ok(Some(_)) => Ok(()),
         Ok(None) => {
             let props = serde_json::json!({
@@ -70,7 +71,7 @@ fn seed_default_branch(db: &Arc<Database>) -> Result<(), String> {
                 object_type: Some("branch".to_string()),
             };
             graph_store
-                .add_node(branch_id, BRANCH_DAG_GRAPH, "default", node)
+                .add_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default", node)
                 .map(|_| ())
                 .map_err(|e| format!("failed to seed default branch node: {e}"))
         }
@@ -107,16 +108,17 @@ pub fn load_status_cache_readonly(db: &Arc<Database>) {
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
     // If the graph doesn't exist yet, nothing to load.
-    match graph_store.get_graph_meta(branch_id, BRANCH_DAG_GRAPH) {
+    match graph_store.get_graph_meta(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH) {
         Ok(Some(_)) => {}
         _ => return,
     }
 
     // Best-effort: populate the cache from existing nodes.
     if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
-        if let Ok(nodes) = graph_store.list_nodes(branch_id, BRANCH_DAG_GRAPH) {
+        if let Ok(nodes) = graph_store.list_nodes(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH) {
             for node_id in nodes {
-                if let Ok(Some(node)) = graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, &node_id)
+                if let Ok(Some(node)) =
+                    graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &node_id)
                 {
                     if node.object_type.as_deref() == Some("branch") {
                         let status = status_from_node_props(&node);
@@ -160,7 +162,7 @@ pub fn dag_add_branch(
         properties: Some(props),
         object_type: Some("branch".to_string()),
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, name, node)?;
+    graph_store.add_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name, node)?;
     Ok(())
 }
 
@@ -169,7 +171,7 @@ fn ensure_branch_node_exists(db: &Arc<Database>, name: &str) -> StrataResult<()>
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
     if graph_store
-        .get_node(branch_id, BRANCH_DAG_GRAPH, name)?
+        .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)?
         .is_some()
     {
         return Ok(());
@@ -212,11 +214,18 @@ pub fn dag_record_fork(
         properties: Some(props),
         object_type: Some("fork".to_string()),
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str(), node)?;
+    graph_store.add_node(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        event_id.as_str(),
+        node,
+    )?;
 
     // parent --[parent]--> fork_event
     graph_store.add_edge(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         parent,
         event_id.as_str(),
@@ -229,6 +238,7 @@ pub fn dag_record_fork(
     // fork_event --[child]--> child
     graph_store.add_edge(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         event_id.as_str(),
         child,
@@ -284,11 +294,18 @@ pub fn dag_record_merge(
         properties: Some(props),
         object_type: Some("merge".to_string()),
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str(), node)?;
+    graph_store.add_node(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        event_id.as_str(),
+        node,
+    )?;
 
     // source --[source]--> merge_event
     graph_store.add_edge(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         source,
         event_id.as_str(),
@@ -301,6 +318,7 @@ pub fn dag_record_merge(
     // merge_event --[target]--> target
     graph_store.add_edge(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         event_id.as_str(),
         target,
@@ -320,7 +338,7 @@ pub fn dag_set_status(db: &Arc<Database>, name: &str, status: DagBranchStatus) -
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
     let node = graph_store
-        .get_node(branch_id, BRANCH_DAG_GRAPH, name)?
+        .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)?
         .ok_or_else(|| StrataError::internal(format!("branch node not found in DAG: {name}")))?;
 
     let mut props = node.properties.unwrap_or_else(|| serde_json::json!({}));
@@ -332,7 +350,7 @@ pub fn dag_set_status(db: &Arc<Database>, name: &str, status: DagBranchStatus) -
         properties: Some(props),
         object_type: node.object_type,
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, name, updated)?;
+    graph_store.add_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name, updated)?;
     Ok(())
 }
 
@@ -341,7 +359,7 @@ pub fn dag_mark_deleted(db: &Arc<Database>, name: &str) -> StrataResult<()> {
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
-    let node = match graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, name)? {
+    let node = match graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)? {
         Some(n) => n,
         None => return Ok(()),
     };
@@ -357,7 +375,7 @@ pub fn dag_mark_deleted(db: &Arc<Database>, name: &str) -> StrataResult<()> {
         properties: Some(props),
         object_type: node.object_type,
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, name, updated)?;
+    graph_store.add_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name, updated)?;
     Ok(())
 }
 
@@ -367,7 +385,7 @@ pub fn dag_set_message(db: &Arc<Database>, name: &str, message: &str) -> StrataR
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
     let node = graph_store
-        .get_node(branch_id, BRANCH_DAG_GRAPH, name)?
+        .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)?
         .ok_or_else(|| StrataError::internal(format!("branch node not found in DAG: {name}")))?;
 
     let mut props = node.properties.unwrap_or_else(|| serde_json::json!({}));
@@ -379,7 +397,7 @@ pub fn dag_set_message(db: &Arc<Database>, name: &str, message: &str) -> StrataR
         properties: Some(props),
         object_type: node.object_type,
     };
-    graph_store.add_node(branch_id, BRANCH_DAG_GRAPH, name, updated)?;
+    graph_store.add_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name, updated)?;
     Ok(())
 }
 
@@ -392,7 +410,7 @@ pub fn dag_get_status(db: &Arc<Database>, name: &str) -> StrataResult<DagBranchS
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
-    match graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, name)? {
+    match graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)? {
         Some(node) => Ok(status_from_node_props(&node)),
         None => Ok(DagBranchStatus::Active),
     }
@@ -403,7 +421,7 @@ pub fn dag_get_branch_info(db: &Arc<Database>, name: &str) -> StrataResult<Optio
     let graph_store = GraphStore::new(db.clone());
     let branch_id = resolve_branch_name(SYSTEM_BRANCH);
 
-    let node = match graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, name)? {
+    let node = match graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, name)? {
         Some(n) => n,
         None => return Ok(None),
     };
@@ -450,6 +468,7 @@ fn find_fork_origin(db: &Arc<Database>, name: &str) -> StrataResult<Option<ForkR
     // Find incoming "child" edges to this branch -> fork event nodes
     let incoming = graph_store.neighbors(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         name,
         Direction::Incoming,
@@ -459,7 +478,7 @@ fn find_fork_origin(db: &Arc<Database>, name: &str) -> StrataResult<Option<ForkR
     for neighbor in incoming {
         // Check if the neighbor is a fork event node
         if let Some(event_node) =
-            graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, &neighbor.node_id)?
+            graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &neighbor.node_id)?
         {
             if event_node.object_type.as_deref() != Some("fork") {
                 continue;
@@ -467,6 +486,7 @@ fn find_fork_origin(db: &Arc<Database>, name: &str) -> StrataResult<Option<ForkR
             // Find the parent branch via incoming "parent" edges to the fork event
             let parents = graph_store.neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 &neighbor.node_id,
                 Direction::Incoming,
@@ -508,6 +528,7 @@ fn find_merge_history(db: &Arc<Database>, name: &str) -> StrataResult<Vec<MergeR
     // Find outgoing "source" edges from this branch -> merge event nodes
     let outgoing = graph_store.neighbors(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         name,
         Direction::Outgoing,
@@ -517,7 +538,7 @@ fn find_merge_history(db: &Arc<Database>, name: &str) -> StrataResult<Vec<MergeR
     let mut records = Vec::new();
     for neighbor in outgoing {
         if let Some(event_node) =
-            graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, &neighbor.node_id)?
+            graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &neighbor.node_id)?
         {
             if event_node.object_type.as_deref() != Some("merge") {
                 continue;
@@ -525,6 +546,7 @@ fn find_merge_history(db: &Arc<Database>, name: &str) -> StrataResult<Vec<MergeR
             // Find the target branch via outgoing "target" edges
             let targets = graph_store.neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 &neighbor.node_id,
                 Direction::Outgoing,
@@ -583,6 +605,7 @@ pub fn find_children(db: &Arc<Database>, name: &str) -> StrataResult<Vec<String>
     // Find outgoing "parent" edges from this branch -> fork event nodes
     let outgoing = graph_store.neighbors(
         branch_id,
+        GRAPH_SPACE,
         BRANCH_DAG_GRAPH,
         name,
         Direction::Outgoing,
@@ -593,7 +616,7 @@ pub fn find_children(db: &Arc<Database>, name: &str) -> StrataResult<Vec<String>
     for neighbor in outgoing {
         // Verify it's a fork event
         if let Some(event_node) =
-            graph_store.get_node(branch_id, BRANCH_DAG_GRAPH, &neighbor.node_id)?
+            graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &neighbor.node_id)?
         {
             if event_node.object_type.as_deref() != Some("fork") {
                 continue;
@@ -601,6 +624,7 @@ pub fn find_children(db: &Arc<Database>, name: &str) -> StrataResult<Vec<String>
             // Follow outgoing "child" edges from the fork event
             let child_neighbors = graph_store.neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 &neighbor.node_id,
                 Direction::Outgoing,
@@ -724,7 +748,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let meta = graph_store
-            .get_graph_meta(branch_id, BRANCH_DAG_GRAPH)
+            .get_graph_meta(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH)
             .unwrap();
         assert!(meta.is_some());
     }
@@ -735,7 +759,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "default")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default")
             .unwrap();
         assert!(node.is_some());
         let node = node.unwrap();
@@ -755,7 +779,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "default")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default")
             .unwrap();
         assert!(node.is_some());
     }
@@ -842,7 +866,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "test-add")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "test-add")
             .unwrap()
             .unwrap();
         assert_eq!(node.object_type.as_deref(), Some("branch"));
@@ -882,7 +906,7 @@ mod tests {
 
         // Verify fork event node exists with correct properties
         let event_node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str())
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, event_id.as_str())
             .unwrap()
             .unwrap();
         assert_eq!(event_node.object_type.as_deref(), Some("fork"));
@@ -905,6 +929,7 @@ mod tests {
         let parent_neighbors = graph_store
             .neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 "parent-branch",
                 Direction::Outgoing,
@@ -919,6 +944,7 @@ mod tests {
         let child_neighbors = graph_store
             .neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 event_id.as_str(),
                 Direction::Outgoing,
@@ -960,7 +986,7 @@ mod tests {
 
         // Verify merge event node
         let event_node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str())
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, event_id.as_str())
             .unwrap()
             .unwrap();
         assert_eq!(event_node.object_type.as_deref(), Some("merge"));
@@ -972,6 +998,7 @@ mod tests {
         let src_neighbors = graph_store
             .neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 "merge-src",
                 Direction::Outgoing,
@@ -984,6 +1011,7 @@ mod tests {
         let tgt_neighbors = graph_store
             .neighbors(
                 branch_id,
+                GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
                 event_id.as_str(),
                 Direction::Outgoing,
@@ -1023,7 +1051,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "del-test")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "del-test")
             .unwrap()
             .unwrap();
         assert!(node
@@ -1119,7 +1147,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "idempotent-test")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "idempotent-test")
             .unwrap();
         assert!(node.is_some());
     }
@@ -1155,7 +1183,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, "msg-test")
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "msg-test")
             .unwrap()
             .unwrap();
         let props = node.properties.as_ref().unwrap();
@@ -1195,7 +1223,7 @@ mod tests {
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let event_node = graph_store
-            .get_node(branch_id, BRANCH_DAG_GRAPH, event_id.as_str())
+            .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, event_id.as_str())
             .unwrap()
             .unwrap();
         let props = event_node.properties.as_ref().unwrap();

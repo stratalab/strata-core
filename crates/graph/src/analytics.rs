@@ -15,10 +15,10 @@ use super::GraphStore;
 
 impl GraphStore {
     /// Weakly Connected Components using union-find.
-    pub fn wcc(&self, branch_id: BranchId, graph: &str) -> StrataResult<WccResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
+    pub fn wcc(&self, branch_id: BranchId, space: &str, graph: &str) -> StrataResult<WccResult> {
+        let index = self.build_adjacency_index(branch_id, space, graph)?;
         // Also load isolated nodes (nodes with no edges).
-        let all_nodes = self.list_nodes(branch_id, graph)?;
+        let all_nodes = self.list_nodes(branch_id, space, graph)?;
         let mut full_index = index;
         for node_id in &all_nodes {
             full_index.nodes.insert(node_id.clone());
@@ -30,11 +30,12 @@ impl GraphStore {
     pub fn cdlp(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         opts: CdlpOptions,
     ) -> StrataResult<CdlpResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
-        let all_nodes = self.list_nodes(branch_id, graph)?;
+        let index = self.build_adjacency_index(branch_id, space, graph)?;
+        let all_nodes = self.list_nodes(branch_id, space, graph)?;
         let mut full_index = index;
         for node_id in &all_nodes {
             full_index.nodes.insert(node_id.clone());
@@ -46,11 +47,12 @@ impl GraphStore {
     pub fn pagerank(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         opts: PageRankOptions,
     ) -> StrataResult<PageRankResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
-        let all_nodes = self.list_nodes(branch_id, graph)?;
+        let index = self.build_adjacency_index(branch_id, space, graph)?;
+        let all_nodes = self.list_nodes(branch_id, space, graph)?;
         let mut full_index = index;
         for node_id in &all_nodes {
             full_index.nodes.insert(node_id.clone());
@@ -59,9 +61,9 @@ impl GraphStore {
     }
 
     /// Local Clustering Coefficient.
-    pub fn lcc(&self, branch_id: BranchId, graph: &str) -> StrataResult<LccResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
-        let all_nodes = self.list_nodes(branch_id, graph)?;
+    pub fn lcc(&self, branch_id: BranchId, space: &str, graph: &str) -> StrataResult<LccResult> {
+        let index = self.build_adjacency_index(branch_id, space, graph)?;
+        let all_nodes = self.list_nodes(branch_id, space, graph)?;
         let mut full_index = index;
         for node_id in &all_nodes {
             full_index.nodes.insert(node_id.clone());
@@ -73,11 +75,12 @@ impl GraphStore {
     pub fn sssp(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         source: &str,
         opts: SsspOptions,
     ) -> StrataResult<SsspResult> {
-        let index = self.build_adjacency_index(branch_id, graph)?;
+        let index = self.build_adjacency_index(branch_id, space, graph)?;
         Ok(sssp_with_index(&index, source, &opts))
     }
 }
@@ -1017,13 +1020,16 @@ mod tests {
     fn graph_store_wcc() {
         let (_db, gs) = setup();
         let b = default_branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        let result = gs.wcc(b, "g").unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        let result = gs.wcc(b, "default", "g").unwrap();
         assert_eq!(result.components["A"], result.components["B"]);
         assert_ne!(result.components["A"], result.components["C"]);
     }
@@ -1032,12 +1038,16 @@ mod tests {
     fn graph_store_pagerank() {
         let (_db, gs) = setup();
         let b = default_branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        let result = gs.pagerank(b, "g", PageRankOptions::default()).unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        let result = gs
+            .pagerank(b, "default", "g", PageRankOptions::default())
+            .unwrap();
         assert!(result.ranks["B"] > result.ranks["A"]);
     }
 
@@ -1045,12 +1055,16 @@ mod tests {
     fn graph_store_sssp() {
         let (_db, gs) = setup();
         let b = default_branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
         gs.add_edge(
             b,
+            "default",
             "g",
             "A",
             "B",
@@ -1063,6 +1077,7 @@ mod tests {
         .unwrap();
         gs.add_edge(
             b,
+            "default",
             "g",
             "B",
             "C",
@@ -1073,7 +1088,9 @@ mod tests {
             },
         )
         .unwrap();
-        let result = gs.sssp(b, "g", "A", SsspOptions::default()).unwrap();
+        let result = gs
+            .sssp(b, "default", "g", "A", SsspOptions::default())
+            .unwrap();
         assert!((result.distances["A"] - 0.0).abs() < 1e-10);
         assert!((result.distances["B"] - 2.0).abs() < 1e-10);
         assert!((result.distances["C"] - 5.0).abs() < 1e-10);

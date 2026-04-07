@@ -8,13 +8,14 @@ impl GraphStore {
     pub fn create_graph(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         meta: Option<GraphMeta>,
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
         let meta = meta.unwrap_or_default();
         self.db.transaction(branch_id, |txn| {
-            txn.graph_create(branch_id, graph, meta.clone())
+            txn.graph_create(branch_id, space, graph, meta.clone())
         })
     }
 
@@ -22,29 +23,31 @@ impl GraphStore {
     pub fn get_graph_meta(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
     ) -> StrataResult<Option<GraphMeta>> {
         self.db
-            .transaction(branch_id, |txn| txn.graph_get_meta(branch_id, graph))
+            .transaction(branch_id, |txn| txn.graph_get_meta(branch_id, space, graph))
     }
 
-    /// List all graph names on a branch.
+    /// List all graph names on a branch within the given space.
     ///
     /// Reads a single catalog key (O(1)) instead of scanning all graph data.
     /// Falls back to full scan if catalog is missing (legacy data), and lazily
     /// creates the catalog on fallback.
-    pub fn list_graphs(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
+    pub fn list_graphs(&self, branch_id: BranchId, space: &str) -> StrataResult<Vec<String>> {
         self.db
-            .transaction(branch_id, |txn| txn.graph_list(branch_id))
+            .transaction(branch_id, |txn| txn.graph_list(branch_id, space))
     }
 
     /// List graph names with cursor-based pagination.
     pub fn list_graphs_paginated(
         &self,
         branch_id: BranchId,
+        space: &str,
         page: PageRequest,
     ) -> StrataResult<PageResponse<String>> {
-        let mut graphs = self.list_graphs(branch_id)?;
+        let mut graphs = self.list_graphs(branch_id, space)?;
         graphs.sort();
 
         // Apply cursor: skip entries at or before cursor
@@ -76,10 +79,10 @@ impl GraphStore {
     ///
     /// Uses batched deletion with bounded memory: each batch is its own
     /// transaction, preventing massive write sets on large graphs.
-    pub fn delete_graph(&self, branch_id: BranchId, graph: &str) -> StrataResult<()> {
+    pub fn delete_graph(&self, branch_id: BranchId, space: &str, graph: &str) -> StrataResult<()> {
         let node_prefix = keys::all_nodes_prefix(graph);
-        let node_prefix_key = keys::storage_key(branch_id, &node_prefix);
-        let catalog_sk = keys::storage_key(branch_id, keys::graph_catalog_key());
+        let node_prefix_key = keys::storage_key(branch_id, space, &node_prefix);
+        let catalog_sk = keys::storage_key(branch_id, space, keys::graph_catalog_key());
 
         // Step 1: Scan nodes, extract entity_refs, delete ref index entries (batched)
         loop {
@@ -101,7 +104,7 @@ impl GraphStore {
                                 if let Ok(data) = serde_json::from_str::<NodeData>(json) {
                                     if let Some(uri) = data.entity_ref {
                                         let rk = keys::ref_index_key(&uri, graph, &node_id);
-                                        txn.delete(keys::storage_key(branch_id, &rk))?;
+                                        txn.delete(keys::storage_key(branch_id, space, &rk))?;
                                     }
                                 }
                             }
@@ -115,7 +118,7 @@ impl GraphStore {
 
             // Post-commit: remove deleted nodes from search index
             for node_id in &deleted_node_ids {
-                self.deindex_node_for_search(branch_id, graph, node_id);
+                self.deindex_node_for_search(branch_id, space, graph, node_id);
             }
 
             if done {
@@ -126,7 +129,7 @@ impl GraphStore {
         // Step 2: Delete remaining graph keys (fwd adj, rev adj, type index,
         // ontology, edge counters, meta) in batches
         let graph_prefix = keys::graph_prefix(graph);
-        let graph_prefix_key = keys::storage_key(branch_id, &graph_prefix);
+        let graph_prefix_key = keys::storage_key(branch_id, space, &graph_prefix);
         self.delete_prefix_batched(branch_id, &graph_prefix_key)?;
 
         // Step 3: Update catalog
@@ -195,8 +198,9 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "test_graph", None).unwrap();
-        let meta = gs.get_graph_meta(branch, "test_graph").unwrap();
+        gs.create_graph(branch, "default", "test_graph", None)
+            .unwrap();
+        let meta = gs.get_graph_meta(branch, "default", "test_graph").unwrap();
         assert!(meta.is_some());
         assert_eq!(meta.unwrap().cascade_policy, CascadePolicy::Ignore);
     }
@@ -206,11 +210,11 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "g1", None).unwrap();
-        gs.create_graph(branch, "g2", None).unwrap();
-        gs.create_graph(branch, "g3", None).unwrap();
+        gs.create_graph(branch, "default", "g1", None).unwrap();
+        gs.create_graph(branch, "default", "g2", None).unwrap();
+        gs.create_graph(branch, "default", "g3", None).unwrap();
 
-        let mut graphs = gs.list_graphs(branch).unwrap();
+        let mut graphs = gs.list_graphs(branch, "default").unwrap();
         graphs.sort();
         assert_eq!(graphs, vec!["g1", "g2", "g3"]);
     }
@@ -220,9 +224,13 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "to_delete", None).unwrap();
-        gs.delete_graph(branch, "to_delete").unwrap();
-        assert!(gs.get_graph_meta(branch, "to_delete").unwrap().is_none());
+        gs.create_graph(branch, "default", "to_delete", None)
+            .unwrap();
+        gs.delete_graph(branch, "default", "to_delete").unwrap();
+        assert!(gs
+            .get_graph_meta(branch, "default", "to_delete")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -230,17 +238,27 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "dg", None).unwrap();
-        gs.add_node(branch, "dg", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "dg", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "dg", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(branch, "default", "dg", None).unwrap();
+        gs.add_node(branch, "default", "dg", "A", NodeData::default())
             .unwrap();
+        gs.add_node(branch, "default", "dg", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "dg",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
-        gs.delete_graph(branch, "dg").unwrap();
-        assert!(gs.get_node(branch, "dg", "A").unwrap().is_none());
-        assert!(gs.get_node(branch, "dg", "B").unwrap().is_none());
+        gs.delete_graph(branch, "default", "dg").unwrap();
+        assert!(gs.get_node(branch, "default", "dg", "A").unwrap().is_none());
+        assert!(gs.get_node(branch, "default", "dg", "B").unwrap().is_none());
         assert!(gs
-            .get_edge(branch, "dg", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "dg", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
     }
@@ -249,9 +267,13 @@ mod tests {
     fn create_graph_invalid_name_errors() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        assert!(gs.create_graph(branch, "", None).is_err());
-        assert!(gs.create_graph(branch, "has/slash", None).is_err());
-        assert!(gs.create_graph(branch, "__reserved", None).is_err());
+        assert!(gs.create_graph(branch, "default", "", None).is_err());
+        assert!(gs
+            .create_graph(branch, "default", "has/slash", None)
+            .is_err());
+        assert!(gs
+            .create_graph(branch, "default", "__reserved", None)
+            .is_err());
     }
 
     // =========================================================================
@@ -263,18 +285,24 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "gA", None).unwrap();
-        gs.create_graph(branch, "gB", None).unwrap();
-        gs.add_node(branch, "gA", "n1", NodeData::default())
+        gs.create_graph(branch, "default", "gA", None).unwrap();
+        gs.create_graph(branch, "default", "gB", None).unwrap();
+        gs.add_node(branch, "default", "gA", "n1", NodeData::default())
             .unwrap();
-        gs.add_node(branch, "gB", "n1", NodeData::default())
+        gs.add_node(branch, "default", "gB", "n1", NodeData::default())
             .unwrap();
 
-        gs.delete_graph(branch, "gA").unwrap();
+        gs.delete_graph(branch, "default", "gA").unwrap();
 
         // gB should be intact
-        assert!(gs.get_graph_meta(branch, "gB").unwrap().is_some());
-        assert!(gs.get_node(branch, "gB", "n1").unwrap().is_some());
+        assert!(gs
+            .get_graph_meta(branch, "default", "gB")
+            .unwrap()
+            .is_some());
+        assert!(gs
+            .get_node(branch, "default", "gB", "n1")
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -282,7 +310,7 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
         // Should not error — idempotent
-        gs.delete_graph(branch, "nonexistent").unwrap();
+        gs.delete_graph(branch, "default", "nonexistent").unwrap();
     }
 
     #[test]
@@ -290,9 +318,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
+        gs.create_graph(branch, "default", "rg", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -304,6 +333,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n2",
             NodeData {
@@ -316,23 +346,27 @@ mod tests {
 
         // Verify ref index entries exist before deletion
         assert_eq!(
-            gs.nodes_for_entity(branch, "kv://main/key1").unwrap().len(),
+            gs.nodes_for_entity(branch, "default", "kv://main/key1")
+                .unwrap()
+                .len(),
             1
         );
         assert_eq!(
-            gs.nodes_for_entity(branch, "kv://main/key2").unwrap().len(),
+            gs.nodes_for_entity(branch, "default", "kv://main/key2")
+                .unwrap()
+                .len(),
             1
         );
 
-        gs.delete_graph(branch, "rg").unwrap();
+        gs.delete_graph(branch, "default", "rg").unwrap();
 
         // Ref index entries should be cleaned up
         assert!(gs
-            .nodes_for_entity(branch, "kv://main/key1")
+            .nodes_for_entity(branch, "default", "kv://main/key1")
             .unwrap()
             .is_empty());
         assert!(gs
-            .nodes_for_entity(branch, "kv://main/key2")
+            .nodes_for_entity(branch, "default", "kv://main/key2")
             .unwrap()
             .is_empty());
     }
@@ -342,12 +376,13 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "gA", None).unwrap();
-        gs.create_graph(branch, "gB", None).unwrap();
+        gs.create_graph(branch, "default", "gA", None).unwrap();
+        gs.create_graph(branch, "default", "gB", None).unwrap();
 
         let uri = "kv://main/shared";
         gs.add_node(
             branch,
+            "default",
             "gA",
             "n1",
             NodeData {
@@ -359,6 +394,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             branch,
+            "default",
             "gB",
             "n1",
             NodeData {
@@ -369,10 +405,10 @@ mod tests {
         )
         .unwrap();
 
-        gs.delete_graph(branch, "gA").unwrap();
+        gs.delete_graph(branch, "default", "gA").unwrap();
 
         // gB's ref should still exist
-        let refs = gs.nodes_for_entity(branch, uri).unwrap();
+        let refs = gs.nodes_for_entity(branch, "default", uri).unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("gB".to_string(), "n1".to_string()));
     }
@@ -386,10 +422,10 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.create_graph(b, "g", None).unwrap(); // second create
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap(); // second create
 
-        let graphs = gs.list_graphs(b).unwrap();
+        let graphs = gs.list_graphs(b, "default").unwrap();
         assert_eq!(
             graphs.iter().filter(|g| g.as_str() == "g").count(),
             1,
@@ -402,13 +438,13 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "a", None).unwrap();
-        gs.create_graph(b, "b", None).unwrap();
-        gs.create_graph(b, "c", None).unwrap();
+        gs.create_graph(b, "default", "a", None).unwrap();
+        gs.create_graph(b, "default", "b", None).unwrap();
+        gs.create_graph(b, "default", "c", None).unwrap();
 
-        gs.delete_graph(b, "b").unwrap();
+        gs.delete_graph(b, "default", "b").unwrap();
 
-        let mut graphs = gs.list_graphs(b).unwrap();
+        let mut graphs = gs.list_graphs(b, "default").unwrap();
         graphs.sort();
         assert_eq!(graphs, vec!["a", "c"]);
     }
@@ -418,12 +454,12 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.delete_graph(b, "g").unwrap();
-        assert!(gs.list_graphs(b).unwrap().is_empty());
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.delete_graph(b, "default", "g").unwrap();
+        assert!(gs.list_graphs(b, "default").unwrap().is_empty());
 
-        gs.create_graph(b, "g", None).unwrap();
-        assert_eq!(gs.list_graphs(b).unwrap(), vec!["g"]);
+        gs.create_graph(b, "default", "g", None).unwrap();
+        assert_eq!(gs.list_graphs(b, "default").unwrap(), vec!["g"]);
     }
 
     #[test]
@@ -431,11 +467,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "keep", None).unwrap();
+        gs.create_graph(b, "default", "keep", None).unwrap();
         // Deleting a graph that doesn't exist should not crash or corrupt catalog
-        gs.delete_graph(b, "ghost").unwrap();
+        gs.delete_graph(b, "default", "ghost").unwrap();
 
-        assert_eq!(gs.list_graphs(b).unwrap(), vec!["keep"]);
+        assert_eq!(gs.list_graphs(b, "default").unwrap(), vec!["keep"]);
     }
 
     // =========================================================================
@@ -447,9 +483,10 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -460,13 +497,17 @@ mod tests {
         .unwrap();
 
         // Verify ref index exists before delete
-        let bindings = gs.nodes_for_entity(b, "kv://main/entity1").unwrap();
+        let bindings = gs
+            .nodes_for_entity(b, "default", "kv://main/entity1")
+            .unwrap();
         assert_eq!(bindings.len(), 1);
 
-        gs.delete_graph(b, "g").unwrap();
+        gs.delete_graph(b, "default", "g").unwrap();
 
         // Ref index should be cleaned up
-        let bindings = gs.nodes_for_entity(b, "kv://main/entity1").unwrap();
+        let bindings = gs
+            .nodes_for_entity(b, "default", "kv://main/entity1")
+            .unwrap();
         assert!(
             bindings.is_empty(),
             "ref index should be cleaned after graph deletion"
@@ -478,7 +519,7 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         // Insert enough nodes to require multiple batches if batch size were small
         let nodes: Vec<(String, NodeData)> = (0..50)
@@ -495,13 +536,14 @@ mod tests {
             })
             .collect();
 
-        gs.bulk_insert(b, "g", &nodes, &edges, None).unwrap();
+        gs.bulk_insert(b, "default", "g", &nodes, &edges, None)
+            .unwrap();
 
-        gs.delete_graph(b, "g").unwrap();
+        gs.delete_graph(b, "default", "g").unwrap();
 
-        assert!(gs.get_graph_meta(b, "g").unwrap().is_none());
-        assert!(gs.list_nodes(b, "g").unwrap().is_empty());
-        assert!(gs.list_graphs(b).unwrap().is_empty());
+        assert!(gs.get_graph_meta(b, "default", "g").unwrap().is_none());
+        assert!(gs.list_nodes(b, "default", "g").unwrap().is_empty());
+        assert!(gs.list_graphs(b, "default").unwrap().is_empty());
     }
 
     #[test]
@@ -509,18 +551,20 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "keep", None).unwrap();
-        gs.add_node(b, "keep", "A", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "keep", None).unwrap();
+        gs.add_node(b, "default", "keep", "A", NodeData::default())
+            .unwrap();
 
-        gs.create_graph(b, "remove", None).unwrap();
-        gs.add_node(b, "remove", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "remove", None).unwrap();
+        gs.add_node(b, "default", "remove", "B", NodeData::default())
+            .unwrap();
 
-        gs.delete_graph(b, "remove").unwrap();
+        gs.delete_graph(b, "default", "remove").unwrap();
 
         // "keep" graph should be untouched
-        assert!(gs.get_graph_meta(b, "keep").unwrap().is_some());
-        assert!(gs.get_node(b, "keep", "A").unwrap().is_some());
-        assert_eq!(gs.list_graphs(b).unwrap(), vec!["keep"]);
+        assert!(gs.get_graph_meta(b, "default", "keep").unwrap().is_some());
+        assert!(gs.get_node(b, "default", "keep", "A").unwrap().is_some());
+        assert_eq!(gs.list_graphs(b, "default").unwrap(), vec!["keep"]);
     }
 
     // =========================================================================
@@ -533,12 +577,13 @@ mod tests {
         let b = default_branch();
 
         for name in &["alpha", "beta", "gamma", "delta", "epsilon"] {
-            gs.create_graph(b, name, None).unwrap();
+            gs.create_graph(b, "default", name, None).unwrap();
         }
 
         let page = gs
             .list_graphs_paginated(
                 b,
+                "default",
                 PageRequest {
                     limit: 2,
                     cursor: None,
@@ -560,7 +605,7 @@ mod tests {
 
         let expected = vec!["a", "b", "c", "d", "e"];
         for name in &expected {
-            gs.create_graph(b, name, None).unwrap();
+            gs.create_graph(b, "default", name, None).unwrap();
         }
 
         let mut all = Vec::new();
@@ -570,6 +615,7 @@ mod tests {
             let page = gs
                 .list_graphs_paginated(
                     b,
+                    "default",
                     PageRequest {
                         limit: 2,
                         cursor: cursor.clone(),
@@ -595,6 +641,7 @@ mod tests {
         let page = gs
             .list_graphs_paginated(
                 b,
+                "default",
                 PageRequest {
                     limit: 10,
                     cursor: None,
@@ -616,7 +663,7 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "big", None).unwrap();
+        gs.create_graph(b, "default", "big", None).unwrap();
 
         // Bulk insert 10K nodes with entity_refs (exercises ref index cleanup)
         let nodes: Vec<(String, NodeData)> = (0..10_000)
@@ -642,31 +689,34 @@ mod tests {
             })
             .collect();
 
-        gs.bulk_insert(b, "big", &nodes, &edges, Some(5_000))
+        gs.bulk_insert(b, "default", "big", &nodes, &edges, Some(5_000))
             .unwrap();
 
         // Verify graph exists
-        assert_eq!(gs.snapshot_stats(b, "big").unwrap().node_count, 10_000);
+        assert_eq!(
+            gs.snapshot_stats(b, "default", "big").unwrap().node_count,
+            10_000
+        );
 
         // Delete — this triggers batched node deletion + ref index cleanup + prefix batched delete
-        gs.delete_graph(b, "big").unwrap();
+        gs.delete_graph(b, "default", "big").unwrap();
 
         // Verify everything is gone
-        assert!(gs.get_graph_meta(b, "big").unwrap().is_none());
-        assert!(gs.list_nodes(b, "big").unwrap().is_empty());
-        assert!(gs.list_graphs(b).unwrap().is_empty());
+        assert!(gs.get_graph_meta(b, "default", "big").unwrap().is_none());
+        assert!(gs.list_nodes(b, "default", "big").unwrap().is_empty());
+        assert!(gs.list_graphs(b, "default").unwrap().is_empty());
 
         // Verify ref index entries are cleaned up (spot check)
         assert!(gs
-            .nodes_for_entity(b, "kv://main/entity0")
+            .nodes_for_entity(b, "default", "kv://main/entity0")
             .unwrap()
             .is_empty());
         assert!(gs
-            .nodes_for_entity(b, "kv://main/entity5000")
+            .nodes_for_entity(b, "default", "kv://main/entity5000")
             .unwrap()
             .is_empty());
         assert!(gs
-            .nodes_for_entity(b, "kv://main/entity9999")
+            .nodes_for_entity(b, "default", "kv://main/entity9999")
             .unwrap()
             .is_empty());
     }

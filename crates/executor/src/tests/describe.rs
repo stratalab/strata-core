@@ -256,6 +256,7 @@ fn describe_lists_graphs_with_edges() {
     executor
         .execute(Command::GraphCreate {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -266,6 +267,7 @@ fn describe_lists_graphs_with_edges() {
         executor
             .execute(Command::GraphAddNode {
                 branch: Some(BranchId::default()),
+                space: None,
                 graph: "social".into(),
                 node_id: node.into(),
                 entity_ref: None,
@@ -279,6 +281,7 @@ fn describe_lists_graphs_with_edges() {
     executor
         .execute(Command::GraphAddEdge {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "social".into(),
             src: "alice".into(),
             dst: "bob".into(),
@@ -313,6 +316,7 @@ fn describe_includes_graph_ontology_types() {
     executor
         .execute(Command::GraphCreate {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "medical".into(),
             cascade_policy: None,
         })
@@ -322,6 +326,7 @@ fn describe_includes_graph_ontology_types() {
     executor
         .execute(Command::GraphDefineObjectType {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "medical".into(),
             definition: strata_core::Value::object(
                 [
@@ -344,6 +349,7 @@ fn describe_includes_graph_ontology_types() {
     executor
         .execute(Command::GraphDefineLinkType {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "medical".into(),
             definition: strata_core::Value::object(
                 [
@@ -694,6 +700,7 @@ fn describe_with_all_primitives() {
     executor
         .execute(Command::GraphCreate {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "g1".into(),
             cascade_policy: None,
         })
@@ -701,6 +708,7 @@ fn describe_with_all_primitives() {
     executor
         .execute(Command::GraphAddNode {
             branch: Some(BranchId::default()),
+            space: None,
             graph: "g1".into(),
             node_id: "n1".into(),
             entity_ref: None,

@@ -1603,6 +1603,7 @@ impl Executor {
             // Graph commands
             Command::GraphCreate {
                 branch,
+                space,
                 graph,
                 cascade_policy,
             } => {
@@ -1610,36 +1611,42 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_create(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     cascade_policy,
                 )
             }
-            Command::GraphDelete { branch, graph } => {
+            Command::GraphDelete { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_delete(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_delete(&self.primitives, branch, space, graph)
             }
-            Command::GraphList { branch } => {
+            Command::GraphList { branch, space } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_list(&self.primitives, branch)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_list(&self.primitives, branch, space)
             }
-            Command::GraphGetMeta { branch, graph } => {
+            Command::GraphGetMeta { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_get_meta(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_get_meta(&self.primitives, branch, space, graph)
             }
             Command::GraphAddNode {
                 branch,
+                space,
                 graph,
                 node_id,
                 entity_ref,
@@ -1650,9 +1657,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_add_node(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     node_id,
                     entity_ref,
@@ -1662,6 +1671,7 @@ impl Executor {
             }
             Command::GraphGetNode {
                 branch,
+                space,
                 graph,
                 node_id,
                 as_of,
@@ -1670,10 +1680,12 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
                     crate::handlers::graph::graph_get_node_at(
                         &self.primitives,
                         branch,
+                    space,
                         graph,
                         node_id,
                         ts,
@@ -1682,6 +1694,7 @@ impl Executor {
                     crate::handlers::graph::graph_get_node(
                         &self.primitives,
                         branch,
+                    space,
                         graph,
                         node_id,
                     )
@@ -1689,6 +1702,7 @@ impl Executor {
             }
             Command::GraphRemoveNode {
                 branch,
+                space,
                 graph,
                 node_id,
             } => {
@@ -1696,10 +1710,12 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_remove_node(&self.primitives, branch, graph, node_id)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_remove_node(&self.primitives, branch, space, graph, node_id)
             }
             Command::GraphListNodes {
                 branch,
+                space,
                 graph,
                 as_of,
             } => {
@@ -1707,19 +1723,22 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
                     crate::handlers::graph::graph_list_nodes_at(
                         &self.primitives,
                         branch,
+                    space,
                         graph,
                         ts,
                     )
                 } else {
-                    crate::handlers::graph::graph_list_nodes(&self.primitives, branch, graph)
+                    crate::handlers::graph::graph_list_nodes(&self.primitives, branch, space, graph)
                 }
             }
             Command::GraphListNodesPaginated {
                 branch,
+                space,
                 graph,
                 limit,
                 cursor,
@@ -1728,9 +1747,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_list_nodes_paginated(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     limit,
                     cursor,
@@ -1738,6 +1759,7 @@ impl Executor {
             }
             Command::GraphAddEdge {
                 branch,
+                space,
                 graph,
                 src,
                 dst,
@@ -1749,9 +1771,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_add_edge(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     src,
                     dst,
@@ -1762,6 +1786,7 @@ impl Executor {
             }
             Command::GraphRemoveEdge {
                 branch,
+                space,
                 graph,
                 src,
                 dst,
@@ -1771,9 +1796,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_remove_edge(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     src,
                     dst,
@@ -1782,6 +1809,7 @@ impl Executor {
             }
             Command::GraphNeighbors {
                 branch,
+                space,
                 graph,
                 node_id,
                 direction,
@@ -1792,10 +1820,12 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 if let Some(ts) = as_of {
                     crate::handlers::graph::graph_neighbors_at(
                         &self.primitives,
                         branch,
+                    space,
                         graph,
                         node_id,
                         direction,
@@ -1806,6 +1836,7 @@ impl Executor {
                     crate::handlers::graph::graph_neighbors(
                         &self.primitives,
                         branch,
+                    space,
                         graph,
                         node_id,
                         direction,
@@ -1815,6 +1846,7 @@ impl Executor {
             }
             Command::GraphBulkInsert {
                 branch,
+                space,
                 graph,
                 nodes,
                 edges,
@@ -1824,9 +1856,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_bulk_insert(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     nodes,
                     edges,
@@ -1835,6 +1869,7 @@ impl Executor {
             }
             Command::GraphBfs {
                 branch,
+                space,
                 graph,
                 start,
                 max_depth,
@@ -1846,9 +1881,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_bfs(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     start,
                     max_depth,
@@ -1861,6 +1898,7 @@ impl Executor {
             // Ontology commands
             Command::GraphDefineObjectType {
                 branch,
+                space,
                 graph,
                 definition,
             } => {
@@ -1868,15 +1906,18 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_define_object_type(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     definition,
                 )
             }
             Command::GraphGetObjectType {
                 branch,
+                space,
                 graph,
                 name,
             } => {
@@ -1884,24 +1925,28 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_get_object_type(&self.primitives, branch, graph, name)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_get_object_type(&self.primitives, branch, space, graph, name)
             }
-            Command::GraphListObjectTypes { branch, graph } => {
+            Command::GraphListObjectTypes { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_list_object_types(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_list_object_types(&self.primitives, branch, space, graph)
             }
-            Command::GraphListOntologyTypes { branch, graph } => {
+            Command::GraphListOntologyTypes { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_list_ontology_types(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_list_ontology_types(&self.primitives, branch, space, graph)
             }
             Command::GraphDeleteObjectType {
                 branch,
+                space,
                 graph,
                 name,
             } => {
@@ -1909,15 +1954,18 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_delete_object_type(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     name,
                 )
             }
             Command::GraphDefineLinkType {
                 branch,
+                space,
                 graph,
                 definition,
             } => {
@@ -1925,15 +1973,18 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_define_link_type(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     definition,
                 )
             }
             Command::GraphGetLinkType {
                 branch,
+                space,
                 graph,
                 name,
             } => {
@@ -1941,17 +1992,20 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_get_link_type(&self.primitives, branch, graph, name)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_get_link_type(&self.primitives, branch, space, graph, name)
             }
-            Command::GraphListLinkTypes { branch, graph } => {
+            Command::GraphListLinkTypes { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_list_link_types(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_list_link_types(&self.primitives, branch, space, graph)
             }
             Command::GraphDeleteLinkType {
                 branch,
+                space,
                 graph,
                 name,
             } => {
@@ -1959,36 +2013,42 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_delete_link_type(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     name,
                 )
             }
-            Command::GraphFreezeOntology { branch, graph } => {
+            Command::GraphFreezeOntology { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_freeze_ontology(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_freeze_ontology(&self.primitives, branch, space, graph)
             }
-            Command::GraphOntologyStatus { branch, graph } => {
+            Command::GraphOntologyStatus { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_ontology_status(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_ontology_status(&self.primitives, branch, space, graph)
             }
-            Command::GraphOntologySummary { branch, graph } => {
+            Command::GraphOntologySummary { branch, space, graph } => {
                 let branch = branch.ok_or(Error::InvalidInput {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
-                crate::handlers::graph::graph_ontology_summary(&self.primitives, branch, graph)
+                let space = space.unwrap_or_else(|| "default".to_string());
+                crate::handlers::graph::graph_ontology_summary(&self.primitives, branch, space, graph)
             }
             Command::GraphNodesByType {
                 branch,
+                space,
                 graph,
                 object_type,
             } => {
@@ -1996,9 +2056,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_nodes_by_type(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     object_type,
                 )
@@ -2007,6 +2069,7 @@ impl Executor {
             // Graph Analytics
             Command::GraphWcc {
                 branch,
+                space,
                 graph,
                 top_n,
                 include_all,
@@ -2015,9 +2078,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_wcc(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     top_n,
                     include_all,
@@ -2025,6 +2090,7 @@ impl Executor {
             }
             Command::GraphCdlp {
                 branch,
+                space,
                 graph,
                 max_iterations,
                 direction,
@@ -2035,9 +2101,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_cdlp(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     max_iterations,
                     direction,
@@ -2047,6 +2115,7 @@ impl Executor {
             }
             Command::GraphPagerank {
                 branch,
+                space,
                 graph,
                 damping,
                 max_iterations,
@@ -2058,9 +2127,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_pagerank(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     damping,
                     max_iterations,
@@ -2071,6 +2142,7 @@ impl Executor {
             }
             Command::GraphLcc {
                 branch,
+                space,
                 graph,
                 top_n,
                 include_all,
@@ -2079,9 +2151,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_lcc(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     top_n,
                     include_all,
@@ -2089,6 +2163,7 @@ impl Executor {
             }
             Command::GraphSssp {
                 branch,
+                space,
                 graph,
                 source,
                 direction,
@@ -2099,9 +2174,11 @@ impl Executor {
                     reason: "Branch must be specified or resolved to default".into(),
                     hint: None,
                 })?;
+                let space = space.unwrap_or_else(|| "default".to_string());
                 crate::handlers::graph::graph_sssp(
                     &self.primitives,
                     branch,
+                    space,
                     graph,
                     source,
                     direction,

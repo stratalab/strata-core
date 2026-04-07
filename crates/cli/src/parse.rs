@@ -752,6 +752,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let cascade_policy = m.get_one::<String>("cascade-policy").cloned();
             Ok(CliAction::Execute(Command::GraphCreate {
                 branch: branch(state),
+                space: None,
                 graph,
                 cascade_policy,
             }))
@@ -760,16 +761,19 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let graph = m.get_one::<String>("name").unwrap().clone();
             Ok(CliAction::Execute(Command::GraphDelete {
                 branch: branch(state),
+                space: None,
                 graph,
             }))
         }
         "list" => Ok(CliAction::Execute(Command::GraphList {
             branch: branch(state),
+            space: None,
         })),
         "info" => {
             let graph = m.get_one::<String>("name").unwrap().clone();
             Ok(CliAction::Execute(Command::GraphGetMeta {
                 branch: branch(state),
+                space: None,
                 graph,
             }))
         }
@@ -785,6 +789,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let object_type = m.get_one::<String>("type").cloned();
             Ok(CliAction::Execute(Command::GraphAddNode {
                 branch: branch(state),
+                space: None,
                 graph,
                 node_id,
                 entity_ref,
@@ -797,6 +802,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let node_id = m.get_one::<String>("node-id").unwrap().clone();
             Ok(CliAction::Execute(Command::GraphGetNode {
                 branch: branch(state),
+                space: None,
                 graph,
                 node_id,
                 as_of: None,
@@ -807,6 +813,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let node_id = m.get_one::<String>("node-id").unwrap().clone();
             Ok(CliAction::Execute(Command::GraphRemoveNode {
                 branch: branch(state),
+                space: None,
                 graph,
                 node_id,
             }))
@@ -816,12 +823,14 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             if let Some(object_type) = m.get_one::<String>("type").cloned() {
                 Ok(CliAction::Execute(Command::GraphNodesByType {
                     branch: branch(state),
+                    space: None,
                     graph,
                     object_type,
                 }))
             } else {
                 Ok(CliAction::Execute(Command::GraphListNodes {
                     branch: branch(state),
+                    space: None,
                     graph,
                     as_of: None,
                 }))
@@ -840,6 +849,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                 .transpose()?;
             Ok(CliAction::Execute(Command::GraphAddEdge {
                 branch: branch(state),
+                space: None,
                 graph,
                 src,
                 dst,
@@ -855,6 +865,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
             Ok(CliAction::Execute(Command::GraphRemoveEdge {
                 branch: branch(state),
+                space: None,
                 graph,
                 src,
                 dst,
@@ -868,6 +879,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let edge_type = m.get_one::<String>("edge-type").cloned();
             Ok(CliAction::Execute(Command::GraphNeighbors {
                 branch: branch(state),
+                space: None,
                 graph,
                 node_id,
                 direction,
@@ -916,6 +928,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
 
             Ok(CliAction::Execute(Command::GraphBulkInsert {
                 branch: branch(state),
+                space: None,
                 graph,
                 nodes,
                 edges,
@@ -933,6 +946,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
             let direction = m.get_one::<String>("direction").cloned();
             Ok(CliAction::Execute(Command::GraphBfs {
                 branch: branch(state),
+                space: None,
                 graph,
                 start,
                 max_depth,
@@ -963,12 +977,14 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     if is_link {
                         Ok(CliAction::Execute(Command::GraphDefineLinkType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             definition,
                         }))
                     } else {
                         Ok(CliAction::Execute(Command::GraphDefineObjectType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             definition,
                         }))
@@ -981,11 +997,13 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     match kind {
                         Some("link") => Ok(CliAction::Execute(Command::GraphGetLinkType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             name,
                         })),
                         _ => Ok(CliAction::Execute(Command::GraphGetObjectType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             name,
                         })),
@@ -997,14 +1015,17 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     match kind {
                         Some("object") => Ok(CliAction::Execute(Command::GraphListObjectTypes {
                             branch: branch(state),
+                            space: None,
                             graph,
                         })),
                         Some("link") => Ok(CliAction::Execute(Command::GraphListLinkTypes {
                             branch: branch(state),
+                            space: None,
                             graph,
                         })),
                         None => Ok(CliAction::Execute(Command::GraphListOntologyTypes {
                             branch: branch(state),
+                            space: None,
                             graph,
                         })),
                         Some(other) => Err(format!(
@@ -1020,11 +1041,13 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     match kind {
                         Some("link") => Ok(CliAction::Execute(Command::GraphDeleteLinkType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             name,
                         })),
                         _ => Ok(CliAction::Execute(Command::GraphDeleteObjectType {
                             branch: branch(state),
+                            space: None,
                             graph,
                             name,
                         })),
@@ -1034,6 +1057,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let graph = onto_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphFreezeOntology {
                         branch: branch(state),
+                        space: None,
                         graph,
                     }))
                 }
@@ -1041,6 +1065,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let graph = onto_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphOntologyStatus {
                         branch: branch(state),
+                        space: None,
                         graph,
                     }))
                 }
@@ -1048,6 +1073,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let graph = onto_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphOntologySummary {
                         branch: branch(state),
+                        space: None,
                         graph,
                     }))
                 }
@@ -1075,6 +1101,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let graph = alg_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphWcc {
                         branch: branch(state),
+                        space: None,
                         graph,
                         top_n,
                         include_all,
@@ -1086,6 +1113,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let direction = alg_m.get_one::<String>("direction").cloned();
                     Ok(CliAction::Execute(Command::GraphCdlp {
                         branch: branch(state),
+                        space: None,
                         graph,
                         max_iterations,
                         direction,
@@ -1100,6 +1128,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let tolerance = alg_m.get_one::<f64>("tolerance").copied();
                     Ok(CliAction::Execute(Command::GraphPagerank {
                         branch: branch(state),
+                        space: None,
                         graph,
                         damping,
                         max_iterations,
@@ -1112,6 +1141,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let graph = alg_m.get_one::<String>("graph").unwrap().clone();
                     Ok(CliAction::Execute(Command::GraphLcc {
                         branch: branch(state),
+                        space: None,
                         graph,
                         top_n,
                         include_all,
@@ -1123,6 +1153,7 @@ fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, 
                     let direction = alg_m.get_one::<String>("direction").cloned();
                     Ok(CliAction::Execute(Command::GraphSssp {
                         branch: branch(state),
+                        space: None,
                         graph,
                         source,
                         direction,
@@ -1602,6 +1633,7 @@ mod tests {
             cmd,
             Command::GraphCreate {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 cascade_policy: None,
             }
@@ -1615,6 +1647,7 @@ mod tests {
             cmd,
             Command::GraphCreate {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 cascade_policy: Some("cascade".into()),
             }
@@ -1628,6 +1661,7 @@ mod tests {
             cmd,
             Command::GraphDelete {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -1640,6 +1674,7 @@ mod tests {
             cmd,
             Command::GraphList {
                 branch: Some(BranchId::from("default")),
+                space: None,
             }
         );
     }
@@ -1651,6 +1686,7 @@ mod tests {
             cmd,
             Command::GraphGetMeta {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -1667,6 +1703,7 @@ mod tests {
             cmd,
             Command::GraphAddNode {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
                 entity_ref: None,
@@ -1694,6 +1731,7 @@ mod tests {
             cmd,
             Command::GraphAddNode {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
                 entity_ref: Some("kv://main/alice".into()),
@@ -1710,6 +1748,7 @@ mod tests {
             cmd,
             Command::GraphGetNode {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
                 as_of: None,
@@ -1724,6 +1763,7 @@ mod tests {
             cmd,
             Command::GraphRemoveNode {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
             }
@@ -1737,6 +1777,7 @@ mod tests {
             cmd,
             Command::GraphListNodes {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 as_of: None,
             }
@@ -1754,6 +1795,7 @@ mod tests {
             cmd,
             Command::GraphAddEdge {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 src: "alice".into(),
                 dst: "bob".into(),
@@ -1782,6 +1824,7 @@ mod tests {
             cmd,
             Command::GraphAddEdge {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 src: "alice".into(),
                 dst: "bob".into(),
@@ -1799,6 +1842,7 @@ mod tests {
             cmd,
             Command::GraphRemoveEdge {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 src: "alice".into(),
                 dst: "bob".into(),
@@ -1814,6 +1858,7 @@ mod tests {
             cmd,
             Command::GraphNeighbors {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
                 direction: None,
@@ -1839,6 +1884,7 @@ mod tests {
             cmd,
             Command::GraphNeighbors {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 node_id: "alice".into(),
                 direction: Some("incoming".into()),
@@ -1859,6 +1905,7 @@ mod tests {
             cmd,
             Command::GraphBfs {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 start: "alice".into(),
                 max_depth: 3,
@@ -1889,6 +1936,7 @@ mod tests {
             cmd,
             Command::GraphBfs {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 start: "alice".into(),
                 max_depth: 5,
@@ -1928,6 +1976,7 @@ mod tests {
             cmd,
             Command::GraphBulkInsert {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 nodes: vec![
                     BulkGraphNode {
@@ -2018,6 +2067,7 @@ mod tests {
             cmd,
             Command::GraphDefineObjectType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 definition: Value::from(
                     serde_json::json!({"name": "Person", "properties": {"age": "int"}})
@@ -2033,6 +2083,7 @@ mod tests {
             cmd,
             Command::GraphGetObjectType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 name: "Person".into(),
             }
@@ -2046,6 +2097,7 @@ mod tests {
             cmd,
             Command::GraphListObjectTypes {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -2058,6 +2110,7 @@ mod tests {
             cmd,
             Command::GraphDeleteObjectType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 name: "Person".into(),
             }
@@ -2076,6 +2129,7 @@ mod tests {
             cmd,
             Command::GraphDefineLinkType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 definition: Value::from(
                     serde_json::json!({"name": "FOLLOWS", "source": "Person", "target": "Person"})
@@ -2093,6 +2147,7 @@ mod tests {
             cmd,
             Command::GraphGetLinkType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 name: "FOLLOWS".into(),
             }
@@ -2106,6 +2161,7 @@ mod tests {
             cmd,
             Command::GraphListLinkTypes {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -2120,6 +2176,7 @@ mod tests {
             cmd,
             Command::GraphDeleteLinkType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 name: "FOLLOWS".into(),
             }
@@ -2137,6 +2194,7 @@ mod tests {
             cmd,
             Command::GraphFreezeOntology {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -2149,6 +2207,7 @@ mod tests {
             cmd,
             Command::GraphOntologyStatus {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -2161,6 +2220,7 @@ mod tests {
             cmd,
             Command::GraphOntologySummary {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
             }
         );
@@ -2173,6 +2233,7 @@ mod tests {
             cmd,
             Command::GraphNodesByType {
                 branch: Some(BranchId::from("default")),
+                space: None,
                 graph: "social".into(),
                 object_type: "Person".into(),
             }

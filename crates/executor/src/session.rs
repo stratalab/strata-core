@@ -44,12 +44,14 @@ use crate::{Command, Error, Executor, Output, Result};
 enum PostCommitOp {
     GraphIndexNode {
         branch_id: CoreBranchId,
+        space: String,
         graph: String,
         node_id: String,
         data: NodeData,
     },
     GraphDeindexNode {
         branch_id: CoreBranchId,
+        space: String,
         graph: String,
         node_id: String,
     },
@@ -365,22 +367,24 @@ impl Session {
             match op {
                 PostCommitOp::GraphIndexNode {
                     branch_id,
+                    space,
                     graph,
                     node_id,
                     data,
                 } => {
                     primitives
                         .graph
-                        .index_node_for_search(branch_id, &graph, &node_id, &data);
+                        .index_node_for_search(branch_id, &space, &graph, &node_id, &data);
                 }
                 PostCommitOp::GraphDeindexNode {
                     branch_id,
+                    space,
                     graph,
                     node_id,
                 } => {
                     primitives
                         .graph
-                        .deindex_node_for_search(branch_id, &graph, &node_id);
+                        .deindex_node_for_search(branch_id, &space, &graph, &node_id);
                 }
                 PostCommitOp::VectorBackendOp(staged_op) => {
                     if let Ok(state) = primitives.vector.state() {
@@ -420,7 +424,40 @@ impl Session {
             | Command::KvBatchPut { space, .. }
             | Command::KvBatchGet { space, .. }
             | Command::KvBatchDelete { space, .. }
-            | Command::EventBatchAppend { space, .. } => {
+            | Command::EventBatchAppend { space, .. }
+            // Graph commands also carry an optional space.
+            | Command::GraphCreate { space, .. }
+            | Command::GraphDelete { space, .. }
+            | Command::GraphList { space, .. }
+            | Command::GraphGetMeta { space, .. }
+            | Command::GraphAddNode { space, .. }
+            | Command::GraphGetNode { space, .. }
+            | Command::GraphRemoveNode { space, .. }
+            | Command::GraphListNodes { space, .. }
+            | Command::GraphListNodesPaginated { space, .. }
+            | Command::GraphAddEdge { space, .. }
+            | Command::GraphRemoveEdge { space, .. }
+            | Command::GraphNeighbors { space, .. }
+            | Command::GraphBulkInsert { space, .. }
+            | Command::GraphBfs { space, .. }
+            | Command::GraphDefineObjectType { space, .. }
+            | Command::GraphGetObjectType { space, .. }
+            | Command::GraphListObjectTypes { space, .. }
+            | Command::GraphDeleteObjectType { space, .. }
+            | Command::GraphDefineLinkType { space, .. }
+            | Command::GraphGetLinkType { space, .. }
+            | Command::GraphListLinkTypes { space, .. }
+            | Command::GraphDeleteLinkType { space, .. }
+            | Command::GraphFreezeOntology { space, .. }
+            | Command::GraphOntologyStatus { space, .. }
+            | Command::GraphOntologySummary { space, .. }
+            | Command::GraphListOntologyTypes { space, .. }
+            | Command::GraphNodesByType { space, .. }
+            | Command::GraphWcc { space, .. }
+            | Command::GraphCdlp { space, .. }
+            | Command::GraphPagerank { space, .. }
+            | Command::GraphLcc { space, .. }
+            | Command::GraphSssp { space, .. } => {
                 space.clone().unwrap_or_else(|| "default".to_string())
             }
             _ => "default".to_string(),
@@ -434,6 +471,7 @@ impl Session {
             &mut ctx,
             ns,
             branch_id,
+            &space,
             cmd,
             &mut self.post_commit_ops,
         );
@@ -447,6 +485,7 @@ impl Session {
         ctx: &mut TransactionContext,
         ns: Arc<Namespace>,
         branch_id: strata_core::types::BranchId,
+        space: &str,
         cmd: Command,
         post_commit_ops: &mut Vec<PostCommitOp>,
     ) -> Result<Output> {
@@ -652,7 +691,7 @@ impl Session {
                     cascade_policy: policy,
                     ..Default::default()
                 };
-                convert_result(ctx.graph_create(branch_id, &graph, meta))?;
+                convert_result(ctx.graph_create(branch_id, space, &graph, meta))?;
                 Ok(Output::Unit)
             }
             Command::GraphAddNode {
@@ -676,9 +715,10 @@ impl Session {
                     object_type,
                 };
                 let created =
-                    convert_result(ctx.graph_add_node(branch_id, &graph, &node_id, &data))?;
+                    convert_result(ctx.graph_add_node(branch_id, space, &graph, &node_id, &data))?;
                 post_commit_ops.push(PostCommitOp::GraphIndexNode {
                     branch_id,
+                    space: space.to_string(),
                     graph,
                     node_id: node_id.clone(),
                     data,
@@ -686,9 +726,10 @@ impl Session {
                 Ok(Output::GraphWriteResult { node_id, created })
             }
             Command::GraphRemoveNode { graph, node_id, .. } => {
-                convert_result(ctx.graph_remove_node(branch_id, &graph, &node_id))?;
+                convert_result(ctx.graph_remove_node(branch_id, space, &graph, &node_id))?;
                 post_commit_ops.push(PostCommitOp::GraphDeindexNode {
                     branch_id,
+                    space: space.to_string(),
                     graph,
                     node_id: node_id.clone(),
                 });
@@ -715,7 +756,7 @@ impl Session {
                     properties: props,
                 };
                 let created = convert_result(
-                    ctx.graph_add_edge(branch_id, &graph, &src, &dst, &edge_type, &data),
+                    ctx.graph_add_edge(branch_id, space, &graph, &src, &dst, &edge_type, &data),
                 )?;
                 Ok(Output::GraphEdgeWriteResult {
                     src,
@@ -731,7 +772,9 @@ impl Session {
                 edge_type,
                 ..
             } => {
-                convert_result(ctx.graph_remove_edge(branch_id, &graph, &src, &dst, &edge_type))?;
+                convert_result(
+                    ctx.graph_remove_edge(branch_id, space, &graph, &src, &dst, &edge_type),
+                )?;
                 Ok(Output::Unit)
             }
 
@@ -745,7 +788,7 @@ impl Session {
 
             // === Graph reads — via GraphStoreExt for snapshot isolation ===
             Command::GraphGetNode { graph, node_id, .. } => {
-                let node = convert_result(ctx.graph_get_node(branch_id, &graph, &node_id))?;
+                let node = convert_result(ctx.graph_get_node(branch_id, space, &graph, &node_id))?;
                 match node {
                     Some(data) => {
                         let json =
@@ -760,11 +803,11 @@ impl Session {
                 }
             }
             Command::GraphListNodes { graph, .. } => {
-                let nodes = convert_result(ctx.graph_list_nodes(branch_id, &graph))?;
+                let nodes = convert_result(ctx.graph_list_nodes(branch_id, space, &graph))?;
                 Ok(Output::Keys(nodes))
             }
             Command::GraphGetMeta { graph, .. } => {
-                let meta = convert_result(ctx.graph_get_meta(branch_id, &graph))?;
+                let meta = convert_result(ctx.graph_get_meta(branch_id, space, &graph))?;
                 match meta {
                     Some(m) => {
                         let json = serde_json::to_value(&m).map_err(|e| Error::Serialization {
@@ -778,7 +821,7 @@ impl Session {
                 }
             }
             Command::GraphList { .. } => {
-                let graphs = convert_result(ctx.graph_list(branch_id))?;
+                let graphs = convert_result(ctx.graph_list(branch_id, space))?;
                 Ok(Output::Keys(graphs))
             }
             Command::GraphNeighbors {
@@ -793,6 +836,7 @@ impl Session {
                     strata_graph::types::Direction::Outgoing => {
                         convert_result(ctx.graph_outgoing_neighbors(
                             branch_id,
+                            space,
                             &graph,
                             &node_id,
                             edge_type.as_deref(),
@@ -801,6 +845,7 @@ impl Session {
                     strata_graph::types::Direction::Incoming => {
                         convert_result(ctx.graph_incoming_neighbors(
                             branch_id,
+                            space,
                             &graph,
                             &node_id,
                             edge_type.as_deref(),
@@ -809,12 +854,14 @@ impl Session {
                     strata_graph::types::Direction::Both => {
                         let mut out = convert_result(ctx.graph_outgoing_neighbors(
                             branch_id,
+                            space,
                             &graph,
                             &node_id,
                             edge_type.as_deref(),
                         ))?;
                         let inc = convert_result(ctx.graph_incoming_neighbors(
                             branch_id,
+                            space,
                             &graph,
                             &node_id,
                             edge_type.as_deref(),

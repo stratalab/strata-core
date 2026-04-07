@@ -75,10 +75,10 @@ fn ensure_vector_recovery() {
     RECOVERY_INIT.call_once(|| {
         strata_vector::register_vector_recovery();
         strata_engine::register_search_recovery();
-        // Phase 3b: register the semantic graph merge implementation. Without
-        // this, `merge_branches` falls back to the Phase 3 tactical refusal
-        // and rejects all divergent graph merges, even disjoint ones that
-        // Phase 3b would handle correctly.
+        // Register the semantic graph merge implementation. Without this,
+        // `merge_branches` falls back to a tactical refusal and rejects
+        // all divergent graph merges, even disjoint ones that the
+        // semantic merge would handle correctly.
         strata_graph::register_graph_semantic_merge();
     });
 }

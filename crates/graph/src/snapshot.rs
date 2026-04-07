@@ -29,8 +29,8 @@ mod tests {
     fn empty_graph_empty_snapshot() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        let snap = gs.snapshot(b, "g").unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         assert_eq!(snap.node_count(), 0);
         assert_eq!(snap.edge_count(), 0);
     }
@@ -39,20 +39,21 @@ mod tests {
     fn snapshot_captures_all_nodes_and_edges() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E1", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E2", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "E3", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "C", "E3", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "C", "A", "E4", EdgeData::default())
+        gs.add_edge(b, "default", "g", "C", "A", "E4", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         assert_eq!(snap.node_count(), 3);
         assert_eq!(snap.edge_count(), 4);
     }
@@ -61,15 +62,16 @@ mod tests {
     fn snapshot_after_remove_node() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
-        gs.remove_node(b, "g", "A").unwrap();
+        gs.remove_node(b, "default", "g", "A").unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         assert_eq!(snap.node_count(), 1);
         assert_eq!(snap.edge_count(), 0);
         assert!(!snap.nodes.contains_key("A"));
@@ -79,11 +81,12 @@ mod tests {
     fn snapshot_nodes_without_edges() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C", "D", "E"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         assert_eq!(snap.node_count(), 5);
         assert_eq!(snap.edge_count(), 0);
     }
@@ -96,12 +99,16 @@ mod tests {
     fn to_edge_list() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
         gs.add_edge(
             b,
+            "default",
             "g",
             "A",
             "B",
@@ -112,10 +119,10 @@ mod tests {
             },
         )
         .unwrap();
-        gs.add_edge(b, "g", "B", "C", "LINKS", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "LINKS", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         let list = snap.to_edge_list();
         assert_eq!(list.len(), 2);
         // Check that entries contain expected data
@@ -129,18 +136,21 @@ mod tests {
     fn to_adjacency_list() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "E", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
+        gs.add_node(b, "default", "g", "C", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "C", "E", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "B", "C", "E", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         let adj = snap.to_adjacency_list();
         assert_eq!(adj.get("A").unwrap().len(), 2);
         assert_eq!(adj.get("B").unwrap().len(), 1);
@@ -151,13 +161,15 @@ mod tests {
     fn to_csv_parseable() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         let csv = snap.to_csv();
         let lines: Vec<&str> = csv.lines().collect();
         assert_eq!(lines[0], "src,dst,edge_type,weight");
@@ -171,13 +183,15 @@ mod tests {
     fn to_csv_default_weight_is_1() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "X", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "Y", NodeData::default()).unwrap();
-        gs.add_edge(b, "g", "X", "Y", "E", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "X", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "Y", NodeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "X", "Y", "E", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         let csv = snap.to_csv();
         assert!(csv.contains("1")); // weight=1.0
     }
@@ -209,16 +223,17 @@ mod tests {
     fn graph_algorithm_degree_count() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E", EdgeData::default())
             .unwrap();
 
-        let snap = gs.snapshot(b, "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
         let degrees = DegreeCount.execute(&snap);
 
         assert_eq!(degrees["A"], 1); // A→B
@@ -234,8 +249,8 @@ mod tests {
     fn snapshot_stats_empty_graph() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        let stats = gs.snapshot_stats(b, "g").unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        let stats = gs.snapshot_stats(b, "default", "g").unwrap();
         assert_eq!(stats.node_count, 0);
         assert_eq!(stats.edge_count, 0);
     }
@@ -244,19 +259,20 @@ mod tests {
     fn snapshot_stats_matches_snapshot() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E1", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E2", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "E3", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "C", "E3", EdgeData::default())
             .unwrap();
 
-        let stats = gs.snapshot_stats(b, "g").unwrap();
-        let snap = gs.snapshot(b, "g").unwrap();
+        let stats = gs.snapshot_stats(b, "default", "g").unwrap();
+        let snap = gs.snapshot(b, "default", "g").unwrap();
 
         assert_eq!(stats.node_count, snap.node_count());
         assert_eq!(stats.edge_count, snap.edge_count());
@@ -266,15 +282,16 @@ mod tests {
     fn snapshot_stats_after_remove() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E", EdgeData::default())
             .unwrap();
-        gs.remove_node(b, "g", "A").unwrap();
+        gs.remove_node(b, "default", "g", "A").unwrap();
 
-        let stats = gs.snapshot_stats(b, "g").unwrap();
+        let stats = gs.snapshot_stats(b, "default", "g").unwrap();
         assert_eq!(stats.node_count, 1);
         assert_eq!(stats.edge_count, 0);
     }
@@ -287,9 +304,9 @@ mod tests {
     fn for_each_edge_empty_graph() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         let mut count = 0;
-        gs.for_each_edge(b, "g", |_| count += 1).unwrap();
+        gs.for_each_edge(b, "default", "g", |_| count += 1).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -297,12 +314,13 @@ mod tests {
     fn for_each_edge_nodes_only_no_edges() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
         let mut count = 0;
-        gs.for_each_edge(b, "g", |_| count += 1).unwrap();
+        gs.for_each_edge(b, "default", "g", |_| count += 1).unwrap();
         assert_eq!(count, 0);
     }
 
@@ -310,22 +328,24 @@ mod tests {
     fn for_each_edge_matches_all_edges() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(b, "g", "A", "B", "E1", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "B", "E1", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "B", "C", "E2", EdgeData::default())
+        gs.add_edge(b, "default", "g", "B", "C", "E2", EdgeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "C", "E3", EdgeData::default())
+        gs.add_edge(b, "default", "g", "A", "C", "E3", EdgeData::default())
             .unwrap();
 
         let mut edges = Vec::new();
-        gs.for_each_edge(b, "g", |e| edges.push(e)).unwrap();
+        gs.for_each_edge(b, "default", "g", |e| edges.push(e))
+            .unwrap();
         assert_eq!(edges.len(), 3);
 
-        let all_edges = gs.all_edges(b, "g").unwrap();
+        let all_edges = gs.all_edges(b, "default", "g").unwrap();
         assert_eq!(edges.len(), all_edges.len());
     }
 
@@ -333,11 +353,14 @@ mod tests {
     fn for_each_edge_preserves_edge_data() {
         let (_db, gs) = setup();
         let b = branch();
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "B", NodeData::default())
+            .unwrap();
         gs.add_edge(
             b,
+            "default",
             "g",
             "A",
             "B",
@@ -350,7 +373,8 @@ mod tests {
         .unwrap();
 
         let mut edges = Vec::new();
-        gs.for_each_edge(b, "g", |e| edges.push(e)).unwrap();
+        gs.for_each_edge(b, "default", "g", |e| edges.push(e))
+            .unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].src, "A");
         assert_eq!(edges[0].dst, "B");

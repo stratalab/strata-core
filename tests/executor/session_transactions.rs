@@ -627,6 +627,7 @@ fn graph_add_node_in_txn_read_your_writes() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -642,6 +643,7 @@ fn graph_add_node_in_txn_read_your_writes() {
     let output = session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -662,6 +664,7 @@ fn graph_add_node_in_txn_read_your_writes() {
     let output = session
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -683,6 +686,7 @@ fn graph_rollback_discards_writes() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -698,6 +702,7 @@ fn graph_rollback_discards_writes() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -711,6 +716,7 @@ fn graph_rollback_discards_writes() {
     let output = session
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -732,6 +738,7 @@ fn graph_commit_makes_writes_visible() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -747,6 +754,7 @@ fn graph_commit_makes_writes_visible() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -762,6 +770,7 @@ fn graph_commit_makes_writes_visible() {
     let output = session2
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -783,6 +792,7 @@ fn graph_and_kv_atomic() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -807,6 +817,7 @@ fn graph_and_kv_atomic() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -835,6 +846,7 @@ fn graph_and_kv_atomic() {
     let node = session2
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -854,6 +866,7 @@ fn graph_add_edge_in_txn() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -869,6 +882,7 @@ fn graph_add_edge_in_txn() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -880,6 +894,7 @@ fn graph_add_edge_in_txn() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "bob".into(),
             entity_ref: None,
@@ -891,6 +906,7 @@ fn graph_add_edge_in_txn() {
     session
         .execute(Command::GraphAddEdge {
             branch: None,
+            space: None,
             graph: "social".into(),
             src: "alice".into(),
             dst: "bob".into(),
@@ -903,6 +919,7 @@ fn graph_add_edge_in_txn() {
     let output = session
         .execute(Command::GraphNeighbors {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             direction: Some("outgoing".into()),
@@ -930,6 +947,7 @@ fn graph_list_nodes_in_txn() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -946,6 +964,7 @@ fn graph_list_nodes_in_txn() {
         session
             .execute(Command::GraphAddNode {
                 branch: None,
+                space: None,
                 graph: "social".into(),
                 node_id: (*name).into(),
                 entity_ref: None,
@@ -958,6 +977,7 @@ fn graph_list_nodes_in_txn() {
     let output = session
         .execute(Command::GraphListNodes {
             branch: None,
+            space: None,
             graph: "social".into(),
             as_of: None,
         })
@@ -981,6 +1001,7 @@ fn graph_remove_node_in_txn() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -988,6 +1009,7 @@ fn graph_remove_node_in_txn() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -1007,6 +1029,7 @@ fn graph_remove_node_in_txn() {
     session
         .execute(Command::GraphRemoveNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
         })
@@ -1016,6 +1039,7 @@ fn graph_remove_node_in_txn() {
     let output = session
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -1039,6 +1063,7 @@ fn graph_kv_rollback_discards_both() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -1063,6 +1088,7 @@ fn graph_kv_rollback_discards_both() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -1092,6 +1118,7 @@ fn graph_kv_rollback_discards_both() {
     let node = session2
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "social".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -1111,6 +1138,7 @@ fn graph_delete_rejected_in_txn() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "social".into(),
             cascade_policy: None,
         })
@@ -1125,6 +1153,7 @@ fn graph_delete_rejected_in_txn() {
 
     let result = session.execute(Command::GraphDelete {
         branch: None,
+        space: None,
         graph: "social".into(),
     });
 
@@ -2276,6 +2305,7 @@ fn all_primitives_atomic_commit() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "g".into(),
             cascade_policy: None,
         })
@@ -2328,6 +2358,7 @@ fn all_primitives_atomic_commit() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "g".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -2373,6 +2404,7 @@ fn all_primitives_atomic_commit() {
     let node = s2
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "g".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -2407,6 +2439,7 @@ fn all_primitives_atomic_rollback() {
     session
         .execute(Command::GraphCreate {
             branch: None,
+            space: None,
             graph: "g".into(),
             cascade_policy: None,
         })
@@ -2458,6 +2491,7 @@ fn all_primitives_atomic_rollback() {
     session
         .execute(Command::GraphAddNode {
             branch: None,
+            space: None,
             graph: "g".into(),
             node_id: "alice".into(),
             entity_ref: None,
@@ -2497,6 +2531,7 @@ fn all_primitives_atomic_rollback() {
     let node = s2
         .execute(Command::GraphGetNode {
             branch: None,
+            space: None,
             graph: "g".into(),
             node_id: "alice".into(),
             as_of: None,
@@ -2525,10 +2560,10 @@ fn all_primitives_atomic_rollback() {
 // ============================================================================
 // KV / JSON session bypass regression tests
 //
-// Phase 3 fixed the Event session dispatch bug where `as_of` was silently
-// dropped via `{ sequence, .. }` destructuring. KV and JSON had the same
-// bug and were not fixed until a later audit. These tests prove the bypass
-// is now in place for all four commands.
+// Earlier work fixed the Event session dispatch bug where `as_of` was
+// silently dropped via `{ sequence, .. }` destructuring. KV and JSON had
+// the same bug and were not fixed until a later audit. These tests prove
+// the bypass is now in place for all four commands.
 // ============================================================================
 
 #[test]

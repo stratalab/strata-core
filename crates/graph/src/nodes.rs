@@ -10,6 +10,7 @@ impl GraphStore {
     pub fn add_node(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         data: NodeData,
@@ -19,19 +20,19 @@ impl GraphStore {
 
         // Validate against frozen ontology if applicable
         if data.object_type.is_some() {
-            if let Some(meta) = self.get_graph_meta(branch_id, graph)? {
+            if let Some(meta) = self.get_graph_meta(branch_id, space, graph)? {
                 if meta.ontology_status == Some(types::OntologyStatus::Frozen) {
-                    self.validate_node(branch_id, graph, node_id, &data)?;
+                    self.validate_node(branch_id, space, graph, node_id, &data)?;
                 }
             }
         }
 
         let result = self.db.transaction(branch_id, |txn| {
-            txn.graph_add_node(branch_id, graph, node_id, &data)
+            txn.graph_add_node(branch_id, space, graph, node_id, &data)
         })?;
 
         // Post-commit: update search index
-        self.index_node_for_search(branch_id, graph, node_id, &data);
+        self.index_node_for_search(branch_id, space, graph, node_id, &data);
 
         Ok(result)
     }
@@ -40,18 +41,25 @@ impl GraphStore {
     pub fn get_node(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) -> StrataResult<Option<NodeData>> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_get_node(branch_id, graph, node_id)
+            txn.graph_get_node(branch_id, space, graph, node_id)
         })
     }
 
     /// List all node IDs in a graph.
-    pub fn list_nodes(&self, branch_id: BranchId, graph: &str) -> StrataResult<Vec<String>> {
-        self.db
-            .transaction(branch_id, |txn| txn.graph_list_nodes(branch_id, graph))
+    pub fn list_nodes(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<Vec<String>> {
+        self.db.transaction(branch_id, |txn| {
+            txn.graph_list_nodes(branch_id, space, graph)
+        })
     }
 
     /// List node IDs with cursor-based pagination.
@@ -61,11 +69,12 @@ impl GraphStore {
     pub fn list_nodes_paginated(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         page: PageRequest,
     ) -> StrataResult<PageResponse<String>> {
         let prefix = keys::all_nodes_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -98,13 +107,19 @@ impl GraphStore {
     }
 
     /// Remove a node and all its incident edges.
-    pub fn remove_node(&self, branch_id: BranchId, graph: &str, node_id: &str) -> StrataResult<()> {
+    pub fn remove_node(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+        node_id: &str,
+    ) -> StrataResult<()> {
         self.db.transaction(branch_id, |txn| {
-            txn.graph_remove_node(branch_id, graph, node_id)
+            txn.graph_remove_node(branch_id, space, graph, node_id)
         })?;
 
         // Post-commit: remove from search index
-        self.deindex_node_for_search(branch_id, graph, node_id);
+        self.deindex_node_for_search(branch_id, space, graph, node_id);
 
         Ok(())
     }
@@ -113,10 +128,11 @@ impl GraphStore {
     pub fn all_nodes(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
     ) -> StrataResult<std::collections::HashMap<String, NodeData>> {
         let prefix = keys::all_nodes_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -153,12 +169,13 @@ impl GraphStore {
     pub fn get_node_at(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         node_id: &str,
         as_of_ts: u64,
     ) -> StrataResult<Option<NodeData>> {
         let user_key = keys::node_key(graph, node_id);
-        let storage_key = keys::storage_key(branch_id, &user_key);
+        let storage_key = keys::storage_key(branch_id, space, &user_key);
         let result = self.db.get_at_timestamp(&storage_key, as_of_ts)?;
         match result {
             Some(vv) => {
@@ -185,11 +202,12 @@ impl GraphStore {
     pub fn list_nodes_at(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         as_of_ts: u64,
     ) -> StrataResult<Vec<String>> {
         let prefix = keys::all_nodes_prefix(graph);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
         let results = self.db.scan_prefix_at_timestamp(&prefix_key, as_of_ts)?;
         let mut node_ids = Vec::new();
         for (key, _) in results {
@@ -206,10 +224,11 @@ impl GraphStore {
     pub fn nodes_for_entity(
         &self,
         branch_id: BranchId,
+        space: &str,
         entity_ref_uri: &str,
     ) -> StrataResult<Vec<(String, String)>> {
         let prefix = keys::ref_index_prefix(entity_ref_uri);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -229,11 +248,12 @@ impl GraphStore {
     pub fn nodes_by_type(
         &self,
         branch_id: BranchId,
+        space: &str,
         graph: &str,
         object_type: &str,
     ) -> StrataResult<Vec<String>> {
         let prefix = keys::type_index_prefix(graph, object_type);
-        let prefix_key = keys::storage_key(branch_id, &prefix);
+        let prefix_key = keys::storage_key(branch_id, space, &prefix);
 
         self.db.transaction(branch_id, |txn| {
             let results = txn.scan_prefix(&prefix_key)?;
@@ -273,10 +293,11 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         let created = gs
             .add_node(
                 branch,
+                "default",
                 "ng",
                 "n1",
                 NodeData {
@@ -288,7 +309,7 @@ mod tests {
             .unwrap();
         assert!(created, "add_node should return true for new node");
 
-        let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
+        let node = gs.get_node(branch, "default", "ng", "n1").unwrap().unwrap();
         assert_eq!(node.properties, Some(serde_json::json!({"name": "Alice"})));
     }
 
@@ -297,9 +318,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "ng",
             "n1",
             NodeData {
@@ -310,7 +332,7 @@ mod tests {
         )
         .unwrap();
 
-        let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
+        let node = gs.get_node(branch, "default", "ng", "n1").unwrap().unwrap();
         assert_eq!(node.entity_ref, Some("kv://main/patient-4821".to_string()));
     }
 
@@ -319,11 +341,11 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(branch, "ng", "n1", NodeData::default())
+        gs.create_graph(branch, "default", "ng", None).unwrap();
+        gs.add_node(branch, "default", "ng", "n1", NodeData::default())
             .unwrap();
 
-        let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
+        let node = gs.get_node(branch, "default", "ng", "n1").unwrap().unwrap();
         assert!(node.entity_ref.is_none());
     }
 
@@ -332,12 +354,13 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         for id in &["a", "b", "c"] {
-            gs.add_node(branch, "ng", id, NodeData::default()).unwrap();
+            gs.add_node(branch, "default", "ng", id, NodeData::default())
+                .unwrap();
         }
 
-        let mut nodes = gs.list_nodes(branch, "ng").unwrap();
+        let mut nodes = gs.list_nodes(branch, "default", "ng").unwrap();
         nodes.sort();
         assert_eq!(nodes, vec!["a", "b", "c"]);
     }
@@ -347,11 +370,14 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
-        gs.add_node(branch, "ng", "n1", NodeData::default())
+        gs.create_graph(branch, "default", "ng", None).unwrap();
+        gs.add_node(branch, "default", "ng", "n1", NodeData::default())
             .unwrap();
-        gs.remove_node(branch, "ng", "n1").unwrap();
-        assert!(gs.get_node(branch, "ng", "n1").unwrap().is_none());
+        gs.remove_node(branch, "default", "ng", "n1").unwrap();
+        assert!(gs
+            .get_node(branch, "default", "ng", "n1")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -359,23 +385,30 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         for id in &["A", "B", "C"] {
-            gs.add_node(branch, "ng", id, NodeData::default()).unwrap();
+            gs.add_node(branch, "default", "ng", id, NodeData::default())
+                .unwrap();
         }
-        gs.add_edge(branch, "ng", "A", "B", "E1", EdgeData::default())
+        gs.add_edge(branch, "default", "ng", "A", "B", "E1", EdgeData::default())
             .unwrap();
-        gs.add_edge(branch, "ng", "C", "A", "E2", EdgeData::default())
+        gs.add_edge(branch, "default", "ng", "C", "A", "E2", EdgeData::default())
             .unwrap();
 
-        gs.remove_node(branch, "ng", "A").unwrap();
+        gs.remove_node(branch, "default", "ng", "A").unwrap();
 
         // Both edges involving A should be gone
-        assert!(gs.get_edge(branch, "ng", "A", "B", "E1").unwrap().is_none());
-        assert!(gs.get_edge(branch, "ng", "C", "A", "E2").unwrap().is_none());
+        assert!(gs
+            .get_edge(branch, "default", "ng", "A", "B", "E1")
+            .unwrap()
+            .is_none());
+        assert!(gs
+            .get_edge(branch, "default", "ng", "C", "A", "E2")
+            .unwrap()
+            .is_none());
         // B and C still exist
-        assert!(gs.get_node(branch, "ng", "B").unwrap().is_some());
-        assert!(gs.get_node(branch, "ng", "C").unwrap().is_some());
+        assert!(gs.get_node(branch, "default", "ng", "B").unwrap().is_some());
+        assert!(gs.get_node(branch, "default", "ng", "C").unwrap().is_some());
     }
 
     #[test]
@@ -383,8 +416,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
-        assert!(gs.add_node(branch, "ng", "", NodeData::default(),).is_err());
+        gs.create_graph(branch, "default", "ng", None).unwrap();
+        assert!(gs
+            .add_node(branch, "default", "ng", "", NodeData::default(),)
+            .is_err());
     }
 
     #[test]
@@ -392,10 +427,11 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         let created1 = gs
             .add_node(
                 branch,
+                "default",
                 "ng",
                 "n1",
                 NodeData {
@@ -410,6 +446,7 @@ mod tests {
         let created2 = gs
             .add_node(
                 branch,
+                "default",
                 "ng",
                 "n1",
                 NodeData {
@@ -421,7 +458,7 @@ mod tests {
             .unwrap();
         assert!(!created2, "second add_node should return created=false");
 
-        let node = gs.get_node(branch, "ng", "n1").unwrap().unwrap();
+        let node = gs.get_node(branch, "default", "ng", "n1").unwrap().unwrap();
         assert_eq!(node.properties, Some(serde_json::json!({"v": 2})));
     }
 
@@ -430,9 +467,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "ng", None).unwrap();
+        gs.create_graph(branch, "default", "ng", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "ng",
             "patient-1",
             NodeData {
@@ -443,7 +481,10 @@ mod tests {
         )
         .unwrap();
 
-        let node = gs.get_node(branch, "ng", "patient-1").unwrap().unwrap();
+        let node = gs
+            .get_node(branch, "default", "ng", "patient-1")
+            .unwrap()
+            .unwrap();
         assert_eq!(node.entity_ref, Some("kv://main/p1".to_string()));
         let props = node.properties.unwrap();
         assert_eq!(props["department"], "cardiology");
@@ -459,9 +500,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
+        gs.create_graph(branch, "default", "rg", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -472,7 +514,9 @@ mod tests {
         )
         .unwrap();
 
-        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
+        let refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/key1")
+            .unwrap();
         assert_eq!(refs.len(), 1);
         assert_eq!(refs[0], ("rg".to_string(), "n1".to_string()));
     }
@@ -482,11 +526,13 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
-        gs.add_node(branch, "rg", "n1", NodeData::default())
+        gs.create_graph(branch, "default", "rg", None).unwrap();
+        gs.add_node(branch, "default", "rg", "n1", NodeData::default())
             .unwrap();
 
-        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
+        let refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/key1")
+            .unwrap();
         assert!(refs.is_empty());
     }
 
@@ -495,12 +541,13 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "g1", None).unwrap();
-        gs.create_graph(branch, "g2", None).unwrap();
+        gs.create_graph(branch, "default", "g1", None).unwrap();
+        gs.create_graph(branch, "default", "g2", None).unwrap();
 
         let uri = "kv://main/shared";
         gs.add_node(
             branch,
+            "default",
             "g1",
             "n1",
             NodeData {
@@ -512,6 +559,7 @@ mod tests {
         .unwrap();
         gs.add_node(
             branch,
+            "default",
             "g2",
             "n2",
             NodeData {
@@ -522,7 +570,7 @@ mod tests {
         )
         .unwrap();
 
-        let mut refs = gs.nodes_for_entity(branch, uri).unwrap();
+        let mut refs = gs.nodes_for_entity(branch, "default", uri).unwrap();
         refs.sort();
         assert_eq!(refs.len(), 2);
     }
@@ -532,9 +580,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
+        gs.create_graph(branch, "default", "rg", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -544,9 +593,11 @@ mod tests {
             },
         )
         .unwrap();
-        gs.remove_node(branch, "rg", "n1").unwrap();
+        gs.remove_node(branch, "default", "rg", "n1").unwrap();
 
-        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
+        let refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/key1")
+            .unwrap();
         assert!(refs.is_empty());
     }
 
@@ -555,9 +606,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
+        gs.create_graph(branch, "default", "rg", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -571,6 +623,7 @@ mod tests {
         // Update with new entity_ref
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -581,10 +634,14 @@ mod tests {
         )
         .unwrap();
 
-        let old_refs = gs.nodes_for_entity(branch, "kv://main/old").unwrap();
+        let old_refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/old")
+            .unwrap();
         assert!(old_refs.is_empty());
 
-        let new_refs = gs.nodes_for_entity(branch, "kv://main/new").unwrap();
+        let new_refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/new")
+            .unwrap();
         assert_eq!(new_refs.len(), 1);
     }
 
@@ -593,9 +650,10 @@ mod tests {
         let (_db, gs) = setup();
         let branch = default_branch();
 
-        gs.create_graph(branch, "rg", None).unwrap();
+        gs.create_graph(branch, "default", "rg", None).unwrap();
         gs.add_node(
             branch,
+            "default",
             "rg",
             "n1",
             NodeData {
@@ -607,10 +665,12 @@ mod tests {
         .unwrap();
 
         // Update with entity_ref=None
-        gs.add_node(branch, "rg", "n1", NodeData::default())
+        gs.add_node(branch, "default", "rg", "n1", NodeData::default())
             .unwrap();
 
-        let refs = gs.nodes_for_entity(branch, "kv://main/key1").unwrap();
+        let refs = gs
+            .nodes_for_entity(branch, "default", "kv://main/key1")
+            .unwrap();
         assert!(refs.is_empty());
     }
 
@@ -622,18 +682,19 @@ mod tests {
     fn test_corrupt_node_data_returns_error() {
         let (db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
+            .unwrap();
 
         // Corrupt the node value directly via the underlying KV store
         let node_uk = keys::node_key("g", "A");
-        let node_sk = keys::storage_key(branch, &node_uk);
+        let node_sk = keys::storage_key(branch, "default", &node_uk);
         db.transaction(branch, |txn| {
             txn.put(node_sk.clone(), Value::String("NOT VALID JSON{{".into()))
         })
         .unwrap();
 
-        let result = gs.all_nodes(branch, "g");
+        let result = gs.all_nodes(branch, "default", "g");
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -651,28 +712,47 @@ mod tests {
     fn remove_node_with_multiple_edges_to_same_neighbor() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
         for id in &["A", "B"] {
-            gs.add_node(branch, "g", id, NodeData::default()).unwrap();
+            gs.add_node(branch, "default", "g", id, NodeData::default())
+                .unwrap();
         }
         // Two different edge types from A to B
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
-            .unwrap();
-        gs.add_edge(branch, "g", "A", "B", "LIKES", EdgeData::default())
-            .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "LIKES",
+            EdgeData::default(),
+        )
+        .unwrap();
 
-        gs.remove_node(branch, "g", "A").unwrap();
+        gs.remove_node(branch, "default", "g", "A").unwrap();
 
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "LIKES")
+            .get_edge(branch, "default", "g", "A", "B", "LIKES")
             .unwrap()
             .is_none());
         // B's reverse adj list should be empty (both edges removed)
-        let incoming = gs.incoming_neighbors(branch, "g", "B", None).unwrap();
+        let incoming = gs
+            .incoming_neighbors(branch, "default", "g", "B", None)
+            .unwrap();
         assert!(incoming.is_empty());
     }
 
@@ -680,27 +760,47 @@ mod tests {
     fn remove_node_with_self_loop() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(branch, "g", "B", NodeData::default()).unwrap();
-        gs.add_edge(branch, "g", "A", "A", "SELF", EdgeData::default())
+        gs.create_graph(branch, "default", "g", None).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(branch, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.add_node(branch, "default", "g", "B", NodeData::default())
             .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "A",
+            "SELF",
+            EdgeData::default(),
+        )
+        .unwrap();
+        gs.add_edge(
+            branch,
+            "default",
+            "g",
+            "A",
+            "B",
+            "KNOWS",
+            EdgeData::default(),
+        )
+        .unwrap();
 
-        gs.remove_node(branch, "g", "A").unwrap();
+        gs.remove_node(branch, "default", "g", "A").unwrap();
 
-        assert!(gs.get_node(branch, "g", "A").unwrap().is_none());
+        assert!(gs.get_node(branch, "default", "g", "A").unwrap().is_none());
         assert!(gs
-            .get_edge(branch, "g", "A", "A", "SELF")
+            .get_edge(branch, "default", "g", "A", "A", "SELF")
             .unwrap()
             .is_none());
         assert!(gs
-            .get_edge(branch, "g", "A", "B", "KNOWS")
+            .get_edge(branch, "default", "g", "A", "B", "KNOWS")
             .unwrap()
             .is_none());
         // B's reverse list should be empty
-        let incoming = gs.incoming_neighbors(branch, "g", "B", None).unwrap();
+        let incoming = gs
+            .incoming_neighbors(branch, "default", "g", "B", None)
+            .unwrap();
         assert!(incoming.is_empty());
     }
 
@@ -708,23 +808,30 @@ mod tests {
     fn remove_node_hub_with_many_neighbors() {
         let (_db, gs) = setup();
         let branch = default_branch();
-        gs.create_graph(branch, "g", None).unwrap();
+        gs.create_graph(branch, "default", "g", None).unwrap();
         // Create a hub node A with edges to 10 neighbors
-        gs.add_node(branch, "g", "A", NodeData::default()).unwrap();
+        gs.add_node(branch, "default", "g", "A", NodeData::default())
+            .unwrap();
         for i in 0..10 {
             let id = format!("N{}", i);
-            gs.add_node(branch, "g", &id, NodeData::default()).unwrap();
-            gs.add_edge(branch, "g", "A", &id, "E", EdgeData::default())
+            gs.add_node(branch, "default", "g", &id, NodeData::default())
+                .unwrap();
+            gs.add_edge(branch, "default", "g", "A", &id, "E", EdgeData::default())
                 .unwrap();
         }
 
-        gs.remove_node(branch, "g", "A").unwrap();
+        gs.remove_node(branch, "default", "g", "A").unwrap();
 
         // All edges removed
         for i in 0..10 {
             let id = format!("N{}", i);
-            assert!(gs.get_edge(branch, "g", "A", &id, "E").unwrap().is_none());
-            let incoming = gs.incoming_neighbors(branch, "g", &id, None).unwrap();
+            assert!(gs
+                .get_edge(branch, "default", "g", "A", &id, "E")
+                .unwrap()
+                .is_none());
+            let incoming = gs
+                .incoming_neighbors(branch, "default", "g", &id, None)
+                .unwrap();
             assert!(incoming.is_empty(), "N{} should have no incoming edges", i);
         }
     }
@@ -738,26 +845,41 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "C", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "C", "A", "KNOWS", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "B", "TRUSTS", EdgeData::default())
+        gs.add_node(b, "default", "g", "C", NodeData::default())
             .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 2);
-        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 1);
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "C", "A", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "TRUSTS", EdgeData::default())
+            .unwrap();
+
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            2
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "TRUSTS").unwrap(),
+            1
+        );
 
         // Removing A should decrement all edges incident to A
-        gs.remove_node(b, "g", "A").unwrap();
+        gs.remove_node(b, "default", "g", "A").unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 0);
-        assert_eq!(gs.count_edges_by_type(b, "g", "TRUSTS").unwrap(), 0);
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            0
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "TRUSTS").unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -765,27 +887,35 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "A", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "B", NodeData::default()).unwrap();
-
-        gs.add_edge(b, "g", "A", "B", "KNOWS", EdgeData::default())
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "A", NodeData::default())
             .unwrap();
-        gs.add_edge(b, "g", "A", "A", "SELF", EdgeData::default())
+        gs.add_node(b, "default", "g", "B", NodeData::default())
             .unwrap();
 
-        assert_eq!(gs.count_edges_by_type(b, "g", "KNOWS").unwrap(), 1);
-        assert_eq!(gs.count_edges_by_type(b, "g", "SELF").unwrap(), 1);
-
-        gs.remove_node(b, "g", "A").unwrap();
+        gs.add_edge(b, "default", "g", "A", "B", "KNOWS", EdgeData::default())
+            .unwrap();
+        gs.add_edge(b, "default", "g", "A", "A", "SELF", EdgeData::default())
+            .unwrap();
 
         assert_eq!(
-            gs.count_edges_by_type(b, "g", "KNOWS").unwrap(),
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
+            1
+        );
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "SELF").unwrap(),
+            1
+        );
+
+        gs.remove_node(b, "default", "g", "A").unwrap();
+
+        assert_eq!(
+            gs.count_edges_by_type(b, "default", "g", "KNOWS").unwrap(),
             0,
             "outgoing KNOWS edge should be decremented"
         );
         assert_eq!(
-            gs.count_edges_by_type(b, "g", "SELF").unwrap(),
+            gs.count_edges_by_type(b, "default", "g", "SELF").unwrap(),
             0,
             "self-loop should be decremented exactly once"
         );
@@ -800,14 +930,16 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["a", "b", "c", "d", "e"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
 
         let page = gs
             .list_nodes_paginated(
                 b,
+                "default",
                 "g",
                 PageRequest {
                     limit: 3,
@@ -825,10 +957,11 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         let expected: Vec<String> = (0..7).map(|i| format!("n{:02}", i)).collect();
         for id in &expected {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
 
         let mut all_items = Vec::new();
@@ -839,6 +972,7 @@ mod tests {
             let page = gs
                 .list_nodes_paginated(
                     b,
+                    "default",
                     "g",
                     PageRequest {
                         limit: 3,
@@ -866,11 +1000,12 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
 
         let page = gs
             .list_nodes_paginated(
                 b,
+                "default",
                 "g",
                 PageRequest {
                     limit: 10,
@@ -888,15 +1023,17 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         for id in &["a", "b", "c"] {
-            gs.add_node(b, "g", id, NodeData::default()).unwrap();
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
         }
 
         // Request exactly 3 nodes when there are exactly 3
         let page = gs
             .list_nodes_paginated(
                 b,
+                "default",
                 "g",
                 PageRequest {
                     limit: 3,
@@ -912,6 +1049,7 @@ mod tests {
             let page2 = gs
                 .list_nodes_paginated(
                     b,
+                    "default",
                     "g",
                     PageRequest {
                         limit: 3,
@@ -929,14 +1067,17 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "b", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "a", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "b", NodeData::default())
+            .unwrap();
 
         // Use a cursor past all existing node IDs
         let page = gs
             .list_nodes_paginated(
                 b,
+                "default",
                 "g",
                 PageRequest {
                     limit: 10,
@@ -966,9 +1107,10 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -986,6 +1128,7 @@ mod tests {
         // Update to v2
         gs.add_node(
             b,
+            "default",
             "g",
             "n1",
             NodeData {
@@ -996,11 +1139,14 @@ mod tests {
         .unwrap();
 
         // get_node_at(ts_after_v1) should return v1
-        let old = gs.get_node_at(b, "g", "n1", ts_after_v1).unwrap().unwrap();
+        let old = gs
+            .get_node_at(b, "default", "g", "n1", ts_after_v1)
+            .unwrap()
+            .unwrap();
         assert_eq!(old.properties, Some(serde_json::json!({"v": 1})));
 
         // Current get_node should return v2
-        let current = gs.get_node(b, "g", "n1").unwrap().unwrap();
+        let current = gs.get_node(b, "default", "g", "n1").unwrap().unwrap();
         assert_eq!(current.properties, Some(serde_json::json!({"v": 2})));
     }
 
@@ -1012,10 +1158,14 @@ mod tests {
         let ts_before = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "n1", NodeData::default())
+            .unwrap();
 
-        assert!(gs.get_node_at(b, "g", "n1", ts_before).unwrap().is_none());
+        assert!(gs
+            .get_node_at(b, "default", "g", "n1", ts_before)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1023,25 +1173,26 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "n1", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "n1", NodeData::default())
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts_before_delete = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        gs.remove_node(b, "g", "n1").unwrap();
+        gs.remove_node(b, "default", "g", "n1").unwrap();
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts_after_delete = now_micros();
 
         // Before deletion: visible
         assert!(gs
-            .get_node_at(b, "g", "n1", ts_before_delete)
+            .get_node_at(b, "default", "g", "n1", ts_before_delete)
             .unwrap()
             .is_some());
         // After deletion: gone
         assert!(gs
-            .get_node_at(b, "g", "n1", ts_after_delete)
+            .get_node_at(b, "default", "g", "n1", ts_after_delete)
             .unwrap()
             .is_none());
     }
@@ -1051,25 +1202,28 @@ mod tests {
         let (_db, gs) = setup();
         let b = default_branch();
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
-        gs.add_node(b, "g", "b", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "a", NodeData::default())
+            .unwrap();
+        gs.add_node(b, "default", "g", "b", NodeData::default())
+            .unwrap();
 
         std::thread::sleep(std::time::Duration::from_millis(5));
         let ts1 = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
         // Add c, remove a
-        gs.add_node(b, "g", "c", NodeData::default()).unwrap();
-        gs.remove_node(b, "g", "a").unwrap();
+        gs.add_node(b, "default", "g", "c", NodeData::default())
+            .unwrap();
+        gs.remove_node(b, "default", "g", "a").unwrap();
 
         // At ts1: should see [a, b]
-        let mut old = gs.list_nodes_at(b, "g", ts1).unwrap();
+        let mut old = gs.list_nodes_at(b, "default", "g", ts1).unwrap();
         old.sort();
         assert_eq!(old, vec!["a", "b"]);
 
         // Current: should see [b, c]
-        let mut current = gs.list_nodes(b, "g").unwrap();
+        let mut current = gs.list_nodes(b, "default", "g").unwrap();
         current.sort();
         assert_eq!(current, vec!["b", "c"]);
     }
@@ -1082,10 +1236,11 @@ mod tests {
         let ts_before = now_micros();
         std::thread::sleep(std::time::Duration::from_millis(5));
 
-        gs.create_graph(b, "g", None).unwrap();
-        gs.add_node(b, "g", "a", NodeData::default()).unwrap();
+        gs.create_graph(b, "default", "g", None).unwrap();
+        gs.add_node(b, "default", "g", "a", NodeData::default())
+            .unwrap();
 
-        let nodes = gs.list_nodes_at(b, "g", ts_before).unwrap();
+        let nodes = gs.list_nodes_at(b, "default", "g", ts_before).unwrap();
         assert!(nodes.is_empty());
     }
 }
