@@ -174,15 +174,13 @@ fn pull_with_bar(
     eprint!("\x1B[2K\r");
     io::stderr().flush().unwrap();
 
-    match &result {
-        Ok(_) => {
-            if elapsed > 1 {
-                eprintln!("  \u{2713} {} downloaded ({}s)", display_name, elapsed);
-            } else {
-                eprintln!("  \u{2713} {} downloaded", display_name);
-            }
+    // caller handles errors
+    if result.is_ok() {
+        if elapsed > 1 {
+            eprintln!("  \u{2713} {} downloaded ({}s)", display_name, elapsed);
+        } else {
+            eprintln!("  \u{2713} {} downloaded", display_name);
         }
-        Err(_) => {} // caller handles errors
     }
     result
 }
