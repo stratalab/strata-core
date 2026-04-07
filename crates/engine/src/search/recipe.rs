@@ -195,6 +195,18 @@ pub struct ExpansionConfig {
     /// Expansion results use weight 1.0.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub original_weight: Option<f32>,
+    /// Maximum tokens to generate per expansion call (default: 600).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens: Option<usize>,
+    /// Sampling temperature for the expansion model (default: 0.7).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    /// Top-k sampling for the expansion model (default: 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+    /// Top-p / nucleus sampling for the expansion model (default: 0.8).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
 }
 
 /// Pre-retrieval filter configuration.
@@ -231,6 +243,10 @@ pub struct RerankConfig {
     /// Number of top candidates to re-rank (default: 20).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_n: Option<usize>,
+    /// Minimum candidate count required to attempt reranking (default: 3).
+    /// Calls with fewer hits skip the reranker entirely.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_candidates: Option<usize>,
     /// Position-aware blending weights.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blending: Option<BlendingConfig>,
@@ -347,6 +363,10 @@ pub(crate) fn builtin_defaults() -> Recipe {
             strong_signal_gap: Some(0.15),
             min_shared_stems: Some(2),
             original_weight: Some(2.0),
+            max_tokens: Some(600),
+            temperature: Some(0.7),
+            top_k: Some(20),
+            top_p: Some(0.8),
         }),
         fusion: Some(FusionConfig {
             method: Some("rrf".into()),
@@ -355,6 +375,7 @@ pub(crate) fn builtin_defaults() -> Recipe {
         }),
         rerank: Some(RerankConfig {
             top_n: Some(20),
+            min_candidates: Some(3),
             blending: Some(BlendingConfig {
                 rank_1_3: Some(0.75),
                 rank_4_10: Some(0.60),
@@ -532,6 +553,10 @@ pub fn builtin_recipes() -> Vec<(&'static str, Recipe)> {
                     strong_signal_gap: Some(0.15),
                     min_shared_stems: Some(2),
                     original_weight: Some(2.0),
+                    max_tokens: Some(600),
+                    temperature: Some(0.7),
+                    top_k: Some(20),
+                    top_p: Some(0.8),
                 }),
                 fusion: Some(FusionConfig {
                     method: Some("rrf".into()),
@@ -540,6 +565,7 @@ pub fn builtin_recipes() -> Vec<(&'static str, Recipe)> {
                 }),
                 rerank: Some(RerankConfig {
                     top_n: Some(20),
+                    min_candidates: Some(3),
                     blending: Some(BlendingConfig {
                         rank_1_3: Some(0.75),
                         rank_4_10: Some(0.60),
@@ -648,5 +674,84 @@ mod tests {
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: Recipe = serde_json::from_str(&json).unwrap();
         assert_eq!(original, deserialized);
+    }
+
+    #[test]
+    fn test_expansion_config_deserialize_with_gen_params() {
+        let json = r#"{
+            "expansion": {
+                "max_tokens": 800,
+                "temperature": 0.5,
+                "top_k": 40,
+                "top_p": 0.9
+            }
+        }"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let expansion = recipe.expansion.unwrap();
+        assert_eq!(expansion.max_tokens, Some(800));
+        assert_eq!(expansion.temperature, Some(0.5));
+        assert_eq!(expansion.top_k, Some(40));
+        assert_eq!(expansion.top_p, Some(0.9));
+    }
+
+    #[test]
+    fn test_expansion_config_backward_compat() {
+        // Recipes without the new gen-param fields must still parse.
+        let json = r#"{
+            "expansion": {
+                "strategy": "full",
+                "strong_signal_threshold": 0.85,
+                "min_shared_stems": 2,
+                "original_weight": 2.0
+            }
+        }"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let expansion = recipe.expansion.unwrap();
+        assert_eq!(expansion.strategy, Some("full".into()));
+        assert!(expansion.max_tokens.is_none());
+        assert!(expansion.temperature.is_none());
+        assert!(expansion.top_k.is_none());
+        assert!(expansion.top_p.is_none());
+    }
+
+    #[test]
+    fn test_rerank_config_min_candidates_deserialize() {
+        let json = r#"{"rerank":{"top_n":20,"min_candidates":5}}"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let rerank = recipe.rerank.unwrap();
+        assert_eq!(rerank.top_n, Some(20));
+        assert_eq!(rerank.min_candidates, Some(5));
+    }
+
+    #[test]
+    fn test_rerank_config_min_candidates_backward_compat() {
+        // Recipes without min_candidates must still parse (field defaults to None).
+        let json = r#"{"rerank":{"top_n":20}}"#;
+        let recipe: Recipe = serde_json::from_str(json).unwrap();
+        let rerank = recipe.rerank.unwrap();
+        assert_eq!(rerank.top_n, Some(20));
+        assert!(rerank.min_candidates.is_none());
+    }
+
+    #[test]
+    fn test_builtin_defaults_populates_gen_params() {
+        let r = builtin_defaults();
+        let exp = r.expansion.as_ref().unwrap();
+        assert_eq!(exp.max_tokens, Some(600));
+        assert_eq!(exp.temperature, Some(0.7));
+        assert_eq!(exp.top_k, Some(20));
+        assert_eq!(exp.top_p, Some(0.8));
+        assert_eq!(r.rerank.as_ref().unwrap().min_candidates, Some(3));
+    }
+
+    #[test]
+    fn test_builtin_rag_populates_gen_params() {
+        let r = get_builtin_recipe("rag").unwrap();
+        let exp = r.expansion.as_ref().unwrap();
+        assert_eq!(exp.max_tokens, Some(600));
+        assert_eq!(exp.temperature, Some(0.7));
+        assert_eq!(exp.top_k, Some(20));
+        assert_eq!(exp.top_p, Some(0.8));
+        assert_eq!(r.rerank.as_ref().unwrap().min_candidates, Some(3));
     }
 }

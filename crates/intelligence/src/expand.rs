@@ -9,12 +9,6 @@ use strata_engine::search::recipe::ExpansionConfig;
 use strata_engine::search::tokenize_unique;
 use strata_search::expand::{ExpandedQuery, QueryType};
 
-// Generation parameters for expansion (v0.8 will move these to recipe.models config).
-const EXPAND_MAX_TOKENS: usize = 600;
-const EXPAND_TEMPERATURE: f32 = 0.7;
-const EXPAND_TOP_K: usize = 20;
-const EXPAND_TOP_P: f32 = 0.8;
-
 /// GBNF grammar that constrains expansion output to parseable `type: content` lines.
 const EXPAND_GRAMMAR: &str = r#"root ::= line+
 line ::= type ": " content "\n"
@@ -31,7 +25,7 @@ pub fn expand_query(
     config: &ExpansionConfig,
     model_spec: &str,
 ) -> Vec<ExpandedQuery> {
-    let raw = generate_expansions(db, query, model_spec);
+    let raw = generate_expansions(db, query, config, model_spec);
     if raw.is_empty() {
         return vec![];
     }
@@ -58,6 +52,7 @@ pub fn has_strong_signal(
 fn generate_expansions(
     db: &strata_engine::Database,
     query: &str,
+    config: &ExpansionConfig,
     model_spec: &str,
 ) -> Vec<ExpandedQuery> {
     use super::generate::GenerateModelState;
@@ -85,10 +80,10 @@ fn generate_expansions(
 
     let request = crate::GenerateRequest {
         prompt,
-        max_tokens: EXPAND_MAX_TOKENS,
-        temperature: EXPAND_TEMPERATURE,
-        top_k: EXPAND_TOP_K,
-        top_p: EXPAND_TOP_P,
+        max_tokens: config.max_tokens.unwrap_or(600),
+        temperature: config.temperature.unwrap_or(0.7),
+        top_k: config.top_k.unwrap_or(20),
+        top_p: config.top_p.unwrap_or(0.8),
         seed: None,
         stop_sequences: vec![],
         stop_tokens: vec![],

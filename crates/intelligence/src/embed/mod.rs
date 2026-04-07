@@ -323,7 +323,7 @@ mod tests {
         let _ = state.get_or_load(Path::new("/nonexistent"), DEFAULT_MODEL, None);
         // If load failed, dim should still be None.
         if state
-            .get_or_load(Path::new("/unused"), DEFAULT_MODEL)
+            .get_or_load(Path::new("/unused"), DEFAULT_MODEL, None)
             .is_err()
         {
             assert!(

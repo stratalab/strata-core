@@ -8,9 +8,6 @@ use strata_engine::search::recipe::RerankConfig;
 use strata_engine::search::SearchHit;
 use strata_search::rerank::{BlendWeights, RerankScore};
 
-/// Minimum number of snippets required to attempt reranking.
-const MIN_RERANK_CANDIDATES: usize = 3;
-
 /// Rerank hits using a cross-encoder model and blend with fusion scores.
 ///
 /// Returns `(hits, was_reranked)`. On failure or insufficient candidates,
@@ -22,8 +19,9 @@ pub fn rerank_hits(
     model_spec: &str,
 ) -> (Vec<SearchHit>, bool) {
     let top_n = config.top_n.unwrap_or(20);
+    let min_candidates = config.min_candidates.unwrap_or(3);
 
-    if hits.len() < MIN_RERANK_CANDIDATES {
+    if hits.len() < min_candidates {
         return (hits, false);
     }
 
@@ -35,7 +33,7 @@ pub fn rerank_hits(
         .filter_map(|(i, hit)| hit.snippet.as_ref().map(|s| (i, s.clone())))
         .collect();
 
-    if snippets.len() < MIN_RERANK_CANDIDATES {
+    if snippets.len() < min_candidates {
         return (hits, false);
     }
 
