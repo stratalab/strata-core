@@ -942,3 +942,263 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
         );
     }
 }
+
+// =============================================================================
+// Phase 1 — Search space-correctness tests
+// =============================================================================
+
+/// Phase 1 Part 1: BM25 search must filter by `space`, not just `branch_id`.
+///
+/// Two KV writes share the same key in two different spaces. Searching
+/// from each space must return only that space's row.
+#[test]
+fn test_bm25_search_isolates_by_space_kv() {
+    use strata_engine::search::Searchable;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let branch_id = BranchId::new();
+
+    let db = Database::open(&path).unwrap();
+    let kv = KVStore::new(db.clone());
+
+    // Same key, different spaces, identical text → identical BM25 candidates
+    kv.put(
+        &branch_id,
+        "tenant_a",
+        "shared_key",
+        Value::String("alpha bravo charlie delta".into()),
+    )
+    .unwrap();
+    kv.put(
+        &branch_id,
+        "tenant_b",
+        "shared_key",
+        Value::String("alpha bravo charlie delta".into()),
+    )
+    .unwrap();
+
+    // Search from tenant_a
+    let req_a = SearchRequest::new(branch_id, "bravo").with_space("tenant_a");
+    let resp_a = kv.search(&req_a).unwrap();
+    assert_eq!(
+        resp_a.hits.len(),
+        1,
+        "tenant_a search should return exactly its own row, got {}",
+        resp_a.hits.len()
+    );
+    if let strata_engine::search::EntityRef::Kv { space, .. } = &resp_a.hits[0].doc_ref {
+        assert_eq!(space, "tenant_a", "hit must belong to tenant_a");
+    } else {
+        panic!("expected EntityRef::Kv");
+    }
+
+    // Search from tenant_b
+    let req_b = SearchRequest::new(branch_id, "bravo").with_space("tenant_b");
+    let resp_b = kv.search(&req_b).unwrap();
+    assert_eq!(resp_b.hits.len(), 1);
+    if let strata_engine::search::EntityRef::Kv { space, .. } = &resp_b.hits[0].doc_ref {
+        assert_eq!(space, "tenant_b");
+    } else {
+        panic!("expected EntityRef::Kv");
+    }
+}
+
+/// Phase 1 Part 1: same as above for `EventLog`.
+#[test]
+fn test_bm25_search_isolates_by_space_event() {
+    use strata_engine::search::Searchable;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let branch_id = BranchId::new();
+
+    let db = Database::open(&path).unwrap();
+    let event_log = EventLog::new(db.clone());
+
+    event_log
+        .append(
+            &branch_id,
+            "tenant_a",
+            "alert",
+            string_payload("anomaly threshold breach"),
+        )
+        .unwrap();
+    event_log
+        .append(
+            &branch_id,
+            "tenant_b",
+            "alert",
+            string_payload("anomaly threshold breach"),
+        )
+        .unwrap();
+
+    let req_a = SearchRequest::new(branch_id, "anomaly").with_space("tenant_a");
+    let resp_a = event_log.search(&req_a).unwrap();
+    assert_eq!(resp_a.hits.len(), 1, "tenant_a should see only its event");
+    if let strata_engine::search::EntityRef::Event { space, .. } = &resp_a.hits[0].doc_ref {
+        assert_eq!(space, "tenant_a");
+    } else {
+        panic!("expected EntityRef::Event");
+    }
+
+    let req_b = SearchRequest::new(branch_id, "anomaly").with_space("tenant_b");
+    let resp_b = event_log.search(&req_b).unwrap();
+    assert_eq!(resp_b.hits.len(), 1);
+    if let strata_engine::search::EntityRef::Event { space, .. } = &resp_b.hits[0].doc_ref {
+        assert_eq!(space, "tenant_b");
+    } else {
+        panic!("expected EntityRef::Event");
+    }
+}
+
+/// Phase 1 Part 3: JSON documents must survive a slow-path BM25 rebuild.
+///
+/// Writes a JSON doc, then deletes the search manifest to force a slow-path
+/// rebuild on the next open. Without Part 3 the JSON doc would silently
+/// vanish from BM25.
+#[test]
+fn test_json_survives_bm25_slow_path_rebuild() {
+    use strata_core::JsonValue;
+    use strata_engine::search::Searchable;
+    use strata_engine::JsonStore;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let branch_id = BranchId::new();
+
+    // Session 1: write a JSON doc
+    {
+        let db = Database::open(&path).unwrap();
+        let json = JsonStore::new(db.clone());
+
+        let doc = JsonValue::from_value(serde_json::json!({
+            "title": "breakthrough quantum supremacy result"
+        }));
+        json.create(&branch_id, "tenant_a", "doc1", doc).unwrap();
+
+        // Sanity: searchable in same session
+        let req = SearchRequest::new(branch_id, "supremacy").with_space("tenant_a");
+        let resp = json.search(&req).unwrap();
+        assert!(!resp.hits.is_empty(), "doc must be searchable in session 1");
+    }
+
+    // Wipe the search index manifest to force a slow-path rebuild on reopen.
+    let search_dir = path.join("search");
+    if search_dir.exists() {
+        std::fs::remove_dir_all(&search_dir).unwrap();
+    }
+
+    // Session 2: reopen — slow path must re-index the JSON doc
+    {
+        let db = Database::open(&path).unwrap();
+        let json = JsonStore::new(db.clone());
+
+        let req = SearchRequest::new(branch_id, "supremacy").with_space("tenant_a");
+        let resp = json.search(&req).unwrap();
+        assert_eq!(
+            resp.hits.len(),
+            1,
+            "JSON doc must survive slow-path rebuild — got {} hits",
+            resp.hits.len()
+        );
+
+        if let strata_engine::search::EntityRef::Json { space, doc_id, .. } = &resp.hits[0].doc_ref
+        {
+            assert_eq!(space, "tenant_a", "rebuilt ref must carry the real space");
+            assert_eq!(doc_id, "doc1");
+        } else {
+            panic!("expected EntityRef::Json");
+        }
+    }
+}
+
+/// Phase 1 Part 3 — regression: JSON entries from internal `_idx/` and
+/// `_idx_meta/` spaces must NOT be indexed by the slow-path BM25 rebuild.
+///
+/// This test exercises the filter directly by writing a real, deserializable
+/// `JsonDoc` into a `_idx_meta/...` space (bypassing the executor's
+/// space-name validator). Without the explicit space-prefix skip in
+/// `recovery.rs`, this entry would be re-indexed during the slow path
+/// because its bytes deserialize cleanly — it's only protected today by
+/// the explicit `is_json_internal_space()` filter, not by accidents in the
+/// deserialization path.
+#[test]
+fn test_json_slow_path_skips_secondary_index_storage() {
+    use strata_core::JsonValue;
+    use strata_engine::primitives::json::index::IndexType;
+    use strata_engine::search::Searchable;
+    use strata_engine::JsonStore;
+
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let branch_id = BranchId::new();
+
+    // Session 1: write a real user doc, create a secondary index, AND
+    // smuggle a real JsonDoc into `_idx_meta/tenant_a` so we test the
+    // filter against a doc that *would* deserialize successfully if the
+    // filter weren't there.
+    {
+        let db = Database::open(&path).unwrap();
+        let json = JsonStore::new(db.clone());
+
+        let doc = JsonValue::from_value(serde_json::json!({
+            "title": "alpha bravo charlie",
+            "category": "books"
+        }));
+        json.create(&branch_id, "tenant_a", "doc1", doc).unwrap();
+
+        // Create a secondary index — writes JSON-encoded IndexDef metadata
+        // at `_idx_meta/tenant_a` (TypeTag::Json). This is the natural
+        // shape of internal storage.
+        json.create_index(&branch_id, "tenant_a", "by_cat", "category", IndexType::Tag)
+            .unwrap();
+
+        // Force a real deserializable JsonDoc into `_idx_meta/tenant_a`
+        // by calling `JsonStore::create` directly. The executor would
+        // reject this space name, but the engine doesn't validate.
+        // Without the filter, this would be re-indexed by the slow path.
+        let smuggled = JsonValue::from_value(serde_json::json!({
+            "title": "smuggled stowaway document"
+        }));
+        json.create(&branch_id, "_idx_meta/tenant_a", "spy", smuggled)
+            .unwrap();
+    }
+
+    // Wipe the search dir to force a slow-path rebuild.
+    let search_dir = path.join("search");
+    if search_dir.exists() {
+        std::fs::remove_dir_all(&search_dir).unwrap();
+    }
+
+    // Session 2: reopen — slow path should index doc1 but skip both the
+    // serde-encoded IndexDef metadata AND the smuggled JsonDoc.
+    {
+        let db = Database::open(&path).unwrap();
+        let json = JsonStore::new(db.clone());
+
+        // doc1 is searchable in tenant_a
+        let req = SearchRequest::new(branch_id, "alpha").with_space("tenant_a");
+        let resp = json.search(&req).unwrap();
+        assert_eq!(resp.hits.len(), 1, "doc1 must survive rebuild");
+
+        // The smuggled `_idx_meta/tenant_a` doc is a real JsonDoc whose
+        // deserialization would succeed — the only thing keeping it out
+        // of BM25 is the space-prefix filter. This is the actual
+        // regression check.
+        let req_smug = SearchRequest::new(branch_id, "stowaway").with_space("_idx_meta/tenant_a");
+        let resp_smug = json.search(&req_smug).unwrap();
+        assert_eq!(
+            resp_smug.hits.len(),
+            0,
+            "smuggled JSON in internal `_idx_meta/` space must be skipped by slow-path rebuild"
+        );
+
+        // Belt-and-braces: secondary-index metadata also must not surface
+        // (this part is protected by both the filter AND the
+        // deserialization fallback).
+        let req_meta = SearchRequest::new(branch_id, "by_cat").with_space("_idx_meta/tenant_a");
+        let resp_meta = json.search(&req_meta).unwrap();
+        assert_eq!(resp_meta.hits.len(), 0);
+    }
+}

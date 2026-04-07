@@ -630,7 +630,10 @@ impl crate::search::Searchable for KVStore {
             weight: req.proximity_weight,
         };
 
-        // Score top-k entirely inside the index (zero-copy posting iteration)
+        // Score top-k entirely inside the index (zero-copy posting iteration).
+        // Pass `Some(&req.space)` to filter out cross-space hits at the
+        // index level — branch_id alone is not enough since multiple spaces
+        // may share the same logical key.
         let top_k = index.score_top_k(
             &parsed.terms,
             &req.branch_id,
@@ -639,6 +642,7 @@ impl crate::search::Searchable for KVStore {
             req.bm25_b,
             &phrase_cfg,
             &prox_cfg,
+            Some(&req.space),
         );
 
         // Only resolve doc_ids and fetch text for the final top-k results

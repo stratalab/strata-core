@@ -292,45 +292,27 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             }
 
             // Search shadow collections in parallel.
-            let vec_hits: Vec<SearchHit> = if let Some(as_of_ts) = request.as_of {
-                // Temporal: use search_at per collection (sequential — search_at
-                // does its own over-fetch internally).
-                let mut hits = Vec::new();
-                for coll in &collection_names {
-                    match vector.search_at(
-                        request.branch_id,
-                        SYSTEM_SPACE,
-                        coll,
-                        embedding,
-                        k,
-                        None,
-                        as_of_ts,
-                    ) {
-                        Ok(matches) => {
-                            for m in matches {
-                                hits.push(SearchHit {
-                                    doc_ref: EntityRef::vector(
-                                        request.branch_id,
-                                        SYSTEM_SPACE,
-                                        coll,
-                                        &m.key,
-                                    ),
-                                    score: m.score,
-                                    rank: 0,
-                                    snippet: None,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            tracing::debug!(
-                                collection = %coll,
-                                error = %e,
-                                "Temporal vector search error, skipping collection"
-                            );
-                        }
-                    }
+            let vec_hits: Vec<SearchHit> = if request.as_of.is_some() {
+                // Phase 1 Part 2: temporal hybrid retrieval is currently a
+                // no-op for the vector stage. `vector.search_at` returns
+                // `VectorMatch` without `source_ref`, so we cannot prove
+                // which user space a hit originated from — and the
+                // alternative (synthesizing a SYSTEM_SPACE doc_ref) was
+                // exactly the cross-space leak this phase fixes. We log
+                // once so the gap is observable but skip the call entirely
+                // — running it would just throw the results away.
+                //
+                // Re-enabling this requires a `search_at_with_sources` API
+                // that surfaces `source_ref` from the version chain.
+                if !collection_names.is_empty() {
+                    tracing::debug!(
+                        target: "strata::search",
+                        as_of = ?request.as_of,
+                        collections = collection_names.len(),
+                        "Temporal hybrid: vector stage skipped (no source_ref in temporal API)"
+                    );
                 }
-                hits
+                Vec::new()
             } else {
                 // Non-temporal: par_iter across shadow collections with source resolution.
                 collection_names
@@ -352,20 +334,30 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                         matches
                             .into_iter()
                             .flat_map(|results| results.into_iter())
-                            .map(|m| {
-                                let doc_ref = m.source_ref.unwrap_or_else(|| {
-                                    EntityRef::vector(request.branch_id, SYSTEM_SPACE, coll, &m.key)
-                                });
+                            .filter_map(|m| {
+                                // Phase 1 Part 2: hybrid retrieval must
+                                // not leak across spaces. The shadow
+                                // collection lives in SYSTEM_SPACE but
+                                // each match's `source_ref` carries the
+                                // real user space. Drop matches whose
+                                // source isn't in the caller's space, and
+                                // drop matches with no `source_ref`
+                                // entirely — we cannot honestly attribute
+                                // them to any user space.
+                                let source = m.source_ref?;
+                                if source.space() != Some(request.space.as_str()) {
+                                    return None;
+                                }
                                 let snippet = m
                                     .metadata
                                     .as_ref()
                                     .map(|meta| truncate_text(&meta.to_string(), 100));
-                                SearchHit {
-                                    doc_ref,
+                                Some(SearchHit {
+                                    doc_ref: source,
                                     score: m.score,
                                     rank: 0,
                                     snippet,
-                                }
+                                })
                             })
                             .collect::<Vec<_>>()
                     })
@@ -754,6 +746,123 @@ mod tests {
 
         let response = retrieve(&db, &request).unwrap();
         assert!(response.hits.is_empty());
+    }
+
+    /// Phase 1 Part 2: vector stage in the substrate must drop matches whose
+    /// `source_ref.space()` doesn't match the request, and must drop matches
+    /// with no `source_ref` entirely.
+    #[test]
+    fn test_substrate_vector_filters_cross_space_sources() {
+        use strata_engine::search::recipe::VectorRetrieveConfig;
+
+        // Create a fresh DB and a shadow vector collection with three records:
+        // one in tenant_a, one in tenant_b, one with no source_ref.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-a",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_a", "k"),
+            )
+            .unwrap();
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-b",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_b", "k"),
+            )
+            .unwrap();
+        vector_store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-orphan",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        // Hybrid recipe: BM25 + vector. BM25 finds nothing because there's
+        // no KV data — only the vector stage produces hits.
+        let recipe = Recipe {
+            retrieve: Some(strata_engine::search::recipe::RetrieveConfig {
+                bm25: Some(BM25Config {
+                    k: Some(50),
+                    ..Default::default()
+                }),
+                vector: Some(VectorRetrieveConfig {
+                    k: Some(50),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            fusion: Some(FusionConfig {
+                method: Some("rrf".into()),
+                k: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Request from tenant_a → exactly the tenant_a hit
+        let req_a = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "tenant_a".into(),
+            recipe: recipe.clone(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+        let resp_a = retrieve(&db, &req_a).unwrap();
+        assert_eq!(
+            resp_a.hits.len(),
+            1,
+            "tenant_a should see exactly its own hit, got {}",
+            resp_a.hits.len()
+        );
+        match &resp_a.hits[0].doc_ref {
+            EntityRef::Kv { space, .. } => assert_eq!(space, "tenant_a"),
+            other => panic!("expected EntityRef::Kv, got {:?}", other),
+        }
+
+        // Request from a third space → zero hits (no source matches and
+        // the orphan must be dropped).
+        let req_c = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "tenant_c".into(),
+            recipe,
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+        let resp_c = retrieve(&db, &req_c).unwrap();
+        assert_eq!(
+            resp_c.hits.len(),
+            0,
+            "tenant_c has no matching sources and orphan must be dropped"
+        );
     }
 
     // ---- RRF unit tests ----
