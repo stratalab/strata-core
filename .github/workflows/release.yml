@@ -27,8 +27,6 @@ jobs:
             runner: ubuntu-latest
           - target: aarch64-apple-darwin
             runner: macos-14
-          - target: x86_64-pc-windows-msvc
-            runner: windows-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -51,19 +49,11 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
         run: cargo build --release --features embed,arrow,cloud --package strata-cli --target ${{ matrix.target }}
 
-      - name: Upload strata binary (unix)
-        if: runner.os != 'Windows'
+      - name: Upload strata binary
         uses: actions/upload-artifact@v4
         with:
           name: strata-${{ matrix.target }}
           path: target/${{ matrix.target }}/release/strata
-
-      - name: Upload strata binary (windows)
-        if: runner.os == 'Windows'
-        uses: actions/upload-artifact@v4
-        with:
-          name: strata-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/strata.exe
 
   # --------------------------------------------------------------------------
   # 2. Package archives
@@ -82,8 +72,6 @@ jobs:
             archive: tar.gz
           - target: aarch64-apple-darwin
             archive: tar.gz
-          - target: x86_64-pc-windows-msvc
-            archive: zip
 
     steps:
       - uses: actions/checkout@v4
@@ -101,8 +89,7 @@ jobs:
           name: strata-${{ matrix.target }}
           path: staging/bin
 
-      - name: Package (unix)
-        if: matrix.archive == 'tar.gz'
+      - name: Package
         run: |
           mkdir -p staging-flat
           chmod +x staging/bin/strata
@@ -110,19 +97,6 @@ jobs:
           cp README.md staging-flat/
           ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz"
           tar czf "${ARCHIVE_NAME}" -C staging-flat strata README.md
-          echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
-
-      - name: Package (windows)
-        if: matrix.archive == 'zip'
-        shell: bash
-        run: |
-          mkdir -p staging-flat
-          cp staging/bin/strata.exe staging-flat/
-          cp README.md staging-flat/
-          ARCHIVE_NAME="strata-v${{ steps.version.outputs.version }}-${{ matrix.target }}.zip"
-          cd staging-flat
-          7z a "../${ARCHIVE_NAME}" ./*
-          cd ..
           echo "ARCHIVE_NAME=${ARCHIVE_NAME}" >> "$GITHUB_ENV"
 
       - name: Upload packaged artifact
@@ -166,7 +140,7 @@ jobs:
           gh release create "${{ github.ref_name }}" \
             --title "Strata ${{ github.ref_name }}" \
             --generate-notes \
-            strata-v*.tar.gz strata-v*.zip checksums-sha256.txt
+            strata-v*.tar.gz checksums-sha256.txt
 
   # --------------------------------------------------------------------------
   # 4. Update Homebrew Tap
