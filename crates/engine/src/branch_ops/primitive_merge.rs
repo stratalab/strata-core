@@ -91,17 +91,30 @@ pub(crate) struct MergePrecheckCtx<'a> {
 /// Each handler returns its own per-primitive write plan; the engine
 /// concatenates them all into the single apply transaction.
 ///
-/// KV / JSON / Vector / Event handlers use the default trait
-/// implementation, which delegates to `classify_typed_entries_for_tag`
-/// (the same 14-case decision matrix the generic merge runs).
-/// `GraphMergeHandler::plan` overrides the default to dispatch to the
-/// graph crate's semantic merge algorithm.
+/// KV / Vector / Event handlers use the default trait implementation,
+/// which delegates to `classify_typed_entries_for_tag` (the same 14-case
+/// decision matrix the generic merge runs). `GraphMergeHandler::plan`
+/// overrides the default to dispatch to the graph crate's semantic merge
+/// algorithm. `JsonMergeHandler::plan` overrides to do per-document
+/// path-level merge AND emit secondary index `MergeAction`s atomically
+/// with the doc updates — see `branch_ops/json_merge.rs` and the
+/// `JsonMergeHandler` implementation in this file.
 ///
 /// `pub` (re-exported from `strata_engine`) so primitive crates registering
 /// graph plan callbacks can borrow it through the function-pointer
 /// signature.
-#[allow(dead_code)] // contract for future handlers
+///
+/// `db` is provided so handlers whose `plan` needs to read auxiliary
+/// state from storage (e.g. `JsonMergeHandler` reading `IndexDef`s from
+/// `_idx_meta/{space}` to compute secondary index entry deltas) can
+/// open a read-only transaction without the engine threading specific
+/// auxiliary types through this struct.
 pub struct MergePlanCtx<'a> {
+    /// Database handle, for handlers that need to read auxiliary state
+    /// (index defs, collection configs, etc.) from storage during plan
+    /// construction. JSON uses this to load `IndexDef`s before emitting
+    /// secondary index actions.
+    pub db: &'a Arc<Database>,
     /// The source branch (changes flowing into target).
     pub source_id: BranchId,
     /// The target branch (the merge destination).
@@ -270,20 +283,18 @@ impl PrimitiveMergeHandler for KvMergeHandler {
     }
 }
 
-/// One per-document merge outcome that the JSON handler needs to fix up
-/// in `post_commit`. Tracks what value the document held in the target
-/// before the merge transaction (so secondary index entries for the old
-/// value can be deleted) and what value the merge wrote (so secondary
-/// index entries for the new value can be re-emitted and the BM25
-/// inverted index can be re-indexed). The merge action itself flows
-/// through the standard `merge_branches` apply transaction; this struct
-/// only carries the information needed to keep derived state in sync.
+/// One per-document merge outcome the JSON handler needs to track for
+/// secondary derived state. Populated by `plan` (so it has access to
+/// the pre-merge target value) and consumed by `post_commit` for the
+/// in-memory BM25 `InvertedIndex` refresh.
+///
+/// Secondary KV indexes (`_idx/{space}/{name}`) are NOT refreshed via
+/// this list — `plan` emits `MergeAction`s for them directly, so they
+/// commit atomically inside the merge transaction. This struct only
+/// carries the in-memory BM25 update payload, which is non-transactional
+/// and lives in the `InvertedIndex` engine extension.
 struct JsonAffectedDoc {
-    space: String,
     doc_id: String,
-    /// Pre-merge target document value, if the doc existed there.
-    /// `None` means the doc was new on target.
-    old_target_value: Option<JsonValue>,
     /// Post-merge document value, or `None` if the merge deleted the doc.
     new_value: Option<JsonValue>,
 }
@@ -297,12 +308,16 @@ struct JsonAffectedDoc {
 /// path edited to different values, or subtree-delete vs. edit) honor
 /// `MergeStrategy`.
 ///
-/// Per-document affected list is populated in `plan` and drained in
-/// `post_commit` to refresh:
-/// 1. Secondary indexes (`_idx/{space}/{name}`) using
-///    `JsonStore::update_index_entries`.
-/// 2. The BM25 `InvertedIndex` extension via
-///    `JsonStore::index_json_doc` / `deindex_json_doc`.
+/// `plan` emits two kinds of `MergeAction`s for every affected doc:
+/// 1. The doc itself (under the user space).
+/// 2. The corresponding secondary index entries (under the internal
+///    `_idx/{space}/{name}` namespaces) so doc + index updates commit
+///    atomically inside the merge transaction.
+///
+/// `post_commit` is BM25-only: it refreshes the in-memory `InvertedIndex`
+/// extension for the affected docs. BM25 is non-transactional and is
+/// already crash-safe via `register_search_recovery` (the search
+/// recovery participant rebuilds BM25 from KV state on `Database::open`).
 ///
 /// Each merge gets a fresh handler instance via `build_merge_registry()`,
 /// so the `affected` mutex is uncontended in practice — it exists only
@@ -337,9 +352,15 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
     }
 
     fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        use crate::primitives::json::index;
+
         let mut actions: Vec<MergeAction> = Vec::new();
         let mut conflicts: Vec<ConflictEntry> = Vec::new();
-        let mut affected: Vec<JsonAffectedDoc> = Vec::new();
+        // (space, doc_id, old_target_value, new_value) tuples accumulated
+        // by the per-doc merge. Used twice below: once to emit secondary
+        // index `MergeAction`s, and once to populate `self.affected` for
+        // BM25 refresh in `post_commit`.
+        let mut per_doc: Vec<(String, String, Option<JsonValue>, Option<JsonValue>)> = Vec::new();
 
         for ((space, type_tag), cell) in &ctx.typed_entries.cells {
             if *type_tag != TypeTag::Json {
@@ -381,14 +402,94 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
                     ctx.strategy,
                     &mut actions,
                     &mut conflicts,
-                    &mut affected,
+                    &mut per_doc,
                 );
             }
         }
 
-        // Stash the affected list for post_commit. New handler instance
-        // per merge → uncontended.
-        *self.affected.lock() = affected;
+        // Pass 2: emit `MergeAction`s for secondary index entries so they
+        // commit atomically inside the same merge transaction as the doc
+        // updates. Loads `IndexDef`s from `_idx_meta/{space}` once per
+        // space via a read-only transaction on `ctx.db`. If a space has
+        // no indexes, the loop body is a no-op for that space.
+        let mut indexes_by_space: BTreeMap<String, Vec<index::IndexDef>> = BTreeMap::new();
+        let touched_spaces: BTreeSet<&str> =
+            per_doc.iter().map(|(s, _, _, _)| s.as_str()).collect();
+        for space in touched_spaces {
+            let space_owned = space.to_string();
+            let result = ctx
+                .db
+                .transaction(ctx.target_id, |txn| {
+                    JsonStore::load_indexes(txn, &ctx.target_id, &space_owned)
+                })
+                .unwrap_or_else(|e| {
+                    tracing::warn!(
+                        target: "strata::branch_ops",
+                        space = %space_owned,
+                        error = %e,
+                        "JSON merge: failed to load index defs for atomic refresh — \
+                         skipping secondary index updates for this space"
+                    );
+                    Vec::new()
+                });
+            indexes_by_space.insert(space_owned, result);
+        }
+
+        for (space, doc_id, old_target, new_value) in &per_doc {
+            let Some(indexes) = indexes_by_space.get(space) else {
+                continue;
+            };
+            if indexes.is_empty() {
+                continue;
+            }
+            for idx_def in indexes {
+                // Old entry: derive from the pre-merge target doc value
+                // and emit a delete. If the old doc didn't have the
+                // indexed field, no entry to delete.
+                if let Some(old_val) = old_target {
+                    if let Some(field_val) =
+                        index::extract_field_value(old_val, &idx_def.field_path)
+                    {
+                        if let Some(encoded) = index::encode_value(&field_val, idx_def.index_type) {
+                            actions.push(MergeAction {
+                                space: index::index_space_name(space, &idx_def.name),
+                                raw_key: index::index_entry_user_key(&encoded, doc_id),
+                                type_tag: TypeTag::Json,
+                                action: MergeActionKind::Delete,
+                                expected_target: None, // OCC skipped for `_idx/`
+                            });
+                        }
+                    }
+                }
+                // New entry: derive from the merged doc value and emit
+                // a put. If the merged doc doesn't have the indexed
+                // field (or the doc was deleted), no entry to write.
+                if let Some(new_val) = new_value {
+                    if let Some(field_val) =
+                        index::extract_field_value(new_val, &idx_def.field_path)
+                    {
+                        if let Some(encoded) = index::encode_value(&field_val, idx_def.index_type) {
+                            actions.push(MergeAction {
+                                space: index::index_space_name(space, &idx_def.name),
+                                raw_key: index::index_entry_user_key(&encoded, doc_id),
+                                type_tag: TypeTag::Json,
+                                action: MergeActionKind::Put(Value::Bytes(vec![])),
+                                expected_target: None, // OCC skipped for `_idx/`
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        // Stash affected docs for BM25 refresh in `post_commit`.
+        // Drop the (space, old_target_value) fields — BM25 only needs
+        // (doc_id, new_value).
+        let bm25_affected: Vec<JsonAffectedDoc> = per_doc
+            .into_iter()
+            .map(|(_space, doc_id, _old, new_value)| JsonAffectedDoc { doc_id, new_value })
+            .collect();
+        *self.affected.lock() = bm25_affected;
 
         Ok(PrimitiveMergePlan { actions, conflicts })
     }
@@ -399,71 +500,27 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
             return Ok(());
         }
 
+        // BM25 inverted index refresh. Secondary KV indexes are no
+        // longer refreshed here — they're committed atomically inside
+        // the merge transaction by `plan`. The BM25 `InvertedIndex`
+        // engine extension is non-transactional and lives in memory,
+        // so it gets refreshed here in a best-effort loop. Failures
+        // are logged and swallowed; the `register_search_recovery`
+        // recovery participant rebuilds BM25 state from KV on the
+        // next `Database::open()`, so a missed refresh self-heals.
         let affected = std::mem::take(&mut *self.affected.lock());
-        if affected.is_empty() {
-            return Ok(());
-        }
-
-        // Group by space so we load index defs once per space.
-        let mut by_space: BTreeMap<String, Vec<JsonAffectedDoc>> = BTreeMap::new();
-        for doc in affected {
-            by_space.entry(doc.space.clone()).or_default().push(doc);
-        }
-
-        for (space, docs) in by_space {
-            // Run secondary index refresh in a single transaction per
-            // space so the per-doc deltas commit atomically. The merge
-            // transaction has already committed at this point, so a
-            // failure here leaves KV in the merged state with stale
-            // index entries — the next compaction / db open will fall
-            // back on the existing recovery path. We log and continue
-            // instead of returning an error to mirror the vector
-            // post-commit failure mode.
-            let txn_result = ctx.db.transaction(ctx.target_id, |txn| {
-                let indexes = JsonStore::load_indexes(txn, &ctx.target_id, &space)?;
-                if indexes.is_empty() {
-                    return Ok(());
-                }
-                for doc in &docs {
-                    JsonStore::update_index_entries(
-                        txn,
-                        &ctx.target_id,
-                        &space,
-                        &doc.doc_id,
-                        doc.old_target_value.as_ref(),
-                        doc.new_value.as_ref(),
-                        &indexes,
-                    )?;
-                }
-                Ok(())
-            });
-            if let Err(e) = txn_result {
+        for doc in &affected {
+            let r = match &doc.new_value {
+                Some(v) => JsonStore::index_json_doc(ctx.db, &ctx.target_id, &doc.doc_id, v),
+                None => JsonStore::deindex_json_doc(ctx.db, &ctx.target_id, &doc.doc_id),
+            };
+            if let Err(e) = r {
                 tracing::warn!(
                     target: "strata::branch_ops",
-                    space = %space,
+                    doc_id = %doc.doc_id,
                     error = %e,
-                    "JSON merge: failed to refresh secondary index entries — falling back to next recovery"
+                    "JSON merge: failed to refresh BM25 inverted-index entry"
                 );
-            }
-
-            // BM25 inverted index updates are not transactional — they
-            // mutate the in-memory `InvertedIndex` extension directly.
-            // Update each affected doc independently. Calls are no-ops
-            // when BM25 is disabled.
-            for doc in &docs {
-                let r = match &doc.new_value {
-                    Some(v) => JsonStore::index_json_doc(ctx.db, &ctx.target_id, &doc.doc_id, v),
-                    None => JsonStore::deindex_json_doc(ctx.db, &ctx.target_id, &doc.doc_id),
-                };
-                if let Err(e) = r {
-                    tracing::warn!(
-                        target: "strata::branch_ops",
-                        space = %space,
-                        doc_id = %doc.doc_id,
-                        error = %e,
-                        "JSON merge: failed to refresh BM25 inverted-index entry"
-                    );
-                }
             }
         }
 
@@ -471,9 +528,17 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
     }
 }
 
+/// One per-doc tracked entry: `(space, doc_id, old_target_value, new_value)`.
+/// Used by `JsonMergeHandler::plan` to drive both the secondary index
+/// `MergeAction`s emission and the BM25 affected-list. Defined as a
+/// type alias rather than a named struct to keep `merge_one_doc`'s
+/// signature compact and to make explicit that this is a transient
+/// in-pass datum, not part of the public API.
+type JsonPerDocEntry = (String, String, Option<JsonValue>, Option<JsonValue>);
+
 /// Merge one document's three-way state into actions / conflicts /
-/// affected list. Splitting this out keeps `JsonMergeHandler::plan`
-/// readable.
+/// per-doc tracking list. Splitting this out keeps
+/// `JsonMergeHandler::plan` readable.
 #[allow(clippy::too_many_arguments)]
 fn merge_one_doc(
     space: &str,
@@ -485,7 +550,7 @@ fn merge_one_doc(
     strategy: MergeStrategy,
     actions: &mut Vec<MergeAction>,
     conflicts: &mut Vec<ConflictEntry>,
-    affected: &mut Vec<JsonAffectedDoc>,
+    per_doc: &mut Vec<JsonPerDocEntry>,
 ) {
     // Decode known-decodable sides into JsonDocs. Sides that fail to
     // decode (corrupt bytes) are treated as opaque and routed through
@@ -524,15 +589,15 @@ fn merge_one_doc(
             target_value: target_value.cloned(),
         });
     };
-    let track_affected =
-        |affected: &mut Vec<JsonAffectedDoc>, old: Option<&JsonDoc>, new: Option<&JsonDoc>| {
+    let track_per_doc =
+        |per_doc: &mut Vec<JsonPerDocEntry>, old: Option<&JsonDoc>, new: Option<&JsonDoc>| {
             if let Some(id) = doc_id {
-                affected.push(JsonAffectedDoc {
-                    space: space.to_string(),
-                    doc_id: id.to_string(),
-                    old_target_value: old.map(|d| d.value.clone()),
-                    new_value: new.map(|d| d.value.clone()),
-                });
+                per_doc.push((
+                    space.to_string(),
+                    id.to_string(),
+                    old.map(|d| d.value.clone()),
+                    new.map(|d| d.value.clone()),
+                ));
             }
         };
 
@@ -556,13 +621,13 @@ fn merge_one_doc(
                 // SourceDeleted: target unchanged from ancestor → apply
                 // delete to target.
                 push_delete(actions);
-                track_affected(affected, Some(tgt), None);
+                track_per_doc(per_doc, Some(tgt), None);
             } else {
                 // DeleteModifyConflict: source deleted, target modified.
                 push_conflict(conflicts, None, target_val);
                 if strategy == MergeStrategy::LastWriterWins {
                     push_delete(actions);
-                    track_affected(affected, Some(tgt), None);
+                    track_per_doc(per_doc, Some(tgt), None);
                 }
             }
         }
@@ -577,14 +642,14 @@ fn merge_one_doc(
             if values_equal(ancestor_val, target_val) {
                 push_delete(actions);
                 if let Some(tgt) = target_doc.as_ref() {
-                    track_affected(affected, Some(tgt), None);
+                    track_per_doc(per_doc, Some(tgt), None);
                 }
             } else {
                 push_conflict(conflicts, None, target_val);
                 if strategy == MergeStrategy::LastWriterWins {
                     push_delete(actions);
                     if let Some(tgt) = target_doc.as_ref() {
-                        track_affected(affected, Some(tgt), None);
+                        track_per_doc(per_doc, Some(tgt), None);
                     }
                 }
             }
@@ -598,13 +663,13 @@ fn merge_one_doc(
                 // SourceAdded: doc didn't exist on either side, source created it.
                 let value = source_val.unwrap().clone();
                 push_put(actions, value);
-                track_affected(affected, None, Some(src));
+                track_per_doc(per_doc, None, Some(src));
             } else {
                 // ModifyDeleteConflict: source modified, target deleted.
                 push_conflict(conflicts, source_val, None);
                 if strategy == MergeStrategy::LastWriterWins {
                     push_put(actions, source_val.unwrap().clone());
-                    track_affected(affected, None, Some(src));
+                    track_per_doc(per_doc, None, Some(src));
                 }
             }
         }
@@ -638,7 +703,7 @@ fn merge_one_doc(
             // to the same result; skip the cost.
             if values_equal(target_val, ancestor_val) {
                 push_put(actions, source_val.unwrap().clone());
-                track_affected(affected, Some(tgt), Some(src));
+                track_per_doc(per_doc, Some(tgt), Some(src));
                 return;
             }
 
@@ -702,24 +767,25 @@ fn merge_one_doc(
                         "JSON merge: failed to serialize merged doc — falling back to source bytes"
                     );
                     push_put(actions, source_val.unwrap().clone());
-                    track_affected(affected, Some(tgt), Some(src));
+                    track_per_doc(per_doc, Some(tgt), Some(src));
                     return;
                 }
             };
             push_put(actions, serialized);
-            // Track the affected doc so post_commit can refresh
-            // secondary indexes against the actual merged value (not
-            // src.value, which only matches in the LWW degenerate case).
-            // Skip tracking when doc_id isn't valid UTF-8 — JSON keys
-            // should always be UTF-8 (`Key::new_json` only accepts
-            // `&str`), so this branch only fires for corrupt rows.
+            // Track the affected doc so `JsonMergeHandler::plan` can
+            // emit secondary index actions for the actual merged value
+            // (not src.value, which only matches in the LWW degenerate
+            // case) and refresh the BM25 index in `post_commit`. Skip
+            // when doc_id isn't valid UTF-8 — JSON keys should always
+            // be UTF-8 (`Key::new_json` only accepts `&str`), so this
+            // branch only fires for corrupt rows.
             if let Some(id) = doc_id {
-                affected.push(JsonAffectedDoc {
-                    space: space.to_string(),
-                    doc_id: id.to_string(),
-                    old_target_value: Some(tgt.value.clone()),
-                    new_value: Some(merged_doc.value.clone()),
-                });
+                per_doc.push((
+                    space.to_string(),
+                    id.to_string(),
+                    Some(tgt.value.clone()),
+                    Some(merged_doc.value.clone()),
+                ));
             }
         }
 
