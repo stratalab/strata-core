@@ -316,9 +316,14 @@ impl Writeset {
                 Self::write_string(bytes, collection);
                 Self::write_string(bytes, key);
             }
-            EntityRef::Graph { branch_id, key } => {
+            EntityRef::Graph {
+                branch_id,
+                space,
+                key,
+            } => {
                 bytes.push(primitive_tags::GRAPH);
                 bytes.extend_from_slice(branch_id.as_bytes());
+                Self::write_string(bytes, space);
                 Self::write_string(bytes, key);
             }
         }
@@ -383,9 +388,18 @@ impl Writeset {
                 ))
             }
             primitive_tags::GRAPH => {
+                let (space, consumed) = Self::read_string(&bytes[cursor..])?;
+                cursor += consumed;
                 let (key, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
-                Ok((EntityRef::Graph { branch_id, key }, cursor))
+                Ok((
+                    EntityRef::Graph {
+                        branch_id,
+                        space,
+                        key,
+                    },
+                    cursor,
+                ))
             }
             _ => Err(WritesetError::InvalidEntityRefTag(tag)),
         }
@@ -563,7 +577,7 @@ mod tests {
             EntityRef::branch(branch_id),
             EntityRef::json(branch_id, "test-doc"),
             EntityRef::vector(branch_id, "collection", "vec-key"),
-            EntityRef::graph(branch_id, "mygraph/n/node1"),
+            EntityRef::graph(branch_id, "default", "mygraph/n/node1"),
         ];
 
         for entity_ref in refs {

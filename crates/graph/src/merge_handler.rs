@@ -293,5 +293,12 @@ fn graph_conflict_to_entry(space: &str, conflict: GraphMergeConflict) -> Conflic
             source_value: source,
             target_value: target,
         },
+        WholeGraphDeleteConflict { graph } => ConflictEntry {
+            key: format!("graph:{graph}:whole-graph-delete-modify"),
+            primitive: strata_core::PrimitiveType::Graph,
+            space: space.to_string(),
+            source_value: None,
+            target_value: None,
+        },
     }
 }

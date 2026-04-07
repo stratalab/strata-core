@@ -177,14 +177,16 @@ impl strata_engine::search::Searchable for GraphStore {
                     return None;
                 }
 
-                // Extract snippet from graph node data.
-                // The key format is "{graph}/n/{node_id}" (from keys::node_key).
-                // Snippet read scopes to the search request's space. Same
-                // caveat as `index_node_for_search`: cross-space identical
-                // node IDs collide in the index because EntityRef::Graph
-                // doesn't carry space.
-                let snippet = if let EntityRef::Graph { ref key, .. } = entity_ref {
-                    self.extract_graph_snippet(&req.branch_id, &req.space, key)
+                // Extract snippet from graph node data. The key format is
+                // "{graph}/n/{node_id}" (from keys::node_key). The
+                // EntityRef carries the space, so we read the snippet
+                // from exactly the space the node was indexed under
+                // rather than guessing from the request's current space.
+                let snippet = if let EntityRef::Graph {
+                    ref space, ref key, ..
+                } = entity_ref
+                {
+                    self.extract_graph_snippet(&req.branch_id, space, key)
                 } else {
                     None
                 };
@@ -227,19 +229,14 @@ impl GraphStore {
 
     /// Index a graph node's text into the inverted index for BM25 search.
     ///
-    /// Called after successful add_node/bulk_insert commits.
-    ///
-    /// Known limitation: `EntityRef::Graph` does NOT carry the space, so
-    /// two graphs with the same `graph/node_id` in different spaces produce
-    /// colliding entries in the index. This matches the existing
-    /// cross-space limitation for KV / JSON / Vector. Tracked as separate
-    /// follow-up work; the `space` parameter here is preserved for forward
-    /// compatibility (so callers don't need to be touched again when the
-    /// search index gains space awareness).
+    /// Called after successful add_node/bulk_insert commits. The
+    /// `(branch_id, space, graph_user_key)` triple uniquely identifies
+    /// the node in the search index, so two tenants with the same
+    /// `(graph, node_id)` in different spaces don't collide.
     pub fn index_node_for_search(
         &self,
         branch_id: BranchId,
-        _space: &str,
+        space: &str,
         graph: &str,
         node_id: &str,
         data: &NodeData,
@@ -255,6 +252,7 @@ impl GraphStore {
         let user_key = keys::node_key(graph, node_id);
         let entity_ref = strata_engine::search::EntityRef::Graph {
             branch_id,
+            space: space.to_string(),
             key: user_key,
         };
         index.index_document(&entity_ref, &text, None);
@@ -262,13 +260,11 @@ impl GraphStore {
 
     /// Remove a graph node from the inverted index.
     ///
-    /// Called after successful remove_node/delete_graph commits. See the
-    /// note on [`Self::index_node_for_search`] about the cross-space
-    /// limitation in `EntityRef::Graph`.
+    /// Called after successful remove_node/delete_graph commits.
     pub fn deindex_node_for_search(
         &self,
         branch_id: BranchId,
-        _space: &str,
+        space: &str,
         graph: &str,
         node_id: &str,
     ) {
@@ -282,6 +278,7 @@ impl GraphStore {
         let user_key = keys::node_key(graph, node_id);
         let entity_ref = strata_engine::search::EntityRef::Graph {
             branch_id,
+            space: space.to_string(),
             key: user_key,
         };
         index.remove_document(&entity_ref);
