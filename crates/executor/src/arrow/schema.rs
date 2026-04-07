@@ -535,9 +535,9 @@ mod tests {
 
     #[test]
     fn test_arrow_to_value_float() {
-        let arr = Float64Array::from(vec![3.14]);
+        let arr = Float64Array::from(vec![2.5]);
         let val = arrow_to_value(&arr, 0).unwrap();
-        assert_eq!(val, Value::Float(3.14));
+        assert_eq!(val, Value::Float(2.5));
     }
 
     #[test]

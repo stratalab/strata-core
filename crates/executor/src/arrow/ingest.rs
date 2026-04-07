@@ -115,6 +115,7 @@ pub fn ingest_json(
 
     for batch in batches {
         let key_col = batch.column(mapping.key_idx);
+        let mut entries: Vec<(String, JsonPath, JsonValue)> = Vec::with_capacity(batch.num_rows());
 
         for row in 0..batch.num_rows() {
             if key_col.is_null(row) {
@@ -142,19 +143,18 @@ pub fn ingest_json(
                 row_to_json(batch, row, &cols_ref)?
             };
 
-            // Parse JSON string into JsonValue, upsert document.
+            // Parse JSON string into JsonValue, upsert document at root.
             let json_val: serde_json::Value = serde_json::from_str(&doc_str)
                 .unwrap_or(serde_json::Value::String(doc_str.clone()));
             let json_value = JsonValue::from(json_val);
 
-            // Try create first; if doc already exists, overwrite at root.
-            if convert_result(p.json.create(&branch_id, space, &key, json_value.clone())).is_err() {
-                convert_result(
-                    p.json
-                        .set(&branch_id, space, &key, &JsonPath::root(), json_value),
-                )?;
-            }
-            result.rows_imported += 1;
+            entries.push((key, JsonPath::root(), json_value));
+        }
+
+        if !entries.is_empty() {
+            let count = entries.len() as u64;
+            convert_result(p.json.batch_set_or_create(&branch_id, space, entries))?;
+            result.rows_imported += count;
         }
 
         result.batches_processed += 1;
@@ -195,6 +195,8 @@ pub fn ingest_vector(
     for batch in batches {
         let key_col = batch.column(mapping.key_idx);
         let emb_col = batch.column(val_idx);
+        let mut entries: Vec<(String, Vec<f32>, Option<serde_json::Value>)> =
+            Vec::with_capacity(batch.num_rows());
 
         for row in 0..batch.num_rows() {
             if key_col.is_null(row) {
@@ -218,7 +220,7 @@ pub fn ingest_vector(
                 }
             };
 
-            // Auto-create collection on first embedding.
+            // Auto-create collection on first valid embedding (need dimension).
             if !collection_created {
                 auto_create_collection(p, branch_id, space, collection, embedding.len())?;
                 collection_created = true;
@@ -236,12 +238,16 @@ pub fn ingest_vector(
                 Some(val)
             };
 
+            entries.push((key, embedding, metadata));
+        }
+
+        if !entries.is_empty() {
+            let count = entries.len() as u64;
             convert_vector_result(
-                p.vector
-                    .insert(branch_id, space, collection, &key, &embedding, metadata),
+                p.vector.batch_insert(branch_id, space, collection, entries),
                 branch_id,
             )?;
-            result.rows_imported += 1;
+            result.rows_imported += count;
         }
 
         result.batches_processed += 1;
@@ -450,10 +456,12 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec!["doc1", "doc2"])),
+                Arc::new(StringArray::from(vec!["doc1", "doc2", "doc3", "doc4"])),
                 Arc::new(StringArray::from(vec![
                     r#"{"title":"Hello"}"#,
                     r#"{"title":"World"}"#,
+                    r#"{"title":"Foo"}"#,
+                    r#"{"title":"Bar"}"#,
                 ])),
             ],
         )
@@ -466,14 +474,27 @@ mod tests {
             extra_names: vec![],
         };
 
+        // Capture storage version before/after to assert a single commit per batch.
+        let v_before = p.db.storage().version();
         let result = ingest_json(&p, branch_id, "default", &[batch], &mapping).unwrap();
-        assert_eq!(result.rows_imported, 2);
+        let v_after = p.db.storage().version();
+        assert_eq!(result.rows_imported, 4);
+        assert_eq!(
+            v_after - v_before,
+            1,
+            "ingest_json must commit exactly once per batch (got {} commits for 4 rows)",
+            v_after - v_before
+        );
 
         let doc = convert_result(p.json.get(&branch_id, "default", "doc1", &JsonPath::root()))
             .unwrap()
             .unwrap();
         let s = doc.to_string();
         assert!(s.contains("Hello"), "got: {s}");
+        let doc4 = convert_result(p.json.get(&branch_id, "default", "doc4", &JsonPath::root()))
+            .unwrap()
+            .unwrap();
+        assert!(doc4.to_string().contains("Bar"));
     }
 
     #[test]
@@ -526,7 +547,12 @@ mod tests {
             ),
         ]));
 
-        let values = Float32Array::from(vec![1.0, 0.0, 0.0, 0.0, 1.0, 0.0]);
+        let values = Float32Array::from(vec![
+            1.0, 0.0, 0.0, // v1
+            0.0, 1.0, 0.0, // v2
+            0.0, 0.0, 1.0, // v3
+            0.5, 0.5, 0.0, // v4
+        ]);
         let list = FixedSizeListArray::try_new(
             Arc::new(Field::new("item", DataType::Float32, true)),
             3,
@@ -538,7 +564,7 @@ mod tests {
         let batch = RecordBatch::try_new(
             schema,
             vec![
-                Arc::new(StringArray::from(vec!["v1", "v2"])),
+                Arc::new(StringArray::from(vec!["v1", "v2", "v3", "v4"])),
                 Arc::new(list),
             ],
         )
@@ -551,10 +577,21 @@ mod tests {
             extra_names: vec![],
         };
 
+        // Capture storage version before/after to assert a single ingest commit per batch.
+        // auto_create_collection performs its own commit, so the delta is 2 (create + insert).
+        let v_before = p.db.storage().version();
         let result =
             ingest_vector(&p, branch_id, "default", "test_col", &[batch], &mapping).unwrap();
-        assert_eq!(result.rows_imported, 2);
+        let v_after = p.db.storage().version();
+        assert_eq!(result.rows_imported, 4);
         assert_eq!(result.rows_skipped, 0);
+        assert_eq!(
+            v_after - v_before,
+            2,
+            "ingest_vector must do one create_collection + one batch_insert commit \
+             (got {} commits for 4 rows)",
+            v_after - v_before
+        );
 
         // Verify via vector get.
         let entry = convert_vector_result(
@@ -565,6 +602,83 @@ mod tests {
         .unwrap();
         assert_eq!(entry.value.embedding.len(), 3);
         assert_eq!(entry.value.embedding[0], 1.0);
+
+        let entry4 = convert_vector_result(
+            p.vector.get(branch_id, "default", "test_col", "v4"),
+            branch_id,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(entry4.value.embedding, vec![0.5, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn test_ingest_vector_pre_created_collection_one_commit_per_batch() {
+        // When the collection already exists, ingest_vector should produce
+        // exactly one commit per RecordBatch (no per-row commits).
+        let (p, branch_id) = setup_with(|_| {});
+
+        // Pre-create the collection so auto_create_collection is a no-op.
+        let config = VectorConfig {
+            dimension: 3,
+            metric: DistanceMetric::Cosine,
+            storage_dtype: StorageDtype::F32,
+        };
+        convert_vector_result(
+            p.vector
+                .create_collection(branch_id, "default", "preexisting", config),
+            branch_id,
+        )
+        .unwrap();
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("key", DataType::Utf8, false),
+            Field::new(
+                "embedding",
+                DataType::FixedSizeList(Arc::new(Field::new("item", DataType::Float32, true)), 3),
+                false,
+            ),
+        ]));
+
+        let values = Float32Array::from(vec![
+            1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.0, 0.25, 0.25, 0.5,
+        ]);
+        let list = FixedSizeListArray::try_new(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            3,
+            Arc::new(values),
+            None,
+        )
+        .unwrap();
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec!["a", "b", "c", "d", "e"])),
+                Arc::new(list),
+            ],
+        )
+        .unwrap();
+
+        let mapping = ImportMapping {
+            key_idx: 0,
+            value_idx: Some(1),
+            extra_indices: vec![],
+            extra_names: vec![],
+        };
+
+        let v_before = p.db.storage().version();
+        let result =
+            ingest_vector(&p, branch_id, "default", "preexisting", &[batch], &mapping).unwrap();
+        let v_after = p.db.storage().version();
+
+        assert_eq!(result.rows_imported, 5);
+        assert_eq!(
+            v_after - v_before,
+            1,
+            "ingest_vector into a pre-existing collection must commit exactly once per batch \
+             (got {} commits for 5 rows)",
+            v_after - v_before
+        );
     }
 
     #[test]
