@@ -13,7 +13,7 @@ This reference is primarily for SDK builders and contributors. Most users should
 | Event | 4 | Event log operations |
 | State | 5 | State cell operations |
 | Vector | 9 | Vector store operations |
-| Branch | 5 | Branch lifecycle operations |
+| Branch | 17 | Branch lifecycle, fork/diff/merge, cherry-pick, revert, tags, notes |
 | Space | 4 | Space management operations |
 | Transaction | 5 | Transaction control |
 | Retention | 3 | Retention policy |
@@ -77,6 +77,10 @@ This reference is primarily for SDK builders and contributors. Most users should
 
 ## Branch Commands
 
+For the full semantics of each cross-branch operation (per-primitive merge rules, error cases, return field schemas), see the [Branching API Reference](branching-api.md).
+
+### Lifecycle
+
 | Command | Fields | Output |
 |---------|--------|--------|
 | `BranchCreate` | `branch_id?`, `metadata?` | `BranchWithVersion { info, version }` |
@@ -84,6 +88,37 @@ This reference is primarily for SDK builders and contributors. Most users should
 | `BranchList` | `state?`, `limit?`, `offset?` | `BranchInfoList(Vec<VersionedBranchInfo>)` |
 | `BranchExists` | `branch` | `Bool(exists)` |
 | `BranchDelete` | `branch` | `Unit` |
+
+### Cross-branch operations
+
+| Command | Fields | Output |
+|---------|--------|--------|
+| `BranchFork` | `source`, `destination`, `message?`, `creator?` | `BranchForked(ForkInfo)` |
+| `BranchDiff` | `branch_a`, `branch_b`, `filter_primitives?`, `filter_spaces?`, `as_of?` | `BranchDiff(BranchDiffResult)` |
+| `BranchDiffThreeWay` | `branch_a`, `branch_b` | `ThreeWayDiff(ThreeWayDiffResult)` |
+| `BranchMergeBase` | `branch_a`, `branch_b` | `MergeBaseInfo(Option<MergeBaseInfo>)` |
+| `BranchMerge` | `source`, `target`, `strategy`, `message?`, `creator?` | `BranchMerged(MergeInfo)` |
+
+### Selective application
+
+| Command | Fields | Output |
+|---------|--------|--------|
+| `BranchCherryPick` | `source`, `target`, `keys?`, `filter_spaces?`, `filter_keys?`, `filter_primitives?` | `BranchCherryPicked(CherryPickInfo)` |
+| `BranchRevert` | `branch`, `from_version`, `to_version` | `BranchReverted(RevertInfo)` |
+
+### Tags and notes
+
+| Command | Fields | Output |
+|---------|--------|--------|
+| `TagCreate` | `branch`, `name`, `version?`, `message?`, `creator?` | `TagInfo(TagInfo)` |
+| `TagDelete` | `branch`, `name` | `Bool(existed)` |
+| `TagList` | `branch` | `TagList(Vec<TagInfo>)` |
+| `TagResolve` | `branch`, `name` | `TagInfo(Option<TagInfo>)` |
+| `NoteAdd` | `branch`, `version`, `message`, `author?`, `metadata?` | `NoteInfo(NoteInfo)` |
+| `NoteGet` | `branch`, `version?` | `NoteList(Vec<NoteInfo>)` |
+| `NoteDelete` | `branch`, `version` | `Bool(existed)` |
+
+> **Note**: `materialize_branch` is engine-only. It is not exposed via the Command enum or the CLI. Call `strata_engine::branch_ops::materialize_branch` directly when you need it.
 
 ## Space Commands
 
