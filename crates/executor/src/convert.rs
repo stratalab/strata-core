@@ -16,7 +16,7 @@ impl From<StrataError> for Error {
             // Not Found errors — use typed EntityRef matching
             StrataError::NotFound { entity_ref } => {
                 let entity_str = entity_ref.to_string();
-                match &entity_ref {
+                match entity_ref.as_ref() {
                     EntityRef::Kv { .. } | EntityRef::Json { .. } => Error::KeyNotFound {
                         key: entity_str,
                         hint: None,

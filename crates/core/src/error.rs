@@ -462,8 +462,13 @@ pub enum StrataError {
     /// Wire code: `NotFound`
     #[error("not found: {entity_ref}")]
     NotFound {
-        /// Reference to the entity that was not found
-        entity_ref: EntityRef,
+        /// Reference to the entity that was not found.
+        ///
+        /// Boxed to keep `StrataError` under the `result_large_err`
+        /// clippy threshold (see `Conflict` variant for the same
+        /// rationale). `EntityRef` can be up to ~96 bytes after
+        /// Phase 0 of the space-correctness fix.
+        entity_ref: Box<EntityRef>,
     },
 
     /// Branch not found
@@ -507,8 +512,14 @@ pub enum StrataError {
     Conflict {
         /// Reason for the conflict
         reason: String,
-        /// Optional entity reference
-        entity_ref: Option<EntityRef>,
+        /// Optional entity reference.
+        ///
+        /// Boxed because `EntityRef` grew to ~96 bytes after Phase 0
+        /// of the space-correctness fix added `space: String` to its
+        /// space-bearing variants. Without boxing, `StrataError` would
+        /// exceed the 128-byte `result_large_err` clippy threshold and
+        /// turn every `StrataResult<T>` function into a CI failure.
+        entity_ref: Option<Box<EntityRef>>,
         /// Optional transaction ID that caused the conflict
         transaction_id: Option<u64>,
     },
@@ -537,8 +548,8 @@ pub enum StrataError {
     /// ```
     #[error("version conflict on {entity_ref}: expected {expected}, got {actual}")]
     VersionConflict {
-        /// Reference to the conflicted entity
-        entity_ref: EntityRef,
+        /// Reference to the conflicted entity (boxed — see `Conflict`).
+        entity_ref: Box<EntityRef>,
         /// The version that was expected
         expected: Version,
         /// The actual version found
@@ -558,8 +569,8 @@ pub enum StrataError {
     /// ```
     #[error("write conflict on {entity_ref}")]
     WriteConflict {
-        /// Reference to the conflicted entity
-        entity_ref: EntityRef,
+        /// Reference to the conflicted entity (boxed — see `Conflict`).
+        entity_ref: Box<EntityRef>,
     },
 
     // =========================================================================
@@ -656,8 +667,8 @@ pub enum StrataError {
     /// ```
     #[error("invalid operation on {entity_ref}: {reason}")]
     InvalidOperation {
-        /// Reference to the entity
-        entity_ref: EntityRef,
+        /// Reference to the entity (boxed — see `Conflict`).
+        entity_ref: Box<EntityRef>,
         /// Why the operation is invalid
         reason: String,
     },
@@ -707,14 +718,14 @@ pub enum StrataError {
     /// # let branch_id = BranchId::new();
     /// # let doc_id = "doc";
     /// StrataError::PathNotFound {
-    ///     entity_ref: EntityRef::json(branch_id,"default", doc_id),
+    ///     entity_ref: Box::new(EntityRef::json(branch_id, "default", doc_id)),
     ///     path: "/data/items/0/name".to_string(),
     /// };
     /// ```
     #[error("path not found in {entity_ref}: {path}")]
     PathNotFound {
-        /// Reference to the JSON document
-        entity_ref: EntityRef,
+        /// Reference to the JSON document (boxed — see `Conflict`).
+        entity_ref: Box<EntityRef>,
         /// The path that wasn't found
         path: String,
     },
@@ -743,8 +754,8 @@ pub enum StrataError {
         "history trimmed for {entity_ref}: requested {requested}, earliest is {earliest_retained}"
     )]
     HistoryTrimmed {
-        /// Reference to the entity
-        entity_ref: EntityRef,
+        /// Reference to the entity (boxed — see `Conflict`).
+        entity_ref: Box<EntityRef>,
         /// The requested version
         requested: Version,
         /// The earliest version still retained
@@ -882,7 +893,9 @@ impl StrataError {
     /// StrataError::not_found(EntityRef::kv(branch_id,"default", "missing-key"));
     /// ```
     pub fn not_found(entity_ref: EntityRef) -> Self {
-        StrataError::NotFound { entity_ref }
+        StrataError::NotFound {
+            entity_ref: Box::new(entity_ref),
+        }
     }
 
     /// Create a BranchNotFound error
@@ -911,7 +924,7 @@ impl StrataError {
     /// ```
     pub fn version_conflict(entity_ref: EntityRef, expected: Version, actual: Version) -> Self {
         StrataError::VersionConflict {
-            entity_ref,
+            entity_ref: Box::new(entity_ref),
             expected,
             actual,
         }
@@ -926,7 +939,9 @@ impl StrataError {
     /// StrataError::write_conflict(EntityRef::kv(branch_id,"default", "shared-key"));
     /// ```
     pub fn write_conflict(entity_ref: EntityRef) -> Self {
-        StrataError::WriteConflict { entity_ref }
+        StrataError::WriteConflict {
+            entity_ref: Box::new(entity_ref),
+        }
     }
 
     /// Create a TransactionAborted error
@@ -994,7 +1009,7 @@ impl StrataError {
     /// ```
     pub fn invalid_operation(entity_ref: EntityRef, reason: impl Into<String>) -> Self {
         StrataError::InvalidOperation {
-            entity_ref,
+            entity_ref: Box::new(entity_ref),
             reason: reason.into(),
         }
     }
@@ -1037,7 +1052,7 @@ impl StrataError {
     /// ```
     pub fn path_not_found(entity_ref: EntityRef, path: impl Into<String>) -> Self {
         StrataError::PathNotFound {
-            entity_ref,
+            entity_ref: Box::new(entity_ref),
             path: path.into(),
         }
     }
@@ -1060,7 +1075,7 @@ impl StrataError {
         earliest_retained: Version,
     ) -> Self {
         StrataError::HistoryTrimmed {
-            entity_ref,
+            entity_ref: Box::new(entity_ref),
             requested,
             earliest_retained,
         }
@@ -1205,7 +1220,7 @@ impl StrataError {
     pub fn conflict_on(entity_ref: EntityRef, reason: impl Into<String>) -> Self {
         StrataError::Conflict {
             reason: reason.into(),
-            entity_ref: Some(entity_ref),
+            entity_ref: Some(Box::new(entity_ref)),
             transaction_id: None,
         }
     }
@@ -1592,15 +1607,15 @@ impl StrataError {
     /// ```
     pub fn entity_ref(&self) -> Option<&EntityRef> {
         match self {
-            StrataError::NotFound { entity_ref } => Some(entity_ref),
+            StrataError::NotFound { entity_ref } => Some(entity_ref.as_ref()),
             StrataError::Conflict {
-                entity_ref: Some(ref e),
+                entity_ref: Some(e),
                 ..
-            } => Some(e),
-            StrataError::VersionConflict { entity_ref, .. } => Some(entity_ref),
-            StrataError::WriteConflict { entity_ref } => Some(entity_ref),
-            StrataError::InvalidOperation { entity_ref, .. } => Some(entity_ref),
-            StrataError::PathNotFound { entity_ref, .. } => Some(entity_ref),
+            } => Some(e.as_ref()),
+            StrataError::VersionConflict { entity_ref, .. } => Some(entity_ref.as_ref()),
+            StrataError::WriteConflict { entity_ref } => Some(entity_ref.as_ref()),
+            StrataError::InvalidOperation { entity_ref, .. } => Some(entity_ref.as_ref()),
+            StrataError::PathNotFound { entity_ref, .. } => Some(entity_ref.as_ref()),
             _ => None,
         }
     }
