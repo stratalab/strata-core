@@ -16,7 +16,7 @@ impl From<StrataError> for Error {
             // Not Found errors — use typed EntityRef matching
             StrataError::NotFound { entity_ref } => {
                 let entity_str = entity_ref.to_string();
-                match &entity_ref {
+                match entity_ref.as_ref() {
                     EntityRef::Kv { .. } | EntityRef::Json { .. } => Error::KeyNotFound {
                         key: entity_str,
                         hint: None,
@@ -220,6 +220,7 @@ mod tests {
     fn test_not_found_kv() {
         let err = StrataError::not_found(EntityRef::kv(
             strata_core::types::BranchId::from_bytes([0; 16]),
+            "default",
             "mykey",
         ));
         let converted: Error = err.into();
@@ -232,7 +233,11 @@ mod tests {
     #[test]
     fn test_version_conflict() {
         let err = StrataError::version_conflict(
-            EntityRef::kv(strata_core::types::BranchId::from_bytes([0; 16]), "key"),
+            EntityRef::kv(
+                strata_core::types::BranchId::from_bytes([0; 16]),
+                "default",
+                "key",
+            ),
             Version::Txn(5),
             Version::Txn(6),
         );

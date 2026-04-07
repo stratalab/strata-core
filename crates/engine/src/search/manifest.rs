@@ -16,8 +16,16 @@ use std::path::Path;
 
 /// Magic bytes for search manifest
 const MANIFEST_MAGIC: &[u8; 4] = b"SMNF";
-/// Current manifest version
-const MANIFEST_VERSION: u32 = 1;
+/// Current manifest version.
+///
+/// v2 was introduced when `EntityRef::{Kv,Event,Json,Vector}` gained a
+/// `space` field (Phase 0 of the space-correctness fix). v1 manifests
+/// stored space-blind `EntityRef` values that would silently collapse
+/// non-default-space identities; they are rejected by the version
+/// check in `load_manifest`. The recovery path
+/// (`crates/engine/src/search/recovery.rs`) catches the resulting
+/// error and rebuilds the index from KV with space-aware refs.
+const MANIFEST_VERSION: u32 = 2;
 
 // ============================================================================
 // Manifest Data (serializable)
@@ -157,10 +165,12 @@ mod tests {
             doc_id_map: vec![
                 EntityRef::Kv {
                     branch_id,
+                    space: "default".to_string(),
                     key: "key1".to_string(),
                 },
                 EntityRef::Kv {
                     branch_id,
+                    space: "default".to_string(),
                     key: "key2".to_string(),
                 },
             ],
@@ -239,5 +249,33 @@ mod tests {
 
         std::fs::write(&path, [0u8; 4]).unwrap();
         assert!(load_manifest(&path).is_err());
+    }
+
+    /// Pre-fix v1 manifests must be rejected outright. Phase 0 of the
+    /// space-correctness fix bumped `MANIFEST_VERSION` to 2 because v1
+    /// `EntityRef` values were space-blind; the recovery path
+    /// (`recovery::recover_search_state`) catches this error and
+    /// rebuilds the index from KV with space-aware refs.
+    #[test]
+    fn test_manifest_v1_rejected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("legacy.manifest");
+
+        // Forge a "v1" manifest: magic + 0x01 + arbitrary bytes.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MANIFEST_MAGIC);
+        buf.extend_from_slice(&1u32.to_le_bytes());
+        buf.extend_from_slice(&[0u8; 16]); // junk payload
+        std::fs::write(&path, &buf).unwrap();
+
+        let result = load_manifest(&path);
+        let err = match result {
+            Ok(_) => panic!("v1 manifest should be rejected by version check"),
+            Err(e) => e,
+        };
+        assert!(
+            err.to_string().contains("unsupported manifest version"),
+            "expected unsupported version error, got: {err}"
+        );
     }
 }

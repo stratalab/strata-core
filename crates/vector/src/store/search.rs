@@ -56,7 +56,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Validate query dimension
         let config = self.get_collection_config_required(branch_id, space, collection)?;
@@ -223,7 +223,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Validate dimension
         let config = self.get_collection_config_required(branch_id, space, collection)?;
@@ -382,7 +382,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Validate query dimension
         let config = self.get_collection_config_required(branch_id, space, collection)?;
@@ -476,7 +476,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Validate query dimension
         let config = self.get_collection_config_required(branch_id, space, collection)?;

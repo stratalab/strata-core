@@ -101,6 +101,7 @@ mod tests {
         SearchHit {
             doc_ref: EntityRef::Kv {
                 branch_id: BranchId::new(),
+                space: "default".to_string(),
                 key: format!("key{}", rank),
             },
             score,

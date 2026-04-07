@@ -65,7 +65,7 @@ mod invariant_1_addressable {
             .unwrap();
 
         // Build EntityRef for KV entry
-        let entity_ref = EntityRef::kv(branch_id, "my-key");
+        let entity_ref = EntityRef::kv(branch_id, "default", "my-key");
 
         // Verify EntityRef properties
         assert_eq!(entity_ref.branch_id(), branch_id);
@@ -94,7 +94,7 @@ mod invariant_1_addressable {
             _ => panic!("Expected sequence version"),
         };
 
-        let entity_ref = EntityRef::event(branch_id, sequence);
+        let entity_ref = EntityRef::event(branch_id, "default", sequence);
 
         assert_eq!(entity_ref.branch_id(), branch_id);
         assert_eq!(entity_ref.primitive_type(), PrimitiveType::Event);
@@ -116,7 +116,7 @@ mod invariant_1_addressable {
         )
         .unwrap();
 
-        let entity_ref = EntityRef::json(branch_id, doc_id);
+        let entity_ref = EntityRef::json(branch_id, "default", doc_id);
 
         assert_eq!(entity_ref.branch_id(), branch_id);
         assert_eq!(entity_ref.primitive_type(), PrimitiveType::Json);

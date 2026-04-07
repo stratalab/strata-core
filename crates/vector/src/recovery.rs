@@ -49,15 +49,25 @@ fn recover_vector_state(db: &Database) -> StrataResult<()> {
 }
 
 /// Compute the `.vec` mmap cache path for a given collection.
+/// On-disk path for the heap mmap of a collection.
+///
+/// Layout: `{data_dir}/vectors/{branch_hex}/{space}/{collection_name}.vec`.
+/// Including `space` as a subdirectory ensures two collections with the
+/// same `(branch_id, name)` in different spaces never collide on disk.
+/// Space names are validated to `[a-z0-9_-]` (`crates/core/src/types.rs`)
+/// so they are always filesystem-safe — no escaping needed. The reserved
+/// `_system_` space is also safe.
 pub(crate) fn mmap_path(
     data_dir: &std::path::Path,
     branch_id: strata_core::types::BranchId,
+    space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {
     let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
     data_dir
         .join("vectors")
         .join(branch_hex)
+        .join(space)
         .join(format!("{}.vec", collection_name))
 }
 
@@ -149,7 +159,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                         continue;
                     }
                 };
-                let collection_id = CollectionId::new(branch_id, &collection_name);
+                let collection_id = CollectionId::new(branch_id, space, &collection_name);
 
                 let factory = IndexBackendFactory::from_type(backend_type);
                 let mut backend = factory.create(&config);
@@ -159,7 +169,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 // -----------------------------------------------------------
                 let mut loaded_from_mmap = false;
                 if use_mmap {
-                    let vec_path = mmap_path(data_dir, branch_id, &collection_name);
+                    let vec_path = mmap_path(data_dir, branch_id, space, &collection_name);
                     if vec_path.exists() {
                         match VectorHeap::from_mmap(&vec_path, config.clone()) {
                             Ok(heap) => {
@@ -294,7 +304,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         for mut entry in state.backends.iter_mut() {
             let mut loaded = false;
             if use_mmap {
-                let gdir = super::graph_dir(data_dir, entry.key().branch_id, &entry.key().name);
+                let gdir = super::graph_dir(
+                    data_dir,
+                    entry.key().branch_id,
+                    &entry.key().space,
+                    &entry.key().name,
+                );
                 if let Ok(true) = entry.value_mut().load_graphs_from_disk(&gdir) {
                     loaded = true;
                 }
@@ -310,7 +325,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             entry.value_mut().seal_remaining_active();
 
             if can_write_disk {
-                let gdir = super::graph_dir(data_dir, entry.key().branch_id, &entry.key().name);
+                let gdir = super::graph_dir(
+                    data_dir,
+                    entry.key().branch_id,
+                    &entry.key().space,
+                    &entry.key().name,
+                );
                 let _ = entry.value_mut().freeze_graphs_to_disk(&gdir);
             }
         }
@@ -321,7 +341,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // -----------------------------------------------------------
     if can_write_disk {
         for mut entry in state.backends.iter_mut() {
-            let vec_path = mmap_path(data_dir, entry.key().branch_id, &entry.key().name);
+            let vec_path = mmap_path(
+                data_dir,
+                entry.key().branch_id,
+                &entry.key().space,
+                &entry.key().name,
+            );
             if !entry.value().is_heap_mmap() {
                 let name = entry.key().name.clone();
                 if let Err(e) = entry.value_mut().freeze_heap_to_disk(&vec_path) {
@@ -471,7 +496,7 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
                 None => continue,
             };
             let branch_id = key.namespace.branch_id;
-            let cid = CollectionId::new(branch_id, collection);
+            let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
             let vid = VectorId::new(record.vector_id);
 
             if let Some(mut backend) = self.state.backends.get_mut(&cid) {
@@ -517,7 +542,7 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
                 None => continue,
             };
             let branch_id = key.namespace.branch_id;
-            let cid = CollectionId::new(branch_id, collection);
+            let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
             let vid = VectorId::new(record.vector_id);
 
             if let Some(mut backend) = self.state.backends.get_mut(&cid) {
@@ -578,4 +603,33 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
     // `pre_delete_read`, `apply_refresh`, and `freeze_to_disk` remain
     // unchanged: they participate in the follower refresh and shutdown
     // paths, neither of which is replaced by Phase 4.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two collections with the same `(branch, name)` in different
+    /// spaces must produce distinct on-disk paths. Without this, the
+    /// `.vec` mmap heap of one tenant would clobber another's after
+    /// Phase 0 — see `docs/design/space-correctness-fix-plan.md`
+    /// Part 4. The `space` subdirectory enforces isolation.
+    #[test]
+    fn test_mmap_path_includes_space() {
+        let bid = strata_core::types::BranchId::new();
+        let root = std::path::Path::new("/tmp/strata-vec-test");
+
+        let a = mmap_path(root, bid, "tenant_a", "embeddings");
+        let b = mmap_path(root, bid, "tenant_b", "embeddings");
+        assert_ne!(a, b, "different spaces must produce different paths");
+        assert!(a.to_string_lossy().contains("tenant_a"));
+        assert!(b.to_string_lossy().contains("tenant_b"));
+
+        // graph_dir under the same constraint
+        let ga = super::super::graph_dir(root, bid, "tenant_a", "embeddings");
+        let gb = super::super::graph_dir(root, bid, "tenant_b", "embeddings");
+        assert_ne!(ga, gb);
+        assert!(ga.to_string_lossy().contains("tenant_a"));
+        assert!(gb.to_string_lossy().contains("tenant_b"));
+    }
 }

@@ -150,6 +150,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
             let entity_ref = crate::search::EntityRef::Kv {
                 branch_id,
+                space: key.namespace.space.to_string(),
                 key: user_key,
             };
             index.index_document(&entity_ref, &text, None);
@@ -177,6 +178,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
             let entity_ref = crate::search::EntityRef::Event {
                 branch_id,
+                space: key.namespace.space.to_string(),
                 sequence,
             };
             index.index_document(&entity_ref, &text, None);
@@ -260,6 +262,7 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
 
             let entity_ref = crate::search::EntityRef::Kv {
                 branch_id,
+                space: key.namespace.space.to_string(),
                 key: user_key,
             };
 
@@ -290,6 +293,7 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
 
             let entity_ref = crate::search::EntityRef::Event {
                 branch_id,
+                space: key.namespace.space.to_string(),
                 sequence,
             };
 

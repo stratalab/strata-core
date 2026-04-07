@@ -1087,7 +1087,11 @@ fn version_conflict_includes_retry_hint() {
     use strata_core::{EntityRef, StrataError, Version};
 
     let err = StrataError::version_conflict(
-        EntityRef::kv(strata_core::types::BranchId::from_bytes([0; 16]), "k"),
+        EntityRef::kv(
+            strata_core::types::BranchId::from_bytes([0; 16]),
+            "default",
+            "k",
+        ),
         Version::Txn(1),
         Version::Txn(2),
     );

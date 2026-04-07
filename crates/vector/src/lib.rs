@@ -68,14 +68,21 @@ pub use wal::{
 };
 
 /// Compute the directory for sealed-segment graph mmap files.
+///
+/// Layout: `{data_dir}/vectors/{branch_hex}/{space}/{collection_name}_graphs/`.
+/// Including `space` as a subdirectory ensures two collections with the
+/// same `(branch_id, name)` in different spaces never share graph caches.
+/// Space names are validated to `[a-z0-9_-]` so they are filesystem-safe.
 pub(crate) fn graph_dir(
     data_dir: &std::path::Path,
     branch_id: strata_core::types::BranchId,
+    space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {
     let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
     data_dir
         .join("vectors")
         .join(branch_hex)
+        .join(space)
         .join(format!("{}_graphs", collection_name))
 }

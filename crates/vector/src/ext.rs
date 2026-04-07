@@ -175,7 +175,7 @@ impl VectorStoreExt for TransactionContext {
             });
         }
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Validate dimension from backend config
         let mut backend = backend_state
@@ -258,7 +258,7 @@ impl VectorStoreExt for TransactionContext {
     ) -> VectorResult<(bool, Option<StagedVectorOp>)> {
         crate::collection::validate_vector_key(key)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
         let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
         let kv_key = Key::new_vector(ns, collection, key);
 

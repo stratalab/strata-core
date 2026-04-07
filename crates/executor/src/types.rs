@@ -629,13 +629,120 @@ pub struct TokenizeResult {
     pub model: String,
 }
 
-/// A single hit from a cross-primitive search
+/// Wire-format identity for a search hit.
+///
+/// A flat DTO with primitive-specific fields nullable, intended to be
+/// serialized 1:1 across the SDK boundary. Internal Rust code prefers
+/// `strata_core::EntityRef` (a strongly-typed enum), but SDK consumers
+/// (Python, Node, CLI JSON) want a single shape with explicit field
+/// names rather than a tagged enum. This type is the bridge.
+///
+/// Constructed from `EntityRef` via `From<&EntityRef>`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct EntityRefOutput {
+    /// Primitive kind: `"kv"`, `"event"`, `"json"`, `"vector"`, `"graph"`, `"branch"`.
+    pub kind: String,
+    /// Branch the entity belongs to (UUID string).
+    pub branch_id: String,
+    /// Space the entity lives in. `None` only for `Branch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub space: Option<String>,
+    /// Vector / KV / Graph user-key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// JSON document id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub doc_id: Option<String>,
+    /// Event sequence number.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sequence: Option<u64>,
+    /// Vector collection name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+}
+
+impl From<&strata_core::EntityRef> for EntityRefOutput {
+    fn from(r: &strata_core::EntityRef) -> Self {
+        use strata_core::EntityRef::*;
+        let branch_uuid = uuid::Uuid::from_bytes(*r.branch_id().as_bytes()).to_string();
+        match r {
+            Kv { space, key, .. } => EntityRefOutput {
+                kind: "kv".into(),
+                branch_id: branch_uuid,
+                space: Some(space.clone()),
+                key: Some(key.clone()),
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
+            Event {
+                space, sequence, ..
+            } => EntityRefOutput {
+                kind: "event".into(),
+                branch_id: branch_uuid,
+                space: Some(space.clone()),
+                key: None,
+                doc_id: None,
+                sequence: Some(*sequence),
+                collection: None,
+            },
+            Json { space, doc_id, .. } => EntityRefOutput {
+                kind: "json".into(),
+                branch_id: branch_uuid,
+                space: Some(space.clone()),
+                key: None,
+                doc_id: Some(doc_id.clone()),
+                sequence: None,
+                collection: None,
+            },
+            Vector {
+                space,
+                collection,
+                key,
+                ..
+            } => EntityRefOutput {
+                kind: "vector".into(),
+                branch_id: branch_uuid,
+                space: Some(space.clone()),
+                key: Some(key.clone()),
+                doc_id: None,
+                sequence: None,
+                collection: Some(collection.clone()),
+            },
+            Graph { space, key, .. } => EntityRefOutput {
+                kind: "graph".into(),
+                branch_id: branch_uuid,
+                space: Some(space.clone()),
+                key: Some(key.clone()),
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
+            Branch { .. } => EntityRefOutput {
+                kind: "branch".into(),
+                branch_id: branch_uuid,
+                space: None,
+                key: None,
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
+        }
+    }
+}
+
+/// A single hit from a cross-primitive search.
+///
+/// `entity_ref` carries the structured identity of the hit (replacing
+/// the legacy `entity: String` + `primitive: String` flat pair). Two
+/// hits with the same key in different spaces produce distinct
+/// `entity_ref` values, so deduplication and version enrichment work
+/// correctly across spaces.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchResultHit {
-    /// Entity identifier string
-    pub entity: String,
-    /// Primitive type that produced this hit
-    pub primitive: String,
+    /// Structured identity of the hit. Sufficient to uniquely re-fetch
+    /// the entity from any primitive.
+    pub entity_ref: EntityRefOutput,
     /// Relevance score (higher = more relevant)
     pub score: f32,
     /// Rank in result set (1-indexed)
@@ -947,4 +1054,143 @@ pub struct BulkGraphEdge {
     /// Optional properties to attach to the edge.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub properties: Option<Value>,
+}
+
+#[cfg(test)]
+mod entity_ref_output_tests {
+    use super::EntityRefOutput;
+    use strata_core::types::BranchId;
+    use strata_core::EntityRef;
+
+    #[test]
+    fn from_kv_carries_space() {
+        let bid = BranchId::new();
+        let r = EntityRef::kv(bid, "tenant_a", "users:42");
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "kv");
+        assert_eq!(out.space.as_deref(), Some("tenant_a"));
+        assert_eq!(out.key.as_deref(), Some("users:42"));
+        assert!(out.doc_id.is_none());
+        assert!(out.sequence.is_none());
+        assert!(out.collection.is_none());
+        let expected_bid = uuid::Uuid::from_bytes(*bid.as_bytes()).to_string();
+        assert_eq!(out.branch_id, expected_bid);
+    }
+
+    #[test]
+    fn from_event_carries_space_and_sequence() {
+        let bid = BranchId::new();
+        let r = EntityRef::event(bid, "tenant_a", 42);
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "event");
+        assert_eq!(out.space.as_deref(), Some("tenant_a"));
+        assert_eq!(out.sequence, Some(42));
+        assert!(out.key.is_none());
+        assert!(out.doc_id.is_none());
+    }
+
+    #[test]
+    fn from_json_carries_doc_id() {
+        let bid = BranchId::new();
+        let r = EntityRef::json(bid, "tenant_a", "doc-99");
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "json");
+        assert_eq!(out.space.as_deref(), Some("tenant_a"));
+        assert_eq!(out.doc_id.as_deref(), Some("doc-99"));
+        assert!(out.key.is_none());
+    }
+
+    #[test]
+    fn from_vector_carries_collection_and_key() {
+        let bid = BranchId::new();
+        let r = EntityRef::vector(bid, "tenant_a", "embeddings", "vec-1");
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "vector");
+        assert_eq!(out.space.as_deref(), Some("tenant_a"));
+        assert_eq!(out.collection.as_deref(), Some("embeddings"));
+        assert_eq!(out.key.as_deref(), Some("vec-1"));
+    }
+
+    #[test]
+    fn from_graph_carries_space() {
+        let bid = BranchId::new();
+        let r = EntityRef::graph(bid, "tenant_a", "g/n/1");
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "graph");
+        assert_eq!(out.space.as_deref(), Some("tenant_a"));
+        assert_eq!(out.key.as_deref(), Some("g/n/1"));
+    }
+
+    #[test]
+    fn from_branch_has_no_space() {
+        let bid = BranchId::new();
+        let r = EntityRef::branch(bid);
+        let out: EntityRefOutput = (&r).into();
+        assert_eq!(out.kind, "branch");
+        assert!(out.space.is_none());
+        assert!(out.key.is_none());
+        assert!(out.doc_id.is_none());
+        assert!(out.sequence.is_none());
+        assert!(out.collection.is_none());
+    }
+
+    /// Two outputs with the same `(kind, key)` in different spaces
+    /// must be `!=` and hash differently — this is what makes
+    /// `compute_diff` correctly track cross-space hits as distinct.
+    #[test]
+    fn space_distinguishes_identity() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let bid = BranchId::new();
+        let a: EntityRefOutput = (&EntityRef::kv(bid, "tenant_a", "k")).into();
+        let b: EntityRefOutput = (&EntityRef::kv(bid, "tenant_b", "k")).into();
+        assert_ne!(a, b);
+
+        let mut h1 = DefaultHasher::new();
+        a.hash(&mut h1);
+        let mut h2 = DefaultHasher::new();
+        b.hash(&mut h2);
+        assert_ne!(h1.finish(), h2.finish());
+    }
+
+    /// Round-trip through serde_json: every field must survive
+    /// untouched, and `null`/`None` must round-trip cleanly without
+    /// flipping to an empty string or zero.
+    #[test]
+    fn serde_round_trip_all_variants() {
+        let bid = BranchId::new();
+        let cases = vec![
+            EntityRef::kv(bid, "default", "k"),
+            EntityRef::event(bid, "tenant_a", 7),
+            EntityRef::json(bid, "tenant_b", "doc"),
+            EntityRef::vector(bid, "tenant_c", "col", "vk"),
+            EntityRef::graph(bid, "tenant_d", "g/n/1"),
+            EntityRef::branch(bid),
+        ];
+        for r in cases {
+            let out: EntityRefOutput = (&r).into();
+            let json = serde_json::to_string(&out).unwrap();
+            let restored: EntityRefOutput = serde_json::from_str(&json).unwrap();
+            assert_eq!(out, restored, "round-trip mismatch for {:?}", r);
+        }
+    }
+
+    /// Branch entities serialize without a `space` field at all
+    /// (`#[serde(skip_serializing_if = "Option::is_none")]`).
+    /// SDK consumers expect that — adding a `"space": null` would
+    /// require them to handle null branches.
+    #[test]
+    fn branch_serialization_omits_space() {
+        let bid = BranchId::new();
+        let out: EntityRefOutput = (&EntityRef::branch(bid)).into();
+        let json = serde_json::to_string(&out).unwrap();
+        assert!(!json.contains("space"));
+        assert!(!json.contains("key"));
+        assert!(!json.contains("doc_id"));
+        assert!(!json.contains("sequence"));
+        assert!(!json.contains("collection"));
+        // …but kind and branch_id are always present.
+        assert!(json.contains("\"kind\":\"branch\""));
+        assert!(json.contains("\"branch_id\""));
+    }
 }

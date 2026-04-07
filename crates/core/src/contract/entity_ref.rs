@@ -26,10 +26,10 @@
 //! let branch_id = BranchId::new();
 //!
 //! // Reference a KV entry
-//! let kv_ref = EntityRef::kv(branch_id, "my-key");
+//! let kv_ref = EntityRef::kv(branch_id, "default", "my-key");
 //!
 //! // Reference an event
-//! let event_ref = EntityRef::event(branch_id, 42);
+//! let event_ref = EntityRef::event(branch_id, "default", 42);
 //!
 //! // Get the primitive type
 //! assert_eq!(kv_ref.primitive_type(), PrimitiveType::Kv);
@@ -55,6 +55,11 @@ pub enum EntityRef {
     Kv {
         /// Branch scope
         branch_id: BranchId,
+        /// Space the entry lives in (e.g. `"default"`, `"tenant_a"`).
+        /// Two KV entries with the same `(branch_id, key)` in different
+        /// spaces are distinct entities; dropping `space` would alias them
+        /// in BM25 / hybrid search and leak data across tenants.
+        space: String,
         /// Key (user-defined)
         key: String,
     },
@@ -63,6 +68,8 @@ pub enum EntityRef {
     Event {
         /// Branch scope
         branch_id: BranchId,
+        /// Space the event lives in. See `Kv::space` for rationale.
+        space: String,
         /// Sequence number in the event log
         sequence: u64,
     },
@@ -77,6 +84,8 @@ pub enum EntityRef {
     Json {
         /// Branch scope
         branch_id: BranchId,
+        /// Space the document lives in. See `Kv::space` for rationale.
+        space: String,
         /// Document ID (user-provided string key)
         doc_id: String,
     },
@@ -85,6 +94,10 @@ pub enum EntityRef {
     Vector {
         /// Branch scope
         branch_id: BranchId,
+        /// Space the collection lives in. Two collections with the same
+        /// `(branch_id, name)` in different spaces are completely
+        /// independent — see `Kv::space` for rationale.
+        space: String,
         /// Collection name
         collection: String,
         /// Key within collection
@@ -111,17 +124,24 @@ impl EntityRef {
     // Constructors
     // =========================================================================
 
-    /// Create a KV entity reference
-    pub fn kv(branch_id: BranchId, key: impl Into<String>) -> Self {
+    /// Create a KV entity reference. `space` identifies which per-branch
+    /// namespace the entry lives in (e.g. `"default"`, `"tenant_a"`).
+    pub fn kv(branch_id: BranchId, space: impl Into<String>, key: impl Into<String>) -> Self {
         let key = key.into();
         debug_assert!(!key.is_empty(), "EntityRef::kv key must not be empty");
-        EntityRef::Kv { branch_id, key }
+        EntityRef::Kv {
+            branch_id,
+            space: space.into(),
+            key,
+        }
     }
 
-    /// Create an event entity reference
-    pub fn event(branch_id: BranchId, sequence: u64) -> Self {
+    /// Create an event entity reference. `space` identifies which
+    /// per-branch namespace the event lives in.
+    pub fn event(branch_id: BranchId, space: impl Into<String>, sequence: u64) -> Self {
         EntityRef::Event {
             branch_id,
+            space: space.into(),
             sequence,
         }
     }
@@ -131,14 +151,19 @@ impl EntityRef {
         EntityRef::Branch { branch_id }
     }
 
-    /// Create a JSON document entity reference
-    pub fn json(branch_id: BranchId, doc_id: impl Into<String>) -> Self {
+    /// Create a JSON document entity reference. `space` identifies which
+    /// per-branch namespace the document lives in.
+    pub fn json(branch_id: BranchId, space: impl Into<String>, doc_id: impl Into<String>) -> Self {
         let doc_id = doc_id.into();
         debug_assert!(
             !doc_id.is_empty(),
             "EntityRef::json doc_id must not be empty"
         );
-        EntityRef::Json { branch_id, doc_id }
+        EntityRef::Json {
+            branch_id,
+            space: space.into(),
+            doc_id,
+        }
     }
 
     /// Create a graph entity reference. `space` identifies which
@@ -152,9 +177,11 @@ impl EntityRef {
         }
     }
 
-    /// Create a vector entity reference
+    /// Create a vector entity reference. `space` identifies which
+    /// per-branch namespace the collection lives in.
     pub fn vector(
         branch_id: BranchId,
+        space: impl Into<String>,
         collection: impl Into<String>,
         key: impl Into<String>,
     ) -> Self {
@@ -167,6 +194,7 @@ impl EntityRef {
         // Note: key may be empty for collection-level references (e.g., error reporting)
         EntityRef::Vector {
             branch_id,
+            space: space.into(),
             collection,
             key,
         }
@@ -187,6 +215,21 @@ impl EntityRef {
             EntityRef::Json { branch_id, .. } => *branch_id,
             EntityRef::Vector { branch_id, .. } => *branch_id,
             EntityRef::Graph { branch_id, .. } => *branch_id,
+        }
+    }
+
+    /// Get the space this entity belongs to.
+    ///
+    /// Returns `None` only for `EntityRef::Branch`, which is not
+    /// space-scoped. Every other variant carries a space.
+    pub fn space(&self) -> Option<&str> {
+        match self {
+            EntityRef::Kv { space, .. } => Some(space),
+            EntityRef::Event { space, .. } => Some(space),
+            EntityRef::Json { space, .. } => Some(space),
+            EntityRef::Vector { space, .. } => Some(space),
+            EntityRef::Graph { space, .. } => Some(space),
+            EntityRef::Branch { .. } => None,
         }
     }
 
@@ -286,27 +329,37 @@ impl EntityRef {
 impl std::fmt::Display for EntityRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EntityRef::Kv { branch_id, key } => {
-                write!(f, "kv://{}/{}", branch_id, key)
+            EntityRef::Kv {
+                branch_id,
+                space,
+                key,
+            } => {
+                write!(f, "kv://{}/{}/{}", branch_id, space, key)
             }
             EntityRef::Event {
                 branch_id,
+                space,
                 sequence,
             } => {
-                write!(f, "event://{}/{}", branch_id, sequence)
+                write!(f, "event://{}/{}/{}", branch_id, space, sequence)
             }
             EntityRef::Branch { branch_id } => {
                 write!(f, "branch://{}", branch_id)
             }
-            EntityRef::Json { branch_id, doc_id } => {
-                write!(f, "json://{}/{}", branch_id, doc_id)
+            EntityRef::Json {
+                branch_id,
+                space,
+                doc_id,
+            } => {
+                write!(f, "json://{}/{}/{}", branch_id, space, doc_id)
             }
             EntityRef::Vector {
                 branch_id,
+                space,
                 collection,
                 key,
             } => {
-                write!(f, "vector://{}/{}/{}", branch_id, collection, key)
+                write!(f, "vector://{}/{}/{}/{}", branch_id, space, collection, key)
             }
             EntityRef::Graph {
                 branch_id,
@@ -330,11 +383,12 @@ mod tests {
     #[test]
     fn test_entity_ref_kv() {
         let branch_id = BranchId::new();
-        let ref_ = EntityRef::kv(branch_id, "my-key");
+        let ref_ = EntityRef::kv(branch_id, "default", "my-key");
 
         assert!(ref_.is_kv());
         assert!(!ref_.is_event());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), Some("default"));
         assert_eq!(ref_.primitive_type(), PrimitiveType::Kv);
         assert_eq!(ref_.kv_key(), Some("my-key"));
     }
@@ -342,10 +396,11 @@ mod tests {
     #[test]
     fn test_entity_ref_event() {
         let branch_id = BranchId::new();
-        let ref_ = EntityRef::event(branch_id, 42);
+        let ref_ = EntityRef::event(branch_id, "default", 42);
 
         assert!(ref_.is_event());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), Some("default"));
         assert_eq!(ref_.primitive_type(), PrimitiveType::Event);
         assert_eq!(ref_.event_sequence(), Some(42));
     }
@@ -357,6 +412,7 @@ mod tests {
 
         assert!(ref_.is_branch());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), None);
         assert_eq!(ref_.primitive_type(), PrimitiveType::Branch);
     }
 
@@ -364,10 +420,11 @@ mod tests {
     fn test_entity_ref_json() {
         let branch_id = BranchId::new();
         let doc_id = "test-doc";
-        let ref_ = EntityRef::json(branch_id, doc_id);
+        let ref_ = EntityRef::json(branch_id, "default", doc_id);
 
         assert!(ref_.is_json());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), Some("default"));
         assert_eq!(ref_.primitive_type(), PrimitiveType::Json);
         assert_eq!(ref_.json_doc_id(), Some(doc_id));
     }
@@ -375,10 +432,11 @@ mod tests {
     #[test]
     fn test_entity_ref_vector() {
         let branch_id = BranchId::new();
-        let ref_ = EntityRef::vector(branch_id, "embeddings", "doc-1");
+        let ref_ = EntityRef::vector(branch_id, "default", "embeddings", "doc-1");
 
         assert!(ref_.is_vector());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), Some("default"));
         assert_eq!(ref_.primitive_type(), PrimitiveType::Vector);
         assert_eq!(ref_.vector_location(), Some(("embeddings", "doc-1")));
     }
@@ -391,6 +449,7 @@ mod tests {
         assert!(ref_.is_graph());
         assert!(!ref_.is_kv());
         assert_eq!(ref_.branch_id(), branch_id);
+        assert_eq!(ref_.space(), Some("default"));
         assert_eq!(ref_.primitive_type(), PrimitiveType::Graph);
         assert_eq!(ref_.graph_key(), Some("mygraph/n/node1"));
     }
@@ -399,19 +458,19 @@ mod tests {
     fn test_entity_ref_display() {
         let branch_id = BranchId::new();
 
-        let kv = EntityRef::kv(branch_id, "key");
+        let kv = EntityRef::kv(branch_id, "default", "key");
         assert!(format!("{}", kv).starts_with("kv://"));
 
-        let event = EntityRef::event(branch_id, 42);
+        let event = EntityRef::event(branch_id, "default", 42);
         assert!(format!("{}", event).starts_with("event://"));
 
         let branch_ref = EntityRef::branch(branch_id);
         assert!(format!("{}", branch_ref).starts_with("branch://"));
 
-        let json = EntityRef::json(branch_id, "test-doc");
+        let json = EntityRef::json(branch_id, "default", "test-doc");
         assert!(format!("{}", json).starts_with("json://"));
 
-        let vector = EntityRef::vector(branch_id, "col", "key");
+        let vector = EntityRef::vector(branch_id, "default", "col", "key");
         assert!(format!("{}", vector).starts_with("vector://"));
 
         let graph = EntityRef::graph(branch_id, "default", "g/n/1");
@@ -419,15 +478,70 @@ mod tests {
     }
 
     #[test]
+    fn test_entity_ref_display_contains_space() {
+        let branch_id = BranchId::new();
+        let kv = EntityRef::kv(branch_id, "tenant_a", "mykey");
+        assert!(format!("{}", kv).contains("tenant_a"));
+    }
+
+    #[test]
     fn test_entity_ref_equality() {
         let branch_id = BranchId::new();
 
-        let ref1 = EntityRef::kv(branch_id, "key");
-        let ref2 = EntityRef::kv(branch_id, "key");
-        let ref3 = EntityRef::kv(branch_id, "other");
+        let ref1 = EntityRef::kv(branch_id, "default", "key");
+        let ref2 = EntityRef::kv(branch_id, "default", "key");
+        let ref3 = EntityRef::kv(branch_id, "default", "other");
 
         assert_eq!(ref1, ref2);
         assert_ne!(ref1, ref3);
+    }
+
+    /// Different spaces with the same `(branch, key)` must be distinct
+    /// for KV / Event / JSON / Vector. This is the core invariant of
+    /// the Phase 0 type fix — without it, BM25 / hybrid / version
+    /// enrichment alias data across tenants.
+    #[test]
+    fn test_entity_ref_space_distinguishes_identity() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(r: &EntityRef) -> u64 {
+            let mut h = DefaultHasher::new();
+            r.hash(&mut h);
+            h.finish()
+        }
+
+        let bid = BranchId::new();
+
+        // KV
+        let a = EntityRef::kv(bid, "tenant_a", "k");
+        let b = EntityRef::kv(bid, "tenant_b", "k");
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
+
+        // Event
+        let a = EntityRef::event(bid, "tenant_a", 7);
+        let b = EntityRef::event(bid, "tenant_b", 7);
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
+
+        // JSON
+        let a = EntityRef::json(bid, "tenant_a", "doc1");
+        let b = EntityRef::json(bid, "tenant_b", "doc1");
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
+
+        // Vector
+        let a = EntityRef::vector(bid, "tenant_a", "col", "k");
+        let b = EntityRef::vector(bid, "tenant_b", "col", "k");
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
+
+        // Graph (already correct, sanity check)
+        let a = EntityRef::graph(bid, "tenant_a", "n/1");
+        let b = EntityRef::graph(bid, "tenant_b", "n/1");
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
     }
 
     #[test]
@@ -437,9 +551,9 @@ mod tests {
         let branch_id = BranchId::new();
 
         let mut set = HashSet::new();
-        set.insert(EntityRef::kv(branch_id, "key1"));
-        set.insert(EntityRef::kv(branch_id, "key2"));
-        set.insert(EntityRef::kv(branch_id, "key1")); // Duplicate
+        set.insert(EntityRef::kv(branch_id, "default", "key1"));
+        set.insert(EntityRef::kv(branch_id, "default", "key2"));
+        set.insert(EntityRef::kv(branch_id, "default", "key1")); // Duplicate
 
         assert_eq!(set.len(), 2);
     }
@@ -448,11 +562,11 @@ mod tests {
     fn test_entity_ref_serialization() {
         let branch_id = BranchId::new();
         let refs = vec![
-            EntityRef::kv(branch_id, "key"),
-            EntityRef::event(branch_id, 42),
+            EntityRef::kv(branch_id, "default", "key"),
+            EntityRef::event(branch_id, "default", 42),
             EntityRef::branch(branch_id),
-            EntityRef::json(branch_id, "test-doc"),
-            EntityRef::vector(branch_id, "col", "key"),
+            EntityRef::json(branch_id, "default", "test-doc"),
+            EntityRef::vector(branch_id, "default", "col", "key"),
             EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
@@ -466,7 +580,7 @@ mod tests {
     #[test]
     fn test_wrong_extraction_returns_none() {
         let branch_id = BranchId::new();
-        let kv_ref = EntityRef::kv(branch_id, "key");
+        let kv_ref = EntityRef::kv(branch_id, "default", "key");
 
         // Wrong extractors should return None
         assert!(kv_ref.event_sequence().is_none());
@@ -481,11 +595,11 @@ mod tests {
 
         // Create one of each type
         let refs = [
-            EntityRef::kv(branch_id, "k"),
-            EntityRef::event(branch_id, 0),
+            EntityRef::kv(branch_id, "default", "k"),
+            EntityRef::event(branch_id, "default", 0),
             EntityRef::branch(branch_id),
-            EntityRef::json(branch_id, "j"),
-            EntityRef::vector(branch_id, "c", "k"),
+            EntityRef::json(branch_id, "default", "j"),
+            EntityRef::vector(branch_id, "default", "c", "k"),
             EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
@@ -497,7 +611,7 @@ mod tests {
     #[test]
     fn test_entity_ref_json_with_string() {
         let branch_id = BranchId::new();
-        let ref_ = EntityRef::json(branch_id, String::from("owned-doc-id"));
+        let ref_ = EntityRef::json(branch_id, "default", String::from("owned-doc-id"));
         assert!(ref_.is_json());
         assert_eq!(ref_.json_doc_id(), Some("owned-doc-id"));
     }
@@ -506,11 +620,11 @@ mod tests {
     fn test_entity_ref_type_checks_are_exclusive() {
         let branch_id = BranchId::new();
         let refs = vec![
-            EntityRef::kv(branch_id, "k"),
-            EntityRef::event(branch_id, 0),
+            EntityRef::kv(branch_id, "default", "k"),
+            EntityRef::event(branch_id, "default", 0),
             EntityRef::branch(branch_id),
-            EntityRef::json(branch_id, "j"),
-            EntityRef::vector(branch_id, "c", "k"),
+            EntityRef::json(branch_id, "default", "j"),
+            EntityRef::vector(branch_id, "default", "c", "k"),
             EntityRef::graph(branch_id, "default", "g/n/1"),
         ];
 
@@ -536,8 +650,8 @@ mod tests {
     fn test_entity_ref_different_branches_differ() {
         let r1 = BranchId::new();
         let r2 = BranchId::new();
-        let ref1 = EntityRef::kv(r1, "key");
-        let ref2 = EntityRef::kv(r2, "key");
+        let ref1 = EntityRef::kv(r1, "default", "key");
+        let ref2 = EntityRef::kv(r2, "default", "key");
         assert_ne!(ref1, ref2);
     }
 
@@ -546,10 +660,10 @@ mod tests {
     fn test_entity_ref_empty_string_keys_release() {
         // In release builds, empty keys are allowed (no debug_assert)
         let branch_id = BranchId::new();
-        let kv = EntityRef::kv(branch_id, "");
+        let kv = EntityRef::kv(branch_id, "default", "");
         assert_eq!(kv.kv_key(), Some(""));
 
-        let json = EntityRef::json(branch_id, "");
+        let json = EntityRef::json(branch_id, "default", "");
         assert_eq!(json.json_doc_id(), Some(""));
     }
 
@@ -558,7 +672,7 @@ mod tests {
     #[should_panic(expected = "must not be empty")]
     fn test_entity_ref_empty_kv_key_debug_panics() {
         let branch_id = BranchId::new();
-        let _kv = EntityRef::kv(branch_id, "");
+        let _kv = EntityRef::kv(branch_id, "default", "");
     }
 
     #[cfg(debug_assertions)]
@@ -566,7 +680,7 @@ mod tests {
     #[should_panic(expected = "EntityRef::json doc_id must not be empty")]
     fn test_entity_ref_empty_json_docid_debug_panics() {
         let branch_id = BranchId::new();
-        let _json = EntityRef::json(branch_id, "");
+        let _json = EntityRef::json(branch_id, "default", "");
     }
 
     #[cfg(debug_assertions)]
@@ -574,7 +688,7 @@ mod tests {
     #[should_panic(expected = "EntityRef::vector collection must not be empty")]
     fn test_entity_ref_empty_vector_collection_debug_panics() {
         let branch_id = BranchId::new();
-        let _vector = EntityRef::vector(branch_id, "", "key");
+        let _vector = EntityRef::vector(branch_id, "default", "", "key");
     }
 
     #[test]
@@ -582,13 +696,13 @@ mod tests {
         let branch_id = BranchId::new();
         let branch_str = format!("{}", branch_id);
 
-        let kv = EntityRef::kv(branch_id, "mykey");
+        let kv = EntityRef::kv(branch_id, "default", "mykey");
         assert!(
             format!("{}", kv).contains(&branch_str),
             "Display should contain branch_id"
         );
 
-        let event = EntityRef::event(branch_id, 42);
+        let event = EntityRef::event(branch_id, "default", 42);
         let display = format!("{}", event);
         assert!(display.contains(&branch_str));
         assert!(display.contains("42"));
@@ -598,15 +712,15 @@ mod tests {
     fn test_entity_ref_cross_type_never_equal() {
         let branch_id = BranchId::new();
         // Even with same branch_id and key-like values, different types are never equal
-        let kv = EntityRef::kv(branch_id, "name");
-        let json = EntityRef::json(branch_id, "name");
+        let kv = EntityRef::kv(branch_id, "default", "name");
+        let json = EntityRef::json(branch_id, "default", "name");
         assert_ne!(kv, json);
     }
 
     #[test]
     fn test_entity_ref_vector_location_with_special_chars() {
         let branch_id = BranchId::new();
-        let v = EntityRef::vector(branch_id, "col/with/slash", "key with spaces");
+        let v = EntityRef::vector(branch_id, "default", "col/with/slash", "key with spaces");
         assert_eq!(
             v.vector_location(),
             Some(("col/with/slash", "key with spaces"))
@@ -616,7 +730,7 @@ mod tests {
     #[test]
     fn test_entity_ref_event_sequence_zero() {
         let branch_id = BranchId::new();
-        let e = EntityRef::event(branch_id, 0);
+        let e = EntityRef::event(branch_id, "default", 0);
         assert_eq!(e.event_sequence(), Some(0));
     }
 }

@@ -383,20 +383,30 @@ pub struct CollectionInfo {
     pub created_at: u64,
 }
 
-/// Unique identifier for a collection within a branch
+/// Unique identifier for a collection within a branch.
+///
+/// `(branch_id, space, name)` is the real storage-key tuple for a vector
+/// collection: primary KV uses `Namespace::for_branch_space(branch_id, space)`
+/// as its prefix and the collection name as the segment under that. Two
+/// collections with the same `(branch_id, name)` in different spaces are
+/// completely independent — they have distinct backends, distinct indexes,
+/// distinct counts, and distinct on-disk caches.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct CollectionId {
     /// Branch ID this collection belongs to
     pub branch_id: BranchId,
+    /// Space within the branch (e.g. `"default"`, `"tenant_a"`, `"_system_"`)
+    pub space: String,
     /// Collection name
     pub name: String,
 }
 
 impl CollectionId {
     /// Create a new CollectionId
-    pub fn new(branch_id: BranchId, name: impl Into<String>) -> Self {
+    pub fn new(branch_id: BranchId, space: impl Into<String>, name: impl Into<String>) -> Self {
         CollectionId {
             branch_id,
+            space: space.into(),
             name: name.into(),
         }
     }
@@ -407,6 +417,7 @@ impl Ord for CollectionId {
         self.branch_id
             .as_bytes()
             .cmp(other.branch_id.as_bytes())
+            .then(self.space.cmp(&other.space))
             .then(self.name.cmp(&other.name))
     }
 }
@@ -941,7 +952,7 @@ mod tests {
     #[test]
     fn test_vector_entry_with_source_ref() {
         let branch_id = BranchId::new();
-        let source = EntityRef::json(branch_id, "source-doc");
+        let source = EntityRef::json(branch_id, "default", "source-doc");
         let entry = VectorEntry::new_with_source(
             "emb-1".to_string(),
             vec![1.0, 2.0],
@@ -971,8 +982,8 @@ mod tests {
     #[test]
     fn test_collection_id_equality() {
         let branch_id = BranchId::new();
-        let c1 = CollectionId::new(branch_id, "embeddings");
-        let c2 = CollectionId::new(branch_id, "embeddings");
+        let c1 = CollectionId::new(branch_id, "default", "embeddings");
+        let c2 = CollectionId::new(branch_id, "default", "embeddings");
         assert_eq!(c1, c2);
     }
 
@@ -980,14 +991,44 @@ mod tests {
     fn test_collection_id_ordering() {
         let r1 = BranchId::new();
         let r2 = BranchId::new();
-        let c1 = CollectionId::new(r1, "a");
-        let c2 = CollectionId::new(r1, "b");
+        let c1 = CollectionId::new(r1, "default", "a");
+        let c2 = CollectionId::new(r1, "default", "b");
         // Same branch_id, different name: should have defined ordering
         // CollectionId has a defined total ordering
         let _has_ordering = c1.cmp(&c2);
         // Different branch_id
-        let c3 = CollectionId::new(r2, "a");
+        let c3 = CollectionId::new(r2, "default", "a");
         assert_ne!(c1, c3);
+    }
+
+    /// Two collections with the same `(branch, name)` in different
+    /// spaces must be distinct values, distinct hashes, and distinct
+    /// in any `Ord`-based collection. This is the core invariant of
+    /// the Phase 0 `CollectionId` change — without it, vector backend
+    /// state collides across tenants.
+    #[test]
+    fn test_collection_id_space_distinguishes_identity() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::collections::BTreeSet;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_of(c: &CollectionId) -> u64 {
+            let mut h = DefaultHasher::new();
+            c.hash(&mut h);
+            h.finish()
+        }
+
+        let bid = BranchId::new();
+        let a = CollectionId::new(bid, "tenant_a", "embeddings");
+        let b = CollectionId::new(bid, "tenant_b", "embeddings");
+
+        assert_ne!(a, b);
+        assert_ne!(hash_of(&a), hash_of(&b));
+
+        let mut set = BTreeSet::new();
+        set.insert(a.clone());
+        set.insert(b.clone());
+        assert_eq!(set.len(), 2);
     }
 
     // ================================================================
@@ -1148,7 +1189,7 @@ mod tests {
     #[test]
     fn test_vector_entry_source_ref_serialization_roundtrip() {
         let branch_id = BranchId::new();
-        let source = EntityRef::json(branch_id, "source-doc");
+        let source = EntityRef::json(branch_id, "default", "source-doc");
         let entry = VectorEntry::new_with_source(
             "emb".to_string(),
             vec![1.0],
@@ -1347,8 +1388,8 @@ mod tests {
     #[test]
     fn test_collection_id_same_branch_different_name() {
         let branch_id = BranchId::new();
-        let c1 = CollectionId::new(branch_id, "alpha");
-        let c2 = CollectionId::new(branch_id, "beta");
+        let c1 = CollectionId::new(branch_id, "default", "alpha");
+        let c2 = CollectionId::new(branch_id, "default", "beta");
         assert_ne!(c1, c2);
         assert!(c1 < c2, "alpha should sort before beta");
     }
@@ -1358,16 +1399,16 @@ mod tests {
         use std::collections::HashSet;
         let branch_id = BranchId::new();
         let mut set = HashSet::new();
-        set.insert(CollectionId::new(branch_id, "a"));
-        set.insert(CollectionId::new(branch_id, "a")); // duplicate
-        set.insert(CollectionId::new(branch_id, "b"));
+        set.insert(CollectionId::new(branch_id, "default", "a"));
+        set.insert(CollectionId::new(branch_id, "default", "a")); // duplicate
+        set.insert(CollectionId::new(branch_id, "default", "b"));
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn test_collection_id_serialization_roundtrip() {
         let branch_id = BranchId::new();
-        let cid = CollectionId::new(branch_id, "my_collection");
+        let cid = CollectionId::new(branch_id, "default", "my_collection");
         let json = serde_json::to_string(&cid).unwrap();
         let restored: CollectionId = serde_json::from_str(&json).unwrap();
         assert_eq!(cid, restored);

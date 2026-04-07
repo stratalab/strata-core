@@ -282,37 +282,54 @@ impl Writeset {
     }
 
     /// Write an EntityRef to the byte buffer.
+    ///
+    /// Wire format per variant: `tag (1) | branch_id (16) | space (varlen string,
+    /// only for space-bearing variants) | variant fields`. `Branch` carries no space.
     fn write_entity_ref(bytes: &mut Vec<u8>, entity_ref: &EntityRef) {
         match entity_ref {
-            EntityRef::Kv { branch_id, key } => {
+            EntityRef::Kv {
+                branch_id,
+                space,
+                key,
+            } => {
                 bytes.push(primitive_tags::KV);
                 bytes.extend_from_slice(branch_id.as_bytes());
+                Self::write_string(bytes, space);
                 Self::write_string(bytes, key);
             }
             EntityRef::Event {
                 branch_id,
+                space,
                 sequence,
             } => {
                 bytes.push(primitive_tags::EVENT);
                 bytes.extend_from_slice(branch_id.as_bytes());
+                Self::write_string(bytes, space);
                 bytes.extend_from_slice(&sequence.to_le_bytes());
             }
             EntityRef::Branch { branch_id } => {
                 bytes.push(primitive_tags::BRANCH);
                 bytes.extend_from_slice(branch_id.as_bytes());
             }
-            EntityRef::Json { branch_id, doc_id } => {
+            EntityRef::Json {
+                branch_id,
+                space,
+                doc_id,
+            } => {
                 bytes.push(primitive_tags::JSON);
                 bytes.extend_from_slice(branch_id.as_bytes());
+                Self::write_string(bytes, space);
                 Self::write_string(bytes, doc_id);
             }
             EntityRef::Vector {
                 branch_id,
+                space,
                 collection,
                 key,
             } => {
                 bytes.push(primitive_tags::VECTOR);
                 bytes.extend_from_slice(branch_id.as_bytes());
+                Self::write_string(bytes, space);
                 Self::write_string(bytes, collection);
                 Self::write_string(bytes, key);
             }
@@ -349,11 +366,22 @@ impl Writeset {
 
         match tag {
             primitive_tags::KV => {
+                let (space, consumed) = Self::read_string(&bytes[cursor..])?;
+                cursor += consumed;
                 let (key, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
-                Ok((EntityRef::Kv { branch_id, key }, cursor))
+                Ok((
+                    EntityRef::Kv {
+                        branch_id,
+                        space,
+                        key,
+                    },
+                    cursor,
+                ))
             }
             primitive_tags::EVENT => {
+                let (space, consumed) = Self::read_string(&bytes[cursor..])?;
+                cursor += consumed;
                 if bytes.len() < cursor + 8 {
                     return Err(WritesetError::InsufficientData);
                 }
@@ -362,6 +390,7 @@ impl Writeset {
                 Ok((
                     EntityRef::Event {
                         branch_id,
+                        space,
                         sequence,
                     },
                     cursor,
@@ -369,11 +398,22 @@ impl Writeset {
             }
             primitive_tags::BRANCH => Ok((EntityRef::Branch { branch_id }, cursor)),
             primitive_tags::JSON => {
+                let (space, consumed) = Self::read_string(&bytes[cursor..])?;
+                cursor += consumed;
                 let (doc_id, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
-                Ok((EntityRef::Json { branch_id, doc_id }, cursor))
+                Ok((
+                    EntityRef::Json {
+                        branch_id,
+                        space,
+                        doc_id,
+                    },
+                    cursor,
+                ))
             }
             primitive_tags::VECTOR => {
+                let (space, consumed) = Self::read_string(&bytes[cursor..])?;
+                cursor += consumed;
                 let (collection, consumed) = Self::read_string(&bytes[cursor..])?;
                 cursor += consumed;
                 let (key, consumed) = Self::read_string(&bytes[cursor..])?;
@@ -381,6 +421,7 @@ impl Writeset {
                 Ok((
                     EntityRef::Vector {
                         branch_id,
+                        space,
                         collection,
                         key,
                     },
@@ -479,7 +520,7 @@ mod tests {
     #[test]
     fn test_writeset_put_kv() {
         let branch_id = test_branch_id();
-        let entity_ref = EntityRef::kv(branch_id, "my-key");
+        let entity_ref = EntityRef::kv(branch_id, "default", "my-key");
 
         let mut ws = Writeset::new();
         ws.put(entity_ref.clone(), vec![1, 2, 3], 42);
@@ -505,7 +546,7 @@ mod tests {
     #[test]
     fn test_writeset_delete() {
         let branch_id = test_branch_id();
-        let entity_ref = EntityRef::kv(branch_id, "my-key");
+        let entity_ref = EntityRef::kv(branch_id, "default", "my-key");
 
         let mut ws = Writeset::new();
         ws.delete(entity_ref.clone());
@@ -525,7 +566,7 @@ mod tests {
     #[test]
     fn test_writeset_append() {
         let branch_id = test_branch_id();
-        let entity_ref = EntityRef::event(branch_id, 100);
+        let entity_ref = EntityRef::event(branch_id, "default", 100);
 
         let mut ws = Writeset::new();
         ws.append(entity_ref.clone(), vec![4, 5, 6, 7], 123);
@@ -553,10 +594,10 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "key1"), vec![1], 1);
-        ws.put(EntityRef::kv(branch_id, "key2"), vec![2], 2);
-        ws.delete(EntityRef::kv(branch_id, "key3"));
-        ws.append(EntityRef::event(branch_id, 1), vec![3], 3);
+        ws.put(EntityRef::kv(branch_id, "default", "key1"), vec![1], 1);
+        ws.put(EntityRef::kv(branch_id, "default", "key2"), vec![2], 2);
+        ws.delete(EntityRef::kv(branch_id, "default", "key3"));
+        ws.append(EntityRef::event(branch_id, "default", 1), vec![3], 3);
 
         assert_eq!(ws.len(), 4);
 
@@ -572,11 +613,11 @@ mod tests {
         let branch_id = test_branch_id();
 
         let refs = vec![
-            EntityRef::kv(branch_id, "key"),
-            EntityRef::event(branch_id, 42),
+            EntityRef::kv(branch_id, "default", "key"),
+            EntityRef::event(branch_id, "default", 42),
             EntityRef::branch(branch_id),
-            EntityRef::json(branch_id, "test-doc"),
-            EntityRef::vector(branch_id, "collection", "vec-key"),
+            EntityRef::json(branch_id, "default", "test-doc"),
+            EntityRef::vector(branch_id, "default", "collection", "vec-key"),
             EntityRef::graph(branch_id, "default", "mygraph/n/node1"),
         ];
 
@@ -604,7 +645,11 @@ mod tests {
         let large_value = vec![0xAB; 10000];
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "large"), large_value.clone(), 1);
+        ws.put(
+            EntityRef::kv(branch_id, "default", "large"),
+            large_value.clone(),
+            1,
+        );
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();
@@ -622,9 +667,9 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "键值对"), vec![1], 1);
+        ws.put(EntityRef::kv(branch_id, "default", "键值对"), vec![1], 1);
         ws.put(
-            EntityRef::vector(branch_id, "коллекция", "κλειδί"),
+            EntityRef::vector(branch_id, "default", "коллекция", "κλειδί"),
             vec![3],
             3,
         );
@@ -640,7 +685,7 @@ mod tests {
     fn test_writeset_empty_strings() {
         let branch_id = test_branch_id();
         // In debug mode, empty keys trigger debug_assert panic in EntityRef constructors
-        let result = std::panic::catch_unwind(move || EntityRef::kv(branch_id, ""));
+        let result = std::panic::catch_unwind(move || EntityRef::kv(branch_id, "default", ""));
         assert!(result.is_err(), "Empty key should panic in debug mode");
     }
 
@@ -650,8 +695,8 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, ""), vec![1], 1);
-        ws.put(EntityRef::vector(branch_id, "", ""), vec![2], 2);
+        ws.put(EntityRef::kv(branch_id, "default", ""), vec![1], 1);
+        ws.put(EntityRef::vector(branch_id, "default", "", ""), vec![2], 2);
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();
@@ -682,7 +727,7 @@ mod tests {
     #[test]
     fn test_mutation_entity_ref() {
         let branch_id = test_branch_id();
-        let entity_ref = EntityRef::kv(branch_id, "key");
+        let entity_ref = EntityRef::kv(branch_id, "default", "key");
 
         let put = Mutation::Put {
             entity_ref: entity_ref.clone(),

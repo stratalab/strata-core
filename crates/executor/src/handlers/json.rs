@@ -585,7 +585,7 @@ fn embed_doc_value(
                 super::embed_hook::SHADOW_JSON,
                 key,
                 &text,
-                strata_core::EntityRef::json(branch_id, key),
+                strata_core::EntityRef::json(branch_id, space, key),
             );
         }
     }

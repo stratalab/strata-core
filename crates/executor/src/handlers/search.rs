@@ -11,7 +11,8 @@ use strata_search::substrate::{self, RetrievalRequest};
 
 use crate::bridge::{to_core_branch_id, Primitives};
 use crate::types::{
-    BranchId, ChangedHit, DiffOutput, SearchQuery, SearchResultHit, SearchStatsOutput, VersionInfo,
+    BranchId, ChangedHit, DiffOutput, EntityRefOutput, SearchQuery, SearchResultHit,
+    SearchStatsOutput, VersionInfo,
 };
 use crate::{Error, Output, Result};
 
@@ -161,16 +162,12 @@ pub fn search(
     // ---- Convert to Output ----
     let mut hits: Vec<SearchResultHit> = final_hits
         .iter()
-        .map(|hit| {
-            let (entity, primitive) = format_entity_ref(&hit.doc_ref);
-            SearchResultHit {
-                entity,
-                primitive,
-                score: hit.score,
-                rank: hit.rank,
-                snippet: hit.snippet.clone(),
-                versions: None,
-            }
+        .map(|hit| SearchResultHit {
+            entity_ref: (&hit.doc_ref).into(),
+            score: hit.score,
+            rank: hit.rank,
+            snippet: hit.snippet.clone(),
+            versions: None,
         })
         .collect();
 
@@ -186,7 +183,10 @@ pub fn search(
             .as_ref()
             .and_then(|v| v.depth)
             .unwrap_or(3);
-        enrich_versions(p, core_branch_id, &space, &mut hits, depth);
+        // Pass the engine `EntityRef` from `final_hits` directly so
+        // enrichment can dispatch on the strongly-typed variant and
+        // use the hit's space (not the request's).
+        enrich_versions(p, core_branch_id, &space, &final_hits, &mut hits, depth);
     }
 
     // ---- Temporal diff ----
@@ -209,16 +209,12 @@ pub fn search(
         let before_fused = fuse_multi_pass(&before_hits, original_weight, &resolved);
         let before_results: Vec<SearchResultHit> = before_fused
             .iter()
-            .map(|hit| {
-                let (entity, primitive) = format_entity_ref(&hit.doc_ref);
-                SearchResultHit {
-                    entity,
-                    primitive,
-                    score: hit.score,
-                    rank: hit.rank,
-                    snippet: hit.snippet.clone(),
-                    versions: None,
-                }
+            .map(|hit| SearchResultHit {
+                entity_ref: (&hit.doc_ref).into(),
+                score: hit.score,
+                rank: hit.rank,
+                snippet: hit.snippet.clone(),
+                versions: None,
             })
             .collect();
         Some(compute_diff(&before_results, &hits, t1, t2))
@@ -565,8 +561,9 @@ fn embed_query_with_model(
 
 /// Compute the diff between "before" and "after" search results.
 ///
-/// Uses (entity, primitive) as the composite key to avoid collisions
-/// between different primitives with the same entity name.
+/// Keys hits by their structured `entity_ref` (which now includes
+/// `space`), so two hits with the same `(primitive, key)` in different
+/// spaces are correctly tracked as distinct.
 fn compute_diff(
     before: &[SearchResultHit],
     after: &[SearchResultHit],
@@ -575,10 +572,9 @@ fn compute_diff(
 ) -> DiffOutput {
     use std::collections::HashMap;
 
-    // Composite key: (entity, primitive) to distinguish "doc1" in KV vs JSON.
-    type HitKey = (String, String);
+    type HitKey = EntityRefOutput;
     fn key_of(h: &SearchResultHit) -> HitKey {
-        (h.entity.clone(), h.primitive.clone())
+        h.entity_ref.clone()
     }
 
     let before_map: HashMap<HitKey, &SearchResultHit> =
@@ -630,18 +626,42 @@ fn compute_diff(
 // Temporal: version history enrichment
 // ============================================================================
 
-/// Enrich search result hits with version history from getv().
+/// Enrich search result hits with version history from `getv()`.
+///
+/// Dispatches on the strongly-typed `EntityRef` from the engine
+/// `SearchHit` rather than a flat primitive string. Uses **the hit's
+/// own space** (`hit_ref.space()`) to fetch versions, not the request
+/// space — this is the Phase 0 realization of bug 3.3 from
+/// `docs/design/space-correctness-fix-plan.md`: before Phase 0, hits
+/// with the same key in different spaces collapsed onto a single
+/// version history from the caller's scope.
+///
+/// `_request_space` is kept in the signature as a pure fallback for
+/// the (unreachable) case of a `Branch` variant slipping through,
+/// which has no per-hit space. `Kv` and `Json` — the only variants
+/// that dispatch — always carry a real space.
 fn enrich_versions(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
-    space: &str,
+    _request_space: &str,
+    hit_refs: &[strata_engine::search::SearchHit],
     hits: &mut [SearchResultHit],
     depth: usize,
 ) {
-    for hit in hits.iter_mut() {
-        hit.versions = match hit.primitive.as_str() {
-            "kv" => get_kv_versions(p, branch_id, space, &hit.entity, depth),
-            "json" => get_json_versions(p, branch_id, space, &hit.entity, depth),
+    debug_assert_eq!(
+        hits.len(),
+        hit_refs.len(),
+        "hit / hit_ref slices must be aligned by the caller"
+    );
+    for (hit, engine_hit) in hits.iter_mut().zip(hit_refs.iter()) {
+        let hit_ref = &engine_hit.doc_ref;
+        hit.versions = match hit_ref {
+            strata_core::EntityRef::Kv { space, key, .. } => {
+                get_kv_versions(p, branch_id, space, key, depth)
+            }
+            strata_core::EntityRef::Json { space, doc_id, .. } => {
+                get_json_versions(p, branch_id, space, doc_id, depth)
+            }
             _ => None,
         };
     }
@@ -706,21 +726,99 @@ fn get_json_versions(
     )
 }
 
-/// Format an EntityRef into (entity_string, primitive_string) for display.
-pub(crate) fn format_entity_ref(doc_ref: &strata_engine::search::EntityRef) -> (String, String) {
-    match doc_ref {
-        strata_engine::search::EntityRef::Kv { key, .. } => (key.clone(), "kv".to_string()),
-        strata_engine::search::EntityRef::Json { doc_id, .. } => {
-            (doc_id.clone(), "json".to_string())
+#[cfg(test)]
+mod compute_diff_tests {
+    use super::{compute_diff, SearchResultHit};
+    use crate::types::EntityRefOutput;
+
+    fn kv_hit(space: &str, key: &str, score: f32, rank: u32) -> SearchResultHit {
+        SearchResultHit {
+            entity_ref: EntityRefOutput {
+                kind: "kv".into(),
+                branch_id: "00000000-0000-0000-0000-000000000000".into(),
+                space: Some(space.into()),
+                key: Some(key.into()),
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
+            score,
+            rank,
+            snippet: None,
+            versions: None,
         }
-        strata_engine::search::EntityRef::Event { sequence, .. } => {
-            (format!("seq:{}", sequence), "event".to_string())
-        }
-        strata_engine::search::EntityRef::Branch { branch_id } => {
-            let uuid = uuid::Uuid::from_bytes(*branch_id.as_bytes());
-            (uuid.to_string(), "branch".to_string())
-        }
-        strata_engine::search::EntityRef::Vector { key, .. } => (key.clone(), "vector".to_string()),
-        strata_engine::search::EntityRef::Graph { key, .. } => (key.clone(), "graph".to_string()),
+    }
+
+    /// Two hits with the same `key` in different spaces are distinct
+    /// — neither appears in `added` nor `removed` of the diff between
+    /// snapshots that contain both. Without space-aware identity, the
+    /// before/after maps would alias them and `compute_diff` would
+    /// drop one.
+    #[test]
+    fn cross_space_same_key_treated_as_distinct() {
+        let before = vec![
+            kv_hit("tenant_a", "k", 0.9, 1),
+            kv_hit("tenant_b", "k", 0.5, 2),
+        ];
+        let after = vec![
+            kv_hit("tenant_a", "k", 0.9, 1),
+            kv_hit("tenant_b", "k", 0.5, 2),
+        ];
+        let diff = compute_diff(&before, &after, 100, 200);
+        assert!(
+            diff.added.is_empty(),
+            "no hits should be added: {:?}",
+            diff.added
+        );
+        assert!(
+            diff.removed.is_empty(),
+            "no hits should be removed: {:?}",
+            diff.removed
+        );
+        assert!(
+            diff.changed.is_empty(),
+            "no hits should change: {:?}",
+            diff.changed
+        );
+    }
+
+    /// Removing the `tenant_b` copy of `"k"` must produce a removal
+    /// for `tenant_b` only — not for `tenant_a`. This is the precise
+    /// regression that bug 3.3 in the design doc described.
+    #[test]
+    fn removal_only_targets_the_right_space() {
+        let before = vec![
+            kv_hit("tenant_a", "k", 0.9, 1),
+            kv_hit("tenant_b", "k", 0.5, 2),
+        ];
+        let after = vec![kv_hit("tenant_a", "k", 0.9, 1)];
+        let diff = compute_diff(&before, &after, 100, 200);
+        assert_eq!(diff.removed.len(), 1);
+        assert_eq!(
+            diff.removed[0].entity_ref.space.as_deref(),
+            Some("tenant_b")
+        );
+        assert!(diff.added.is_empty());
+    }
+
+    /// A score change on the `tenant_a` copy must surface in
+    /// `changed`, not aliased by the unchanged `tenant_b` hit.
+    #[test]
+    fn score_change_attributed_to_correct_space() {
+        let before = vec![
+            kv_hit("tenant_a", "k", 0.9, 1),
+            kv_hit("tenant_b", "k", 0.5, 2),
+        ];
+        let after = vec![
+            kv_hit("tenant_a", "k", 0.4, 1),
+            kv_hit("tenant_b", "k", 0.5, 2),
+        ];
+        let diff = compute_diff(&before, &after, 100, 200);
+        assert_eq!(diff.changed.len(), 1);
+        assert_eq!(
+            diff.changed[0].hit.entity_ref.space.as_deref(),
+            Some("tenant_a")
+        );
+        assert!((diff.changed[0].previous_score - 0.9).abs() < 0.01);
     }
 }

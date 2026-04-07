@@ -54,7 +54,7 @@ impl VectorStore {
             });
         }
 
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
 
         // Check if collection already exists
         if self.collection_exists(branch_id, space, name)? {
@@ -113,7 +113,7 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
 
         // Check if collection exists
         if !self.collection_exists(branch_id, space, name)? {
@@ -185,7 +185,7 @@ impl VectorStore {
             let config = VectorConfig::try_from(record.config)?;
 
             // Get current count from backend
-            let collection_id = CollectionId::new(branch_id, &name);
+            let collection_id = CollectionId::new(branch_id, space, &name);
             let count = self.get_collection_count(&collection_id, branch_id, space, &name)?;
 
             collections.push(CollectionInfo {
@@ -254,7 +254,7 @@ impl VectorStore {
         let record = CollectionRecord::from_bytes(&bytes)?;
         let config = VectorConfig::try_from(record.config)?;
 
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
         let count = self.get_collection_count(&collection_id, branch_id, space, name)?;
 
         let info = CollectionInfo {

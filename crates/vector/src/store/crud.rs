@@ -50,7 +50,7 @@ impl VectorStore {
             });
         }
         let state = self.state()?;
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
         {
             let backend = state.backends.get(&collection_id).ok_or_else(|| {
                 VectorError::CollectionNotFound {
@@ -106,7 +106,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
         // Get record from KV with version info
@@ -374,7 +374,7 @@ impl VectorStore {
 
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Acquire per-collection lock once for the entire batch
         let state = self.state()?;
@@ -466,7 +466,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         use strata_core::traits::Storage;
         let version = self.db.storage().version();
@@ -552,7 +552,7 @@ impl VectorStore {
         // Ensure collection is loaded
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         // Hold per-collection write lock for entire check-then-delete batch to
         // prevent TOCTOU race with concurrent insert (fixes #1572).

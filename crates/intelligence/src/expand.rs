@@ -231,6 +231,7 @@ mod tests {
             SearchHit {
                 doc_ref: EntityRef::Kv {
                     branch_id: BranchId::from_bytes([0u8; 16]),
+                    space: "default".into(),
                     key: "a".into(),
                 },
                 score: 0.90,
@@ -240,6 +241,7 @@ mod tests {
             SearchHit {
                 doc_ref: EntityRef::Kv {
                     branch_id: BranchId::from_bytes([0u8; 16]),
+                    space: "default".into(),
                     key: "b".into(),
                 },
                 score: 0.50,

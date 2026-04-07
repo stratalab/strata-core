@@ -70,7 +70,7 @@ pub fn kv_put(
             super::embed_hook::SHADOW_KV,
             &key,
             text,
-            strata_core::EntityRef::kv(branch_id, &key),
+            strata_core::EntityRef::kv(branch_id, &space, &key),
         );
     }
 
@@ -255,7 +255,7 @@ pub fn kv_batch_put(
                 super::embed_hook::SHADOW_KV,
                 key,
                 text,
-                strata_core::EntityRef::kv(branch_id, key),
+                strata_core::EntityRef::kv(branch_id, &space, key),
             );
         }
     }
