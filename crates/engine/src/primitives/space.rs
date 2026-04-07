@@ -55,40 +55,39 @@ impl SpaceIndex {
         })
     }
 
-    /// Check if a space exists.
+    /// Check if a space exists in the branch.
     ///
-    /// Returns `true` for "default" without hitting storage.
+    /// Returns `true` for the implicit `default` and `_system_` spaces
+    /// without hitting storage. Otherwise checks the metadata index first
+    /// (cheap) and falls back to a data scan so that legacy or
+    /// bypass-written spaces are still discoverable.
     pub fn exists(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
         if space == "default" || space == crate::system_space::SYSTEM_SPACE {
             return Ok(true);
         }
-        self.db.transaction(branch_id, |txn| {
-            let key = Key::new_space(branch_id, space);
-            Ok(txn.get(&key)?.is_some())
-        })
+        if self.exists_metadata(branch_id, space)? {
+            return Ok(true);
+        }
+        self.has_any_data(branch_id, space)
     }
 
     /// List all spaces in a branch.
     ///
-    /// Always includes "default" in the result, even if not explicitly registered.
+    /// Returns the union of metadata-registered spaces and spaces
+    /// discovered by scanning the data layer. Always includes `default`.
+    /// `_system_` is excluded.
+    ///
+    /// This is administrative — not a hot path. Cost is dominated by
+    /// `discover_used_spaces`, which walks every user-data type tag once.
     pub fn list(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
-        self.db.transaction(branch_id, |txn| {
-            let prefix = Key::new_space_prefix(branch_id);
-            let results = txn.scan_prefix(&prefix)?;
+        use std::collections::BTreeSet;
 
-            let mut spaces: Vec<String> = results
-                .into_iter()
-                .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
-                .filter(|s| s != crate::system_space::SYSTEM_SPACE)
-                .collect();
+        let metadata_spaces: BTreeSet<String> =
+            self.list_metadata(branch_id)?.into_iter().collect();
+        let discovered_spaces: BTreeSet<String> =
+            self.discover_used_spaces(branch_id)?.into_iter().collect();
 
-            // Always include "default"
-            if !spaces.contains(&"default".to_string()) {
-                spaces.insert(0, "default".to_string());
-            }
-
-            Ok(spaces)
-        })
+        Ok(metadata_spaces.union(&discovered_spaces).cloned().collect())
     }
 
     /// Delete the space metadata key only.
@@ -129,6 +128,141 @@ impl SpaceIndex {
             Ok(true)
         })
     }
+
+    /// Discover spaces that contain real user data, regardless of whether
+    /// they were ever registered through `register()`.
+    ///
+    /// Iterates the storage layer for each user-data type tag (KV, Event,
+    /// Json, Vector, Graph) at the current MVCC version, collecting the
+    /// distinct `space` field of every live (non-tombstone) entry. The
+    /// `_system_` shadow space is excluded; `default` is always included.
+    ///
+    /// Cost: O(branch size) over five iterations. This is an administrative
+    /// operation — it powers `SPACE LIST`, branch ops, and startup repair.
+    /// No hot path uses it.
+    pub fn discover_used_spaces(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
+        use std::collections::BTreeSet;
+
+        let mut spaces: BTreeSet<String> = BTreeSet::new();
+        spaces.insert("default".to_string());
+
+        let snapshot = self.db.storage().version();
+        for type_tag in [
+            TypeTag::KV,
+            TypeTag::Event,
+            TypeTag::Json,
+            TypeTag::Vector,
+            TypeTag::Graph,
+        ] {
+            for entry in self
+                .db
+                .storage()
+                .list_by_type_at_version(&branch_id, type_tag, snapshot)
+            {
+                if entry.is_tombstone {
+                    continue;
+                }
+                let space = entry.key.namespace.space.as_str();
+                if space == crate::system_space::SYSTEM_SPACE {
+                    continue;
+                }
+                spaces.insert(space.to_string());
+            }
+        }
+        Ok(spaces.into_iter().collect())
+    }
+
+    /// Reconcile metadata with real data: register every space that has
+    /// data but no metadata entry. Returns the count of spaces newly
+    /// registered. Idempotent — a second call after the first returns 0.
+    ///
+    /// Called during database startup so that downstream recovery
+    /// participants and administrative consumers see a complete set of
+    /// spaces, even on legacy databases or after bypass writes.
+    pub fn repair_space_metadata(&self, branch_id: BranchId) -> StrataResult<usize> {
+        let discovered = self.discover_used_spaces(branch_id)?;
+        let mut repaired = 0usize;
+        for space in &discovered {
+            if space == "default" || space == crate::system_space::SYSTEM_SPACE {
+                continue;
+            }
+            if !self.exists_metadata(branch_id, space)? {
+                self.register(branch_id, space)?;
+                repaired += 1;
+            }
+        }
+        Ok(repaired)
+    }
+
+    /// Internal: metadata-only existence check.
+    ///
+    /// Used by `exists()` as a fast path before falling back to a data scan,
+    /// and by `repair_space_metadata()` to avoid double-writes.
+    fn exists_metadata(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
+        self.db.transaction(branch_id, |txn| {
+            let key = Key::new_space(branch_id, space);
+            Ok(txn.get(&key)?.is_some())
+        })
+    }
+
+    /// Internal: metadata-only list of registered spaces (always includes
+    /// "default"). Used by `list()` as one half of the union.
+    fn list_metadata(&self, branch_id: BranchId) -> StrataResult<Vec<String>> {
+        self.db.transaction(branch_id, |txn| {
+            let prefix = Key::new_space_prefix(branch_id);
+            let results = txn.scan_prefix(&prefix)?;
+
+            let mut spaces: Vec<String> = results
+                .into_iter()
+                .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
+                .filter(|s| s != crate::system_space::SYSTEM_SPACE)
+                .collect();
+
+            if !spaces.contains(&"default".to_string()) {
+                spaces.insert(0, "default".to_string());
+            }
+
+            Ok(spaces)
+        })
+    }
+
+    /// Internal: returns true if any user-data entry exists for this
+    /// `(branch, space)`. Used by `exists()` as the fallback when metadata
+    /// doesn't have the space registered.
+    ///
+    /// Equivalent to `!is_empty(branch_id, space)?`, but expressed
+    /// directly so the call site is self-documenting.
+    fn has_any_data(&self, branch_id: BranchId, space: &str) -> StrataResult<bool> {
+        Ok(!self.is_empty(branch_id, space)?)
+    }
+}
+
+/// Atomically ensure a space's metadata key exists within an open
+/// transaction.
+///
+/// Idempotent: writes the metadata key only if it is missing. Skips the
+/// implicit `default` and `_system_` spaces. Callers invoke this from
+/// inside the same `db.transaction(...)` that performs the data write so
+/// that registration is atomic with the user write — no partial state.
+///
+/// This is the canonical helper used by `EventLog::append`,
+/// `KVStore::put`, `JsonStore::create/set`,
+/// `VectorStore::create_collection/insert_inner`, and graph mutate paths.
+/// Centralising it here ensures every primitive uses the same skip rules
+/// and the same key encoding.
+pub fn ensure_space_registered_in_txn(
+    txn: &mut strata_concurrency::TransactionContext,
+    branch_id: &BranchId,
+    space: &str,
+) -> StrataResult<()> {
+    if space == "default" || space == crate::system_space::SYSTEM_SPACE {
+        return Ok(());
+    }
+    let key = Key::new_space(*branch_id, space);
+    if txn.get(&key)?.is_none() {
+        txn.put(key, Value::String("{}".to_string()))?;
+    }
+    Ok(())
 }
 
 // ========== Tests ==========
@@ -275,7 +409,7 @@ mod tests {
 
         // Read it back and verify content
         let val = db
-            .transaction(bid, |txn| Ok(txn.get(&key)?))
+            .transaction(bid, |txn| txn.get(&key))
             .unwrap()
             .expect("system space value should be readable");
         assert_eq!(val.as_str().unwrap(), "{\"version\":1}");

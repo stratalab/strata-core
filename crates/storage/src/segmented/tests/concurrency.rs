@@ -1432,10 +1432,10 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
 ///   2. Writer: signals "allocated"
 ///   3. Fork:   receives signal
 ///   4. Fork:   fork_branch(parent, child)
-///              → acquires DashMap lock
-///              → inline-flushes memtable (does NOT contain V's data)
-///              → fork_version = self.version.load() = V
-///              → captures snapshot, releases lock
+///      → acquires DashMap lock
+///      → inline-flushes memtable (does NOT contain V's data)
+///      → fork_version = self.version.load() = V
+///      → captures snapshot, releases lock
 ///   5. Fork:   signals "forked"
 ///   6. Writer: receives signal
 ///   7. Writer: put_with_version_mode(V)  → data at V enters parent's memtable

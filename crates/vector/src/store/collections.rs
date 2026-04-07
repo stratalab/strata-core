@@ -75,6 +75,9 @@ impl VectorStore {
         // Use transaction for atomic storage
         self.db
             .transaction(branch_id, |txn| {
+                strata_engine::primitives::space::ensure_space_registered_in_txn(
+                    txn, &branch_id, space,
+                )?;
                 txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;

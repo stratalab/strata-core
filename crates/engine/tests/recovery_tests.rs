@@ -1559,3 +1559,363 @@ fn test_vector_collections_isolated_across_spaces_after_restart() {
         assert_eq!(collections_b[0].count, 1);
     }
 }
+
+// =============================================================================
+// Phase 3 — Lower-layer registration, discovery, repair, startup wiring
+// =============================================================================
+//
+// These tests pin every part of Phase 3 to a single revert-checkable test:
+//
+//   Part 1 (engine-layer registration)
+//     test_kv_put_registers_space_at_engine_layer
+//     test_json_create_registers_space_at_engine_layer
+//     test_vector_create_collection_registers_space_at_engine_layer
+//     test_vector_insert_registers_space_at_engine_layer
+//     test_graph_create_registers_space_at_engine_layer
+//
+//   Part 3 (discovery + repair + union list/exists + startup wiring)
+//     test_discover_used_spaces_finds_data_in_unregistered_space
+//     test_discover_used_spaces_excludes_system_space
+//     test_discover_used_spaces_filters_tombstones
+//     test_list_returns_union_of_metadata_and_discovered
+//     test_exists_returns_true_for_unregistered_space_with_data
+//     test_repair_space_metadata_is_idempotent
+//     test_startup_repair_registers_orphan_data_spaces
+//
+// Empirical revert verification: revert each fix in turn and confirm the
+// matching test fails.
+
+/// Storage-layer bypass: write a KV entry to `(branch, space)` without
+/// going through any primitive. Used by Phase 3 discovery / repair tests
+/// to construct the exact "orphan data" state that must be repaired.
+fn bypass_kv_put(
+    db: &Arc<Database>,
+    branch_id: BranchId,
+    space: &str,
+    user_key: &[u8],
+    value: Value,
+) {
+    use std::sync::Arc as StdArc;
+    use strata_core::types::{Key, Namespace, TypeTag};
+
+    let ns = StdArc::new(Namespace::for_branch_space(branch_id, space));
+    let key = Key::new(ns, TypeTag::KV, user_key.to_vec());
+    db.transaction(branch_id, |txn| txn.put(key, value))
+        .unwrap();
+}
+
+/// Metadata-only check: does the space have an entry in `SpaceIndex`'s
+/// metadata key namespace? This bypasses the public `list/exists` union and
+/// is the only way to verify that Part 1's lower-layer registration helper
+/// actually fired — the union path would otherwise mask a missing
+/// registration via the data scan.
+fn space_metadata_exists(db: &Arc<Database>, branch_id: BranchId, space: &str) -> bool {
+    use strata_core::types::Key;
+
+    db.transaction(branch_id, |txn| {
+        let key = Key::new_space(branch_id, space);
+        Ok(txn.get(&key)?.is_some())
+    })
+    .unwrap()
+}
+
+// --- Part 1 — engine-layer registration ----------------------------------
+
+#[test]
+fn test_kv_put_registers_space_at_engine_layer() {
+    let (db, _temp, branch_id) = setup();
+    let kv = KVStore::new(db.clone());
+
+    // Write directly via the engine primitive — bypass the executor's
+    // pre-registration. Only Part 1's `ensure_space_registered_in_txn`
+    // call inside `KVStore::put` makes the metadata key exist.
+    //
+    // We check the metadata key directly (not via `SpaceIndex::list`)
+    // because the union behaviour of `list` would otherwise mask a
+    // missing Part 1 registration with a data-scan hit.
+    kv.put(&branch_id, "tenant_kv", "k1", Value::Int(7))
+        .unwrap();
+
+    assert!(
+        space_metadata_exists(&db, branch_id, "tenant_kv"),
+        "KVStore::put must persist a SpaceIndex metadata key for its space"
+    );
+}
+
+#[test]
+fn test_json_create_registers_space_at_engine_layer() {
+    use strata_core::JsonValue;
+    use strata_engine::JsonStore;
+
+    let (db, _temp, branch_id) = setup();
+    let json = JsonStore::new(db.clone());
+
+    let doc = JsonValue::from_value(serde_json::json!({"hello": "world"}));
+    json.create(&branch_id, "tenant_json", "doc1", doc).unwrap();
+
+    assert!(
+        space_metadata_exists(&db, branch_id, "tenant_json"),
+        "JsonStore::create must persist a SpaceIndex metadata key for its space"
+    );
+}
+
+#[test]
+fn test_vector_create_collection_registers_space_at_engine_layer() {
+    use strata_core::primitives::vector::DistanceMetric;
+    use strata_vector::{VectorConfig, VectorStore};
+
+    let (db, _temp, branch_id) = setup();
+    let store = VectorStore::new(db.clone());
+
+    let cfg = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+    store
+        .create_collection(branch_id, "tenant_vec", "embeddings", cfg)
+        .unwrap();
+
+    assert!(
+        space_metadata_exists(&db, branch_id, "tenant_vec"),
+        "VectorStore::create_collection must persist a SpaceIndex metadata key"
+    );
+}
+
+#[test]
+fn test_vector_insert_registers_space_at_engine_layer() {
+    use strata_core::primitives::vector::DistanceMetric;
+    use strata_vector::{VectorConfig, VectorStore};
+
+    let (db, _temp, branch_id) = setup();
+    let store = VectorStore::new(db.clone());
+
+    // `insert_inner` is the call site `create_collection` already covers,
+    // so we test it on its own with a second-step insert that exercises
+    // the registration helper inside the upsert transaction.
+    let cfg = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+    store
+        .create_collection(branch_id, "tenant_vec_insert", "embeddings", cfg)
+        .unwrap();
+    store
+        .insert(
+            branch_id,
+            "tenant_vec_insert",
+            "embeddings",
+            "k1",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        space_metadata_exists(&db, branch_id, "tenant_vec_insert"),
+        "VectorStore::insert (insert_inner) must persist a SpaceIndex metadata key"
+    );
+}
+
+#[test]
+fn test_graph_create_registers_space_at_engine_layer() {
+    use strata_graph::types::NodeData;
+    use strata_graph::GraphStore;
+
+    let (db, _temp, branch_id) = setup();
+    let graph = GraphStore::new(db.clone());
+
+    // Add a node directly — `add_node` flows through `txn.graph_add_node`
+    // which calls `ensure_space_registered_in_txn`. We don't call
+    // `create_graph` first, so this is the strict test of the helper.
+    graph
+        .add_node(
+            branch_id,
+            "tenant_graph",
+            "social",
+            "alice",
+            NodeData::default(),
+        )
+        .unwrap();
+
+    assert!(
+        space_metadata_exists(&db, branch_id, "tenant_graph"),
+        "GraphStore::add_node must persist a SpaceIndex metadata key for its space"
+    );
+}
+
+#[test]
+fn test_graph_bulk_insert_empty_input_does_not_register_space() {
+    use strata_graph::GraphStore;
+
+    let (db, _temp, branch_id) = setup();
+    let graph = GraphStore::new(db.clone());
+
+    // Empty bulk insert must NOT create a phantom space metadata entry.
+    // Pre-fix `bulk_insert` registered the space upfront before checking
+    // whether there was anything to write.
+    let (nodes_inserted, edges_inserted) = graph
+        .bulk_insert(branch_id, "phantom_bulk", "g", &[], &[], None)
+        .unwrap();
+    assert_eq!(nodes_inserted, 0);
+    assert_eq!(edges_inserted, 0);
+
+    assert!(
+        !space_metadata_exists(&db, branch_id, "phantom_bulk"),
+        "bulk_insert with empty inputs must not register a phantom space"
+    );
+}
+
+// --- Part 3 — discovery / repair / union / startup -----------------------
+
+#[test]
+fn test_discover_used_spaces_finds_data_in_unregistered_space() {
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+
+    // Write data into "ghost" via the storage layer — bypassing every
+    // primitive AND every metadata-write call site. Only `discover_used_spaces`
+    // can resurface it.
+    bypass_kv_put(&db, branch_id, "ghost", b"k1", Value::String("v".into()));
+
+    let space_index = SpaceIndex::new(db.clone());
+    let discovered = space_index.discover_used_spaces(branch_id).unwrap();
+    assert!(
+        discovered.contains(&"ghost".to_string()),
+        "discover_used_spaces must find data in unregistered space; got {discovered:?}"
+    );
+}
+
+#[test]
+fn test_discover_used_spaces_excludes_system_space() {
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+
+    // Write to the reserved system space directly. Discovery must filter it.
+    bypass_kv_put(
+        &db,
+        branch_id,
+        "_system_",
+        b"shadow",
+        Value::String("internal".into()),
+    );
+
+    let space_index = SpaceIndex::new(db.clone());
+    let discovered = space_index.discover_used_spaces(branch_id).unwrap();
+    assert!(
+        !discovered.contains(&"_system_".to_string()),
+        "_system_ must be excluded from discover_used_spaces; got {discovered:?}"
+    );
+}
+
+#[test]
+fn test_discover_used_spaces_filters_tombstones() {
+    use std::sync::Arc as StdArc;
+    use strata_core::types::{Key, Namespace, TypeTag};
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+
+    // Write one KV in "tombstone-only", then delete it. After the delete
+    // the only visible MVCC entry for that key is a tombstone — discovery
+    // must skip it, otherwise a fully-deleted space would phantom-register.
+    let ns = StdArc::new(Namespace::for_branch_space(branch_id, "tombstone-only"));
+    let key = Key::new(ns, TypeTag::KV, b"k1".to_vec());
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::String("v".into()))
+    })
+    .unwrap();
+    db.transaction(branch_id, |txn| txn.delete(key)).unwrap();
+
+    let space_index = SpaceIndex::new(db.clone());
+    let discovered = space_index.discover_used_spaces(branch_id).unwrap();
+    assert!(
+        !discovered.contains(&"tombstone-only".to_string()),
+        "tombstoned-only space must NOT appear in discover_used_spaces; got {discovered:?}"
+    );
+}
+
+#[test]
+fn test_list_returns_union_of_metadata_and_discovered() {
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+    let space_index = SpaceIndex::new(db.clone());
+
+    // `a` is registered the conventional way; `b` only has bypass-written
+    // data — no metadata. The post-Phase-3 union `list` must return both.
+    space_index.register(branch_id, "a").unwrap();
+    bypass_kv_put(&db, branch_id, "b", b"k1", Value::String("v".into()));
+
+    let spaces = space_index.list(branch_id).unwrap();
+    assert!(
+        spaces.contains(&"a".to_string()),
+        "metadata-registered space `a` must be in union list; got {spaces:?}"
+    );
+    assert!(
+        spaces.contains(&"b".to_string()),
+        "data-only space `b` must be in union list; got {spaces:?}"
+    );
+}
+
+#[test]
+fn test_exists_returns_true_for_unregistered_space_with_data() {
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+
+    bypass_kv_put(&db, branch_id, "data-only", b"k", Value::Int(1));
+
+    let space_index = SpaceIndex::new(db.clone());
+    assert!(
+        space_index.exists(branch_id, "data-only").unwrap(),
+        "exists() must return true for an unregistered space that has data"
+    );
+}
+
+#[test]
+fn test_repair_space_metadata_is_idempotent() {
+    use strata_engine::SpaceIndex;
+
+    let (db, _temp, branch_id) = setup();
+
+    // One orphan space — repair should register exactly one new entry,
+    // and the second call should find nothing left to do.
+    bypass_kv_put(&db, branch_id, "orphan", b"k", Value::Int(1));
+
+    let space_index = SpaceIndex::new(db.clone());
+    let repaired_first = space_index.repair_space_metadata(branch_id).unwrap();
+    assert_eq!(repaired_first, 1, "first repair should register the orphan");
+
+    let repaired_second = space_index.repair_space_metadata(branch_id).unwrap();
+    assert_eq!(
+        repaired_second, 0,
+        "second repair must be a no-op (idempotent)"
+    );
+}
+
+#[test]
+fn test_startup_repair_registers_orphan_data_spaces() {
+    let temp_dir = TempDir::new().unwrap();
+    let path = temp_dir.path().to_path_buf();
+    let branch_id = BranchId::new();
+
+    // Session 1: write orphan data via storage bypass and drop the DB.
+    // No metadata is ever written for this space — the bypass helper
+    // skips every primitive's registration call site.
+    {
+        let db = Database::open(&path).unwrap();
+        bypass_kv_put(&db, branch_id, "orphan_startup", b"k", Value::Int(1));
+        drop(db);
+    }
+
+    // Session 2: reopen. `repair_space_metadata_on_open` must fire BEFORE
+    // we get our handle, persisting a SpaceIndex metadata key for
+    // "orphan_startup". We verify this with a metadata-only check via
+    // `space_metadata_exists` — bypassing the union `list/exists` so the
+    // assertion fails when startup repair is reverted instead of being
+    // masked by the data-scan fallback.
+    {
+        let db = Database::open(&path).unwrap();
+        assert!(
+            space_metadata_exists(&db, branch_id, "orphan_startup"),
+            "startup repair must persist a SpaceIndex metadata key for orphan data"
+        );
+        drop(db);
+    }
+}

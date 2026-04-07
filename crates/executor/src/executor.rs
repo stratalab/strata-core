@@ -398,7 +398,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::kv::kv_batch_delete(&self.primitives, branch, space, keys)
             }
             Command::KvBatchExists {
@@ -436,7 +435,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::kv::kv_delete(&self.primitives, branch, space, key)
             }
             Command::KvList {
@@ -542,7 +540,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::json::json_batch_delete(&self.primitives, branch, space, entries)
             }
             Command::JsonGet {
@@ -593,7 +590,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::json::json_delete(&self.primitives, branch, space, key, path)
             }
             Command::JsonList {
@@ -917,7 +913,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::vector::vector_delete(
                     &self.primitives,
                     branch,
@@ -998,7 +993,6 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
                 crate::handlers::vector::vector_delete_collection(
                     &self.primitives,
                     branch,

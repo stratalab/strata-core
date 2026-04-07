@@ -812,7 +812,7 @@ fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
         let _delete_result = delete_handle.join().unwrap();
         writer.join().unwrap();
 
-        if let Ok(_) = &fork_result {
+        if fork_result.is_ok() {
             // If fork succeeded, the original 50 keys MUST be present
             let child_id = strata_engine::primitives::branch::resolve_branch_name(&child_name);
             for i in 0..50 {

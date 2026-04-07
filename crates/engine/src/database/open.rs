@@ -218,6 +218,16 @@ impl Database {
         // Vector recovery is now handled by strata-vector (caller must register).
         // Also sets subsystems on the Database for freeze-on-drop.
         crate::search::register_search_recovery();
+
+        // Repair space metadata BEFORE search/vector recovery so that those
+        // participants see the complete set of spaces. Without this, legacy
+        // databases (or any bypass write that ever skipped the registration
+        // helper) leave orphan data in spaces invisible to enumeration.
+        // Followers are read-only and skip the metadata writes — the union
+        // behaviour in `SpaceIndex::list/exists` still gives them correct
+        // discovery via the data scan.
+        Self::repair_space_metadata_on_open(&db);
+
         crate::recovery::recover_all_participants(&db)?;
         let index = db.extension::<crate::search::InvertedIndex>()?;
         if !index.is_enabled() {
@@ -226,6 +236,27 @@ impl Database {
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
 
         Ok(db)
+    }
+
+    /// Repair space metadata at open time by reconciling registered metadata
+    /// with the actual data found by `discover_used_spaces`. Skipped on
+    /// followers (read-only) — they still get correct enumeration via the
+    /// union behaviour in `SpaceIndex::list/exists`.
+    fn repair_space_metadata_on_open(db: &Arc<Self>) {
+        if db.is_follower() {
+            return;
+        }
+        let space_index = crate::SpaceIndex::new(db.clone());
+        for branch_id in db.storage().branch_ids() {
+            if let Err(e) = space_index.repair_space_metadata(branch_id) {
+                tracing::warn!(
+                    target: "strata::space",
+                    branch_id = %branch_id,
+                    error = %e,
+                    "Space metadata repair failed; recovery may miss spaces"
+                );
+            }
+        }
     }
 
     /// Open a read-only follower of an existing database.
@@ -348,6 +379,13 @@ impl Database {
         });
 
         crate::search::register_search_recovery();
+
+        // Followers are read-only — `repair_space_metadata_on_open` is a
+        // no-op for them but kept on the same code path for symmetry. The
+        // union behaviour in `SpaceIndex::list/exists` still gives the
+        // follower correct discovery via a data scan.
+        Self::repair_space_metadata_on_open(&db);
+
         crate::recovery::recover_all_participants(&db)?;
         let index = db.extension::<crate::search::InvertedIndex>()?;
         if !index.is_enabled() {

@@ -474,9 +474,11 @@ fn concurrent_appends_preserve_data_integrity() {
                         ("i".to_string(), Value::Int(i)),
                     ]));
                     // OCC may require retries; the engine handles this internally
-                    match event.append(&branch_id, "default", "concurrent", payload) {
-                        Ok(_) => successes += 1,
-                        Err(_) => {} // OCC conflict, acceptable
+                    if event
+                        .append(&branch_id, "default", "concurrent", payload)
+                        .is_ok()
+                    {
+                        successes += 1;
                     }
                 }
                 successes

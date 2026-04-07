@@ -1002,7 +1002,7 @@ mod tests {
     fn duplicate_insert_returns_existing() {
         let cache = BlockCache::new(1024 * 1024);
 
-        let first = cache.insert(1, 0, vec![0xAA; 10]);
+        let _first = cache.insert(1, 0, vec![0xAA; 10]);
         let second = cache.insert(1, 0, vec![0xBB; 10]);
 
         // Second insert should find the existing entry and return it.

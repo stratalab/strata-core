@@ -636,3 +636,122 @@ fn graph_three_user_spaces_independent_via_strata_api() {
         assert_eq!(nodes[0], format!("node-{tenant}"));
     }
 }
+
+// =============================================================================
+// Phase 3 — Delete commands MUST NOT register their target space.
+// =============================================================================
+//
+// Background: prior to Phase 3, six executor delete handlers called
+// `ensure_space_registered` *before* dispatching the delete. The result was
+// that issuing a delete against a key in a never-before-used space created a
+// permanent empty `SpaceIndex` metadata entry. The fix removed those calls
+// and the union `SpaceIndex::list` makes accidental phantoms naturally
+// invisible. These tests pin both halves of the contract.
+//
+// Empirical revert verification: re-add `self.ensure_space_registered(...)`
+// to KvDelete / JsonDelete / VectorDeleteCollection (etc.) in
+// `executor.rs` and these tests fail.
+
+#[test]
+fn test_kv_delete_in_new_space_does_not_register_it() {
+    let db = strata();
+
+    // Issue KvDelete against a never-used space. Pre-fix this would silently
+    // register `phantom_kv` even though no key was ever written there.
+    db.executor()
+        .execute(Command::KvDelete {
+            branch: None,
+            space: Some("phantom_kv".to_string()),
+            key: "nonexistent".to_string(),
+        })
+        .unwrap();
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_kv".to_string()),
+        "KvDelete must not auto-register its target space; got {spaces:?}"
+    );
+}
+
+#[test]
+fn test_kv_batch_delete_in_new_space_does_not_register_it() {
+    let db = strata();
+
+    db.executor()
+        .execute(Command::KvBatchDelete {
+            branch: None,
+            space: Some("phantom_kv_batch".to_string()),
+            keys: vec!["a".to_string(), "b".to_string()],
+        })
+        .unwrap();
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_kv_batch".to_string()),
+        "KvBatchDelete must not auto-register its target space; got {spaces:?}"
+    );
+}
+
+#[test]
+fn test_json_delete_in_new_space_does_not_register_it() {
+    let db = strata();
+
+    // JsonDelete against a missing doc returns an error, but the executor
+    // pre-registration ran before the delete and persisted the metadata
+    // anyway — exactly the bug. Even after the call errors out, the space
+    // must remain unregistered.
+    let _ = db.executor().execute(Command::JsonDelete {
+        branch: None,
+        space: Some("phantom_json".to_string()),
+        key: "nonexistent".to_string(),
+        path: "$".to_string(),
+    });
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_json".to_string()),
+        "JsonDelete must not auto-register its target space; got {spaces:?}"
+    );
+}
+
+#[test]
+fn test_json_batch_delete_in_new_space_does_not_register_it() {
+    use crate::types::BatchJsonDeleteEntry;
+
+    let db = strata();
+
+    let _ = db.executor().execute(Command::JsonBatchDelete {
+        branch: None,
+        space: Some("phantom_json_batch".to_string()),
+        entries: vec![BatchJsonDeleteEntry {
+            key: "missing".to_string(),
+            path: "".to_string(),
+        }],
+    });
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_json_batch".to_string()),
+        "JsonBatchDelete must not auto-register its target space; got {spaces:?}"
+    );
+}
+
+#[test]
+fn test_vector_delete_collection_in_new_space_does_not_register_it() {
+    let db = strata();
+
+    // VectorDeleteCollection against a non-existent collection returns an
+    // error. Pre-fix the space metadata was already written by the
+    // pre-registration helper before the inner call ran.
+    let _ = db.executor().execute(Command::VectorDeleteCollection {
+        branch: None,
+        space: Some("phantom_vec".to_string()),
+        collection: "missing".to_string(),
+    });
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_vec".to_string()),
+        "VectorDeleteCollection must not auto-register its target space; got {spaces:?}"
+    );
+}

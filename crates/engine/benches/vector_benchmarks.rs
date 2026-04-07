@@ -10,7 +10,7 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::collections::HashSet;
 use strata_core::primitives::vector::{DistanceMetric, VectorConfig, VectorId};
-use strata_vector::backend::VectorIndexBackend;
+use strata_vector::backend::{SegmentCapable, VectorIndexBackend};
 use strata_vector::hnsw::HnswConfig;
 use strata_vector::segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
 

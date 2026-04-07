@@ -2393,7 +2393,7 @@ fn test_issue_1924_write_stall_timeout_manual_commit() {
     let mut saw_timeout = false;
     for i in 0..20 {
         let mut txn = db.begin_transaction(branch_id).unwrap();
-        let key = Key::new_kv(ns.clone(), &format!("key_{}", i));
+        let key = Key::new_kv(ns.clone(), format!("key_{}", i));
         txn.put(key, big_value.clone()).unwrap();
         let result = db.commit_transaction(&mut txn);
         db.end_transaction(txn);
