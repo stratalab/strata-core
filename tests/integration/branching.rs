@@ -5705,9 +5705,8 @@ fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
 // These tests prove "all primitives inherit branching uniformly" by
 // behavior, not by storage plumbing — they fork a branch, mutate every
 // primitive, merge, and verify that each primitive's invariants hold on
-// the merged target. They are the final gate for Claim 4 in
-// `docs/coding-standards/12-architectural-claims.md`. See
-// `docs/design/branching/primitive-aware-merge.md` for the design.
+// the merged target. See `docs/design/branching/primitive-aware-merge.md`
+// for the design and acceptance criteria.
 
 /// Verify the standard graph adjacency invariant on a branch: every
 /// edge's endpoints exist on both sides (forward and reverse adjacency
@@ -6203,16 +6202,20 @@ fn cross_primitive_merge_overlapping_lww() {
         .get(target_id, "default", "vc", "v-target")
         .unwrap()
         .is_some());
-    // HNSW search returns each.
+    // HNSW search returns each. Assert non-empty before indexing so a
+    // regression returning no hits produces a clear failure rather than
+    // an out-of-bounds panic.
     let hits_a = p
         .vector
         .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
         .unwrap();
+    assert!(!hits_a.is_empty(), "search for v-source returned no hits");
     assert_eq!(hits_a[0].key, "v-source");
     let hits_b = p
         .vector
         .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
         .unwrap();
+    assert!(!hits_b.is_empty(), "search for v-target returned no hits");
     assert_eq!(hits_b[0].key, "v-target");
 
     // Graph: both sides' nodes present.
@@ -6412,21 +6415,35 @@ fn cross_primitive_merge_invariant_sweep() {
     )
     .expect("graph adjacency must verify after cross-primitive merge");
 
-    // Vector: HNSW search returns every inserted vector.
+    // Vector: HNSW search returns every inserted vector. Assert
+    // non-empty before indexing so a regression that returns no hits
+    // produces a clear failure instead of an out-of-bounds panic.
     let pre_hit = p
         .vector
         .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
         .unwrap();
+    assert!(
+        !pre_hit.is_empty(),
+        "pre-fork vector search returned no hits"
+    );
     assert_eq!(pre_hit[0].key, "v-pre", "pre-fork vector still findable");
     let src_hit = p
         .vector
         .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
         .unwrap();
+    assert!(
+        !src_hit.is_empty(),
+        "source-added vector search returned no hits"
+    );
     assert_eq!(src_hit[0].key, "v-source", "source-added vector findable");
     let tgt_hit = p
         .vector
         .search(target_id, "default", "vc", &[0.0, 0.0, 1.0], 1, None)
         .unwrap();
+    assert!(
+        !tgt_hit.is_empty(),
+        "target-added vector search returned no hits"
+    );
     assert_eq!(tgt_hit[0].key, "v-target", "target-added vector findable");
 
     // JSON: secondary index entry for the merged price exists; entry
@@ -6664,21 +6681,35 @@ fn cross_primitive_merge_rollback_via_reopen() {
     .expect("graph adjacency must verify after reopen");
 
     // Vector HNSW backend rebuilt by recovery — every inserted vector
-    // findable via k-NN.
+    // findable via k-NN. Assert non-empty before indexing so a recovery
+    // failure produces a clear assertion failure instead of an
+    // out-of-bounds panic.
     let pre_hit = p
         .vector
         .search(target_id, "default", "vc", &[1.0, 0.0, 0.0], 1, None)
         .unwrap();
+    assert!(
+        !pre_hit.is_empty(),
+        "post-reopen: pre-fork vector search returned no hits — HNSW recovery may be broken"
+    );
     assert_eq!(pre_hit[0].key, "v-pre");
     let src_hit = p
         .vector
         .search(target_id, "default", "vc", &[0.0, 1.0, 0.0], 1, None)
         .unwrap();
+    assert!(
+        !src_hit.is_empty(),
+        "post-reopen: source-added vector search returned no hits"
+    );
     assert_eq!(src_hit[0].key, "v-source");
     let tgt_hit = p
         .vector
         .search(target_id, "default", "vc", &[0.0, 0.0, 1.0], 1, None)
         .unwrap();
+    assert!(
+        !tgt_hit.is_empty(),
+        "post-reopen: target-added vector search returned no hits"
+    );
     assert_eq!(tgt_hit[0].key, "v-target");
 
     // JSON secondary index — the critical assertion that this PR
