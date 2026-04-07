@@ -3961,3 +3961,753 @@ fn entity_ref_graph_distinguishes_spaces() {
          results across tenants)"
     );
 }
+
+// ============================================================================
+// Vector merge — Claim 4 vector-aware merge
+// ============================================================================
+//
+// `VectorMergeHandler` (engine side) tracks `(space, collection)` pairs
+// touched by the merge and dispatches to vector-crate callbacks for
+// dimension/metric mismatch refusal (`precheck`) and per-collection HNSW
+// rebuild (`post_commit`). These tests pin the contract: disjoint vector
+// adds merge cleanly, conflicting IDs follow the merge strategy,
+// incompatible configs are refused, and post-merge k-NN search returns
+// the correct union of both sides without a global rebuild.
+
+#[test]
+fn vector_merge_disjoint_collections() {
+    // Source writes to collection "alpha", target writes to "beta".
+    // After merge, target sees both collections with their respective
+    // vectors searchable.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed target with a placeholder write so the storage layer knows
+    // the branch exists before fork (fork requires storage state).
+    kv.put(&target_id, "default", "_seed", Value::Int(0))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: create "alpha" and add a vector.
+    vector
+        .create_collection(source_id, "default", "alpha", config_small())
+        .unwrap();
+    vector
+        .insert(source_id, "default", "alpha", "v1", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    // Target: create "beta" and add a vector.
+    vector
+        .create_collection(target_id, "default", "beta", config_small())
+        .unwrap();
+    vector
+        .insert(target_id, "default", "beta", "v1", &[0.0, 1.0, 0.0], None)
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("disjoint-collection vector merge should succeed");
+
+    // After merge, target sees both collections.
+    let collections = vector.list_collections(target_id, "default").unwrap();
+    let names: Vec<&str> = collections.iter().map(|c| c.name.as_str()).collect();
+    assert!(
+        names.contains(&"alpha"),
+        "merged target should see source's 'alpha' collection; got {names:?}"
+    );
+    assert!(
+        names.contains(&"beta"),
+        "merged target should retain its own 'beta' collection; got {names:?}"
+    );
+
+    // Both vectors are searchable post-merge.
+    let alpha_hits = vector
+        .search(target_id, "default", "alpha", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(
+        alpha_hits.len(),
+        1,
+        "expected exactly one hit for 'alpha' search; got {}",
+        alpha_hits.len()
+    );
+    assert_eq!(alpha_hits[0].key, "v1");
+
+    let beta_hits = vector
+        .search(target_id, "default", "beta", &[0.0, 1.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(
+        beta_hits.len(),
+        1,
+        "expected exactly one hit for 'beta' search; got {}",
+        beta_hits.len()
+    );
+    assert_eq!(beta_hits[0].key, "v1");
+}
+
+#[test]
+fn vector_merge_same_collection_disjoint_ids() {
+    // Both branches use the same collection but write disjoint vector
+    // keys. After merge, target sees the union of both sets and all
+    // four vectors are searchable.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed the collection on target before fork so both branches share it.
+    vector
+        .create_collection(target_id, "default", "shared", config_small())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: add vec1, vec2 with disjoint embeddings.
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "vec1",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "vec2",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Target: add vec3, vec4 with disjoint embeddings.
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "vec3",
+            &[0.0, 0.0, 1.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "vec4",
+            &[0.5, 0.5, 0.0],
+            None,
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("disjoint-id vector merge should succeed");
+
+    // All four vectors are present post-merge.
+    for key in ["vec1", "vec2", "vec3", "vec4"] {
+        assert!(
+            vector
+                .get(target_id, "default", "shared", key)
+                .unwrap()
+                .is_some(),
+            "expected '{key}' to be present in target after merge"
+        );
+    }
+
+    // k-NN search returns vectors from both branches. Searching with
+    // k=4 over a 4-vector collection should return all four.
+    let hits = vector
+        .search(target_id, "default", "shared", &[1.0, 0.0, 0.0], 4, None)
+        .unwrap();
+    let returned_keys: std::collections::HashSet<String> =
+        hits.iter().map(|h| h.key.clone()).collect();
+    assert_eq!(
+        returned_keys.len(),
+        4,
+        "expected k=4 search to return all four vectors; got {returned_keys:?}"
+    );
+    for key in ["vec1", "vec2", "vec3", "vec4"] {
+        assert!(
+            returned_keys.contains(key),
+            "expected '{key}' in search results; got {returned_keys:?}"
+        );
+    }
+}
+
+#[test]
+fn vector_merge_conflicting_id_lww() {
+    // Both branches write the same (collection, key) with different
+    // embeddings. Under LWW the source value wins.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    vector
+        .create_collection(target_id, "default", "shared", config_small())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Both sides write the same key with different embeddings.
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "conflict",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "conflict",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("LWW vector conflict should resolve cleanly");
+
+    // LWW: source wins. Target now reads source's embedding.
+    let entry = vector
+        .get(target_id, "default", "shared", "conflict")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entry.value.embedding,
+        vec![1.0, 0.0, 0.0],
+        "LWW should resolve to source's embedding"
+    );
+}
+
+#[test]
+fn vector_merge_dimension_mismatch_rejected() {
+    // Both branches have a collection named "shared" but with different
+    // dimensions. The merge precheck refuses regardless of strategy —
+    // combining mismatched-dimension vectors into one HNSW would
+    // corrupt the index.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    kv.put(&target_id, "default", "_seed", Value::Int(0))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: 3-dim collection.
+    vector
+        .create_collection(source_id, "default", "shared", config_small())
+        .unwrap();
+    vector
+        .insert(source_id, "default", "shared", "v1", &[1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    // Target: 5-dim collection (same name).
+    vector
+        .create_collection(
+            target_id,
+            "default",
+            "shared",
+            config_custom(5, DistanceMetric::Cosine),
+        )
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "v1",
+            &[1.0, 0.0, 0.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // LWW should refuse the merge — dimension mismatch is fatal regardless
+    // of strategy.
+    let lww_result = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    );
+    assert!(
+        lww_result.is_err(),
+        "LWW merge with dimension mismatch must fail; got {:?}",
+        lww_result
+    );
+    let err = lww_result.unwrap_err().to_string();
+    assert!(
+        err.contains("incompatible dimensions") || err.contains("dimension"),
+        "error message should mention dimension mismatch; got: {err}"
+    );
+
+    // Strict should also refuse.
+    let strict_result =
+        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+    assert!(
+        strict_result.is_err(),
+        "Strict merge with dimension mismatch must fail; got {:?}",
+        strict_result
+    );
+
+    // Target's data is unchanged after the failed merge attempts.
+    let entry = vector
+        .get(target_id, "default", "shared", "v1")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        entry.value.embedding.len(),
+        5,
+        "target should still have its 5-dim vector after failed merge"
+    );
+}
+
+#[test]
+fn vector_merge_metric_mismatch_rejected() {
+    // Both branches have a collection named "shared" but with different
+    // distance metrics. The merge precheck refuses — switching metrics
+    // would silently change search semantics for already-indexed
+    // vectors.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+    kv.put(&target_id, "default", "_seed", Value::Int(0))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source: Cosine metric.
+    vector
+        .create_collection(
+            source_id,
+            "default",
+            "shared",
+            config_custom(3, DistanceMetric::Cosine),
+        )
+        .unwrap();
+
+    // Target: Euclidean metric (same name + dimension, different metric).
+    vector
+        .create_collection(
+            target_id,
+            "default",
+            "shared",
+            config_custom(3, DistanceMetric::Euclidean),
+        )
+        .unwrap();
+
+    let result = branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    );
+    assert!(
+        result.is_err(),
+        "merge with metric mismatch must fail; got {:?}",
+        result
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("incompatible distance metrics") || err.contains("metric"),
+        "error message should mention metric mismatch; got: {err}"
+    );
+}
+
+#[test]
+fn vector_merge_hnsw_search_correct_after_merge() {
+    // Phase 4 acceptance test: after disjoint adds on both branches,
+    // a k-NN search returns the union of both sides with correct
+    // ranking. This proves the per-collection HNSW rebuild produced a
+    // searchable index without a full backend reload.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    vector
+        .create_collection(target_id, "default", "shared", config_small())
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source adds 3 vectors near [1, 0, 0]
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "src_a",
+            &[0.99, 0.01, 0.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "src_b",
+            &[0.95, 0.05, 0.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "src_c",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Target adds 3 vectors — two near [1, 0, 0], one far away
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "tgt_a",
+            &[0.98, 0.02, 0.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "tgt_b",
+            &[0.0, 0.0, 1.0],
+            None,
+        )
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "tgt_c",
+            &[0.5, 0.5, 0.0],
+            None,
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("disjoint-id vector merge should succeed");
+
+    // Search for [1, 0, 0] with k=3. Top results must come from BOTH
+    // branches: src_a (0.99), tgt_a (0.98), src_b (0.95) — i.e. the
+    // top-3 are src_a, tgt_a, src_b in that order, mixing source and
+    // target additions.
+    let hits = vector
+        .search(target_id, "default", "shared", &[1.0, 0.0, 0.0], 3, None)
+        .unwrap();
+    assert_eq!(
+        hits.len(),
+        3,
+        "expected k=3 search to return 3 results; got {}",
+        hits.len()
+    );
+
+    let returned_keys: Vec<&str> = hits.iter().map(|h| h.key.as_str()).collect();
+    let has_src = returned_keys.iter().any(|k| k.starts_with("src_"));
+    let has_tgt = returned_keys.iter().any(|k| k.starts_with("tgt_"));
+    assert!(
+        has_src && has_tgt,
+        "post-merge top-k must include vectors from BOTH source and target; got {returned_keys:?}"
+    );
+
+    // src_a (0.99 cosine ≈ 1.0) should be the top hit.
+    assert_eq!(
+        hits[0].key, "src_a",
+        "src_a (0.99 cosine to query) should be the top result; got {returned_keys:?}"
+    );
+}
+
+#[test]
+fn vector_merge_does_not_touch_unaffected_collections() {
+    // Regression test for the per-collection rebuild contract:
+    // collections that the merge does NOT touch should not be rebuilt.
+    //
+    // We insert vectors into the untouched collection in NON-lex order
+    // so each vector's VectorId reflects insertion order, not key
+    // order. The rebuild path scans KV in lexicographic order, so a
+    // regression that re-introduces full-branch rebuild would
+    // reassign IDs and the assertion below would fail. With proper
+    // per-collection scoping (the merge doesn't touch this
+    // collection → no rebuild fires), all VectorIds stay byte-for-byte
+    // identical to their pre-merge values.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Create two collections on target before fork.
+    vector
+        .create_collection(target_id, "default", "touched", config_small())
+        .unwrap();
+    vector
+        .create_collection(target_id, "default", "untouched", config_small())
+        .unwrap();
+
+    // Insert in non-lexicographic order. After this loop:
+    //   c → vid 0,  e → vid 1,  a → vid 2,  d → vid 3,  b → vid 4
+    // A lexicographic-order rebuild would reassign:
+    //   a → vid 0,  b → vid 1,  c → vid 2,  d → vid 3,  e → vid 4
+    // So pre-merge and post-merge IDs only match if NO rebuild fires.
+    for (key, embedding) in [
+        ("c", [0.5, 0.5, 0.0f32]),
+        ("e", [0.1, 0.9, 0.0f32]),
+        ("a", [1.0, 0.0, 0.0f32]),
+        ("d", [0.3, 0.7, 0.0f32]),
+        ("b", [0.9, 0.1, 0.0f32]),
+    ] {
+        vector
+            .insert(target_id, "default", "untouched", key, &embedding, None)
+            .unwrap();
+    }
+
+    // Capture all pre-merge VectorIds.
+    let pre_merge_ids: std::collections::HashMap<&str, u64> = ["a", "b", "c", "d", "e"]
+        .iter()
+        .map(|&key| {
+            let id = vector
+                .get(target_id, "default", "untouched", key)
+                .unwrap()
+                .unwrap()
+                .value
+                .vector_id
+                .as_u64();
+            (key, id)
+        })
+        .collect();
+
+    // Sanity check: insertion order produced non-lex IDs (otherwise a
+    // coincidental rebuild would reproduce them and the test is vacuous).
+    assert_ne!(
+        pre_merge_ids[&"a"], 0,
+        "test setup invariant: 'a' was inserted third, so its VectorId must not be 0"
+    );
+
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    // Source touches ONLY the "touched" collection.
+    vector
+        .insert(
+            source_id,
+            "default",
+            "touched",
+            "new",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    branch_ops::merge_branches(
+        &test_db.db,
+        "source",
+        "target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .expect("single-side vector merge should succeed");
+
+    // The touched collection sees the new vector.
+    assert!(vector
+        .get(target_id, "default", "touched", "new")
+        .unwrap()
+        .is_some());
+
+    // ALL of the untouched collection's VectorIds must remain stable.
+    // A regression that re-introduces full-branch rebuild would shuffle
+    // these IDs because the rebuild scans lexicographically.
+    for key in ["a", "b", "c", "d", "e"] {
+        let post_id = vector
+            .get(target_id, "default", "untouched", key)
+            .unwrap()
+            .unwrap()
+            .value
+            .vector_id
+            .as_u64();
+        assert_eq!(
+            post_id, pre_merge_ids[key],
+            "untouched collection's VectorId for '{key}' shifted across merge \
+             (was {}, now {}) — per-collection rebuild scoping regression",
+            pre_merge_ids[key], post_id
+        );
+    }
+
+    // Search still works on the untouched collection.
+    let hits = vector
+        .search(target_id, "default", "untouched", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].key, "a");
+}
+
+#[test]
+fn vector_cherry_pick_refreshes_hnsw_backend() {
+    // Regression test for the cherry-pick + vector post_commit gap.
+    //
+    // Cherry-pick has its own apply path that historically called
+    // `reload_secondary_backends` directly. After Phase 4, the
+    // `VectorRefreshHook::post_merge_reload` callback is a no-op
+    // (the per-handler `post_commit` lifecycle owns vector rebuilds).
+    // If `cherry_pick_from_diff` does not also dispatch through the
+    // `PrimitiveMergeHandler::post_commit` lifecycle, vectors land
+    // correctly in target's KV but the in-memory HNSW backend stays
+    // stale — k-NN search returns the pre-cherry-pick result set.
+    //
+    // This test cherry-picks a new vector from source to target and
+    // asserts that searching for that vector's embedding returns the
+    // new key (not the old one).
+    use strata_engine::branch_ops::CherryPickFilter;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let vector = test_db.vector();
+
+    branch_index.create_branch("target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
+
+    // Seed target with a collection and one vector at [0, 1, 0].
+    vector
+        .create_collection(target_id, "default", "shared", config_small())
+        .unwrap();
+    vector
+        .insert(
+            target_id,
+            "default",
+            "shared",
+            "old",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Pre-cherry-pick: searching for [1, 0, 0] returns "old" (only
+    // vector in the collection).
+    let pre_hits = vector
+        .search(target_id, "default", "shared", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(pre_hits.len(), 1);
+    assert_eq!(pre_hits[0].key, "old");
+
+    // Fork target → source, source adds a vector at [1, 0, 0]
+    // (closer to the query than "old").
+    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
+
+    vector
+        .insert(
+            source_id,
+            "default",
+            "shared",
+            "new",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Cherry-pick everything from source to target.
+    branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "source",
+        "target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .expect("vector cherry-pick should succeed");
+
+    // The cherry-picked vector must be visible AND searchable. The
+    // search returning "new" (not "old") proves the in-memory HNSW
+    // backend was refreshed — without the post_commit dispatch, this
+    // assertion would fail because the backend would still only know
+    // about "old".
+    assert!(
+        vector
+            .get(target_id, "default", "shared", "new")
+            .unwrap()
+            .is_some(),
+        "cherry-picked vector should be present in target's KV"
+    );
+
+    let post_hits = vector
+        .search(target_id, "default", "shared", &[1.0, 0.0, 0.0], 1, None)
+        .unwrap();
+    assert_eq!(post_hits.len(), 1);
+    assert_eq!(
+        post_hits[0].key, "new",
+        "cherry-picked vector should be the top hit; if 'old' is returned, \
+         the in-memory HNSW backend was not refreshed by cherry-pick \
+         (post_commit dispatch missing — Phase 4 regression)"
+    );
+}

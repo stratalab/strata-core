@@ -614,7 +614,7 @@ Ontology entries (`{graph}/__types__/object/...`, `{graph}/__types__/link/...`) 
 
 ---
 
-## Phase 4 — Vector-aware merge
+## Phase 4 — Vector-aware merge (implemented)
 
 **Goal:** real vector merge with HNSW consistency.
 
@@ -629,39 +629,60 @@ Vector state decomposes into:
 
 Merge decisions per category:
 
-| Category | v1 Rule |
+| Category | Rule |
 |---|---|
 | Disjoint vector adds on different collections | Apply, rebuild affected collections |
 | Disjoint vector adds on the same collection | Apply, rebuild that collection |
-| Same vector ID written on both sides with different embeddings | LWW or Strict |
-| Collection creation/deletion conflict | Strict rejection in v1 |
-| Metric/dimension mismatch | Strict rejection (never automatically mergeable) |
+| Same vector key written on both sides with different embeddings | LWW or Strict (per `MergeStrategy`) |
+| Collection creation/deletion conflict | Strict rejection |
+| Dimension / metric / storage_dtype mismatch | Always rejected (never automatically mergeable) |
 
 ### Step 4.2: Plan construction
 
-`VectorMergeHandler::plan`:
-- Produces KV puts/deletes for vector payload and collection config.
-- Tracks `affected_collections: BTreeSet<CollectionId>` — any collection with at least one vector write on either side since the merge base.
+`VectorMergeHandler::plan` (in `crates/engine/src/branch_ops/primitive_merge.rs`):
+- Runs the trait's default 14-case classifier — vectors are KV-shaped at the cell level, so generic classification produces correct puts and deletes.
+- Walks each `(space, TypeTag::Vector)` cell's source / target / ancestor slices and records the `(space, collection)` pair for every user_key it sees, populating `self.affected: Mutex<BTreeSet<(String, String)>>`.
+- Both vector data keys (`{collection}/{vector_key}`) and config keys (`__config__/{collection}`) are extracted, so collection-only changes (creation, deletion, metadata-only updates) also trigger a rebuild.
+- Each merge gets a fresh `VectorMergeHandler` instance via `build_merge_registry()`, so the mutex is uncontended.
 
-### Step 4.3: HNSW rebuild
+### Step 4.3: Precheck — config mismatch refusal
 
-`VectorMergeHandler::post_commit`:
-- For each affected collection, call the vector backend's rebuild entry point (the same path used by recovery — this already exists; see `crates/engine/src/primitives/vector/recovery.rs`).
-- For unaffected collections, do nothing.
+`VectorMergeHandler::precheck` dispatches to a vector-crate callback registered via `register_vector_merge` (mirroring the graph crate's callback pattern, since `vector → engine` rules out engine calling vector code directly). The callback (in `crates/vector/src/merge_handler.rs::vector_precheck_fn`):
 
-### Step 4.4: Vector merge tests
+- For every space that exists on both source and target, scans `__config__/` and decodes `CollectionRecord` for each collection.
+- For each collection that appears on both sides, compares `dimension`, `metric`, and `storage_dtype`.
+- Any mismatch returns `StrataError::invalid_input` with a user-facing message — the merge aborts before any writes happen, regardless of `MergeStrategy`. Combining vectors of different dimensions into one HNSW would corrupt the index; switching metrics post-hoc would silently change search semantics for already-indexed vectors.
 
-- `vector_merge_disjoint_collections`
-- `vector_merge_same_collection_disjoint_ids`
-- `vector_merge_conflicting_id_lww`
-- `vector_merge_dimension_mismatch_rejected`
-- `vector_merge_hnsw_search_correct_after_merge` — after merge, a k-NN search returns the expected set including vectors from both sides.
+### Step 4.4: HNSW rebuild
+
+`VectorMergeHandler::post_commit` dispatches to `vector_post_commit_fn`, which iterates the `affected` set and calls `VectorStore::rebuild_collection_after_merge(target, Some(source), space, collection_name)` per pair. This is a public per-collection helper extracted from the existing `post_merge_reload_vectors_from`:
+
+- Re-read `__config__/{name}` from KV (drops the in-memory backend if the row is gone — handles wholesale collection deletion).
+- Build a fresh backend via `IndexBackendFactory::from_type(record.backend_type())`.
+- Scan all `{collection}/` vector entries; resolve each embedding (KV record, source-branch backend for legacy lite records, or old target backend), allocate a fresh `VectorId` from the new backend's counter, and queue any KV writes for ID remapping.
+- Write the remapped IDs back to KV in one transaction. If the write fails, restore the old backend and surface the error — never install a new backend with mismatched IDs.
+- Call `rebuild_index()` and atomically swap the backend in `VectorBackendState`.
+
+The previous `VectorRefreshHook::post_merge_reload` (which scanned only the `"default"` namespace and rebuilt every collection in the branch) is now a no-op — the handler owns the merge path. `apply_refresh` (follower path) and `freeze_to_disk` (shutdown path) are unchanged.
+
+### Step 4.5: Vector merge tests
+
+`tests/integration/branching.rs`:
+
+- `vector_merge_disjoint_collections` — source writes to "alpha", target writes to "beta", merge → both visible and searchable.
+- `vector_merge_same_collection_disjoint_ids` — both branches write disjoint keys to the same collection, merge → all four searchable in target.
+- `vector_merge_conflicting_id_lww` — both sides write the same key with different embeddings → LWW takes source.
+- `vector_merge_dimension_mismatch_rejected` — different dimensions on the same collection name → merge errors regardless of strategy; target's data unchanged.
+- `vector_merge_metric_mismatch_rejected` — different metrics → merge errors with metric-specific message.
+- `vector_merge_hnsw_search_correct_after_merge` — disjoint adds on a single collection; post-merge k-NN search returns the union of both sides with correct ranking.
+- `vector_merge_does_not_touch_unaffected_collections` — regression: untouched collection's `VectorId` is stable across merge (proves the per-collection rebuild scoping).
 
 ### Phase 4 acceptance bar
 
-- Vector merge is no longer blocked by Phase 2's placeholder `Unsupported`.
-- Merged collections return correct k-NN results without a full backend reload.
-- HNSW rebuild is per-collection, not global.
+- ✅ Vector merge is no longer blocked by Phase 2's placeholder no-op.
+- ✅ Merged collections return correct k-NN results without a full backend reload.
+- ✅ HNSW rebuild is per-collection, not global.
+- ✅ Dimension / metric / dtype mismatches are caught in precheck and refused regardless of strategy.
 
 ---
 

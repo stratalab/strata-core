@@ -80,6 +80,11 @@ fn ensure_vector_recovery() {
         // all divergent graph merges, even disjoint ones that the
         // semantic merge would handle correctly.
         strata_graph::register_graph_semantic_merge();
+        // Register the vector merge precheck (dimension/metric mismatch
+        // refusal) and post-commit (per-collection HNSW rebuild) hooks.
+        // Without this, the engine's VectorMergeHandler is a no-op and
+        // the legacy full-branch rebuild applies.
+        strata_vector::register_vector_semantic_merge();
     });
 }
 

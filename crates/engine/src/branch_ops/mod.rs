@@ -1839,6 +1839,7 @@ pub fn merge_branches(
 
     let registry: MergeHandlerRegistry = build_merge_registry();
     let precheck_ctx = MergePrecheckCtx {
+        db,
         source_id,
         target_id,
         merge_base: &merge_base,
@@ -2941,6 +2942,7 @@ pub fn cherry_pick_from_diff(
 
     let registry = primitive_merge::build_merge_registry();
     let precheck_ctx = MergePrecheckCtx {
+        db,
         source_id,
         target_id,
         merge_base: &merge_base,
@@ -3070,7 +3072,31 @@ pub fn cherry_pick_from_diff(
         cherry_pick_version = Some(version);
     }
 
-    // Reload secondary index backends
+    // Per-primitive post-commit handlers — symmetric with merge_branches.
+    // The vector handler rebuilds the HNSW backends for collections that
+    // its `plan` recorded as affected; without this dispatch, vectors
+    // cherry-picked into the target would land in KV correctly but the
+    // in-memory backend would be stale until the next full recovery.
+    //
+    // Note: the affected set was populated from the unfiltered plan
+    // actions, so a cherry-pick that filters out a collection's writes
+    // entirely will still trigger a redundant rebuild for that
+    // collection. The rebuild reads from KV (which is unchanged for
+    // filtered collections) so it's wasted work but produces correct
+    // state.
+    let post_ctx = MergePostCommitCtx {
+        db,
+        source_id,
+        target_id,
+        merge_version: cherry_pick_version,
+    };
+    for &tag in &DATA_TYPE_TAGS {
+        registry.get(tag).post_commit(&post_ctx)?;
+    }
+
+    // Reload secondary index backends — vector refresh hook is a no-op
+    // after Phase 4 (handler owns the rebuild path); preserved for
+    // future per-primitive refresh hooks (e.g. JSON inverted-index).
     reload_secondary_backends(db, target_id, source_id);
 
     info!(
