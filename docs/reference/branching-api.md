@@ -272,6 +272,8 @@ let base: Option<MergeBaseInfo> = db.branches().merge_base("source", "target")?;
 
 `None` if the branches have no fork or merge relationship (they are unrelated).
 
+The merge base is computed by walking the **branch DAG**, which is stored as a graph called `_branch_dag` on the `_system_` branch. The DAG records every fork and merge event in the database with their MVCC versions. For a freshly forked pair, the merge base is the fork point. For branches that have been merged before, the merge base is the version of the most recent merge — this is what makes repeated merges of the same source/target pair fast and correct (only the changes since the last merge are reconsidered, not the full history). See [Concepts: The `_system_` branch](../concepts/branches.md#the-_system_-branch).
+
 ### Merge
 
 Merge data from `source` into `target` using a three-way merge over their merge base.
@@ -469,7 +471,7 @@ let existed = db.branches().delete_tag("main", "v0.9")?;
 | `timestamp` | `u64` | Microseconds since epoch when the tag was created |
 | `creator` | `Option<String>` | Optional creator identifier |
 
-**Storage**: tags are stored in the `_system_` branch under their own keyspace. Deleting a branch does not delete its tags — tags become orphaned references.
+**Storage**: tags are stored as KV entries on the `_system_` branch (the engine-internal branch that's filtered out of `branch list` — see [Concepts: The `_system_` branch](../concepts/branches.md#the-_system_-branch)) under the key pattern `tag:{branch}:{name}`. Deleting a branch does **not** delete its tags — tags become orphaned references and need to be deleted explicitly via `delete_tag`.
 
 ### Notes
 
@@ -505,6 +507,8 @@ let existed = db.branches().delete_note("main", 123)?;
 | `author` | `Option<String>` | Optional author identifier |
 | `timestamp` | `u64` | Microseconds since epoch when the note was added |
 | `metadata` | `Option<Value>` | Optional structured metadata payload |
+
+**Storage**: notes are stored as KV entries on the `_system_` branch (see [Concepts: The `_system_` branch](../concepts/branches.md#the-_system_-branch)) under the key pattern `note:{branch}:{version}`. Like tags, notes survive branch deletion as orphaned references and must be deleted explicitly.
 
 ---
 

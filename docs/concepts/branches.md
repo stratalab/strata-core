@@ -139,6 +139,36 @@ The trade-off is read-path overhead on deep fork chains: a read on a 10-level-de
 
 Under the hood, every key in storage is prefixed with its branch ID. Branch isolation is automatic — no filtering needed, because the keys are simply different. Deleting a branch is O(branch size), scanning only that branch's keys. Cross-branch operations (fork, diff, merge, cherry-pick, materialize, revert, tag, note) are described in the [Branch Management Guide](../guides/branch-management.md) and the [Branching API Reference](../reference/branching-api.md).
 
+## The `_system_` branch
+
+There's one branch you'll never see in `branch list` but that always exists: `_system_`. It's auto-created when you open the database, can't be deleted, and is filtered out of every user-facing branch listing. Most users never need to know it exists. It's documented here because the things it stores are visible to users — the visible behavior of `branch tag`, `branch note`, and the merge-base computation depends on it.
+
+The `_system_` branch holds **cross-branch metadata** — data that is *about* branches, not data that lives *in* branches:
+
+- **The branch DAG.** Every fork and merge event ever performed is recorded as a node in a graph called `_branch_dag` on the `_system_` branch. Forks add a parent → child edge with the fork version; merges add a source → target edge with the merge version, strategy, and conflict count. The DAG is what powers the merge-base computation: when you merge `feature-x` into `main` for the second time, the engine walks the DAG to find the version of the previous merge instead of falling all the way back to the original fork point.
+- **Tags.** Every tag created via `branches().create_tag(branch, name, ...)` is stored as a KV entry on the `_system_` branch keyed by `tag:{branch}:{name}`. Tags survive branch deletion (they become orphaned references — the engine doesn't garbage-collect them automatically).
+- **Notes.** Every note created via `branches().add_note(branch, version, ...)` is stored as a KV entry on the `_system_` branch keyed by `note:{branch}:{version}`. Notes are queryable per-version and ordered by version.
+
+The `_system_` branch is a regular branch internally — it has its own KV/JSON/Graph data, MVCC versions, and storage segments. The only thing special about it is that the branch index filters it out of `list_branches()` so users never see it in normal output. If you ask `branch exists _system_`, the answer is `true`.
+
+You **cannot** explicitly fork from, merge into, or delete the `_system_` branch via the user-facing API. The executor enforces a `reject_system_branch` guard on every command — any command whose source or target branch name starts with `_system` returns an `InvalidInput` error ("Branch '_system_' is reserved for system use"). The same guard applies to `set_branch`, `kv_put`, and every other data operation. The branch is treated as engine-owned infrastructure, not user data.
+
+### The `_system_` space (parallel concept)
+
+There's a related but distinct concept: the **`_system_` space**. Where the `_system_` branch is a *separate top-level branch*, the `_system_` space is a *reserved space name within every branch*. Both share the `_system_` name; both are hidden from user listings; both are protected by reserved-prefix validation. They serve different purposes:
+
+| | `_system_` branch | `_system_` space |
+|---|---|---|
+| Scope | Single global branch | One per user branch |
+| Purpose | Cross-branch metadata (DAG, tags, notes) | In-branch internal state |
+| Forks with parent? | N/A — there's only one | Yes, via COW like any other space |
+| Visible in listings? | Hidden from `branch list` | Hidden from `space list` on every branch |
+| Examples | Branch DAG, tags, notes | Search recipes, model bindings |
+
+A user-space search recipe stored in the `_system_` space of branch `feature-x` follows the branch through forks: if you fork `feature-x` to `feature-x-prime`, the recipe is inherited via COW. By contrast, a tag created on `feature-x` lives on the `_system_` branch and is *not* inherited by `feature-x-prime` — it's still attached to `feature-x` only.
+
+You don't normally interact with either directly. Tag and note operations transparently route through the `_system_` branch; recipe operations transparently route through each branch's `_system_` space. The names matter only when you're reading source code or debugging storage layout.
+
 ## Next
 
 - [Primitives](primitives.md) — the six data types
