@@ -131,6 +131,14 @@ pub use branch_ops::primitive_merge::{
     register_graph_merge_plan, GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan,
 };
 
+// Registration hook for vector semantic merge. The vector crate registers
+// its precheck (dimension/metric mismatch detection) and post-commit
+// (per-collection HNSW rebuild) implementations here at startup;
+// engine's `VectorMergeHandler` dispatches to them.
+pub use branch_ops::primitive_merge::{
+    register_vector_merge, VectorMergePostCommitFn, VectorMergePrecheckFn,
+};
+
 // Re-export branch_dag types from core at crate root for convenience
 pub use strata_core::branch_dag::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,

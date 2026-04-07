@@ -563,106 +563,19 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
         Ok(())
     }
 
-    fn post_merge_reload(
-        &self,
-        db: &strata_engine::Database,
-        target_branch: strata_core::types::BranchId,
-        source_branch: Option<strata_core::types::BranchId>,
-    ) -> strata_core::StrataResult<()> {
-        // Reload vector backends from KV for the target branch.
-        // This is a simplified inline version that doesn't require Arc<Database>.
-        use strata_core::traits::Storage;
-        use strata_core::types::{Key, Namespace};
-        use strata_core::value::Value;
-
-        let version = db.storage().version();
-        let ns = std::sync::Arc::new(Namespace::for_branch_space(target_branch, "default"));
-
-        let config_prefix = Key::new_vector_config_prefix(ns.clone());
-        let config_entries = db
-            .storage()
-            .scan_prefix(&config_prefix, version)
-            .map_err(|e| strata_core::StrataError::storage(e.to_string()))?;
-
-        for (key, versioned) in &config_entries {
-            let config_bytes = match &versioned.value {
-                Value::Bytes(b) => b,
-                _ => continue,
-            };
-            let record = match super::CollectionRecord::from_bytes(config_bytes) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let collection_name = match key.user_key_string() {
-                Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
-                None => continue,
-            };
-            let config: super::VectorConfig = match record.config.clone().try_into() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-            let cid = super::CollectionId::new(target_branch, &collection_name);
-
-            let backend_type = record.backend_type();
-            let factory = super::IndexBackendFactory::from_type(backend_type);
-            let mut backend = factory.create(&config);
-            let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
-            let vector_entries = match db.storage().scan_prefix(&vector_prefix, version) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-
-            let collection_prefix = format!("{}/", collection_name);
-            for (vec_key, vec_versioned) in &vector_entries {
-                let vec_bytes = match &vec_versioned.value {
-                    Value::Bytes(b) => b,
-                    _ => continue,
-                };
-                let vec_record = match super::VectorRecord::from_bytes(vec_bytes) {
-                    Ok(r) => r,
-                    Err(_) => continue,
-                };
-                let vid = super::VectorId::new(vec_record.vector_id);
-
-                if vec_record.embedding.is_empty() {
-                    // Legacy empty-embedding record — try to copy from source branch backend
-                    if let Some(src) = source_branch {
-                        let src_cid = super::CollectionId::new(src, &collection_name);
-                        if let Some(src_backend) = self.state.backends.get(&src_cid) {
-                            if let Some(emb) = src_backend.get(vid) {
-                                let _ = backend.insert_with_id_and_timestamp(
-                                    vid,
-                                    emb,
-                                    vec_record.created_at,
-                                );
-                            }
-                        }
-                    }
-                } else {
-                    let _ = backend.insert_with_id_and_timestamp(
-                        vid,
-                        &vec_record.embedding,
-                        vec_record.created_at,
-                    );
-                }
-
-                let vector_key = String::from_utf8(vec_key.user_key.to_vec())
-                    .ok()
-                    .and_then(|uk| uk.strip_prefix(&collection_prefix).map(|s| s.to_string()))
-                    .unwrap_or_default();
-                backend.set_inline_meta(
-                    vid,
-                    super::types::InlineMeta {
-                        key: vector_key,
-                        source_ref: vec_record.source_ref.clone(),
-                    },
-                );
-            }
-
-            backend.rebuild_index();
-            backend.seal_remaining_active();
-            self.state.backends.insert(cid, backend);
-        }
-        Ok(())
-    }
+    // post_merge_reload uses the trait default (no-op).
+    //
+    // The vector merge post-commit lifecycle moved to
+    // `VectorMergeHandler::post_commit` (via `register_vector_semantic_merge`)
+    // — see crates/vector/src/merge_handler.rs. The handler does a
+    // *per-collection* rebuild, scoped to the collections the merge
+    // actually touched, instead of the full-branch rebuild this method
+    // used to do. The full-branch path also had a real bug — it only
+    // scanned the "default" namespace and silently lost vectors in user
+    // spaces. The handler iterates affected (space, collection) pairs
+    // explicitly and avoids both problems.
+    //
+    // `pre_delete_read`, `apply_refresh`, and `freeze_to_disk` remain
+    // unchanged: they participate in the follower refresh and shutdown
+    // paths, neither of which is replaced by Phase 4.
 }

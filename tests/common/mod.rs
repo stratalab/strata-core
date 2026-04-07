@@ -40,6 +40,11 @@ fn ensure_recovery_registered() {
         // a tactical refusal of divergent graph merges (which still
         // works, just refuses safely-mergeable cases).
         strata_graph::register_graph_semantic_merge();
+        // Register the vector merge precheck/post-commit callbacks with
+        // the engine's VectorMergeHandler. Without this, the handler
+        // is a pass-through and the legacy full-branch rebuild fallback
+        // applies.
+        strata_vector::register_vector_semantic_merge();
     });
 }
 

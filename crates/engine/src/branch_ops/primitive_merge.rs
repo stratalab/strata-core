@@ -23,8 +23,13 @@
 //!   lives in `branch_ops/mod.rs` as a free function for historical
 //!   reasons; both `merge_branches` and `cherry_pick_from_diff` reach it
 //!   through this handler.
-//! - `VectorMergeHandler` is a no-op — `VectorRefreshHook::post_merge_reload`
-//!   does a full HNSW rebuild from KV state on every merge.
+//! - `VectorMergeHandler` tracks affected `(space, collection)` pairs in
+//!   `plan` and dispatches to function pointers registered by the vector
+//!   crate (`register_vector_merge`) for the dimension/metric mismatch
+//!   precheck and the per-collection HNSW rebuild in `post_commit`. If
+//!   unset (engine-only unit tests that don't load the vector crate),
+//!   the handler is a pure pass-through and HNSW backends only catch up
+//!   to the merged KV state on the next full recovery.
 //! - `GraphMergeHandler::plan` dispatches to a function pointer registered
 //!   by the graph crate (`register_graph_merge_plan`), which implements
 //!   the semantic merge algorithm: decoded edge diffing, additive merging
@@ -33,10 +38,11 @@
 //!   crate), the handler falls back to `check_graph_merge_divergence` —
 //!   the tactical "refuse divergent graph merges" rule.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
 use once_cell::sync::OnceCell;
+use parking_lot::Mutex;
 use strata_core::types::{BranchId, TypeTag};
 use strata_core::StrataResult;
 
@@ -56,11 +62,14 @@ use crate::database::Database;
 /// handler that needs to validate the merge shape (e.g. Event divergence)
 /// can do so without re-reading from storage.
 ///
-/// Several fields are unused by handlers today (only `EventMergeHandler`
-/// reads `typed_entries`), but they form the documented contract that
-/// future handlers can rely on for richer per-primitive validation.
+/// `db` is provided so handlers whose validation requires decoding logic
+/// that lives in a downstream crate (e.g. `VectorMergeHandler` decoding
+/// `CollectionRecord` rows in the vector crate) can dispatch to a
+/// callback that re-reads from storage rather than threading internal
+/// types through the engine.
 #[allow(dead_code)] // contract for future handlers
 pub(crate) struct MergePrecheckCtx<'a> {
+    pub db: &'a Arc<Database>,
     pub source_id: BranchId,
     pub target_id: BranchId,
     pub merge_base: &'a MergeBase,
@@ -215,7 +224,7 @@ pub(crate) fn build_merge_registry() -> MergeHandlerRegistry {
         Arc::new(KvMergeHandler),
         Arc::new(JsonMergeHandler),
         Arc::new(EventMergeHandler),
-        Arc::new(VectorMergeHandler),
+        Arc::new(VectorMergeHandler::new()),
         Arc::new(GraphMergeHandler),
     ];
     for handler in entries {
@@ -302,23 +311,190 @@ impl PrimitiveMergeHandler for EventMergeHandler {
     }
 }
 
-/// Vector merge handler. Pure no-op pass-through.
+/// Function pointer type for the vector merge precheck.
 ///
-/// Vector merges are safe today: `VectorRefreshHook::post_merge_reload`
-/// (in `crates/vector/src/recovery.rs`) does a full HNSW rebuild from KV
-/// state on every merge, so disjoint and conflicting vector merges both
-/// produce correct HNSW after the rebuild. There is no silent corruption
-/// to refuse. An incremental rebuild is TODO.
-pub(crate) struct VectorMergeHandler;
+/// The vector crate provides this implementation via
+/// `register_vector_merge`. Called from `VectorMergeHandler::precheck` to
+/// reject merges that would combine collections with incompatible
+/// configurations (dimension or metric mismatch). The check requires
+/// decoding `CollectionRecord` rows, which lives in the vector crate, so
+/// the engine dispatches to it via this callback rather than rolling its
+/// own decoder.
+///
+/// Returns `Err` to abort the entire merge (no writes happen).
+pub type VectorMergePrecheckFn =
+    fn(db: &Arc<Database>, source: BranchId, target: BranchId) -> StrataResult<()>;
+
+/// Function pointer type for the vector merge post-commit rebuild.
+///
+/// The vector crate provides this implementation via
+/// `register_vector_merge`. Called from `VectorMergeHandler::post_commit`
+/// once per merge with the set of `(space, collection)` pairs that the
+/// merge actually touched on either side. The vector crate rebuilds only
+/// those collections' HNSW backends, leaving untouched collections alone.
+///
+/// Per-collection failures inside the callback are typically logged and
+/// swallowed by the implementation: at this point the merge has already
+/// committed to KV, so propagating an error would leave a successful
+/// KV merge looking like a failure to the caller. The fallback for any
+/// collection that fails to rebuild is the next full recovery on db
+/// open (`recover_vector_state`), which scans every collection in the
+/// branch from KV.
+pub type VectorMergePostCommitFn = fn(
+    db: &Arc<Database>,
+    source: BranchId,
+    target: BranchId,
+    affected: &BTreeSet<(String, String)>,
+) -> StrataResult<()>;
+
+/// Bundle of vector-merge callbacks registered by the vector crate.
+struct VectorMergeCallbacks {
+    precheck: VectorMergePrecheckFn,
+    post_commit: VectorMergePostCommitFn,
+}
+
+/// Registered vector semantic merge implementation, set by the vector
+/// crate at startup via `register_vector_merge`. If unset (engine-only
+/// unit tests that don't load the vector crate), `VectorMergeHandler` is
+/// a pure pass-through: precheck and post_commit are no-ops, vectors
+/// merge through the generic 14-case classifier (which writes correct
+/// KV) but no in-memory HNSW rebuild fires. The next full recovery on
+/// db open will catch up via `recover_vector_state`.
+static VECTOR_MERGE_CALLBACKS: OnceCell<VectorMergeCallbacks> = OnceCell::new();
+
+/// Register the vector crate's semantic merge implementation.
+///
+/// Should be called once at application/test startup, before any
+/// `merge_branches` calls. Subsequent calls are no-ops (the first
+/// registration wins).
+///
+/// The standard test fixtures call this from `ensure_recovery_registered`
+/// alongside the existing `register_vector_recovery` /
+/// `register_search_recovery` / `register_graph_semantic_merge` hooks.
+pub fn register_vector_merge(
+    precheck: VectorMergePrecheckFn,
+    post_commit: VectorMergePostCommitFn,
+) {
+    let _ = VECTOR_MERGE_CALLBACKS.set(VectorMergeCallbacks {
+        precheck,
+        post_commit,
+    });
+}
+
+/// Vector merge handler.
+///
+/// Tracks the set of `(space, collection)` pairs touched on either side
+/// of the merge in `plan`, then dispatches to the registered vector-crate
+/// callbacks in `precheck` (dimension/metric mismatch detection) and
+/// `post_commit` (per-collection HNSW rebuild). The plan itself uses the
+/// trait default (KV-shaped 14-case classification) — vectors are stored
+/// as KV entries under `TypeTag::Vector`, so the generic classifier
+/// produces correct puts and deletes.
+///
+/// Each merge gets a fresh handler instance via `build_merge_registry()`,
+/// so the `affected` mutex is uncontended in practice — it exists only
+/// because the trait methods take `&self`.
+pub(crate) struct VectorMergeHandler {
+    /// Set of `(space, collection_name)` pairs whose vector cells were
+    /// touched on either source or target since the merge base.
+    /// Populated by `plan`, drained by `post_commit`.
+    affected: Mutex<BTreeSet<(String, String)>>,
+}
+
+impl VectorMergeHandler {
+    pub(crate) fn new() -> Self {
+        Self {
+            affected: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    /// Extract the collection name from a vector KV user_key.
+    ///
+    /// Vector keys come in two shapes:
+    /// - `__config__/{collection}` for collection config
+    /// - `{collection}/{vector_key}` for vector data
+    ///
+    /// Returns `None` for malformed keys (e.g. user_key with no `/`).
+    fn collection_from_user_key(user_key: &[u8]) -> Option<String> {
+        let s = std::str::from_utf8(user_key).ok()?;
+        if let Some(rest) = s.strip_prefix("__config__/") {
+            return Some(rest.to_string());
+        }
+        let (collection, _) = s.split_once('/')?;
+        if collection.is_empty() {
+            return None;
+        }
+        Some(collection.to_string())
+    }
+}
 
 impl PrimitiveMergeHandler for VectorMergeHandler {
     fn type_tag(&self) -> TypeTag {
         TypeTag::Vector
     }
-    fn precheck(&self, _ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
+
+    fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
+        // Dimension/metric mismatch detection lives in the vector crate
+        // (it requires decoding CollectionRecord). If no callback is
+        // registered, fall through — the engine has nothing to validate
+        // on its own.
+        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+            (callbacks.precheck)(ctx.db, ctx.source_id, ctx.target_id)?;
+        }
         Ok(())
     }
-    fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
+
+    fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        // Run the default 14-case classification first — vectors are
+        // KV-shaped at the cell level, so the generic classifier
+        // produces the right puts and deletes.
+        let (actions, conflicts) =
+            classify_typed_entries_for_tag(ctx.typed_entries, ctx.strategy, TypeTag::Vector);
+
+        // Track which (space, collection) pairs were actually mutated by
+        // the merge. We walk the produced `actions` (puts and deletes)
+        // rather than the raw cell slices because cell.source/target
+        // include COW-inherited rows from ancestor — so a collection
+        // that no side modified would otherwise be flagged as "affected"
+        // and trigger a needless rebuild on every merge.
+        //
+        // Walking actions also correctly catches deletes (via
+        // MergeActionKind::Delete) so wholesale-collection-delete
+        // scenarios drop the in-memory backend in post_commit.
+        let mut affected = self.affected.lock();
+        for action in &actions {
+            if action.type_tag != TypeTag::Vector {
+                continue;
+            }
+            if let Some(collection) = Self::collection_from_user_key(&action.raw_key) {
+                affected.insert((action.space.clone(), collection));
+            }
+        }
+
+        Ok(PrimitiveMergePlan { actions, conflicts })
+    }
+
+    fn post_commit(&self, ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
+        // If no merge happened (no actions applied), there's nothing to
+        // rebuild. The merge_branches caller signals this via merge_version
+        // being None.
+        if ctx.merge_version.is_none() {
+            return Ok(());
+        }
+
+        let affected = std::mem::take(&mut *self.affected.lock());
+        if affected.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+            (callbacks.post_commit)(ctx.db, ctx.source_id, ctx.target_id, &affected)?;
+        }
+        // No callback → no rebuild fires here. Vectors are still
+        // KV-correct (the generic classifier wrote them) but the
+        // in-memory HNSW backends are not refreshed until the next full
+        // recovery on db open. Engine-only unit tests are the typical
+        // unregistered case.
         Ok(())
     }
 }
