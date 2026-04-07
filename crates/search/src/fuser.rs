@@ -333,6 +333,7 @@ mod tests {
     fn make_kv_doc_ref(branch_id: &BranchId, key: &str) -> EntityRef {
         EntityRef::Kv {
             branch_id: *branch_id,
+            space: "default".to_string(),
             key: key.to_string(),
         }
     }

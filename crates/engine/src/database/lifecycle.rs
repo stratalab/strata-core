@@ -225,6 +225,7 @@ impl Database {
                                 if let Some(user_key) = key.user_key_string() {
                                     let entity_ref = strata_core::EntityRef::Kv {
                                         branch_id,
+                                        space: key.namespace.space.to_string(),
                                         key: user_key,
                                     };
                                     index.index_document(&entity_ref, &text, None);
@@ -244,6 +245,7 @@ impl Database {
                                     );
                                     let entity_ref = strata_core::EntityRef::Event {
                                         branch_id,
+                                        space: key.namespace.space.to_string(),
                                         sequence,
                                     };
                                     index.index_document(&entity_ref, &text, None);
@@ -278,6 +280,7 @@ impl Database {
                             if let Some(user_key) = key.user_key_string() {
                                 let entity_ref = strata_core::EntityRef::Kv {
                                     branch_id,
+                                    space: key.namespace.space.to_string(),
                                     key: user_key,
                                 };
                                 index.remove_document(&entity_ref);
@@ -296,6 +299,7 @@ impl Database {
                                 let branch_id = key.namespace.branch_id;
                                 let entity_ref = strata_core::EntityRef::Event {
                                     branch_id,
+                                    space: key.namespace.space.to_string(),
                                     sequence,
                                 };
                                 index.remove_document(&entity_ref);

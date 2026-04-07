@@ -1272,11 +1272,11 @@ pub mod core_types {
 
     pub fn all_entity_refs(branch_id: BranchId) -> Vec<EntityRef> {
         vec![
-            EntityRef::kv(branch_id, "test_key"),
-            EntityRef::event(branch_id, 1),
+            EntityRef::kv(branch_id, "default", "test_key"),
+            EntityRef::event(branch_id, "default", 1),
             EntityRef::branch(branch_id),
-            EntityRef::json(branch_id, "test_doc"),
-            EntityRef::vector(branch_id, "test_collection", "test_vector"),
+            EntityRef::json(branch_id, "default", "test_doc"),
+            EntityRef::vector(branch_id, "default", "test_collection", "test_vector"),
             EntityRef::graph(branch_id, "default", "test_graph/n/test_node"),
         ]
     }

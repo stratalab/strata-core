@@ -530,7 +530,7 @@ pub enum StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::version_conflict(
-    ///     EntityRef::kv(branch_id, "counter"),
+    ///     EntityRef::kv(branch_id,"default", "counter"),
     ///     Version::Counter(5),  // expected
     ///     Version::Counter(6),  // actual
     /// );
@@ -554,7 +554,7 @@ pub enum StrataError {
     /// ```no_run
     /// # use strata_core::{StrataError, EntityRef, BranchId};
     /// # let branch_id = BranchId::new();
-    /// StrataError::write_conflict(EntityRef::kv(branch_id, "shared-key"));
+    /// StrataError::write_conflict(EntityRef::kv(branch_id,"default", "shared-key"));
     /// ```
     #[error("write conflict on {entity_ref}")]
     WriteConflict {
@@ -650,7 +650,7 @@ pub enum StrataError {
     /// # let branch_id = BranchId::new();
     /// # let doc_id = "doc";
     /// StrataError::invalid_operation(
-    ///     EntityRef::json(branch_id, doc_id),
+    ///     EntityRef::json(branch_id,"default", doc_id),
     ///     "Document already exists",
     /// );
     /// ```
@@ -707,7 +707,7 @@ pub enum StrataError {
     /// # let branch_id = BranchId::new();
     /// # let doc_id = "doc";
     /// StrataError::PathNotFound {
-    ///     entity_ref: EntityRef::json(branch_id, doc_id),
+    ///     entity_ref: EntityRef::json(branch_id,"default", doc_id),
     ///     path: "/data/items/0/name".to_string(),
     /// };
     /// ```
@@ -734,7 +734,7 @@ pub enum StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::history_trimmed(
-    ///     EntityRef::kv(branch_id, "key"),
+    ///     EntityRef::kv(branch_id,"default", "key"),
     ///     Version::Txn(100),
     ///     Version::Txn(150),
     /// );
@@ -879,7 +879,7 @@ impl StrataError {
     /// ```no_run
     /// # use strata_core::{StrataError, EntityRef, BranchId};
     /// # let branch_id = BranchId::new();
-    /// StrataError::not_found(EntityRef::kv(branch_id, "missing-key"));
+    /// StrataError::not_found(EntityRef::kv(branch_id,"default", "missing-key"));
     /// ```
     pub fn not_found(entity_ref: EntityRef) -> Self {
         StrataError::NotFound { entity_ref }
@@ -904,7 +904,7 @@ impl StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::version_conflict(
-    ///     EntityRef::kv(branch_id, "counter"),
+    ///     EntityRef::kv(branch_id,"default", "counter"),
     ///     Version::Counter(5),
     ///     Version::Counter(6),
     /// );
@@ -923,7 +923,7 @@ impl StrataError {
     /// ```no_run
     /// # use strata_core::{StrataError, EntityRef, BranchId};
     /// # let branch_id = BranchId::new();
-    /// StrataError::write_conflict(EntityRef::kv(branch_id, "shared-key"));
+    /// StrataError::write_conflict(EntityRef::kv(branch_id,"default", "shared-key"));
     /// ```
     pub fn write_conflict(entity_ref: EntityRef) -> Self {
         StrataError::WriteConflict { entity_ref }
@@ -988,7 +988,7 @@ impl StrataError {
     /// # let branch_id = BranchId::new();
     /// # let doc_id = "doc";
     /// StrataError::invalid_operation(
-    ///     EntityRef::json(branch_id, doc_id),
+    ///     EntityRef::json(branch_id,"default", doc_id),
     ///     "Document already exists",
     /// );
     /// ```
@@ -1031,7 +1031,7 @@ impl StrataError {
     /// # let branch_id = BranchId::new();
     /// # let doc_id = "doc";
     /// StrataError::path_not_found(
-    ///     EntityRef::json(branch_id, doc_id),
+    ///     EntityRef::json(branch_id,"default", doc_id),
     ///     "/data/items/0",
     /// );
     /// ```
@@ -1049,7 +1049,7 @@ impl StrataError {
     /// # use strata_core::{StrataError, EntityRef, BranchId, Version};
     /// # let branch_id = BranchId::new();
     /// StrataError::history_trimmed(
-    ///     EntityRef::kv(branch_id, "key"),
+    ///     EntityRef::kv(branch_id,"default", "key"),
     ///     Version::Txn(100),
     ///     Version::Txn(150),
     /// );
@@ -1200,7 +1200,7 @@ impl StrataError {
     /// ```no_run
     /// # use strata_core::{StrataError, EntityRef, BranchId};
     /// # let branch_id = BranchId::new();
-    /// StrataError::conflict_on(EntityRef::kv(branch_id, "key"), "Version mismatch");
+    /// StrataError::conflict_on(EntityRef::kv(branch_id,"default", "key"), "Version mismatch");
     /// ```
     pub fn conflict_on(entity_ref: EntityRef, reason: impl Into<String>) -> Self {
         StrataError::Conflict {
@@ -1643,7 +1643,7 @@ impl StrataError {
 ///     # let value: Option<String> = None;
 ///     match value {
 ///         Some(v) => Ok(v),
-///         None => Err(StrataError::not_found(EntityRef::kv(branch_id, key))),
+///         None => Err(StrataError::not_found(EntityRef::kv(branch_id,"default", key))),
 ///     }
 /// }
 /// ```
@@ -1691,7 +1691,7 @@ mod strata_error_tests {
     #[test]
     fn test_not_found_constructor() {
         let branch_id = BranchId::new();
-        let e = StrataError::not_found(EntityRef::kv(branch_id, "key"));
+        let e = StrataError::not_found(EntityRef::kv(branch_id, "default", "key"));
 
         assert!(e.is_not_found());
         assert!(!e.is_conflict());
@@ -1715,7 +1715,7 @@ mod strata_error_tests {
     fn test_version_conflict_constructor() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::kv(branch_id, "counter"),
+            EntityRef::kv(branch_id, "default", "counter"),
             Version::Counter(5),
             Version::Counter(6),
         );
@@ -1730,7 +1730,7 @@ mod strata_error_tests {
     #[test]
     fn test_write_conflict_constructor() {
         let branch_id = BranchId::new();
-        let e = StrataError::write_conflict(EntityRef::kv(branch_id, "shared-key"));
+        let e = StrataError::write_conflict(EntityRef::kv(branch_id, "default", "shared-key"));
 
         assert!(e.is_conflict());
         assert!(e.is_retryable());
@@ -1791,7 +1791,7 @@ mod strata_error_tests {
     fn test_invalid_operation_constructor() {
         let branch_id = BranchId::new();
         let e = StrataError::invalid_operation(
-            EntityRef::json(branch_id, "test-doc"),
+            EntityRef::json(branch_id, "default", "test-doc"),
             "Document already exists",
         );
 
@@ -1826,8 +1826,10 @@ mod strata_error_tests {
     #[test]
     fn test_path_not_found_constructor() {
         let branch_id = BranchId::new();
-        let e =
-            StrataError::path_not_found(EntityRef::json(branch_id, "test-doc"), "/data/items/0");
+        let e = StrataError::path_not_found(
+            EntityRef::json(branch_id, "default", "test-doc"),
+            "/data/items/0",
+        );
 
         assert!(e.is_not_found());
         assert!(e.entity_ref().is_some());
@@ -1988,16 +1990,18 @@ mod strata_error_tests {
 
         // Retryable
         assert!(StrataError::version_conflict(
-            EntityRef::kv(branch_id, "k"),
+            EntityRef::kv(branch_id, "default", "k"),
             Version::Txn(1),
             Version::Txn(2),
         )
         .is_retryable());
-        assert!(StrataError::write_conflict(EntityRef::kv(branch_id, "k")).is_retryable());
+        assert!(
+            StrataError::write_conflict(EntityRef::kv(branch_id, "default", "k")).is_retryable()
+        );
         assert!(StrataError::transaction_aborted("conflict").is_retryable());
 
         // Not retryable
-        assert!(!StrataError::not_found(EntityRef::kv(branch_id, "k")).is_retryable());
+        assert!(!StrataError::not_found(EntityRef::kv(branch_id, "default", "k")).is_retryable());
         assert!(!StrataError::branch_not_found(branch_id).is_retryable());
         assert!(!StrataError::invalid_input("bad").is_retryable());
         assert!(!StrataError::transaction_timeout(1000).is_retryable());
@@ -2011,7 +2015,7 @@ mod strata_error_tests {
         assert!(StrataError::internal("unexpected state").is_serious());
 
         let branch_id = BranchId::new();
-        assert!(!StrataError::not_found(EntityRef::kv(branch_id, "k")).is_serious());
+        assert!(!StrataError::not_found(EntityRef::kv(branch_id, "default", "k")).is_serious());
         assert!(!StrataError::storage("disk full").is_serious());
     }
 
@@ -2020,7 +2024,7 @@ mod strata_error_tests {
     #[test]
     fn test_error_display_not_found() {
         let branch_id = BranchId::new();
-        let e = StrataError::not_found(EntityRef::kv(branch_id, "config"));
+        let e = StrataError::not_found(EntityRef::kv(branch_id, "default", "config"));
         let msg = e.to_string();
 
         assert!(msg.contains("not found"));
@@ -2031,7 +2035,7 @@ mod strata_error_tests {
     fn test_error_display_version_conflict() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::kv(branch_id, "counter"),
+            EntityRef::kv(branch_id, "default", "counter"),
             Version::Counter(5),
             Version::Counter(6),
         );
@@ -2056,7 +2060,7 @@ mod strata_error_tests {
     #[test]
     fn test_entity_ref_accessor() {
         let branch_id = BranchId::new();
-        let entity_ref = EntityRef::kv(branch_id, "key");
+        let entity_ref = EntityRef::kv(branch_id, "default", "key");
 
         let e = StrataError::not_found(entity_ref.clone());
         assert_eq!(e.entity_ref(), Some(&entity_ref));
@@ -2077,7 +2081,7 @@ mod strata_error_tests {
         assert_eq!(e.branch_id(), Some(branch_id));
 
         // From entity ref
-        let e = StrataError::not_found(EntityRef::kv(branch_id, "key"));
+        let e = StrataError::not_found(EntityRef::kv(branch_id, "default", "key"));
         assert_eq!(e.branch_id(), Some(branch_id));
 
         // No branch_id
@@ -2101,7 +2105,7 @@ mod strata_error_tests {
     #[test]
     fn test_error_code_mapping_not_found() {
         let branch_id = BranchId::new();
-        let e = StrataError::not_found(EntityRef::kv(branch_id, "key"));
+        let e = StrataError::not_found(EntityRef::kv(branch_id, "default", "key"));
         assert_eq!(e.code(), ErrorCode::NotFound);
     }
 
@@ -2127,7 +2131,7 @@ mod strata_error_tests {
     fn test_error_code_mapping_version_conflict() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::kv(branch_id, "k"),
+            EntityRef::kv(branch_id, "default", "k"),
             Version::Txn(1),
             Version::Txn(2),
         );
@@ -2162,7 +2166,7 @@ mod strata_error_tests {
     #[test]
     fn test_error_details() {
         let branch_id = BranchId::new();
-        let e = StrataError::not_found(EntityRef::kv(branch_id, "mykey"));
+        let e = StrataError::not_found(EntityRef::kv(branch_id, "default", "mykey"));
         let details = e.details();
         assert!(!details.is_empty());
         assert!(details.fields().contains_key("entity"));
@@ -2172,7 +2176,7 @@ mod strata_error_tests {
     fn test_error_details_version_conflict() {
         let branch_id = BranchId::new();
         let e = StrataError::version_conflict(
-            EntityRef::kv(branch_id, "k"),
+            EntityRef::kv(branch_id, "default", "k"),
             Version::Txn(1),
             Version::Txn(2),
         );
@@ -2483,7 +2487,7 @@ mod adversarial_error_tests {
     #[test]
     fn test_conflict_on_constructor() {
         let branch_id = BranchId::new();
-        let entity = EntityRef::kv(branch_id, "shared-counter");
+        let entity = EntityRef::kv(branch_id, "default", "shared-counter");
         let e = StrataError::conflict_on(entity.clone(), "concurrent modification");
 
         assert_eq!(e.code(), ErrorCode::Conflict);
@@ -2596,7 +2600,7 @@ mod adversarial_error_tests {
     #[test]
     fn test_all_error_variants_have_wire_code() {
         let branch_id = BranchId::new();
-        let entity = EntityRef::kv(branch_id, "k");
+        let entity = EntityRef::kv(branch_id, "default", "k");
         // Construct every error variant and verify code() doesn't panic
         let errors: Vec<StrataError> = vec![
             StrataError::not_found(entity.clone()),
@@ -2635,7 +2639,7 @@ mod adversarial_error_tests {
     fn test_history_trimmed_code_and_details() {
         let branch_id = BranchId::new();
         let e = StrataError::history_trimmed(
-            EntityRef::kv(branch_id, "k"),
+            EntityRef::kv(branch_id, "default", "k"),
             Version::Txn(10),
             Version::Txn(50),
         );
@@ -2648,7 +2652,8 @@ mod adversarial_error_tests {
     #[test]
     fn test_path_not_found_is_not_found_but_has_invalid_path_code() {
         let branch_id = BranchId::new();
-        let e = StrataError::path_not_found(EntityRef::json(branch_id, "doc"), "/missing");
+        let e =
+            StrataError::path_not_found(EntityRef::json(branch_id, "default", "doc"), "/missing");
         // is_not_found returns true (classification)
         assert!(e.is_not_found());
         // but wire code is InvalidPath

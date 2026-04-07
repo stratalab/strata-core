@@ -416,6 +416,7 @@ impl EventLog {
             if let Version::Sequence(seq) = result {
                 let entity_ref = crate::search::EntityRef::Event {
                     branch_id: *branch_id,
+                    space: space.to_string(),
                     sequence: seq,
                 };
                 idx.index_document(&entity_ref, &text, None);
@@ -517,6 +518,7 @@ impl EventLog {
                     );
                     let entity_ref = crate::search::EntityRef::Event {
                         branch_id: *branch_id,
+                        space: space.to_string(),
                         sequence: seq,
                     };
                     idx.index_document(&entity_ref, &text, None);
@@ -1123,11 +1125,16 @@ impl crate::search::Searchable for EventLog {
                 // Only include Event results from this primitive
                 if let EntityRef::Event {
                     ref branch_id,
+                    ref space,
                     sequence,
                 } = entity_ref
                 {
+                    // Hydrate snippet from the hit's own space, not
+                    // the request scope. After Phase 0 the hit carries
+                    // its real space; using `req.space` here would
+                    // miss snippets for hits in other tenants.
                     let snippet = self
-                        .get(branch_id, &req.space, sequence)
+                        .get(branch_id, space, sequence)
                         .ok()
                         .flatten()
                         .map(|v| {

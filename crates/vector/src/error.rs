@@ -152,19 +152,25 @@ impl VectorError {
     /// Prefer this over the `From` impl when `branch_id` is available,
     /// so that `EntityRef` fields contain the real branch instead of a placeholder.
     pub fn into_strata_error(self, branch_id: BranchId) -> StrataError {
+        // NOTE: real `space` is not yet threaded through error conversion
+        // sites. Phase 2 of the space-correctness work will thread it
+        // alongside `branch_id`. Until then, errors from this path use
+        // "unknown" — same imprecision as existing "unknown" collection
+        // placeholder for VectorNotFound.
+        const UNKNOWN_SPACE: &str = "unknown";
         match self {
             VectorError::CollectionNotFound { name } => StrataError::NotFound {
-                entity_ref: EntityRef::vector(branch_id, name, ""),
+                entity_ref: EntityRef::vector(branch_id, UNKNOWN_SPACE, name, ""),
             },
             VectorError::CollectionAlreadyExists { name } => StrataError::InvalidOperation {
-                entity_ref: EntityRef::vector(branch_id, name, ""),
+                entity_ref: EntityRef::vector(branch_id, UNKNOWN_SPACE, name, ""),
                 reason: "Collection already exists".to_string(),
             },
             VectorError::VectorNotFound { key } => StrataError::NotFound {
-                entity_ref: EntityRef::vector(branch_id, "unknown", key),
+                entity_ref: EntityRef::vector(branch_id, UNKNOWN_SPACE, "unknown", key),
             },
             VectorError::ConfigMismatch { collection, field } => StrataError::InvalidOperation {
-                entity_ref: EntityRef::vector(branch_id, collection, ""),
+                entity_ref: EntityRef::vector(branch_id, UNKNOWN_SPACE, collection, ""),
                 reason: format!("Config field '{}' cannot be changed", field),
             },
             // Remaining variants don't use branch context — delegate to From impl
@@ -178,13 +184,14 @@ impl From<VectorError> for StrataError {
         // Fallback conversion without branch context.
         // Prefer `VectorError::into_strata_error(branch_id)` when the branch is known.
         let placeholder_branch_id = BranchId::new();
+        const UNKNOWN_SPACE: &str = "unknown";
 
         match e {
             VectorError::CollectionNotFound { name } => StrataError::NotFound {
-                entity_ref: EntityRef::vector(placeholder_branch_id, name, ""),
+                entity_ref: EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, name, ""),
             },
             VectorError::CollectionAlreadyExists { name } => StrataError::InvalidOperation {
-                entity_ref: EntityRef::vector(placeholder_branch_id, name, ""),
+                entity_ref: EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, name, ""),
                 reason: "Collection already exists".to_string(),
             },
             VectorError::DimensionMismatch { expected, got } => {
@@ -194,7 +201,7 @@ impl From<VectorError> for StrataError {
                 message: format!("Invalid dimension: {} (must be > 0)", dimension),
             },
             VectorError::VectorNotFound { key } => StrataError::NotFound {
-                entity_ref: EntityRef::vector(placeholder_branch_id, "unknown", key),
+                entity_ref: EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, "unknown", key),
             },
             VectorError::EmptyEmbedding => StrataError::InvalidInput {
                 message: "Empty embedding".to_string(),
@@ -209,7 +216,7 @@ impl From<VectorError> for StrataError {
                 message: format!("Invalid key '{}': {}", key, reason),
             },
             VectorError::ConfigMismatch { collection, field } => StrataError::InvalidOperation {
-                entity_ref: EntityRef::vector(placeholder_branch_id, collection, ""),
+                entity_ref: EntityRef::vector(placeholder_branch_id, UNKNOWN_SPACE, collection, ""),
                 reason: format!("Config field '{}' cannot be changed", field),
             },
             VectorError::SearchLimitExceeded { requested, max } => StrataError::CapacityExceeded {

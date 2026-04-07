@@ -358,7 +358,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         // Check if document already exists (in write buffer or snapshot)
         if self.ctx.json_exists(&full_key)? {
             return Err(StrataError::invalid_operation(
-                EntityRef::json(self.branch_id(), doc_id),
+                EntityRef::json(self.branch_id(), self.namespace.space.as_str(), doc_id),
                 "document already exists",
             ));
         }

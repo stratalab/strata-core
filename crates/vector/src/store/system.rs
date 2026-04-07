@@ -23,7 +23,7 @@ impl VectorStore {
             });
         }
 
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, SYSTEM_SPACE, name);
 
         if self.collection_exists(branch_id, SYSTEM_SPACE, name)? {
             return Err(VectorError::CollectionAlreadyExists {
@@ -111,7 +111,7 @@ impl VectorStore {
         branch_id: BranchId,
         collection: &str,
     ) -> VectorResult<usize> {
-        let cid = CollectionId::new(branch_id, collection);
+        let cid = CollectionId::new(branch_id, SYSTEM_SPACE, collection);
         let state = self.state()?;
         Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
     }
@@ -134,7 +134,7 @@ impl VectorStore {
 
         {
             let state = self.state()?;
-            let collection_id = CollectionId::new(branch_id, name);
+            let collection_id = CollectionId::new(branch_id, SYSTEM_SPACE, name);
             state.backends.remove(&collection_id);
         }
 

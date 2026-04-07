@@ -1488,6 +1488,7 @@ mod tests {
         let branch_id = BranchId::new();
         EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: name.to_string(),
         }
     }
@@ -1754,6 +1755,7 @@ mod tests {
     fn kv_ref(branch_id: BranchId, key: &str) -> EntityRef {
         EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: key.to_string(),
         }
     }
@@ -2246,10 +2248,12 @@ mod tests {
         // Index a KV entity and an Event entity on the same branch
         let kv_doc = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "doc1".to_string(),
         };
         let event_doc = EntityRef::Event {
             branch_id,
+            space: "default".to_string(),
             sequence: 42,
         };
         index.index_document(&kv_doc, "hello world", None);
@@ -3670,6 +3674,7 @@ mod tests {
         for i in 0..5 {
             let doc_ref = EntityRef::Kv {
                 branch_id,
+                space: "default".to_string(),
                 key: format!("doc{}", i),
             };
             index.index_document(&doc_ref, "common term", None);
@@ -3689,6 +3694,7 @@ mod tests {
         // Index a doc with a UNIQUE term (not shared with previously sealed docs)
         let late_doc = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "late_doc".to_string(),
         };
         index.index_document(&late_doc, "xylophone", None);
@@ -3707,6 +3713,7 @@ mod tests {
         // Now the real test: index ANOTHER doc after seal
         let post_seal_doc = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "post_seal_doc".to_string(),
         };
         index.index_document(&post_seal_doc, "zeppelin", None);
@@ -3734,6 +3741,7 @@ mod tests {
         for i in 0..10 {
             let doc_ref = EntityRef::Kv {
                 branch_id,
+                space: "default".to_string(),
                 key: format!("pre_{}", i),
             };
             index.index_document(&doc_ref, &format!("term_{}", i), None);
@@ -3761,6 +3769,7 @@ mod tests {
                 for i in 0..20 {
                     let doc_ref = EntityRef::Kv {
                         branch_id,
+                        space: "default".to_string(),
                         key: format!("concurrent_t{}_{}", t, i),
                     };
                     idx.index_document(&doc_ref, &format!("concurrent_term_t{}_{}", t, i), None);
@@ -3944,14 +3953,14 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "doc0")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "doc0")
             })
             .map(|r| r.score);
         let doc1_score = result
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "doc1")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "doc1")
             })
             .map(|r| r.score);
 
@@ -3989,7 +3998,10 @@ mod tests {
         // doc1 has both words but not adjacent — should be filtered out
         for scored in &result {
             let entity = index.resolve_doc_id(scored.doc_id).unwrap();
-            if let EntityRef::Kv { ref key, .. } = entity {
+            if let EntityRef::Kv {
+                ref key, space: _, ..
+            } = entity
+            {
                 assert_ne!(key, "doc1", "doc1 should be filtered out in filter mode");
             }
         }
@@ -4028,7 +4040,7 @@ mod tests {
             .iter()
             .filter_map(|s| {
                 let e = index.resolve_doc_id(s.doc_id)?;
-                if let EntityRef::Kv { key, .. } = e {
+                if let EntityRef::Kv { key, space: _, .. } = e {
                     Some(key)
                 } else {
                     None
@@ -4056,7 +4068,7 @@ mod tests {
             .iter()
             .filter_map(|s| {
                 let e = index.resolve_doc_id(s.doc_id)?;
-                if let EntityRef::Kv { key, .. } = e {
+                if let EntityRef::Kv { key, space: _, .. } = e {
                     Some(key)
                 } else {
                     None
@@ -4154,7 +4166,10 @@ mod tests {
             "only doc matching both phrases should survive"
         );
         let entity = index.resolve_doc_id(result[0].doc_id).unwrap();
-        if let EntityRef::Kv { ref key, .. } = entity {
+        if let EntityRef::Kv {
+            ref key, space: _, ..
+        } = entity
+        {
             assert_eq!(key, "both");
         } else {
             panic!("expected Kv entity");
@@ -4264,14 +4279,14 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "doc0")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "doc0")
             })
             .unwrap();
         let boosted_doc0 = boosted
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "doc0")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "doc0")
             })
             .unwrap();
 
@@ -4329,7 +4344,7 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "both")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "both")
             })
             .unwrap()
             .score;
@@ -4337,7 +4352,7 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "one")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "one")
             })
             .unwrap()
             .score;
@@ -4462,7 +4477,7 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "close")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "close")
             })
             .unwrap()
             .score;
@@ -4470,7 +4485,7 @@ mod tests {
             .iter()
             .find(|r| {
                 let e = index.resolve_doc_id(r.doc_id).unwrap();
-                matches!(e, EntityRef::Kv { ref key, .. } if key == "far")
+                matches!(e, EntityRef::Kv { ref key, space: _, .. } if key == "far")
             })
             .unwrap()
             .score;

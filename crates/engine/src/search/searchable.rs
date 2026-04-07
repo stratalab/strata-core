@@ -739,10 +739,12 @@ mod tests {
         // Index some documents
         let ref1 = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "doc1".to_string(),
         };
         let ref2 = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "doc2".to_string(),
         };
         index.index_document(&ref1, "hello world test", None);

@@ -573,8 +573,15 @@ fn test_command_vector_sample() {
 fn test_output_search_results_with_stats() {
     test_output_round_trip(Output::SearchResults {
         hits: vec![SearchResultHit {
-            entity: "key1".to_string(),
-            primitive: "kv".to_string(),
+            entity_ref: crate::types::EntityRefOutput {
+                kind: "kv".to_string(),
+                branch_id: "00000000-0000-0000-0000-000000000000".to_string(),
+                space: Some("default".to_string()),
+                key: Some("key1".to_string()),
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
             score: 0.95,
             rank: 1,
             snippet: Some("matched text".to_string()),

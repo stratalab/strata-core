@@ -46,7 +46,7 @@ pub fn event_append(
             super::embed_hook::SHADOW_EVENT,
             &event_key,
             text,
-            strata_core::EntityRef::event(core_branch_id, sequence),
+            strata_core::EntityRef::event(core_branch_id, &space, sequence),
         );
     }
 
@@ -245,7 +245,7 @@ pub fn event_batch_append(
                         super::embed_hook::SHADOW_EVENT,
                         &event_key,
                         text,
-                        strata_core::EntityRef::event(core_branch_id, seq),
+                        strata_core::EntityRef::event(core_branch_id, &space, seq),
                     );
                 }
             }

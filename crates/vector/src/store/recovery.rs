@@ -17,10 +17,11 @@ impl VectorStore {
     pub fn replay_create_collection(
         &self,
         branch_id: BranchId,
+        space: &str,
         name: &str,
         config: VectorConfig,
     ) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
 
         // Check if collection already exists in backend
         let state = self.state()?;
@@ -70,8 +71,13 @@ impl VectorStore {
     ///
     /// IMPORTANT: This method is for WAL replay during recovery.
     /// It does NOT write to WAL.
-    pub fn replay_delete_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, name);
+    pub fn replay_delete_collection(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        name: &str,
+    ) -> VectorResult<()> {
+        let collection_id = CollectionId::new(branch_id, space, name);
 
         // Remove in-memory backend
         let state = self.state()?;
@@ -94,6 +100,7 @@ impl VectorStore {
     pub fn replay_upsert(
         &self,
         branch_id: BranchId,
+        space: &str,
         collection: &str,
         key: &str,
         vector_id: VectorId,
@@ -102,7 +109,7 @@ impl VectorStore {
         source_ref: Option<strata_core::EntityRef>,
         created_at: u64,
     ) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         let state = self.state()?;
         let mut backend = state.backends.get_mut(&collection_id).ok_or_else(|| {
@@ -138,12 +145,13 @@ impl VectorStore {
     pub fn replay_delete(
         &self,
         branch_id: BranchId,
+        space: &str,
         collection: &str,
         _key: &str,
         vector_id: VectorId,
         deleted_at: u64,
     ) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, collection);
+        let collection_id = CollectionId::new(branch_id, space, collection);
 
         let state = self.state()?;
         if let Some(mut backend) = state.backends.get_mut(&collection_id) {
@@ -324,7 +332,7 @@ impl VectorStore {
                 // Config missing — collection was deleted by the merge.
                 // Drop the in-memory backend if any (so search doesn't return
                 // stale results) and return.
-                let collection_id = CollectionId::new(branch_id, collection_name);
+                let collection_id = CollectionId::new(branch_id, space, collection_name);
                 state.backends.remove(&collection_id);
                 return Ok(0);
             }
@@ -343,7 +351,7 @@ impl VectorStore {
             .try_into()
             .map_err(|e: VectorError| VectorError::Storage(e.to_string()))?;
 
-        let collection_id = CollectionId::new(branch_id, collection_name);
+        let collection_id = CollectionId::new(branch_id, space, collection_name);
 
         // ----------------------------------------------------------------
         // 2. Take ownership of the old backend (so we can read embeddings
@@ -440,7 +448,7 @@ impl VectorStore {
 
                 if is_from_source {
                     if let Some(src_bid) = source_branch_id {
-                        let src_cid = CollectionId::new(src_bid, collection_name);
+                        let src_cid = CollectionId::new(src_bid, space, collection_name);
                         let src_emb = state
                             .backends
                             .get(&src_cid)
@@ -478,7 +486,7 @@ impl VectorStore {
                         Some(emb) => emb.to_vec(),
                         None => {
                             if let Some(src_bid) = source_branch_id {
-                                let src_cid = CollectionId::new(src_bid, collection_name);
+                                let src_cid = CollectionId::new(src_bid, space, collection_name);
                                 let src_emb = state
                                     .backends
                                     .get(&src_cid)
@@ -590,10 +598,10 @@ impl VectorStore {
     pub fn collection_backend_stats(
         &self,
         branch_id: BranchId,
-        _space: &str,
+        space: &str,
         name: &str,
     ) -> Option<(&'static str, usize)> {
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
         let state = self.state().ok()?;
         state
             .backends

@@ -117,7 +117,8 @@ fn test_search_with_primitive_filter() {
     match result {
         Ok(Output::SearchResults { hits, .. }) => {
             assert!(!hits.is_empty(), "Should find KV data via BM25");
-            assert_eq!(hits[0].entity, "test_key");
+            assert_eq!(hits[0].entity_ref.kind, "kv");
+            assert_eq!(hits[0].entity_ref.key.as_deref(), Some("test_key"));
         }
         other => panic!("Expected SearchResults, got {:?}", other),
     }

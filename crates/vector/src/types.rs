@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn test_collection_id() {
         let branch_id = BranchId::new();
-        let id = CollectionId::new(branch_id, "my_collection");
+        let id = CollectionId::new(branch_id, "default", "my_collection");
 
         assert_eq!(id.branch_id, branch_id);
         assert_eq!(id.name, "my_collection");
@@ -653,9 +653,9 @@ mod tests {
     #[test]
     fn test_collection_id_equality() {
         let branch_id = BranchId::new();
-        let id1 = CollectionId::new(branch_id, "collection1");
-        let id2 = CollectionId::new(branch_id, "collection1");
-        let id3 = CollectionId::new(branch_id, "collection2");
+        let id1 = CollectionId::new(branch_id, "default", "collection1");
+        let id2 = CollectionId::new(branch_id, "default", "collection1");
+        let id3 = CollectionId::new(branch_id, "default", "collection2");
 
         assert_eq!(id1, id2);
         assert_ne!(id1, id3);
@@ -667,9 +667,9 @@ mod tests {
         let branch_id = BranchId::new();
 
         let mut set = HashSet::new();
-        set.insert(CollectionId::new(branch_id, "collection1"));
-        set.insert(CollectionId::new(branch_id, "collection2"));
-        set.insert(CollectionId::new(branch_id, "collection1")); // Duplicate
+        set.insert(CollectionId::new(branch_id, "default", "collection1"));
+        set.insert(CollectionId::new(branch_id, "default", "collection2"));
+        set.insert(CollectionId::new(branch_id, "default", "collection1")); // Duplicate
 
         assert_eq!(set.len(), 2);
     }

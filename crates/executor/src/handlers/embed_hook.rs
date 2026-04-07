@@ -513,7 +513,7 @@ pub fn reindex_embeddings(
                             SHADOW_KV,
                             key,
                             &text,
-                            strata_core::EntityRef::kv(branch_id, key),
+                            strata_core::EntityRef::kv(branch_id, space, key),
                         );
                         kv_queued += 1;
                     }
@@ -543,7 +543,7 @@ pub fn reindex_embeddings(
                                 SHADOW_JSON,
                                 doc_id,
                                 &text,
-                                strata_core::EntityRef::json(branch_id, doc_id),
+                                strata_core::EntityRef::json(branch_id, space, doc_id),
                             );
                             json_queued += 1;
                         }
@@ -572,7 +572,7 @@ pub fn reindex_embeddings(
                             SHADOW_EVENT,
                             &event_key,
                             &text,
-                            strata_core::EntityRef::event(branch_id, seq),
+                            strata_core::EntityRef::event(branch_id, space, seq),
                         );
                         event_queued += 1;
                     }
@@ -655,7 +655,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("key-{}", i),
                 &format!("text for key {}", i),
-                strata_core::EntityRef::kv(branch_id, &format!("key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", &format!("key-{}", i)),
             );
         }
     }
@@ -726,7 +726,7 @@ mod tests {
             SHADOW_KV,
             "keep-1",
             "text one",
-            strata_core::EntityRef::kv(branch_id, "keep-1"),
+            strata_core::EntityRef::kv(branch_id, "default", "keep-1"),
         );
         maybe_embed_text(
             &p,
@@ -735,7 +735,7 @@ mod tests {
             SHADOW_KV,
             "to-delete",
             "text two",
-            strata_core::EntityRef::kv(branch_id, "to-delete"),
+            strata_core::EntityRef::kv(branch_id, "default", "to-delete"),
         );
         maybe_embed_text(
             &p,
@@ -744,7 +744,7 @@ mod tests {
             SHADOW_KV,
             "keep-2",
             "text three",
-            strata_core::EntityRef::kv(branch_id, "keep-2"),
+            strata_core::EntityRef::kv(branch_id, "default", "keep-2"),
         );
         assert_eq!(buffer_len(&p), 3);
 
@@ -785,7 +785,7 @@ mod tests {
             SHADOW_KV,
             "shared-key",
             "kv text",
-            strata_core::EntityRef::kv(branch_id, "shared-key"),
+            strata_core::EntityRef::kv(branch_id, "default", "shared-key"),
         );
         // Buffer an item in SHADOW_JSON with the same key name.
         maybe_embed_text(
@@ -795,7 +795,7 @@ mod tests {
             SHADOW_JSON,
             "shared-key",
             "json text",
-            strata_core::EntityRef::json(branch_id, "shared-key"),
+            strata_core::EntityRef::json(branch_id, "default", "shared-key"),
         );
         assert_eq!(buffer_len(&p), 2);
 
@@ -841,7 +841,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("drop-key-{}", i),
                 &format!("text {}", i),
-                strata_core::EntityRef::kv(branch_id, &format!("drop-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", &format!("drop-key-{}", i)),
             );
         }
         assert_eq!(buffer_len(&p), 5);
@@ -880,7 +880,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("nrt-key-{}", i),
                 &format!("nrt text {}", i),
-                strata_core::EntityRef::kv(branch_id, &format!("nrt-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", &format!("nrt-key-{}", i)),
             );
         }
         assert_eq!(buffer_len(&p), 3);
@@ -919,7 +919,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("flush-cmd-key-{}", i),
                 &format!("text {}", i),
-                strata_core::EntityRef::kv(branch_id, &format!("flush-cmd-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", &format!("flush-cmd-key-{}", i)),
             );
         }
 

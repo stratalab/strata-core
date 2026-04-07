@@ -6,8 +6,29 @@
 //! - **Raw** (`--raw`): Bare values, no quotes, no type prefixes
 
 use strata_executor::{
-    BranchDiffResult, Error, ErrorSeverity, ForkInfo, MergeInfo, Output, Value, VersionedValue,
+    BranchDiffResult, EntityRefOutput, Error, ErrorSeverity, ForkInfo, MergeInfo, Output, Value,
+    VersionedValue,
 };
+
+/// Render an `EntityRefOutput` as a short human-readable identifier
+/// for CLI output. Mirrors the `Display` impl on `strata_core::EntityRef`.
+fn display_entity(r: &EntityRefOutput) -> String {
+    let space = r.space.as_deref().unwrap_or("");
+    match r.kind.as_str() {
+        "kv" | "vector" | "graph" => {
+            let key = r.key.as_deref().unwrap_or("");
+            if let Some(coll) = r.collection.as_deref() {
+                format!("{}/{}/{}", space, coll, key)
+            } else {
+                format!("{}/{}", space, key)
+            }
+        }
+        "json" => format!("{}/{}", space, r.doc_id.as_deref().unwrap_or("")),
+        "event" => format!("{}/seq:{}", space, r.sequence.unwrap_or(0)),
+        "branch" => r.branch_id.clone(),
+        _ => r.key.clone().unwrap_or_default(),
+    }
+}
 
 /// Output formatting mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -412,7 +433,14 @@ fn format_raw(output: &Output) -> String {
         Output::Metrics(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
         Output::SearchResults { hits, .. } => hits
             .iter()
-            .map(|h| format!("{}\t{}\t{}", h.entity, h.primitive, h.score))
+            .map(|h| {
+                format!(
+                    "{}\t{}\t{}",
+                    display_entity(&h.entity_ref),
+                    h.entity_ref.kind,
+                    h.score
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n"),
         Output::SampleResult { items, .. } => items
@@ -1076,8 +1104,8 @@ fn format_human(output: &Output) -> String {
                         format!(
                             "{}) \"{}\" [{}] (score: {:.3}){}",
                             i + 1,
-                            h.entity,
-                            h.primitive,
+                            display_entity(&h.entity_ref),
+                            h.entity_ref.kind,
                             h.score,
                             snippet
                         )

@@ -294,6 +294,7 @@ impl PrimitiveMergeHandler for KvMergeHandler {
 /// carries the in-memory BM25 update payload, which is non-transactional
 /// and lives in the `InvertedIndex` engine extension.
 struct JsonAffectedDoc {
+    space: String,
     doc_id: String,
     /// Post-merge document value, or `None` if the merge deleted the doc.
     new_value: Option<JsonValue>,
@@ -487,7 +488,11 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
         // (doc_id, new_value).
         let bm25_affected: Vec<JsonAffectedDoc> = per_doc
             .into_iter()
-            .map(|(_space, doc_id, _old, new_value)| JsonAffectedDoc { doc_id, new_value })
+            .map(|(space, doc_id, _old, new_value)| JsonAffectedDoc {
+                space,
+                doc_id,
+                new_value,
+            })
             .collect();
         *self.affected.lock() = bm25_affected;
 
@@ -511,8 +516,12 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
         let affected = std::mem::take(&mut *self.affected.lock());
         for doc in &affected {
             let r = match &doc.new_value {
-                Some(v) => JsonStore::index_json_doc(ctx.db, &ctx.target_id, &doc.doc_id, v),
-                None => JsonStore::deindex_json_doc(ctx.db, &ctx.target_id, &doc.doc_id),
+                Some(v) => {
+                    JsonStore::index_json_doc(ctx.db, &ctx.target_id, &doc.space, &doc.doc_id, v)
+                }
+                None => {
+                    JsonStore::deindex_json_doc(ctx.db, &ctx.target_id, &doc.space, &doc.doc_id)
+                }
             };
             if let Err(e) = r {
                 tracing::warn!(

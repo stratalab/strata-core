@@ -316,7 +316,7 @@ impl JsonStore {
         })?;
 
         // Update inverted index for BM25 search (zero overhead when disabled)
-        Self::index_json_doc(&self.db, branch_id, doc_id, &value)?;
+        Self::index_json_doc(&self.db, branch_id, space, doc_id, &value)?;
 
         Ok(version)
     }
@@ -451,6 +451,7 @@ impl JsonStore {
     pub(crate) fn index_json_doc(
         db: &Arc<Database>,
         branch_id: &BranchId,
+        space: &str,
         doc_id: &str,
         value: &JsonValue,
     ) -> StrataResult<()> {
@@ -459,6 +460,7 @@ impl JsonStore {
             let text = serde_json::to_string(value.as_inner()).unwrap_or_default();
             let entity_ref = crate::search::EntityRef::Json {
                 branch_id: *branch_id,
+                space: space.to_string(),
                 doc_id: doc_id.to_string(),
             };
             idx.index_document(&entity_ref, &text, None);
@@ -474,12 +476,14 @@ impl JsonStore {
     pub(crate) fn deindex_json_doc(
         db: &Arc<Database>,
         branch_id: &BranchId,
+        space: &str,
         doc_id: &str,
     ) -> StrataResult<()> {
         let idx = db.extension::<crate::search::InvertedIndex>()?;
         if idx.is_enabled() {
             let entity_ref = crate::search::EntityRef::Json {
                 branch_id: *branch_id,
+                space: space.to_string(),
                 doc_id: doc_id.to_string(),
             };
             idx.remove_document(&entity_ref);
@@ -597,7 +601,7 @@ impl JsonStore {
         })?;
 
         // Update inverted index for BM25 search
-        Self::index_json_doc(&self.db, branch_id, doc_id, &result.1)?;
+        Self::index_json_doc(&self.db, branch_id, space, doc_id, &result.1)?;
 
         Ok(result)
     }
@@ -652,7 +656,7 @@ impl JsonStore {
 
         // Post-commit: update inverted index for BM25 search
         for (doc_id, (_, doc_value)) in doc_ids.iter().zip(results.iter()) {
-            Self::index_json_doc(&self.db, branch_id, doc_id, doc_value)?;
+            Self::index_json_doc(&self.db, branch_id, space, doc_id, doc_value)?;
         }
 
         Ok(results)
@@ -758,7 +762,7 @@ impl JsonStore {
         })?;
 
         // Update inverted index for BM25 search
-        Self::index_json_doc(&self.db, branch_id, doc_id, &doc_value)?;
+        Self::index_json_doc(&self.db, branch_id, space, doc_id, &doc_value)?;
 
         Ok(version)
     }
@@ -1470,11 +1474,15 @@ impl JsonStore {
                 // Only include Json results from this primitive
                 if let EntityRef::Json {
                     ref branch_id,
+                    ref space,
                     ref doc_id,
                 } = entity_ref
                 {
+                    // Hydrate snippet from the hit's own space, not
+                    // the request scope. See `event.rs` for the same
+                    // Phase 0 fix and rationale.
                     let snippet = self
-                        .get(branch_id, &req.space, doc_id, &JsonPath::root())
+                        .get(branch_id, space, doc_id, &JsonPath::root())
                         .ok()
                         .flatten()
                         .map(|v| {
@@ -1586,6 +1594,7 @@ impl crate::search::Searchable for JsonStore {
                     hits.push(SearchHit {
                         doc_ref: EntityRef::Json {
                             branch_id: req.branch_id,
+                            space: req.space.clone(),
                             doc_id: doc_id.clone(),
                         },
                         score: 1.0,

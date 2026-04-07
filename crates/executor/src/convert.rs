@@ -220,6 +220,7 @@ mod tests {
     fn test_not_found_kv() {
         let err = StrataError::not_found(EntityRef::kv(
             strata_core::types::BranchId::from_bytes([0; 16]),
+            "default",
             "mykey",
         ));
         let converted: Error = err.into();
@@ -232,7 +233,11 @@ mod tests {
     #[test]
     fn test_version_conflict() {
         let err = StrataError::version_conflict(
-            EntityRef::kv(strata_core::types::BranchId::from_bytes([0; 16]), "key"),
+            EntityRef::kv(
+                strata_core::types::BranchId::from_bytes([0; 16]),
+                "default",
+                "key",
+            ),
             Version::Txn(5),
             Version::Txn(6),
         );

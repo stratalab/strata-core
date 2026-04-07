@@ -177,6 +177,7 @@ impl KVStore {
             if index.is_enabled() {
                 let entity_ref = crate::search::EntityRef::Kv {
                     branch_id,
+                    space: space.to_string(),
                     key: key.to_string(),
                 };
                 index.index_document(&entity_ref, &text, None);
@@ -211,6 +212,7 @@ impl KVStore {
                 if index.is_enabled() {
                     let entity_ref = crate::search::EntityRef::Kv {
                         branch_id: *branch_id,
+                        space: space.to_string(),
                         key: key.to_string(),
                     };
                     index.remove_document(&entity_ref);
@@ -450,6 +452,7 @@ impl KVStore {
                 if let Some(ref text) = texts[i] {
                     let entity_ref = crate::search::EntityRef::Kv {
                         branch_id: *branch_id,
+                        space: space.to_string(),
                         key: key.clone(),
                     };
                     index.index_document(&entity_ref, text, None);
@@ -520,6 +523,7 @@ impl KVStore {
                     if results[i] {
                         let entity_ref = crate::search::EntityRef::Kv {
                             branch_id: *branch_id,
+                            space: space.to_string(),
                             key: key.clone(),
                         };
                         index.remove_document(&entity_ref);
@@ -642,8 +646,17 @@ impl crate::search::Searchable for KVStore {
             .into_iter()
             .filter_map(|scored| {
                 let entity_ref = index.resolve_doc_id(scored.doc_id)?;
-                let snippet = if let EntityRef::Kv { ref key, .. } = entity_ref {
-                    self.get(&req.branch_id, &req.space, key)
+                let snippet = if let EntityRef::Kv {
+                    ref branch_id,
+                    ref space,
+                    ref key,
+                } = entity_ref
+                {
+                    // Hydrate snippet from the hit's own space, not
+                    // the request scope. After Phase 0 the hit
+                    // carries its real space; using `req.space` here
+                    // would miss snippets for hits in other tenants.
+                    self.get(branch_id, space, key)
                         .ok()
                         .flatten()
                         .map(|v| match &v {
@@ -1302,6 +1315,7 @@ mod tests {
             response_a.hits[0].doc_ref,
             crate::search::EntityRef::Kv {
                 branch_id: branch_a,
+                space: "default".to_string(),
                 key: "doc_a".to_string(),
             }
         );
@@ -1314,6 +1328,7 @@ mod tests {
             response_b.hits[0].doc_ref,
             crate::search::EntityRef::Kv {
                 branch_id: branch_b,
+                space: "default".to_string(),
                 key: "doc_b".to_string(),
             }
         );
@@ -1399,6 +1414,7 @@ mod tests {
             response.hits[0].doc_ref,
             crate::search::EntityRef::Kv {
                 branch_id,
+                space: "default".to_string(),
                 key: "doc1".to_string(),
             }
         );
@@ -1489,6 +1505,7 @@ mod tests {
             response.hits[0].doc_ref,
             crate::search::EntityRef::Kv {
                 branch_id,
+                space: "default".to_string(),
                 key: "permanent".to_string(),
             }
         );

@@ -223,23 +223,30 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             bm25_hits.truncate(k);
 
             // Temporal post-filter: discard hits not visible at as_of timestamp.
+            //
+            // The namespace must come from **the hit's own space**, not
+            // the request's. After Phase 0 the hit carries its real
+            // space; using `request.space` here would silently miss
+            // hits in other tenants (and potentially fetch the wrong
+            // entity if a key happens to exist in `request.space` too).
             if let Some(as_of_ts) = request.as_of {
-                let ns = Arc::new(Namespace::new(request.branch_id, request.space.clone()));
-                bm25_hits.retain(|hit| {
-                    match &hit.doc_ref {
-                        EntityRef::Kv { key, .. } => db
-                            .get_at_timestamp(&Key::new_kv(ns.clone(), key.as_bytes()), as_of_ts)
+                bm25_hits.retain(|hit| match &hit.doc_ref {
+                    EntityRef::Kv { key, space, .. } => {
+                        let ns = Arc::new(Namespace::new(request.branch_id, space.clone()));
+                        db.get_at_timestamp(&Key::new_kv(ns, key.as_bytes()), as_of_ts)
                             .ok()
                             .flatten()
-                            .is_some(),
-                        EntityRef::Json { doc_id, .. } => db
-                            .get_at_timestamp(&Key::new_json(ns.clone(), doc_id), as_of_ts)
-                            .ok()
-                            .flatten()
-                            .is_some(),
-                        // Events are append-only — always visible once indexed.
-                        _ => true,
+                            .is_some()
                     }
+                    EntityRef::Json { doc_id, space, .. } => {
+                        let ns = Arc::new(Namespace::new(request.branch_id, space.clone()));
+                        db.get_at_timestamp(&Key::new_json(ns, doc_id), as_of_ts)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    }
+                    // Events are append-only — always visible once indexed.
+                    _ => true,
                 });
             }
 
@@ -302,7 +309,12 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                         Ok(matches) => {
                             for m in matches {
                                 hits.push(SearchHit {
-                                    doc_ref: EntityRef::vector(request.branch_id, coll, &m.key),
+                                    doc_ref: EntityRef::vector(
+                                        request.branch_id,
+                                        SYSTEM_SPACE,
+                                        coll,
+                                        &m.key,
+                                    ),
                                     score: m.score,
                                     rank: 0,
                                     snippet: None,
@@ -342,7 +354,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                             .flat_map(|results| results.into_iter())
                             .map(|m| {
                                 let doc_ref = m.source_ref.unwrap_or_else(|| {
-                                    EntityRef::vector(request.branch_id, coll, &m.key)
+                                    EntityRef::vector(request.branch_id, SYSTEM_SPACE, coll, &m.key)
                                 });
                                 let snippet = m
                                     .metadata
@@ -755,6 +767,7 @@ mod tests {
         SearchHit {
             doc_ref: EntityRef::Kv {
                 branch_id: test_branch(),
+                space: "default".to_string(),
                 key: key.into(),
             },
             score,
@@ -799,6 +812,7 @@ mod tests {
             result[0].doc_ref,
             EntityRef::Kv {
                 branch_id: test_branch(),
+                space: "default".to_string(),
                 key: "a".into()
             }
         );
@@ -832,6 +846,7 @@ mod tests {
             result[0].doc_ref,
             EntityRef::Kv {
                 branch_id: test_branch(),
+                space: "default".to_string(),
                 key: "a".into()
             }
         );
@@ -900,7 +915,7 @@ mod tests {
             .hits
             .iter()
             .filter_map(|h| match &h.doc_ref {
-                EntityRef::Kv { key, .. } => Some(key.as_str()),
+                EntityRef::Kv { key, space: _, .. } => Some(key.as_str()),
                 _ => None,
             })
             .collect();

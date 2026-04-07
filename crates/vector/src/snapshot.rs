@@ -41,14 +41,21 @@ use std::io::{Read, Write};
 use strata_core::value::Value;
 use strata_core::BranchId;
 
-/// Snapshot format version
-pub const VECTOR_SNAPSHOT_VERSION: u8 = 0x01;
+/// Snapshot format version.
+///
+/// v0x02 added per-collection `space` to `CollectionSnapshotHeader`.
+/// Older v0x01 snapshots are rejected outright (no backward-compat decoder).
+pub const VECTOR_SNAPSHOT_VERSION: u8 = 0x02;
 
 /// Collection snapshot header (MessagePack serialized)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CollectionSnapshotHeader {
-    /// Run ID for this collection
+    /// Branch ID for this collection
     pub branch_id: BranchId,
+    /// Space the collection lives in (e.g. `"default"`, `"tenant_a"`,
+    /// `"_system_"`). Pre-fix snapshots that omitted this field are
+    /// rejected by the version check.
+    pub space: String,
     /// Collection name
     pub name: String,
     /// Embedding dimension
@@ -105,10 +112,15 @@ impl VectorStore {
             .iter()
             .map(|entry| entry.key().clone())
             .collect();
+        // Sort by `(branch_id, space, name)` for deterministic snapshot
+        // output. Two collections with the same `(branch_id, name)` in
+        // different spaces are distinct entities and must serialize in
+        // a stable order.
         collection_ids.sort_by(|a, b| {
             a.branch_id
                 .as_bytes()
                 .cmp(b.branch_id.as_bytes())
+                .then(a.space.cmp(&b.space))
                 .then(a.name.cmp(&b.name))
         });
 
@@ -121,7 +133,11 @@ impl VectorStore {
             // Get config from the collection info (which gets it from KV)
             // Use "default" space for snapshot serialization (backwards compat)
             let config = self
-                .get_collection(collection_id.branch_id, "default", &collection_id.name)?
+                .get_collection(
+                    collection_id.branch_id,
+                    &collection_id.space,
+                    &collection_id.name,
+                )?
                 .ok_or_else(|| VectorError::CollectionNotFound {
                     name: collection_id.name.clone(),
                 })?
@@ -144,6 +160,7 @@ impl VectorStore {
             // Create header
             let header = CollectionSnapshotHeader {
                 branch_id: collection_id.branch_id,
+                space: collection_id.space.clone(),
                 name: collection_id.name.clone(),
                 dimension: config.dimension,
                 metric: config.metric.to_byte(),
@@ -173,10 +190,13 @@ impl VectorStore {
                     .write_u64::<LittleEndian>(vector_id.as_u64())
                     .map_err(|e| VectorError::Io(e.to_string()))?;
 
-                // Get key and metadata from KV
+                // Get key and metadata from KV using the collection's
+                // actual space — not a hardcoded `"default"`. Without
+                // this, snapshotting any collection in `_system_` or
+                // a tenant space would fail to fetch its keys.
                 let (key, metadata) = self.get_key_and_metadata(
                     collection_id.branch_id,
-                    "default",
+                    &collection_id.space,
                     &collection_id.name,
                     vector_id,
                 )?;
@@ -283,15 +303,16 @@ impl VectorStore {
                 storage_dtype: StorageDtype::F32,
             };
 
-            let collection_id = CollectionId::new(header.branch_id, &header.name);
+            let collection_id = CollectionId::new(header.branch_id, &header.space, &header.name);
 
-            // Restore collection configuration in KV
-            // Use "default" space for snapshot deserialization (backwards compat)
+            // Restore collection configuration in KV under the snapshot's
+            // recorded space. Snapshot v0x02 added the `space` field; older
+            // snapshots are rejected by the version check earlier.
             let collection_record = crate::CollectionRecord::new(&config);
             let config_key = strata_core::types::Key::new_vector_config(
                 std::sync::Arc::new(strata_core::types::Namespace::for_branch_space(
                     header.branch_id,
-                    "default",
+                    &header.space,
                 )),
                 &header.name,
             );
@@ -380,10 +401,13 @@ impl VectorStore {
                     None
                 };
 
-                // Store VectorRecord in KV (includes embedding for history support)
+                // Store VectorRecord in KV under the snapshot's
+                // recorded space (header.space). v0x02 of the
+                // snapshot format added `space` to the header so we
+                // can restore non-default-space collections correctly.
                 let record = VectorRecord::new(vector_id, embedding.clone(), metadata);
                 let kv_key =
-                    self.vector_key_internal(header.branch_id, "default", &header.name, &key);
+                    self.vector_key_internal(header.branch_id, &header.space, &header.name, &key);
                 let record_bytes = record.to_bytes()?;
                 self.db()
                     .transaction(header.branch_id, |txn| {

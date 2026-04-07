@@ -211,7 +211,7 @@ impl VectorStore {
         // stay in anonymous memory forever, causing OOM on large datasets.
         let data_dir = self.db.data_dir();
         if !data_dir.as_os_str().is_empty() {
-            let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.name);
+            let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.space, &id.name);
             if let Some(parent) = vec_path.parent() {
                 if let Err(e) = std::fs::create_dir_all(parent) {
                     warn!(
@@ -254,7 +254,7 @@ impl VectorStore {
         // Try mmap-accelerated reload (same logic as recover_from_db)
         let mut loaded_from_mmap = false;
         if use_mmap {
-            let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.name);
+            let vec_path = super::recovery::mmap_path(data_dir, id.branch_id, &id.space, &id.name);
             if vec_path.exists() {
                 match super::heap::VectorHeap::from_mmap(&vec_path, config.clone()) {
                     Ok(heap) if !heap.is_empty() => {
@@ -334,7 +334,7 @@ impl VectorStore {
         // Rebuild HNSW graphs (or load from mmap cache)
         let mut graphs_loaded = false;
         if use_mmap {
-            let gdir = super::graph_dir(data_dir, id.branch_id, &id.name);
+            let gdir = super::graph_dir(data_dir, id.branch_id, &id.space, &id.name);
             if let Ok(true) = backend.load_graphs_from_disk(&gdir) {
                 graphs_loaded = true;
             }
@@ -636,7 +636,7 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<()> {
-        let collection_id = CollectionId::new(branch_id, name);
+        let collection_id = CollectionId::new(branch_id, space, name);
         let state = self.state()?;
 
         // Fast path: check without entry overhead
@@ -746,9 +746,14 @@ impl strata_engine::search::Searchable for VectorStore {
                 };
 
             for m in matches {
-                let doc_ref = m
-                    .source_ref
-                    .unwrap_or_else(|| EntityRef::vector(req.branch_id, &col.name, &m.key));
+                // Shadow collections (`_system_embed_*`) always live in
+                // SYSTEM_SPACE (see `list_collections` call above). When a
+                // match has no source_ref we fall back to pointing at the
+                // shadow vector itself, which is in SYSTEM_SPACE — not
+                // `req.space` (the caller's scope).
+                let doc_ref = m.source_ref.unwrap_or_else(|| {
+                    EntityRef::vector(req.branch_id, SYSTEM_SPACE, &col.name, &m.key)
+                });
                 let snippet = m
                     .metadata
                     .as_ref()
@@ -1232,7 +1237,7 @@ mod tests {
             VectorId(2),
             vec![4.0, 5.0, 6.0],
             None,
-            EntityRef::json(branch_id, "test_key"),
+            EntityRef::json(branch_id, "default", "test_key"),
         );
         assert_eq!(record.embedding, vec![4.0, 5.0, 6.0]);
 
@@ -1826,11 +1831,11 @@ mod tests {
 
         // Replay collection creation
         store
-            .replay_create_collection(branch_id, "test", config)
+            .replay_create_collection(branch_id, "default", "test", config)
             .unwrap();
 
         // Backend should be created
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         assert!(store
             .backends()
             .unwrap()
@@ -1845,10 +1850,10 @@ mod tests {
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         store
-            .replay_create_collection(branch_id, "test", config)
+            .replay_create_collection(branch_id, "default", "test", config)
             .unwrap();
 
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         assert!(store
             .backends()
             .unwrap()
@@ -1856,7 +1861,9 @@ mod tests {
             .contains_key(&collection_id));
 
         // Replay deletion
-        store.replay_delete_collection(branch_id, "test").unwrap();
+        store
+            .replay_delete_collection(branch_id, "default", "test")
+            .unwrap();
 
         assert!(!store
             .backends()
@@ -1872,7 +1879,7 @@ mod tests {
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         store
-            .replay_create_collection(branch_id, "test", config)
+            .replay_create_collection(branch_id, "default", "test", config)
             .unwrap();
 
         // Replay upsert with specific VectorId
@@ -1880,6 +1887,7 @@ mod tests {
         store
             .replay_upsert(
                 branch_id,
+                "default",
                 "test",
                 "doc1",
                 vector_id,
@@ -1891,7 +1899,7 @@ mod tests {
             .unwrap();
 
         // Verify vector exists in backend
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         let state = store.backends().unwrap();
         let backend = state.backends.get(&collection_id).unwrap();
         assert!(backend.contains(vector_id));
@@ -1905,7 +1913,7 @@ mod tests {
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         store
-            .replay_create_collection(branch_id, "test", config)
+            .replay_create_collection(branch_id, "default", "test", config)
             .unwrap();
 
         // Replay upsert with high VectorId
@@ -1913,6 +1921,7 @@ mod tests {
         store
             .replay_upsert(
                 branch_id,
+                "default",
                 "test",
                 "doc",
                 high_id,
@@ -1924,7 +1933,7 @@ mod tests {
             .unwrap();
 
         // Verify the vector exists
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         let state = store.backends().unwrap();
         let backend = state.backends.get(&collection_id).unwrap();
         assert!(backend.contains(high_id));
@@ -1937,7 +1946,7 @@ mod tests {
 
         let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         store
-            .replay_create_collection(branch_id, "test", config)
+            .replay_create_collection(branch_id, "default", "test", config)
             .unwrap();
 
         // Replay upsert
@@ -1945,6 +1954,7 @@ mod tests {
         store
             .replay_upsert(
                 branch_id,
+                "default",
                 "test",
                 "doc",
                 vector_id,
@@ -1955,7 +1965,7 @@ mod tests {
             )
             .unwrap();
 
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         {
             let state = store.backends().unwrap();
             assert!(state
@@ -1967,7 +1977,7 @@ mod tests {
 
         // Replay deletion
         store
-            .replay_delete(branch_id, "test", "doc", vector_id, 2000)
+            .replay_delete(branch_id, "default", "test", "doc", vector_id, 2000)
             .unwrap();
 
         {
@@ -1986,7 +1996,14 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Replay delete on non-existent collection should succeed (idempotent)
-        let result = store.replay_delete(branch_id, "nonexistent", "doc", VectorId::new(1), 1000);
+        let result = store.replay_delete(
+            branch_id,
+            "default",
+            "nonexistent",
+            "doc",
+            VectorId::new(1),
+            1000,
+        );
         assert!(result.is_ok());
     }
 
@@ -1999,12 +2016,13 @@ mod tests {
 
         // Replay a sequence of operations
         store
-            .replay_create_collection(branch_id, "col1", config.clone())
+            .replay_create_collection(branch_id, "default", "col1", config.clone())
             .unwrap();
 
         store
             .replay_upsert(
                 branch_id,
+                "default",
                 "col1",
                 "v1",
                 VectorId::new(1),
@@ -2018,6 +2036,7 @@ mod tests {
         store
             .replay_upsert(
                 branch_id,
+                "default",
                 "col1",
                 "v2",
                 VectorId::new(2),
@@ -2029,11 +2048,11 @@ mod tests {
             .unwrap();
 
         store
-            .replay_delete(branch_id, "col1", "v1", VectorId::new(1), 3000)
+            .replay_delete(branch_id, "default", "col1", "v1", VectorId::new(1), 3000)
             .unwrap();
 
         // Verify final state
-        let collection_id = CollectionId::new(branch_id, "col1");
+        let collection_id = CollectionId::new(branch_id, "default", "col1");
         let state = store.backends().unwrap();
         let backend = state.backends.get(&collection_id).unwrap();
 
@@ -2082,7 +2101,7 @@ mod tests {
             .insert(branch_id, "default", "test", "c", &[0.0, 0.0, 1.0], None)
             .unwrap();
 
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
 
         // Call post_merge_reload — the old backend will be extracted
         // per-collection and used to resolve legacy empty-embedding records.
@@ -2132,7 +2151,7 @@ mod tests {
             .unwrap();
 
         // Verify 2 vectors in backend
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         {
             let state = store.state().unwrap();
             assert_eq!(state.backends.get(&collection_id).unwrap().len(), 2);
@@ -2419,6 +2438,7 @@ mod tests {
 
         let source = EntityRef::Kv {
             branch_id,
+            space: "default".to_string(),
             key: "original_key".to_string(),
         };
         store
@@ -2610,7 +2630,7 @@ mod tests {
         // Evict from memory to force re-loading
         {
             let state = store.state().unwrap();
-            let collection_id = CollectionId::new(branch_id, "concurrent_test");
+            let collection_id = CollectionId::new(branch_id, "default", "concurrent_test");
             state.backends.remove(&collection_id);
         }
 
@@ -2637,7 +2657,7 @@ mod tests {
 
         // Verify exactly one backend exists
         let state = store.state().unwrap();
-        let collection_id = CollectionId::new(branch_id, "concurrent_test");
+        let collection_id = CollectionId::new(branch_id, "default", "concurrent_test");
         assert!(state.backends.contains_key(&collection_id));
     }
 
@@ -3024,7 +3044,7 @@ mod tests {
         // Evict the backend from memory (simulates the cold-start scenario)
         {
             let state = store.state().unwrap();
-            let collection_id = CollectionId::new(branch_id, "reload_test");
+            let collection_id = CollectionId::new(branch_id, "default", "reload_test");
             state.backends.remove(&collection_id);
         }
 
@@ -3091,7 +3111,7 @@ mod tests {
 
         // Now remove the vector from the backend only (simulating crash/failure)
         let state = store.state().unwrap();
-        let collection_id = CollectionId::new(branch_id, "test");
+        let collection_id = CollectionId::new(branch_id, "default", "test");
         let mut backend = state.backends.get_mut(&collection_id).unwrap();
         let vector_id = entry.value.vector_id;
         backend.delete(vector_id).unwrap();
@@ -3181,7 +3201,7 @@ mod tests {
             // Remove backend from DashMap to force ensure_collection_loaded to reload
             {
                 let state = store.state().unwrap();
-                let cid = CollectionId::new(branch_id, "resurrect");
+                let cid = CollectionId::new(branch_id, "default", "resurrect");
                 state.backends.remove(&cid);
             }
 
@@ -3213,7 +3233,7 @@ mod tests {
 
             if !config_exists {
                 let state = store.state().unwrap();
-                let cid = CollectionId::new(branch_id, "resurrect");
+                let cid = CollectionId::new(branch_id, "default", "resurrect");
                 assert!(
                     !state.backends.contains_key(&cid),
                     "Backend exists in DashMap but config was deleted from KV — \
@@ -3615,7 +3635,7 @@ mod tests {
         // Evict the backend to simulate recovery scenario
         {
             let state = store.state().unwrap();
-            let cid = CollectionId::new(branch_id, "recover_test");
+            let cid = CollectionId::new(branch_id, "default", "recover_test");
             state.backends.remove(&cid);
         }
 
@@ -4205,7 +4225,7 @@ mod tests {
             .unwrap();
 
         // Insert with a source_ref pointing back to a KV entity
-        let source = EntityRef::kv(branch_id, "original-key");
+        let source = EntityRef::kv(branch_id, "default", "original-key");
         store
             .system_insert_with_source(
                 branch_id,
