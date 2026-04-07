@@ -48,10 +48,10 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu cmake
 
-      - name: Build (embed statically linked)
+      - name: Build (full features: embed + arrow + cloud)
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.target == 'aarch64-unknown-linux-gnu' && 'aarch64-linux-gnu-gcc' || '' }}
-        run: cargo build --release --features embed --package strata-cli --target ${{ matrix.target }}
+        run: cargo build --release --features embed,arrow,cloud --package strata-cli --target ${{ matrix.target }}
 
       - name: Upload strata binary (unix)
         if: runner.os != 'Windows'
@@ -203,7 +203,7 @@ jobs:
       - name: Checkout Homebrew tap
         uses: actions/checkout@v4
         with:
-          repository: strata-ai-labs/homebrew-tap
+          repository: stratalab/homebrew-tap
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: homebrew-tap
 
@@ -224,22 +224,22 @@ jobs:
 
             on_macos do
               on_arm do
-                url "https://github.com/strata-ai-labs/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
+                url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-aarch64-apple-darwin.tar.gz"
                 sha256 "SHA_ARM64_PLACEHOLDER"
               end
               on_intel do
-                url "https://github.com/strata-ai-labs/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-x86_64-apple-darwin.tar.gz"
+                url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-x86_64-apple-darwin.tar.gz"
                 sha256 "SHA_X86_64_PLACEHOLDER"
               end
             end
 
             on_linux do
               on_arm do
-                url "https://github.com/strata-ai-labs/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-aarch64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-aarch64-unknown-linux-gnu.tar.gz"
                 sha256 "SHA_LINUX_ARM64_PLACEHOLDER"
               end
               on_intel do
-                url "https://github.com/strata-ai-labs/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-x86_64-unknown-linux-gnu.tar.gz"
+                url "https://github.com/stratalab/strata-core/releases/download/vVERSION_PLACEHOLDER/strata-vVERSION_PLACEHOLDER-x86_64-unknown-linux-gnu.tar.gz"
                 sha256 "SHA_LINUX_X86_64_PLACEHOLDER"
               end
             end
