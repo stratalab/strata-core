@@ -58,6 +58,7 @@ mod reexport_tests {
             seed: Some(42),
             stop_sequences: vec!["STOP".into()],
             stop_tokens: vec![1, 2],
+            grammar: None,
         };
         assert_eq!(req.prompt, "hello");
         assert_eq!(req.max_tokens, 10);
