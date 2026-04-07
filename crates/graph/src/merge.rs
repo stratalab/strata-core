@@ -1,14 +1,13 @@
-//! Semantic graph merge (Phase 3b of primitive-aware merge).
+//! Semantic graph merge.
 //!
-//! See `docs/design/branching/primitive-aware-merge.md` §Phase 3b.
+//! See `docs/design/branching/primitive-aware-merge.md`.
 //!
 //! ## Role
 //!
-//! Phase 3 (#2333) refused divergent graph branch merges with a tactical
-//! check. That was strictly conservative — disjoint additions on both sides
-//! of a fork were also rejected, even when the merge would have been
-//! perfectly safe. This module replaces that refusal with a real semantic
-//! merge:
+//! The fallback divergence-refusal in `branch_ops/mod.rs` rejects every
+//! merge where both branches modified graph state since fork — strictly
+//! conservative, but it rejects disjoint additions too. This module
+//! replaces that refusal with a real semantic merge:
 //!
 //! 1. **Decode** the packed adjacency lists from each side into logical
 //!    edge sets, plus node records, catalog, meta, and "other" graph keys.
@@ -20,6 +19,16 @@
 //! 4. **Re-encode** the projected adjacency lists back into packed binary
 //!    and emit puts/deletes only for affected keys.
 //!
+//! `merge_catalog` (the catalog merge step) decodes each side as a
+//! `BTreeSet<String>` and projects per-name presence, so concurrent
+//! independent `create_graph` calls on different names merge cleanly.
+//! The `CatalogDivergence` conflict variant is reserved but no longer
+//! produced from the additive merge.
+//!
+//! Both `merge_branches` and `cherry_pick_from_diff` go through this
+//! algorithm via the per-handler `plan` dispatch in
+//! `crates/engine/src/branch_ops/primitive_merge.rs`.
+//!
 //! ## Layering
 //!
 //! This module is **pure**: no engine dispatch, no transaction context,
@@ -27,17 +36,7 @@
 //! `compute_graph_merge` and converts the resulting `GraphMergeOutput`
 //! into the engine's per-handler `PrimitiveMergePlan` shape.
 //!
-//! ## Phase 3c additions on top of Phase 3b
-//!
-//! - **Additive catalog merging.** `merge_catalog` decodes each side as a
-//!   `BTreeSet<String>` and projects per-name presence. Concurrent
-//!   independent `create_graph` calls now merge cleanly. The
-//!   `CatalogDivergence` variant is reserved but no longer produced.
-//! - **Cherry-pick semantic merge.** `cherry_pick_from_diff` now uses the
-//!   same per-handler `plan` dispatch as `merge_branches`, so cherry-pick
-//!   inherits the Phase 3b semantic merge and Phase 3c additive catalog.
-//!
-//! ## What Phase 3b/3c don't do
+//! ## Out of scope
 //!
 //! - **Ontology semantic merge.** Ontology entries are merged as opaque KV
 //!   via the 14-case matrix. A richer ontology-aware merge (additive type
@@ -71,8 +70,8 @@ pub struct GraphCellState {
     pub graphs: BTreeMap<String, PerGraphState>,
     /// Raw `__catalog__` value if present on this side. Decoded by
     /// `merge_catalog` as a JSON list of graph names and merged
-    /// per-name additively (Phase 3c). `None` means "this side has not
-    /// touched the catalog" (NOT "this side deleted everything").
+    /// per-name additively. `None` means "this side has not touched the
+    /// catalog" (NOT "this side deleted everything").
     pub catalog: Option<Value>,
 }
 
@@ -88,11 +87,11 @@ pub struct PerGraphState {
     /// Graph metadata if present.
     pub meta: Option<GraphMeta>,
     /// Other graph keys (ontology, ref index, type index, edge counters).
-    /// Phase 3b merges these as opaque KV via the 14-case matrix; the
-    /// catalog is handled separately at the `GraphCellState` level. The
-    /// edge counter keys are intentionally INCLUDED here in the decoded
-    /// view but are *overwritten* by the projected counters during the
-    /// merge (we derive counts from the projected edge set).
+    /// These are merged as opaque KV via the 14-case matrix; the catalog
+    /// is handled separately at the `GraphCellState` level. The edge
+    /// counter keys are intentionally INCLUDED here in the decoded view
+    /// but are *overwritten* by the projected counters during the merge
+    /// (we derive counts from the projected edge set).
     pub other: HashMap<Vec<u8>, Value>,
 }
 
@@ -165,11 +164,11 @@ pub enum GraphMergeConflict {
     },
     /// Both branches modified the graph catalog differently. Always fatal.
     ///
-    /// **Reserved as of Phase 3c.** The current `merge_catalog` does
-    /// per-name additive set merging and never produces this variant. Kept
-    /// in the enum because it's `pub` and removing it would be a breaking
-    /// API change with no benefit. `is_fatal()` continues to return `true`
-    /// for it so any future caller that DID produce it (e.g. an opt-in
+    /// **Reserved.** The current `merge_catalog` does per-name additive
+    /// set merging and never produces this variant. Kept in the enum
+    /// because it's `pub` and removing it would be a breaking API change
+    /// with no benefit. `is_fatal()` continues to return `true` for it
+    /// so any future caller that DID produce it (e.g. an opt-in
     /// strict-catalog merge mode) would still abort the merge.
     CatalogDivergence,
     /// A non-graph-aware key (ontology, ref index, type index) had
@@ -568,19 +567,21 @@ pub fn compute_graph_merge(
 // Catalog merge
 // =============================================================================
 
-/// Additive set-union catalog merge (Phase 3c).
+/// Additive set-union catalog merge.
 ///
-/// The catalog (`__catalog__`) is a `Value::String` containing a JSON array of
-/// graph names. Phase 3b treated it as opaque KV and reported any divergent
-/// edit as a fatal `CatalogDivergence` — which meant two branches that each
-/// independently called `create_graph` could never merge.
+/// The catalog (`__catalog__`) is a `Value::String` containing a JSON array
+/// of graph names. Treating it as opaque KV would mean two branches that
+/// each independently called `create_graph` for different names could
+/// never merge — both writes would land on the same `__catalog__` key
+/// with different JSON values, looking like a conflict to the generic
+/// three-way merge.
 ///
-/// Phase 3c decodes both sides into `BTreeSet<String>` and projects per-name
-/// presence: a graph name is in the merged catalog iff it isn't dropped by a
-/// delete-without-readd on either side. This is the natural set semantics for
-/// a catalog of names — each name's presence is independent of every other
-/// name's, so concurrent independent `create_graph` / `delete_graph` calls
-/// always merge cleanly.
+/// Instead, decode both sides into `BTreeSet<String>` and project per-name
+/// presence: a graph name is in the merged catalog iff it isn't dropped
+/// by a delete-without-readd on either side. This is the natural set
+/// semantics for a catalog of names — each name's presence is independent
+/// of every other name's, so concurrent independent `create_graph` /
+/// `delete_graph` calls always merge cleanly.
 ///
 /// Per-name rule (for each name in `anc ∪ src ∪ tgt`):
 /// - If src deleted it (in anc, not in src) AND tgt didn't add it back → drop
@@ -591,10 +592,10 @@ pub fn compute_graph_merge(
 /// ∪ added_by_source ∪ added_by_target`.
 ///
 /// Because the projection is purely set-membership and the values being
-/// compared are unit (presence/absence), no conflict variant ever fires from
-/// this function. `GraphMergeConflict::CatalogDivergence` remains in the enum
-/// for backwards-compat (it's `pub`) but is unreachable from the current
-/// algorithm.
+/// compared are unit (presence/absence), no conflict variant ever fires
+/// from this function. `GraphMergeConflict::CatalogDivergence` remains
+/// in the enum for backwards-compat (it's `pub`) but is unreachable from
+/// the current algorithm.
 fn merge_catalog(
     ancestor: &GraphCellState,
     source: &GraphCellState,
@@ -1756,9 +1757,9 @@ mod tests {
     #[test]
     fn other_key_conflict_carries_source_and_target_values() {
         // Both branches concurrently set a different ontology entry for the
-        // same object_type. Phase 3b treats ontology as opaque KV via the
-        // 14-case matrix, but the resulting OtherKeyConflict must carry both
-        // sides' values so users can inspect what's actually different.
+        // same object_type. The merge treats ontology as opaque KV via the
+        // 14-case matrix, but the resulting OtherKeyConflict must carry
+        // both sides' values so users can inspect what's actually different.
         let key = b"g/__types__/object/Patient".to_vec();
         let mut ancestor = state_with_nodes("g", &[]);
         ancestor.graphs.get_mut("g").unwrap().other.insert(
@@ -1820,9 +1821,9 @@ mod tests {
 
     #[test]
     fn catalog_additive_disjoint_creates_succeeds() {
-        // Phase 3c: both branches concurrently created a different new graph.
-        // The Phase 3b behavior was a fatal CatalogDivergence; Phase 3c
-        // produces a set union [g1,g2,g3] with no conflicts.
+        // Both branches concurrently created a different new graph.
+        // Additive set-union catalog merge produces [g1,g2,g3] with no
+        // conflicts (rather than treating it as a fatal divergence).
         let mut ancestor = empty_state();
         ancestor.catalog = Some(Value::String("[\"g1\"]".to_string()));
         let mut source = empty_state();
@@ -1838,7 +1839,7 @@ mod tests {
                 .conflicts
                 .iter()
                 .any(|c| matches!(c, GraphMergeConflict::CatalogDivergence)),
-            "Phase 3c must not produce CatalogDivergence, got {:?}",
+            "additive catalog merge must not produce CatalogDivergence, got {:?}",
             result.conflicts
         );
         let merged = extract_catalog_put(&result).expect("expected a catalog Put");
@@ -1865,7 +1866,7 @@ mod tests {
                 .conflicts
                 .iter()
                 .any(|c| matches!(c, GraphMergeConflict::CatalogDivergence)),
-            "Phase 3c must not produce CatalogDivergence, got {:?}",
+            "additive catalog merge must not produce CatalogDivergence, got {:?}",
             result.conflicts
         );
         let merged = extract_catalog_put(&result).expect("expected a catalog Put");
@@ -1891,7 +1892,7 @@ mod tests {
                 .conflicts
                 .iter()
                 .any(|c| matches!(c, GraphMergeConflict::CatalogDivergence)),
-            "Phase 3c must not produce CatalogDivergence, got {:?}",
+            "additive catalog merge must not produce CatalogDivergence, got {:?}",
             result.conflicts
         );
         let merged = extract_catalog_put(&result).expect("expected a catalog Put");

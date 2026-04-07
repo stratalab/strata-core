@@ -16,10 +16,10 @@ use strata_core::{StrataError, StrataResult};
 /// allocation per pair, ever — all subsequent calls return `Arc::clone()`
 /// (atomic refcount bump, zero heap allocation). Fixes graph OOM (#1297).
 ///
-/// Phase 6: rekeyed from `BranchId` to `(BranchId, String)` so different
-/// spaces on the same branch get distinct namespaces. The `String` allocation
-/// per lookup is regrettable but necessary for hash key equality; profile if
-/// it shows up as a bottleneck.
+/// Keyed by `(BranchId, String)` so different spaces on the same branch
+/// get distinct namespaces. The `String` allocation per lookup is
+/// regrettable but necessary for hash key equality; profile if it shows
+/// up as a bottleneck.
 static NS_CACHE: Lazy<DashMap<(BranchId, String), Arc<Namespace>>> = Lazy::new(DashMap::new);
 
 /// Separator used between path segments in graph keys.
@@ -96,11 +96,10 @@ pub fn validate_edge_type(t: &str) -> StrataResult<()> {
 
 /// The reserved space name where the system branch DAG graph lives.
 ///
-/// Phase 6 narrowed this constant: it's used **only** by `branch_dag.rs`
-/// to keep the system DAG isolated from user spaces. It is NOT a default
-/// for user graph CRUD — user graph CRUD goes through
-/// `Strata::current_space` (default `"default"`), exactly like KV /
-/// JSON / Vector / Event.
+/// Used **only** by `branch_dag.rs` to keep the system DAG isolated from
+/// user spaces. It is NOT a default for user graph CRUD — user graph
+/// CRUD goes through `Strata::current_space` (default `"default"`),
+/// exactly like KV / JSON / Vector / Event.
 ///
 /// `_graph_` is also unreachable through the user API because space-name
 /// validation rejects names starting with `_`. Direct GraphStore
@@ -121,7 +120,7 @@ pub fn graph_namespace(branch_id: BranchId, space: &str) -> Arc<Namespace> {
 
 /// Remove a cached namespace entry for `(branch, space)`.
 ///
-/// Phase 6: removes a single `(branch, space)` entry. Callers that want to
+/// Removes a single `(branch, space)` entry. Callers that want to
 /// invalidate every space for a branch must iterate the cache themselves.
 pub fn invalidate_namespace_cache(branch_id: &BranchId, space: &str) {
     NS_CACHE.remove(&(*branch_id, space.to_string()));
@@ -163,8 +162,8 @@ pub fn parse_forward_adj_key(graph: &str, user_key: &str) -> Option<String> {
 
 /// Parse a reverse adjacency key back into node_id.
 ///
-/// Mirror of `parse_forward_adj_key`. Added for the Phase 3b semantic graph
-/// merge, which classifies storage entries by key shape and needs to identify
+/// Mirror of `parse_forward_adj_key`. Used by the semantic graph merge,
+/// which classifies storage entries by key shape and needs to identify
 /// reverse adjacency lists distinctly from forward adjacency lists.
 pub fn parse_reverse_adj_key(graph: &str, user_key: &str) -> Option<String> {
     let prefix = format!("{}{SEP}rev{SEP}", graph);
@@ -782,8 +781,8 @@ mod tests {
 
     #[test]
     fn namespace_cache_different_spaces_return_different_namespaces() {
-        // Phase 6: same branch, two different spaces → distinct cache entries
-        // and distinct Namespace contents.
+        // Same branch, two different spaces → distinct cache entries and
+        // distinct Namespace contents.
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x07, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let ns_default = graph_namespace(branch, "default");
@@ -816,8 +815,8 @@ mod tests {
 
     #[test]
     fn invalidate_namespace_cache_only_evicts_target_space() {
-        // Phase 6: invalidating one space must not evict another space's
-        // namespace entry on the same branch.
+        // Invalidating one space must not evict another space's namespace
+        // entry on the same branch.
         let branch =
             BranchId::from_bytes([0xCA, 0xCE, 0x08, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
         let ns_default = graph_namespace(branch, "default");

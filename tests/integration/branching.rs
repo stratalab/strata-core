@@ -723,7 +723,7 @@ fn test_fork_diff_merge_roundtrip() {
 }
 
 // ============================================================================
-// Event Merge Safety (Phase 1 of primitive-aware merge)
+// Event Merge Safety
 // ============================================================================
 //
 // See docs/design/branching/primitive-aware-merge.md. The generic three-way
@@ -1000,7 +1000,7 @@ fn event_merge_target_only_appends_succeeds() {
 #[test]
 fn event_append_auto_registers_space() {
     // Regression test for the EventLog space auto-registration gap that was
-    // worked around in the Phase 1 cross-space merge test (PR #2330).
+    // worked around in an earlier cross-space merge test (PR #2330).
     //
     // `EventLog::append` must register non-default spaces with `SpaceIndex`
     // so that `branch_ops::merge_branches` (which iterates via
@@ -1148,16 +1148,15 @@ fn event_merge_cross_space_divergence_succeeds() {
 }
 
 // ============================================================================
-// Graph Merge Safety (Phase 3b of primitive-aware merge)
+// Graph Merge Safety: semantic three-way merge
 // ============================================================================
 //
-// See docs/design/branching/primitive-aware-merge.md §Phase 3b. Phase 3b
-// replaces Phase 3's tactical refusal of divergent graph merges with a
-// real semantic merge: decoded-edge-level diffing, additive merging of
-// disjoint edges, and referential integrity validation. Single-sided
-// merges still work, dangling-edge / orphan-reference scenarios still
-// reject (with structured errors), and disjoint additions on both sides
-// now SUCCEED instead of being conservatively rejected.
+// See docs/design/branching/primitive-aware-merge.md. The graph merge
+// performs decoded-edge-level diffing, additive merging of disjoint
+// edges, and referential integrity validation. Single-sided merges work,
+// dangling-edge / orphan-reference scenarios reject (with structured
+// errors), and disjoint additions on both sides SUCCEED rather than
+// being conservatively rejected.
 
 #[test]
 fn graph_merge_disjoint_node_additions_succeeds() {
@@ -1216,10 +1215,10 @@ fn graph_merge_disjoint_node_additions_succeeds() {
         )
         .unwrap();
 
-    // Phase 3b: disjoint additions on both sides merge cleanly. Phase 3
-    // would have rejected this scenario; the semantic merge correctly
-    // recognizes that source's "carol+alice→carol" and target's
-    // "dave+bob→dave" are independent and combinable.
+    // Disjoint additions on both sides merge cleanly. The earlier
+    // tactical refusal would have rejected this scenario; the semantic
+    // merge correctly recognizes that source's "carol+alice→carol" and
+    // target's "dave+bob→dave" are independent and combinable.
     branch_ops::merge_branches(
         &test_db.db,
         "source",
@@ -1227,7 +1226,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect("disjoint divergent graph merge should succeed under Phase 3b");
+    .expect("disjoint divergent graph merge should succeed");
 
     // After the merge, target has BOTH source's additions AND its own.
     assert!(p
@@ -1519,10 +1518,10 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     // Pre-fork: nodes alice and bob exist on target.
     // Source: deletes alice.
     // Target: adds an outgoing edge alice→bob (alice still exists on target).
-    // Phase 3b's semantic merge sees: projected nodes lacks alice, but
-    // projected edges has alice→bob → DanglingEdge / OrphanedReference.
-    // Both are fatal regardless of strategy, so the merge is refused with
-    // a structured error before any writes happen.
+    // The semantic merge sees: projected nodes lacks alice, but projected
+    // edges has alice→bob → DanglingEdge / OrphanedReference. Both are
+    // fatal regardless of strategy, so the merge is refused with a
+    // structured error before any writes happen.
     let test_db = TestDb::new();
     let branch_index = test_db.branch_index();
     let p = test_db.all_primitives();
@@ -1560,8 +1559,8 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
         .unwrap();
 
     // LWW must reject — referential integrity is fatal regardless of
-    // strategy. Phase 3b emits a structured error from the graph plan
-    // function naming the violation.
+    // strategy. The graph plan function emits a structured error naming
+    // the violation.
     let err = branch_ops::merge_branches(
         &test_db.db,
         "source",
@@ -1573,7 +1572,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     let msg = err.to_string();
     assert!(
         msg.contains("merge unsupported: graph referential integrity violation"),
-        "rejection must use the Phase 3b structured error, got: {msg}"
+        "rejection must use the structured error, got: {msg}"
     );
     assert!(
         msg.contains("alice"),
@@ -1587,7 +1586,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     assert!(
         err.to_string()
             .contains("merge unsupported: graph referential integrity violation"),
-        "Strict rejection should use the same Phase 3b structured error"
+        "Strict rejection should use the same structured error"
     );
 
     // Target state untouched: alice still exists, alice→bob edge intact.
@@ -1605,7 +1604,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
 }
 
 // ============================================================================
-// Phase 3b: new test cases
+// Additional graph merge test cases
 // ============================================================================
 
 #[test]
@@ -1614,7 +1613,8 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
 
     // Pre-fork: alice, bob, carol, dave (no edges).
     // Source adds alice→carol. Target adds bob→dave.
-    // Phase 3 would have rejected this. Phase 3b merges additively.
+    // The earlier tactical refusal would have rejected this; the
+    // semantic merge combines the disjoint edges additively.
     let test_db = TestDb::new();
     let branch_index = test_db.branch_index();
     let p = test_db.all_primitives();
@@ -1749,7 +1749,7 @@ fn graph_merge_dangling_edge_rejected() {
     let msg = err.to_string();
     assert!(
         msg.contains("merge unsupported: graph referential integrity violation"),
-        "rejection must use the Phase 3b structured error, got: {msg}"
+        "rejection must use the structured error, got: {msg}"
     );
     assert!(
         msg.contains("carol") || msg.contains("alice"),
@@ -1889,12 +1889,12 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
 }
 
 // ============================================================================
-// Phase 3c: Cherry-pick semantic graph merge + additive catalog
+// Cherry-pick semantic graph merge + additive catalog
 // ============================================================================
 
-/// Phase 3c: cherry-pick of disjoint graph divergences succeeds (Phase 3b's
-/// per-handler `plan` dispatch is now wired into `cherry_pick_from_diff`).
-/// Before Phase 3c, this scenario was rejected by the old tactical refusal.
+/// Cherry-pick of disjoint graph divergences succeeds: the per-handler
+/// `plan` dispatch is wired into `cherry_pick_from_diff`. Earlier, this
+/// scenario was rejected by the tactical refusal.
 #[test]
 fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     use strata_engine::branch_ops::CherryPickFilter;
@@ -1951,9 +1951,9 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
         )
         .unwrap();
 
-    // Cherry-pick with no filter (default = include everything). Phase 3c
-    // should hand this off to the per-handler plan dispatch, which produces
-    // the same semantic merge result as `merge_branches`.
+    // Cherry-pick with no filter (default = include everything). The
+    // cherry-pick path hands this off to the per-handler plan dispatch,
+    // which produces the same semantic merge result as `merge_branches`.
     branch_ops::cherry_pick_from_diff(
         &test_db.db,
         "source",
@@ -1961,7 +1961,7 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
         CherryPickFilter::default(),
         None,
     )
-    .expect("Phase 3c cherry-pick of disjoint graph divergences must succeed");
+    .expect("cherry-pick of disjoint graph divergences must succeed");
 
     // Target now has all four nodes, with bidirectional consistency on the
     // alice→carol edge that source added.
@@ -2003,9 +2003,9 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     );
 }
 
-/// Phase 3c: dangling-edge scenarios still get rejected through cherry-pick
-/// — referential integrity is enforced inside the graph plan and fatal
-/// conflicts propagate as `Err`.
+/// Dangling-edge scenarios are rejected through cherry-pick — referential
+/// integrity is enforced inside the graph plan and fatal conflicts
+/// propagate as `Err`.
 #[test]
 fn cherry_pick_graph_dangling_edge_rejected() {
     use strata_engine::branch_ops::CherryPickFilter;
@@ -2066,8 +2066,8 @@ fn cherry_pick_graph_dangling_edge_rejected() {
     );
 }
 
-/// Phase 3c: cherry-pick with `filter.keys` set to a partial subset of graph
-/// keys must refuse with the atomicity error — the filter would split a
+/// Cherry-pick with `filter.keys` set to a partial subset of graph keys
+/// must refuse with the atomicity error — the filter would split a
 /// (space, Graph) cell's interdependent actions and break bidirectional
 /// consistency.
 #[test]
@@ -2128,9 +2128,9 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
     );
 }
 
-/// Phase 3c: cherry-pick with `primitives = [KV]` cleanly drops all graph
-/// actions even when the source has divergent graph state. No atomicity
-/// error fires (the primitives filter partitions cells atomically).
+/// Cherry-pick with `primitives = [KV]` cleanly drops all graph actions
+/// even when the source has divergent graph state. No atomicity error
+/// fires (the primitives filter partitions cells atomically).
 #[test]
 fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     use strata_core::PrimitiveType;
@@ -2200,14 +2200,13 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     );
 }
 
-/// Phase 3c: cherry-pick where `filter.keys` is set to a non-graph key
-/// and the source has divergent graph data. The atomicity guard's
-/// "0 graph actions pass" branch must drop all graph actions atomically
-/// without raising an atomicity error. This is the only test that
-/// exercises the atomicity helper through the loop branch
-/// (`filter.keys.is_some()`) with a clean drop outcome — the
-/// `primitives = [KV]` test goes through the early-return path because
-/// `filter.keys` is None there.
+/// Cherry-pick where `filter.keys` is set to a non-graph key and the
+/// source has divergent graph data. The atomicity guard's "0 graph
+/// actions pass" branch must drop all graph actions atomically without
+/// raising an atomicity error. This is the only test that exercises the
+/// atomicity helper through the loop branch (`filter.keys.is_some()`)
+/// with a clean drop outcome — the `primitives = [KV]` test goes through
+/// the early-return path because `filter.keys` is None there.
 #[test]
 fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     use strata_engine::branch_ops::CherryPickFilter;
@@ -2279,8 +2278,8 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     );
 }
 
-/// Phase 3c: KV-only cherry-pick when neither side touched graph state
-/// must succeed without invoking the atomicity guard at all (no graph
+/// KV-only cherry-pick when neither side touched graph state must
+/// succeed without invoking the atomicity guard at all (no graph
 /// actions in the plan).
 #[test]
 fn cherry_pick_kv_only_no_graph_changes_works() {
@@ -2316,9 +2315,10 @@ fn cherry_pick_kv_only_no_graph_changes_works() {
     );
 }
 
-/// Phase 3c additive catalog: both branches concurrently `create_graph` for
-/// different names. Phase 3b would have rejected this with `CatalogDivergence`.
-/// Phase 3c merges the catalogs as a set union — both new graphs coexist.
+/// Additive catalog merge: both branches concurrently `create_graph` for
+/// different names. The earlier behavior rejected this with
+/// `CatalogDivergence`; the additive catalog merge merges the catalogs
+/// as a set union — both new graphs coexist.
 #[test]
 fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
     use strata_graph::types::NodeData;
@@ -2373,7 +2373,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect("Phase 3c additive catalog must merge concurrent creates of different graphs");
+    .expect("additive catalog must merge concurrent creates of different graphs");
 
     // Target now lists all three graphs.
     let graphs = p.graph.list_graphs(target_id, "default").unwrap();
@@ -2396,9 +2396,9 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
         .is_some());
 }
 
-/// Phase 3c additive catalog: source deletes one graph, target creates a
-/// different graph. Both intents are honored — the deleted graph is dropped
-/// from the catalog, the new graph is added.
+/// Additive catalog merge: source deletes one graph, target creates a
+/// different graph. Both intents are honored — the deleted graph is
+/// dropped from the catalog, the new graph is added.
 #[test]
 fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
     use strata_graph::types::NodeData;
@@ -2438,7 +2438,7 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect("Phase 3c additive catalog must handle mixed delete + create");
+    .expect("additive catalog must handle mixed delete + create");
 
     let graphs: std::collections::HashSet<String> = p
         .graph
@@ -3329,16 +3329,16 @@ fn cow_diff_matches_expected_complex() {
 }
 
 // ============================================================================
-// Phase 6: Graph space symmetry
+// Graph space symmetry
 // ============================================================================
 //
-// These tests verify that graph data can live in any user-named space, not
-// just the legacy `_graph_` space. Phase 6 made `Strata::graph_*` honor
-// `current_space` exactly like KV/JSON/Vector/Event do, removing the last
-// asymmetry in Claim 4.
+// These tests verify that graph data can live in any user-named space,
+// not just the reserved `_graph_` space. `Strata::graph_*` honors
+// `current_space` exactly like KV/JSON/Vector/Event do — graph
+// inherits branching uniformly with the other primitives.
 
-/// Phase 6: create a graph in a custom user space and verify it's queryable
-/// only from that space.
+/// Create a graph in a custom user space and verify it's queryable only
+/// from that space.
 #[test]
 fn graph_in_user_space_create_and_query_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
@@ -3399,8 +3399,8 @@ fn graph_in_user_space_create_and_query_succeeds() {
     );
 }
 
-/// Phase 6: two graphs with the same name in different spaces are
-/// fully independent — same node IDs, different data, no cross-contamination.
+/// Two graphs with the same name in different spaces are fully
+/// independent — same node IDs, different data, no cross-contamination.
 #[test]
 fn graph_in_two_spaces_independent() {
     use strata_graph::types::NodeData;
@@ -3453,8 +3453,8 @@ fn graph_in_two_spaces_independent() {
     assert_ne!(from_a.properties, from_b.properties);
 }
 
-/// Phase 6: a graph in a user space survives a fork — the child branch
-/// inherits the data via COW exactly like KV/JSON.
+/// A graph in a user space survives a fork — the child branch inherits
+/// the data via COW exactly like KV/JSON.
 #[test]
 fn graph_in_user_space_survives_fork() {
     use strata_graph::types::NodeData;
@@ -3500,11 +3500,11 @@ fn graph_in_user_space_survives_fork() {
         .is_none());
 }
 
-/// Phase 6: Phase 3b semantic merge applies to user-space graphs identically
-/// to legacy `_graph_` graphs. Disjoint additions on a user-space graph
-/// merge cleanly with bidirectional consistency.
+/// The semantic graph merge applies to user-space graphs identically
+/// to graphs in the reserved `_graph_` space. Disjoint additions on a
+/// user-space graph merge cleanly with bidirectional consistency.
 #[test]
-fn graph_in_user_space_phase_3b_semantic_merge_succeeds() {
+fn graph_in_user_space_semantic_merge_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
@@ -3563,7 +3563,7 @@ fn graph_in_user_space_phase_3b_semantic_merge_succeeds() {
         MergeStrategy::LastWriterWins,
         None,
     )
-    .expect("Phase 3b semantic merge must work for user-space graphs");
+    .expect("semantic merge must work for user-space graphs");
 
     // All four nodes present after merge.
     for n in &["alice", "bob", "carol", "dave"] {
@@ -3593,8 +3593,8 @@ fn graph_in_user_space_phase_3b_semantic_merge_succeeds() {
     assert!(carol_sources.contains("alice"));
 }
 
-/// Phase 6: Phase 3b referential integrity rejection still applies to
-/// user-space graphs.
+/// Referential integrity rejection applies to user-space graphs the
+/// same way it does to graphs in the reserved `_graph_` space.
 #[test]
 fn graph_in_user_space_referential_integrity_rejects_dangling() {
     use strata_graph::types::{EdgeData, NodeData};
@@ -3651,12 +3651,12 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
     );
 }
 
-/// Phase 6: the lower-level `GraphStore::*` API accepts any space name,
-/// including the reserved `_graph_` space that `branch_dag.rs` uses for
-/// the system DAG. This is unreachable through the user-facing
-/// `Strata::graph_*` API (space-name validation rejects `_`-prefixed
-/// names), but direct GraphStore callers — branch_dag, recovery, test
-/// fixtures — must still be able to target it.
+/// The lower-level `GraphStore::*` API accepts any space name, including
+/// the reserved `_graph_` space that `branch_dag.rs` uses for the system
+/// DAG. This is unreachable through the user-facing `Strata::graph_*`
+/// API (space-name validation rejects `_`-prefixed names), but direct
+/// GraphStore callers — branch_dag, recovery, test fixtures — must still
+/// be able to target it.
 #[test]
 fn graph_store_accepts_reserved_system_dag_space() {
     use strata_graph::types::NodeData;

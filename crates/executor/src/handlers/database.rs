@@ -111,11 +111,11 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         });
 
     // -- Graphs --
-    // Phase 6: graphs honor `current_space`. `describe` summarizes the
-    // default space's graphs (where Strata API code lands by default).
-    // Multi-space describe — aggregating graphs across every space with
-    // data — is a separate concern; if you want to describe a different
-    // space's graphs, query it explicitly via `Strata::graph_*` after
+    // Graphs honor `current_space`. `describe` summarizes the default
+    // space's graphs (where Strata API code lands by default). Multi-space
+    // describe — aggregating graphs across every space with data — is a
+    // separate concern; if you want to describe a different space's
+    // graphs, query it explicitly via `Strata::graph_*` after
     // `set_space(...)`.
     let graph_space = "default";
     let graph_names = p

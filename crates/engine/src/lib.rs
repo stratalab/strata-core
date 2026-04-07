@@ -124,9 +124,9 @@ pub use branch_ops::{
     ThreeWayDiffEntry, ThreeWayDiffResult, TypedEntries, TypedEntryCell,
 };
 
-// Phase 3b primitive-aware merge: registration hook for graph semantic
-// merge. The graph crate registers its `compute_graph_merge` adapter
-// here at startup; engine's `GraphMergeHandler::plan` dispatches to it.
+// Registration hook for the graph semantic merge. The graph crate
+// registers its `compute_graph_merge` adapter here at startup; engine's
+// `GraphMergeHandler::plan` dispatches to it.
 pub use branch_ops::primitive_merge::{
     register_graph_merge_plan, GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan,
 };

@@ -562,12 +562,12 @@ fn test_spaces_independent_across_branches() {
 }
 
 // =============================================================================
-// Phase 6: Graph honors current_space (matches KV / JSON / Vector / Event)
+// Graph honors current_space (matches KV / JSON / Vector / Event)
 // =============================================================================
 
-/// Phase 6: `db.graph_create("g")` writes to `current_space/g`, not the
-/// legacy `_graph_/g`. Verifies that `Strata::graph_*` methods auto-fill
-/// `space` from `self.space_id()` exactly the way `kv_put` does.
+/// `db.graph_create("g")` writes to `current_space/g`, not the legacy
+/// `_graph_/g`. Verifies that `Strata::graph_*` methods auto-fill `space`
+/// from `self.space_id()` exactly the way `kv_put` does.
 #[test]
 fn graph_honors_current_space_via_strata_api() {
     let mut db = strata();
@@ -578,7 +578,7 @@ fn graph_honors_current_space_via_strata_api() {
 
     // Switch to a user space and create the SAME graph name with
     // a different node — this is only possible if graph honors
-    // current_space (Phase 6 behavior).
+    // current_space.
     db.set_space("tenant_a").unwrap();
     db.graph_create("social").unwrap();
     db.graph_add_node("social", "bob", None, None).unwrap();
@@ -609,7 +609,7 @@ fn graph_honors_current_space_via_strata_api() {
     );
 }
 
-/// Phase 6: graphs in three different user spaces are fully independent.
+/// Graphs in three different user spaces are fully independent.
 /// Strengthens `graph_honors_current_space_via_strata_api` by exercising
 /// three distinct spaces and verifying every (space, graph_name)
 /// combination is isolated.

@@ -41,12 +41,10 @@ pub(crate) fn read_edge_type_count(
 /// spaces that have been explicitly registered. Without this hook,
 /// branches with graph data have an empty space list, and
 /// `merge_branches` silently skips graph state entirely — which means
-/// Phase 3's graph divergence safety check never fires either. This is
+/// the graph divergence safety check never fires either. This is
 /// the same gap PR #2331 closed for EventLog.
 ///
-/// Phase 6: takes the target `space` as a parameter (was hardwired to
-/// `keys::GRAPH_SPACE` before). Callers pass the user space they want to
-/// write graph data into.
+/// Callers pass the user space they want to write graph data into.
 ///
 /// Skip the read+write if the metadata key already exists to avoid
 /// bloating the WAL with no-op puts on every graph mutation. The

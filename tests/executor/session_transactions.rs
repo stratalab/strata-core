@@ -2560,10 +2560,10 @@ fn all_primitives_atomic_rollback() {
 // ============================================================================
 // KV / JSON session bypass regression tests
 //
-// Phase 3 fixed the Event session dispatch bug where `as_of` was silently
-// dropped via `{ sequence, .. }` destructuring. KV and JSON had the same
-// bug and were not fixed until a later audit. These tests prove the bypass
-// is now in place for all four commands.
+// Earlier work fixed the Event session dispatch bug where `as_of` was
+// silently dropped via `{ sequence, .. }` destructuring. KV and JSON had
+// the same bug and were not fixed until a later audit. These tests prove
+// the bypass is now in place for all four commands.
 // ============================================================================
 
 #[test]

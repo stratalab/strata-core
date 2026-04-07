@@ -24,8 +24,8 @@ fn enrich_graph_error(
     match &err {
         Error::ConstraintViolation { .. } | Error::InvalidInput { .. } | Error::Internal { .. } => {
             // Check if this might be a "graph not found" scenario.
-            // Phase 6: probe the default space; this enrichment is best-effort
-            // and used only for hint formatting.
+            // Probe the default space; this enrichment is best-effort and
+            // used only for hint formatting.
             let graphs = match p.graph.list_graphs(branch_id, "default") {
                 Ok(g) => g,
                 Err(_) => return err,
@@ -62,10 +62,10 @@ fn enrich_ontology_error(
     // Pattern: "Object type 'X' is not declared in frozen ontology for graph 'G'"
     if msg.contains("is not declared in frozen ontology") {
         // Best-effort hint enrichment: probe the default space for matching
-        // type definitions. Phase 6 made graph data space-aware but the
-        // error enrichment path doesn't have a space in scope; hint
-        // misses are non-fatal so this is acceptable until enrich_graph_error
-        // is plumbed with the caller's space.
+        // type definitions. Graph data is space-aware but the error
+        // enrichment path doesn't have a space in scope; hint misses are
+        // non-fatal so this is acceptable until enrich_graph_error is
+        // plumbed with the caller's space.
         if msg.starts_with("Object type") {
             if let Ok(types) = p.graph.list_object_types(branch_id, "default", graph) {
                 if let Some(type_name) = extract_quoted(&msg) {

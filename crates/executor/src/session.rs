@@ -425,7 +425,7 @@ impl Session {
             | Command::KvBatchGet { space, .. }
             | Command::KvBatchDelete { space, .. }
             | Command::EventBatchAppend { space, .. }
-            // Phase 6: Graph commands also carry an optional space.
+            // Graph commands also carry an optional space.
             | Command::GraphCreate { space, .. }
             | Command::GraphDelete { space, .. }
             | Command::GraphList { space, .. }

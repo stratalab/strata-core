@@ -179,8 +179,8 @@ impl strata_engine::search::Searchable for GraphStore {
 
                 // Extract snippet from graph node data.
                 // The key format is "{graph}/n/{node_id}" (from keys::node_key).
-                // Phase 6: snippet read scopes to the search request's space.
-                // Same caveat as `index_node_for_search`: cross-space identical
+                // Snippet read scopes to the search request's space. Same
+                // caveat as `index_node_for_search`: cross-space identical
                 // node IDs collide in the index because EntityRef::Graph
                 // doesn't carry space.
                 let snippet = if let EntityRef::Graph { ref key, .. } = entity_ref {
@@ -229,8 +229,8 @@ impl GraphStore {
     ///
     /// Called after successful add_node/bulk_insert commits.
     ///
-    /// Phase 6 note: `EntityRef::Graph` does NOT carry the space, so two
-    /// graphs with the same `graph/node_id` in different spaces produce
+    /// Known limitation: `EntityRef::Graph` does NOT carry the space, so
+    /// two graphs with the same `graph/node_id` in different spaces produce
     /// colliding entries in the index. This matches the existing
     /// cross-space limitation for KV / JSON / Vector. Tracked as separate
     /// follow-up work; the `space` parameter here is preserved for forward

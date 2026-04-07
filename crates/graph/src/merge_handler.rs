@@ -1,4 +1,4 @@
-//! Engine bridge for the graph semantic merge (Phase 3b).
+//! Engine bridge for the graph semantic merge.
 //!
 //! The graph crate's `merge` module is pure (no engine dispatch). This
 //! module wires the algorithm into the engine's `PrimitiveMergeHandler`
@@ -22,7 +22,7 @@
 //! Test fixtures and application startup must call
 //! `register_graph_semantic_merge` before any `merge_branches` invocation.
 //! It is idempotent (the engine's `OnceCell`-backed slot ignores
-//! subsequent calls). If never called, the engine falls back to Phase 3's
+//! subsequent calls). If never called, the engine falls back to a
 //! tactical refusal of divergent graph merges.
 
 use std::collections::HashMap;
@@ -93,7 +93,7 @@ fn graph_plan_fn(ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
                 .join("; ");
             return Err(StrataError::invalid_input(format!(
                 "merge unsupported: graph referential integrity violation in space '{space}': \
-                 {summary}. See docs/design/branching/primitive-aware-merge.md §Phase 3b."
+                 {summary}. See docs/design/branching/primitive-aware-merge.md."
             )));
         }
 
@@ -168,9 +168,9 @@ fn format_fatal_conflict(conflict: &GraphMergeConflict) -> String {
             "orphaned reference: deleted node '{node_id}' in graph '{graph}' is still referenced by {edge_count} edge(s)"
         ),
         CatalogDivergence => {
-            // Phase 3c made `merge_catalog` additive, so this variant is
-            // no longer produced by the current algorithm. Kept here for
-            // forward compatibility — any future caller (e.g. an opt-in
+            // `merge_catalog` is additive, so this variant is no longer
+            // produced by the current algorithm. Kept here for forward
+            // compatibility — any future caller (e.g. an opt-in
             // strict-catalog mode) that DID push it would still abort the
             // merge with this message.
             "graph catalog modified differently on both sides — \
