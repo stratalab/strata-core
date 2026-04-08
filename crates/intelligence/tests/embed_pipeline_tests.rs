@@ -141,8 +141,13 @@ fn test_embed_model_state_is_send_and_sync() {
 
 #[test]
 fn test_embed_model_state_concurrent_get_or_load() {
-    // Multiple threads calling get_or_load concurrently should all get the
-    // same result without panicking.
+    // Multiple threads calling get_or_load concurrently should:
+    //   1. all see the same Ok/Err variant (no torn state under contention),
+    //   2. all return a healthy engine when the load succeeds, and
+    //   3. leave the state in a usable, cached condition (a follow-up serial
+    //      call hits the fast path with a stable Arc).
+    // We do NOT assert that all four concurrent results share the same Arc:
+    // the current implementation does not single-flight the underlying load.
     let state = Arc::new(EmbedModelState::default());
     let mut handles = Vec::new();
 
@@ -184,6 +189,25 @@ fn test_embed_model_state_concurrent_get_or_load() {
             let healthy = arc.lock().unwrap_or_else(|e| e.into_inner()).is_healthy();
             assert!(healthy, "thread {} returned an unhealthy engine", i);
         }
+
+        // Post-condition: even though concurrent loads may produce distinct
+        // Arcs, the state must end with *some* engine cached. A 5th serial
+        // call (no contention) hits the fast path, returns the stored Arc,
+        // and that Arc must be ptr_eq with itself on a follow-up call —
+        // proving the cache survived the race rather than being left empty
+        // or churning forever.
+        let post1 = state
+            .get_or_load(std::path::Path::new("/unused"), "miniLM", None)
+            .expect("post-race load should hit cache");
+        let post2 = state
+            .get_or_load(std::path::Path::new("/unused"), "miniLM", None)
+            .expect("post-race second load should hit cache");
+        assert!(
+            Arc::ptr_eq(&post1, &post2),
+            "two serial post-race calls must return the same cached Arc"
+        );
+        let healthy = post1.lock().unwrap_or_else(|e| e.into_inner()).is_healthy();
+        assert!(healthy, "post-race cached engine should be healthy");
     }
 }
 
