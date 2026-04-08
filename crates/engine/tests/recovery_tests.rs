@@ -2015,18 +2015,34 @@ fn test_concurrent_open_blocks_until_recovery_completes() {
     let path_b = Arc::clone(&path);
     let done_b = Arc::clone(&done);
     let handle_b = std::thread::spawn(move || {
-        let _db = DatabaseBuilder::new().open(&*path_b).unwrap();
-        done_b.load(Ordering::SeqCst)
+        let db = DatabaseBuilder::new().open(&*path_b).unwrap();
+        let observed_done = done_b.load(Ordering::SeqCst);
+        (db, observed_done)
     });
 
-    let _db_a = handle_a.join().unwrap();
-    let b_observed_recovery_done = handle_b.join().unwrap();
+    let db_a = handle_a.join().unwrap();
+    let (db_b, b_observed_recovery_done) = handle_b.join().unwrap();
 
     assert!(
         b_observed_recovery_done,
         "concurrent opener returned a Database before the first opener's \
          subsystem recovery completed — OPEN_DATABASES registry published \
          the Arc too early (Finding 1 regressed). See audit follow-up to #2354."
+    );
+
+    // Thread B should have taken the registry fast path and returned the
+    // same `Arc<Database>` as thread A (singleton-per-path invariant).
+    // Without this assertion, the test could pass spuriously if thread B
+    // fell through to its own independent open — in which case thread B's
+    // `done` flag would still be `true` (thread A already set it), but
+    // we would have two distinct `Database` instances for the same path,
+    // violating the singleton contract.
+    assert!(
+        Arc::ptr_eq(&db_a, &db_b),
+        "concurrent openers for the same path must be deduped through \
+         OPEN_DATABASES — thread B got a different Arc than thread A, \
+         meaning thread B ran its own parallel open instead of taking \
+         the registry fast path."
     );
 }
 
@@ -2084,7 +2100,7 @@ impl strata_engine::Subsystem for AlwaysFailingSubsystem {
 /// surfaces as a visible timeout rather than a hung test binary.
 #[test]
 fn test_recovery_failure_does_not_deadlock() {
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
     use strata_engine::DatabaseBuilder;
 
@@ -2102,8 +2118,7 @@ fn test_recovery_failure_does_not_deadlock() {
         let _ = tx.send(result.is_err());
     });
 
-    let result = rx.recv_timeout(Duration::from_secs(5));
-    match result {
+    match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(true) => {
             // Correct: recovery failed and the error propagated without
             // deadlocking. The Arc dropped cleanly, Drop for Database
@@ -2114,13 +2129,19 @@ fn test_recovery_failure_does_not_deadlock() {
             "AlwaysFailingSubsystem unexpectedly succeeded — test is \
              not exercising the failure path it was designed for"
         ),
-        Err(_) => panic!(
+        Err(RecvTimeoutError::Timeout) => panic!(
             "acquire_primary_db deadlocked on recovery failure. \
              Drop for Database tries to reacquire OPEN_DATABASES, but \
              acquire_primary_db was still holding the guard when the \
              Arc unwound through it. The error path must drop the \
              registry guard BEFORE the Arc drops. See audit follow-up \
              to #2354 Finding 1 review."
+        ),
+        Err(RecvTimeoutError::Disconnected) => panic!(
+            "worker thread exited without sending a result — likely \
+             panicked unexpectedly. This is NOT the deadlock this test \
+             is designed to catch; rerun with RUST_BACKTRACE=1 to see \
+             the underlying panic."
         ),
     }
 }
@@ -2148,7 +2169,7 @@ fn test_recovery_failure_does_not_deadlock() {
 /// deadline so a deadlock surfaces as a visible timeout.
 #[test]
 fn test_recovery_panic_does_not_deadlock() {
-    use std::sync::mpsc;
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
     use strata_engine::DatabaseBuilder;
 
@@ -2168,8 +2189,7 @@ fn test_recovery_panic_does_not_deadlock() {
         let _ = tx.send(caught.is_err());
     });
 
-    let result = rx.recv_timeout(Duration::from_secs(5));
-    match result {
+    match rx.recv_timeout(Duration::from_secs(5)) {
         Ok(true) => {
             // Correct: the panic unwound through acquire_primary_db,
             // Drop for Database's try_lock skipped the registry remove
@@ -2180,12 +2200,17 @@ fn test_recovery_panic_does_not_deadlock() {
             "PanickingSubsystem::recover() unexpectedly did not panic \
              — test is not exercising the panic path"
         ),
-        Err(_) => panic!(
+        Err(RecvTimeoutError::Timeout) => panic!(
             "acquire_primary_db deadlocked when subsystem recovery \
              panicked. Drop for Database must use try_lock on \
              OPEN_DATABASES to avoid self-deadlock against the \
              still-held guard from acquire_primary_db. See audit \
              follow-up to #2354 Finding 1 review."
+        ),
+        Err(RecvTimeoutError::Disconnected) => panic!(
+            "worker thread exited without sending a result — \
+             catch_unwind may have failed. This is NOT the deadlock \
+             this test is designed to catch."
         ),
     }
 }
