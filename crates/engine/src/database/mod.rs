@@ -1130,10 +1130,26 @@ impl Drop for Database {
             }
         }
 
-        // Remove from registry if we're disk-backed
+        // Remove from registry if we're disk-backed. Best-effort via
+        // `try_lock`: if the mutex is contended we skip the remove and
+        // leave a stale `Weak<Database>` entry behind. That is safe
+        // because the next call to `acquire_primary_db` for this path
+        // will find the entry, fail to upgrade the weak ref (strong
+        // count is zero now), fall through to creating a fresh
+        // `Database`, and overwrite the stale entry on insert.
+        //
+        // The contention case this handles is the recovery-failure /
+        // recovery-panic path inside `acquire_primary_db`: that
+        // function holds the `OPEN_DATABASES` guard across subsystem
+        // recovery, and if recovery errors or panics, the local
+        // `Arc<Self>` unwinds through Rust's drop order *before* the
+        // guard does. A blocking `lock()` call here would self-deadlock
+        // against the still-held guard because `parking_lot::Mutex` is
+        // non-reentrant.
         if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
-            let mut registry = OPEN_DATABASES.lock();
-            registry.remove(&self.data_dir);
+            if let Some(mut registry) = OPEN_DATABASES.try_lock() {
+                registry.remove(&self.data_dir);
+            }
         }
     }
 }
