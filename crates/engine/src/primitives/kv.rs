@@ -647,12 +647,19 @@ impl crate::search::Searchable for KVStore {
             Some(&req.space),
         );
 
-        // Only resolve doc_ids and fetch text for the final top-k results
+        // Only resolve doc_ids and fetch text for the final top-k results.
+        // Restrict to `EntityRef::Kv` so the BM25 fan-out at the substrate
+        // level doesn't get duplicate hits — every other primitive's
+        // `Searchable::search` (JSON/Event/Graph) filters its own variant
+        // the same way. Without this filter the substrate would receive
+        // each non-KV doc twice (once from KV, once from its real owner)
+        // because `rrf_fuse` short-circuits past dedup when there's only
+        // one source list.
         let hits: Vec<SearchHit> = top_k
             .into_iter()
             .filter_map(|scored| {
                 let entity_ref = index.resolve_doc_id(scored.doc_id)?;
-                let snippet = if let EntityRef::Kv {
+                if let EntityRef::Kv {
                     ref branch_id,
                     ref space,
                     ref key,
@@ -662,26 +669,26 @@ impl crate::search::Searchable for KVStore {
                     // the request scope. After Phase 0 the hit
                     // carries its real space; using `req.space` here
                     // would miss snippets for hits in other tenants.
-                    self.get(branch_id, space, key)
-                        .ok()
-                        .flatten()
-                        .map(|v| match &v {
-                            strata_core::value::Value::String(s) => truncate_text(s, 100),
-                            other => truncate_text(
-                                &serde_json::to_string(other).unwrap_or_default(),
-                                100,
-                            ),
-                        })
+                    let snippet =
+                        self.get(branch_id, space, key)
+                            .ok()
+                            .flatten()
+                            .map(|v| match &v {
+                                strata_core::value::Value::String(s) => truncate_text(s, 100),
+                                other => truncate_text(
+                                    &serde_json::to_string(other).unwrap_or_default(),
+                                    100,
+                                ),
+                            });
+                    Some(SearchHit {
+                        doc_ref: entity_ref,
+                        score: scored.score,
+                        rank: 0, // Set below
+                        snippet,
+                    })
                 } else {
                     None
-                };
-
-                Some(SearchHit {
-                    doc_ref: entity_ref,
-                    score: scored.score,
-                    rank: 0, // Set below
-                    snippet,
-                })
+                }
             })
             .enumerate()
             .map(|(i, mut hit)| {
