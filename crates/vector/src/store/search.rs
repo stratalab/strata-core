@@ -323,15 +323,20 @@ impl VectorStore {
         Ok(matches)
     }
 
-    /// Find a vector's key and metadata by VectorId at a given timestamp (internal helper).
-    fn find_vector_key_metadata_at(
+    /// Find a vector's full record by VectorId at a given timestamp (internal helper).
+    ///
+    /// Scans the collection prefix at `as_of_ts` and returns the historical
+    /// `VectorRecord` for the matching `target_id` together with its
+    /// collection-relative key. Used by both `search_at` (which only needs
+    /// metadata) and `search_at_with_sources` (which needs `source_ref`).
+    fn find_vector_record_at(
         &self,
         branch_id: BranchId,
         space: &str,
         collection: &str,
         target_id: VectorId,
         as_of_ts: u64,
-    ) -> VectorResult<Option<(String, Option<JsonValue>)>> {
+    ) -> VectorResult<Option<(String, VectorRecord)>> {
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
         let results = self
@@ -355,10 +360,24 @@ impl VectorStore {
                     .strip_prefix(&format!("{}/", collection))
                     .unwrap_or(&user_key)
                     .to_string();
-                return Ok(Some((vector_key, record.metadata)));
+                return Ok(Some((vector_key, record)));
             }
         }
         Ok(None)
+    }
+
+    /// Find a vector's key and metadata by VectorId at a given timestamp (internal helper).
+    fn find_vector_key_metadata_at(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        target_id: VectorId,
+        as_of_ts: u64,
+    ) -> VectorResult<Option<(String, Option<JsonValue>)>> {
+        Ok(self
+            .find_vector_record_at(branch_id, space, collection, target_id, as_of_ts)?
+            .map(|(k, r)| (k, r.metadata)))
     }
 
     /// Search returning results with source references (internal)
@@ -530,6 +549,85 @@ impl VectorStore {
                 self.get_key_and_metadata(branch_id, space, collection, vid)
             {
                 matches.push(VectorMatchWithSource::new(key, score, None, None, 0));
+            }
+        }
+
+        // Facade-level tie-breaking (score desc, key asc)
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
+        matches.truncate(k);
+
+        Ok(matches)
+    }
+
+    /// Temporal search returning results with source references (internal).
+    ///
+    /// Like `search_with_sources` but resolves candidates via the version
+    /// chain at `as_of_ts`. Used by hybrid retrieval to attribute temporal
+    /// matches back to their originating user space.
+    ///
+    /// Note: this intentionally does NOT use the inline-meta fast path.
+    /// `InlineMeta::source_ref` reflects the *current* state of a vector,
+    /// not the as-of state. `VectorRecord::update_with_source` exists, so
+    /// the historical `source_ref` must come from the version chain to be
+    /// correct under point-in-time queries.
+    pub(crate) fn search_at_with_sources(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        as_of_ts: u64,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
+
+        // Ensure collection is loaded
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+
+        let collection_id = CollectionId::new(branch_id, space, collection);
+
+        // Validate query dimension
+        let config = self.get_collection_config_required(branch_id, space, collection)?;
+        if query.len() != config.dimension {
+            return Err(VectorError::DimensionMismatch {
+                expected: config.dimension,
+                got: query.len(),
+            });
+        }
+
+        let candidates = {
+            let state = self.state()?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
+            backend.search_at(query, k, as_of_ts)
+        };
+
+        let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
+        for (vid, score) in candidates {
+            if let Some((key, record)) =
+                self.find_vector_record_at(branch_id, space, collection, vid, as_of_ts)?
+            {
+                matches.push(VectorMatchWithSource::new(
+                    key,
+                    score,
+                    None, // substrate doesn't need metadata; matches search_with_sources
+                    record.source_ref,
+                    record.version,
+                ));
             }
         }
 

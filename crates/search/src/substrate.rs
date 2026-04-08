@@ -335,78 +335,83 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                 return (Vec::new(), None, false);
             }
 
-            // Search shadow collections in parallel.
-            let vec_hits: Vec<SearchHit> = if request.as_of.is_some() {
-                // Phase 1 Part 2: temporal hybrid retrieval is currently a
-                // no-op for the vector stage. `vector.search_at` returns
-                // `VectorMatch` without `source_ref`, so we cannot prove
-                // which user space a hit originated from — and the
-                // alternative (synthesizing a SYSTEM_SPACE doc_ref) was
-                // exactly the cross-space leak this phase fixes. We log
-                // once so the gap is observable but skip the call entirely
-                // — running it would just throw the results away.
-                //
-                // Re-enabling this requires a `search_at_with_sources` API
-                // that surfaces `source_ref` from the version chain.
-                if !collection_names.is_empty() {
-                    tracing::debug!(
-                        target: "strata::search",
-                        as_of = ?request.as_of,
-                        collections = collection_names.len(),
-                        "Temporal hybrid: vector stage skipped (no source_ref in temporal API)"
-                    );
-                }
-                Vec::new()
-            } else {
-                // Non-temporal: par_iter across shadow collections with source resolution.
-                collection_names
-                    .par_iter()
-                    .flat_map(|coll| {
-                        let matches = if let Some((s, e)) = request.time_range {
-                            vector.system_search_with_sources_in_range(
-                                request.branch_id,
-                                coll,
-                                embedding,
-                                k,
-                                s,
-                                e,
-                            )
-                        } else {
-                            vector.system_search_with_sources(request.branch_id, coll, embedding, k)
-                        };
-
-                        matches
-                            .into_iter()
-                            .flat_map(|results| results.into_iter())
-                            .filter_map(|m| {
-                                // Phase 1 Part 2: hybrid retrieval must
-                                // not leak across spaces. The shadow
-                                // collection lives in SYSTEM_SPACE but
-                                // each match's `source_ref` carries the
-                                // real user space. Drop matches whose
-                                // source isn't in the caller's space, and
-                                // drop matches with no `source_ref`
-                                // entirely — we cannot honestly attribute
-                                // them to any user space.
-                                let source = m.source_ref?;
-                                if source.space() != Some(request.space.as_str()) {
-                                    return None;
-                                }
-                                let snippet = m
-                                    .metadata
-                                    .as_ref()
-                                    .map(|meta| truncate_text(&meta.to_string(), 100));
-                                Some(SearchHit {
-                                    doc_ref: source,
-                                    score: m.score,
-                                    rank: 0,
-                                    snippet,
-                                })
-                            })
-                            .collect::<Vec<_>>()
+            // Hits-from-results closure: shared by all three temporal modes.
+            // Drops orphans and cross-space matches; builds SearchHit with
+            // snippet. Centralised here so the as_of, time_range, and current
+            // branches all enforce the same Phase 1 isolation guarantees.
+            let to_hits = |result: strata_vector::VectorResult<
+                Vec<strata_vector::VectorMatchWithSource>,
+            >|
+             -> Vec<SearchHit> {
+                result
+                    .into_iter()
+                    .flat_map(|matches| matches.into_iter())
+                    .filter_map(|m| {
+                        // Phase 1 Part 2: hybrid retrieval must not leak
+                        // across spaces. The shadow collection lives in
+                        // SYSTEM_SPACE but each match's `source_ref`
+                        // carries the real user space. Drop matches whose
+                        // source isn't in the caller's space, and drop
+                        // matches with no `source_ref` entirely — we
+                        // cannot honestly attribute them to any user space.
+                        let source = m.source_ref?;
+                        if source.space() != Some(request.space.as_str()) {
+                            return None;
+                        }
+                        let snippet = m
+                            .metadata
+                            .as_ref()
+                            .map(|meta| truncate_text(&meta.to_string(), 100));
+                        Some(SearchHit {
+                            doc_ref: source,
+                            score: m.score,
+                            rank: 0,
+                            snippet,
+                        })
                     })
-                    .collect()
+                    .collect::<Vec<_>>()
             };
+
+            // Mode precedence: as_of > time_range > current. When `as_of` is
+            // set, this branch ignores `time_range` and runs a pure point-in-
+            // time search. Note this is **asymmetric vs BM25**, which since
+            // PR #2365 applies both filters as an intersection (visible at
+            // `as_of` AND `created_at` inside `time_range`).
+            //
+            // Closing the asymmetry doesn't need a new backend trait method:
+            // `find_vector_record_at` already returns the full `VectorRecord`
+            // (with `created_at`), so a `search_at_in_range_with_sources`
+            // can be built at the `VectorStore` layer by post-filtering
+            // each candidate's `record.created_at`. Tracked as follow-up to
+            // Audit Finding 3 (Gap G); not in scope for this PR. Until then,
+            // callers that combine `as_of` with `time_range` get vector hits
+            // filtered only by `as_of` while BM25 hits are filtered by both.
+            let vec_hits: Vec<SearchHit> = collection_names
+                .par_iter()
+                .flat_map(|coll| {
+                    let result = if let Some(as_of_ts) = request.as_of {
+                        vector.system_search_at_with_sources(
+                            request.branch_id,
+                            coll,
+                            embedding,
+                            k,
+                            as_of_ts,
+                        )
+                    } else if let Some((s, e)) = request.time_range {
+                        vector.system_search_with_sources_in_range(
+                            request.branch_id,
+                            coll,
+                            embedding,
+                            k,
+                            s,
+                            e,
+                        )
+                    } else {
+                        vector.system_search_with_sources(request.branch_id, coll, embedding, k)
+                    };
+                    to_hits(result)
+                })
+                .collect();
 
             // Sort and truncate.
             let mut vec_hits = vec_hits;
@@ -1694,5 +1699,321 @@ mod tests {
                 assert_eq!(a.rank, b.rank, "Non-deterministic ranks");
             }
         }
+    }
+
+    // ---- Temporal hybrid retrieval tests (Audit Finding 3) ----
+    //
+    // Pin the vector stage of the substrate when `as_of` is set. The path
+    // goes through `system_search_at_with_sources`, which resolves source_ref
+    // from the version chain at the requested timestamp. BM25 finds nothing
+    // in these tests (no KV data), so any returned hit must have come from
+    // the temporal vector branch.
+
+    /// Build a hybrid recipe (BM25 + vector + RRF) for the temporal tests.
+    fn temporal_hybrid_recipe() -> Recipe {
+        Recipe {
+            retrieve: Some(RetrieveConfig {
+                bm25: Some(BM25Config {
+                    k: Some(50),
+                    ..Default::default()
+                }),
+                vector: Some(VectorRetrieveConfig {
+                    k: Some(50),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            fusion: Some(FusionConfig {
+                method: Some("rrf".into()),
+                k: Some(60),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_substrate_temporal_hybrid_returns_vector_hits() {
+        // Insert shadow-early, capture t1, insert shadow-late.
+        // as_of=t1 → exactly the early hit. as_of=None → both.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-early",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "default", "k_early"),
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        // Capture timestamp after the first insert is visible.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t1 = strata_core::Timestamp::now().as_micros();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-late",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "default", "k_late"),
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        let recipe = temporal_hybrid_recipe();
+
+        // as_of=t1 → only the early shadow.
+        let req_at_t1 = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe: recipe.clone(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(t1),
+            budget_ms: None,
+        };
+        let resp_t1 = retrieve(&db, &req_at_t1).unwrap();
+        // The test relies on BM25 contributing nothing — there is no KV/Json/
+        // Event/Graph data, so any hit MUST come from the temporal vector
+        // branch. Pin this so the test can't pass for the wrong reason if a
+        // future change makes BM25 see shadow collections directly.
+        assert_eq!(
+            resp_t1
+                .stats
+                .stages
+                .get("bm25")
+                .map(|s| s.candidates)
+                .unwrap_or(0),
+            0,
+            "BM25 must produce zero hits — vector branch is the only source"
+        );
+        assert_eq!(
+            resp_t1.hits.len(),
+            1,
+            "as_of=t1 should yield exactly the early shadow's source"
+        );
+        match &resp_t1.hits[0].doc_ref {
+            EntityRef::Kv { space, key, .. } => {
+                assert_eq!(space, "default");
+                assert_eq!(key, "k_early");
+            }
+            other => panic!("expected EntityRef::Kv, got {:?}", other),
+        }
+
+        // as_of=None → both shadows visible.
+        let req_now = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+        let resp_now = retrieve(&db, &req_now).unwrap();
+        assert_eq!(resp_now.hits.len(), 2, "as_of=None should see both shadows");
+    }
+
+    #[test]
+    fn test_substrate_temporal_hybrid_filters_cross_space() {
+        // Three shadow inserts (tenant_a, tenant_b, orphan with no source_ref).
+        // Retrieve with as_of and tenant_a → exactly the tenant_a hit.
+        // Retrieve with as_of and tenant_c → zero hits.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-a",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_a", "k"),
+            )
+            .unwrap();
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-b",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "tenant_b", "k"),
+            )
+            .unwrap();
+        vector_store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-orphan",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let snapshot = strata_core::Timestamp::now().as_micros();
+
+        let recipe = temporal_hybrid_recipe();
+
+        let req_a = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "tenant_a".into(),
+            recipe: recipe.clone(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(snapshot),
+            budget_ms: None,
+        };
+        let resp_a = retrieve(&db, &req_a).unwrap();
+        assert_eq!(
+            resp_a.hits.len(),
+            1,
+            "tenant_a should see exactly its own hit at as_of"
+        );
+        match &resp_a.hits[0].doc_ref {
+            EntityRef::Kv { space, .. } => assert_eq!(space, "tenant_a"),
+            other => panic!("expected EntityRef::Kv, got {:?}", other),
+        }
+
+        let req_c = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "tenant_c".into(),
+            recipe,
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(snapshot),
+            budget_ms: None,
+        };
+        let resp_c = retrieve(&db, &req_c).unwrap();
+        assert_eq!(
+            resp_c.hits.len(),
+            0,
+            "tenant_c has no matching source and orphan must be dropped"
+        );
+    }
+
+    #[test]
+    fn test_substrate_temporal_hybrid_orphan_dropped() {
+        // Only an orphan (no source_ref). as_of query → 0 hits.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        vector_store
+            .system_insert(
+                branch_id,
+                "_system_embed_kv",
+                "shadow-orphan",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let as_of_ts = strata_core::Timestamp::now().as_micros();
+
+        let request = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe: temporal_hybrid_recipe(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(as_of_ts),
+            budget_ms: None,
+        };
+        let response = retrieve(&db, &request).unwrap();
+        assert_eq!(
+            response.hits.len(),
+            0,
+            "orphan vector with no source_ref must be dropped under as_of"
+        );
+    }
+
+    #[test]
+    fn test_substrate_temporal_hybrid_before_data() {
+        // as_of captured BEFORE any vector insert → 0 vector hits.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let t0 = strata_core::Timestamp::now().as_micros();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+        vector_store
+            .system_insert_with_source(
+                branch_id,
+                "_system_embed_kv",
+                "shadow",
+                &[1.0, 0.0, 0.0],
+                None,
+                EntityRef::kv(branch_id, "default", "k"),
+            )
+            .unwrap();
+        db.flush().unwrap();
+
+        let request = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe: temporal_hybrid_recipe(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(t0),
+            budget_ms: None,
+        };
+        let response = retrieve(&db, &request).unwrap();
+        assert_eq!(
+            response.hits.len(),
+            0,
+            "as_of before any insert must yield zero vector hits"
+        );
     }
 }
