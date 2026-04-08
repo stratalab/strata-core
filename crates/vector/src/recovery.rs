@@ -71,6 +71,42 @@ pub(crate) fn mmap_path(
         .join(format!("{}.vec", collection_name))
 }
 
+/// Wipe the on-disk vector caches (`.vec` heap mmap and `_graphs/` graph
+/// dir) for a single collection.
+///
+/// Best-effort: missing files are ignored, I/O failures are logged as
+/// warnings but never returned. Used by `VectorStore::delete_collection`
+/// (single-collection delete) and `VectorStore::purge_collections_in_space`
+/// (force-delete cleanup) so that a deleted collection cannot resurrect
+/// itself from a stale on-disk cache after the next recovery pass.
+pub(crate) fn purge_collection_disk_cache(data_dir: &std::path::Path, cid: &super::CollectionId) {
+    if data_dir.as_os_str().is_empty() {
+        return;
+    }
+    let vec_path = mmap_path(data_dir, cid.branch_id, &cid.space, &cid.name);
+    if vec_path.exists() {
+        if let Err(e) = std::fs::remove_file(&vec_path) {
+            tracing::warn!(
+                target: "strata::vector",
+                path = ?vec_path,
+                error = %e,
+                "Failed to remove vector mmap cache during purge"
+            );
+        }
+    }
+    let gdir = super::graph_dir(data_dir, cid.branch_id, &cid.space, &cid.name);
+    if gdir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&gdir) {
+            tracing::warn!(
+                target: "strata::vector",
+                path = ?gdir,
+                error = %e,
+                "Failed to remove vector graph dir during purge"
+            );
+        }
+    }
+}
+
 /// Internal recovery implementation that works with &Database
 fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};

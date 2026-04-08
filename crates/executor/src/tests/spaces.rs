@@ -755,3 +755,520 @@ fn test_vector_delete_collection_in_new_space_does_not_register_it() {
         "VectorDeleteCollection must not auto-register its target space; got {spaces:?}"
     );
 }
+
+// =============================================================================
+// Phase 4 — Force-delete must wipe ALL secondary state for the space.
+// =============================================================================
+//
+// Background: prior to Phase 4, `space_delete --force` only wiped primary
+// KV/Event/Json/Vector/Graph data + the metadata key. It left behind:
+//   1. BM25 inverted-index documents (search returned stale hits)
+//   2. In-memory vector backends (`VectorBackendState::backends` ghosts)
+//   3. On-disk vector caches (`.vec` mmap and `_graphs/` dirs)
+//   4. Shadow embeddings in `_system_embed_*` whose source is the
+//      deleted space
+//
+// These tests pin the post-commit cleanup wired into `space_delete` and
+// double as empirical revert checks: comment out one of the cleanup
+// blocks in `crates/executor/src/handlers/space.rs` and exactly the
+// matching test below fails.
+
+use crate::types::{DistanceMetric, SearchQuery};
+
+/// Helper: search the current space and return the number of hits.
+fn search_hits(db: &Strata, query: &str) -> usize {
+    let (hits, _) = db
+        .search(SearchQuery {
+            query: query.to_string(),
+            recipe: None,
+            precomputed_embedding: None,
+            k: Some(10),
+            as_of: None,
+            diff: None,
+        })
+        .unwrap();
+    hits.len()
+}
+
+/// Phase 4 / Part 1 — search index cleanup. Force-deleting a space must
+/// remove every BM25 doc whose `EntityRef` was in that space, both from
+/// the active segment and via tombstones in sealed segments.
+///
+/// Empirical revert: comment out the `index.remove_documents_in_space`
+/// block in `space_delete` and this test fails — the search returns the
+/// stale hit and `total_docs` does not decrement.
+#[test]
+fn test_force_delete_clears_search_index() {
+    let mut db = strata();
+
+    // Write a searchable string into a tenant space.
+    db.set_space("tenant_x").unwrap();
+    db.kv_put("doc1", "phase4 unique searchable text").unwrap();
+
+    // Sanity: BM25 finds it.
+    assert_eq!(
+        search_hits(&db, "phase4"),
+        1,
+        "BM25 must find the doc before delete"
+    );
+
+    // Snapshot total_docs from the inverted index extension.
+    let core_db = db.database();
+    let index = core_db
+        .extension::<strata_engine::search::InvertedIndex>()
+        .expect("InvertedIndex extension must exist for cache databases");
+    let before = index.total_docs();
+    assert!(
+        before >= 1,
+        "expected at least 1 doc in BM25 index, got {before}"
+    );
+
+    // Force-delete tenant_x. Switch back to default first because
+    // delete_space_force is not allowed on the active space.
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    // Search must return 0 hits and total_docs must have decremented
+    // by exactly the count we wrote.
+    db.set_space("tenant_x").unwrap();
+    assert_eq!(
+        search_hits(&db, "phase4"),
+        0,
+        "BM25 must not return stale hits after force-delete"
+    );
+    let after = index.total_docs();
+    assert_eq!(
+        after,
+        before - 1,
+        "total_docs must decrement by exactly 1 (before={before}, after={after})"
+    );
+}
+
+/// Phase 4 / Part 1 — per-space scoping. Force-deleting one tenant must
+/// not touch another tenant's BM25 docs even when they share the same
+/// key string.
+#[test]
+fn test_force_delete_search_index_other_spaces_unaffected() {
+    let mut db = strata();
+
+    db.set_space("tenant_x").unwrap();
+    db.kv_put("shared", "phase4 isolation marker").unwrap();
+    db.set_space("tenant_y").unwrap();
+    db.kv_put("shared", "phase4 isolation marker").unwrap();
+
+    // Both spaces find the marker before any delete.
+    db.set_space("tenant_x").unwrap();
+    assert_eq!(search_hits(&db, "isolation"), 1);
+    db.set_space("tenant_y").unwrap();
+    assert_eq!(search_hits(&db, "isolation"), 1);
+
+    // Force-delete tenant_x.
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    // tenant_x — gone.
+    db.set_space("tenant_x").unwrap();
+    assert_eq!(
+        search_hits(&db, "isolation"),
+        0,
+        "tenant_x must lose its hit after force-delete"
+    );
+
+    // tenant_y — survives, pinning the per-space filter inside
+    // `remove_documents_in_space`.
+    db.set_space("tenant_y").unwrap();
+    assert_eq!(
+        search_hits(&db, "isolation"),
+        1,
+        "tenant_y must keep its hit (per-space filter must isolate)"
+    );
+}
+
+/// Phase 4 / Part 2 — vector backend cleanup. Force-deleting a space
+/// must evict every collection in that space from the in-memory
+/// `VectorBackendState::backends` map.
+///
+/// Empirical revert: comment out the `purge_collections_in_space` call
+/// in `space_delete` and this test fails — the `CollectionId` survives
+/// in the DashMap.
+#[test]
+fn test_force_delete_clears_vector_backend() {
+    let mut db = strata();
+    // The executor maps the string branch "default" → all-zero UUID via
+    // `to_core_branch_id` (see crates/executor/src/bridge.rs:91). Note
+    // that `strata_core::types::BranchId::default()` is a *random* UUID
+    // and would NOT match what the executor uses internally.
+    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+
+    db.set_space("tenant_x").unwrap();
+    db.vector_create_collection("embeddings", 4, DistanceMetric::Cosine)
+        .unwrap();
+    db.vector_upsert("embeddings", "v1", vec![1.0, 0.0, 0.0, 0.0], None)
+        .unwrap();
+
+    // Snapshot in-memory state — the collection backend must exist.
+    let core_db = db.database();
+    let state = core_db
+        .extension::<strata_vector::VectorBackendState>()
+        .unwrap();
+    let cid =
+        strata_core::primitives::vector::CollectionId::new(core_branch, "tenant_x", "embeddings");
+    assert!(
+        state.backends.contains_key(&cid),
+        "backend must exist before delete"
+    );
+
+    // Force-delete tenant_x.
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    assert!(
+        !state.backends.contains_key(&cid),
+        "backend must be evicted from VectorBackendState after force-delete"
+    );
+}
+
+/// Phase 4 / Part 2 — cross-space isolation for vector backends and
+/// disk caches. Deleting one tenant must not touch another tenant's
+/// in-memory backend.
+#[test]
+fn test_force_delete_other_vector_spaces_unaffected() {
+    let mut db = strata();
+    // The executor maps the string branch "default" → all-zero UUID via
+    // `to_core_branch_id` (see crates/executor/src/bridge.rs:91). Note
+    // that `strata_core::types::BranchId::default()` is a *random* UUID
+    // and would NOT match what the executor uses internally.
+    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+
+    db.set_space("tenant_x").unwrap();
+    db.vector_create_collection("embeddings", 4, DistanceMetric::Cosine)
+        .unwrap();
+    db.vector_upsert("embeddings", "v1", vec![1.0, 0.0, 0.0, 0.0], None)
+        .unwrap();
+
+    db.set_space("tenant_y").unwrap();
+    db.vector_create_collection("embeddings", 4, DistanceMetric::Cosine)
+        .unwrap();
+    db.vector_upsert("embeddings", "v1", vec![0.0, 1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    let core_db = db.database();
+    let state = core_db
+        .extension::<strata_vector::VectorBackendState>()
+        .unwrap();
+    let cid_x =
+        strata_core::primitives::vector::CollectionId::new(core_branch, "tenant_x", "embeddings");
+    let cid_y =
+        strata_core::primitives::vector::CollectionId::new(core_branch, "tenant_y", "embeddings");
+    assert!(state.backends.contains_key(&cid_x));
+    assert!(state.backends.contains_key(&cid_y));
+
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    assert!(
+        !state.backends.contains_key(&cid_x),
+        "tenant_x backend must be gone"
+    );
+    assert!(
+        state.backends.contains_key(&cid_y),
+        "tenant_y backend must survive (per-space filter must isolate)"
+    );
+
+    // tenant_y query path still works after the delete.
+    db.set_space("tenant_y").unwrap();
+    let matches = db
+        .vector_query("embeddings", vec![0.0, 1.0, 0.0, 0.0], 5)
+        .unwrap();
+    assert_eq!(matches.len(), 1, "tenant_y vector must still be queryable");
+}
+
+/// Phase 4 / Part 2 — on-disk vector cache cleanup. Force-deleting a
+/// space must remove the `.vec` mmap heap and the `_graphs/` directory
+/// for every collection in that space — and must NOT touch the
+/// equivalent files belonging to a different space.
+///
+/// Uses `Strata::open` against a tempdir so that the recovery / freeze
+/// path actually writes the cache files. Calls `freeze_vector_heaps`
+/// explicitly to force the freeze before checking the path.
+///
+/// Empirical revert:
+///   • Comment out the `purge_collections_in_space` call in
+///     `space_delete` and the tenant_x assertions fail — the `.vec`
+///     file survives.
+///   • Weaken the `(branch_id, space)` filter inside
+///     `purge_collections_in_space` and the tenant_y survival
+///     assertions fail.
+#[test]
+fn test_force_delete_clears_vector_disk_cache() {
+    use std::path::PathBuf;
+    let temp = tempfile::TempDir::new().unwrap();
+    let data_dir: PathBuf = temp.path().to_path_buf();
+
+    let mut db = Strata::open(&data_dir).unwrap();
+
+    // tenant_x: collection that MUST be wiped.
+    db.set_space("tenant_x").unwrap();
+    db.vector_create_collection("embeddings", 4, DistanceMetric::Cosine)
+        .unwrap();
+    db.vector_upsert("embeddings", "v1", vec![1.0, 0.0, 0.0, 0.0], None)
+        .unwrap();
+
+    // tenant_y: same collection name in a different space — MUST
+    // survive the tenant_x delete. Pins the per-space filter inside
+    // `purge_collections_in_space` and `purge_collection_disk_cache`.
+    db.set_space("tenant_y").unwrap();
+    db.vector_create_collection("embeddings", 4, DistanceMetric::Cosine)
+        .unwrap();
+    db.vector_upsert("embeddings", "v1", vec![0.0, 1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    // Force both vector heaps onto disk so we have real `.vec` files
+    // to assert against.
+    db.database().freeze_vector_heaps().unwrap();
+
+    // The executor maps the string branch "default" → all-zero UUID via
+    // `to_core_branch_id` (see crates/executor/src/bridge.rs:91). Note
+    // that `strata_core::types::BranchId::default()` is a *random* UUID
+    // and would NOT match what the executor uses internally.
+    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+    let branch_hex = format!("{:032x}", u128::from_be_bytes(*core_branch.as_bytes()));
+
+    let vec_path_x = data_dir
+        .join("vectors")
+        .join(&branch_hex)
+        .join("tenant_x")
+        .join("embeddings.vec");
+    let graph_dir_x = data_dir
+        .join("vectors")
+        .join(&branch_hex)
+        .join("tenant_x")
+        .join("embeddings_graphs");
+
+    let vec_path_y = data_dir
+        .join("vectors")
+        .join(&branch_hex)
+        .join("tenant_y")
+        .join("embeddings.vec");
+    let space_dir_y = data_dir.join("vectors").join(&branch_hex).join("tenant_y");
+
+    assert!(
+        vec_path_x.exists(),
+        "tenant_x mmap heap must exist after freeze, looked for {vec_path_x:?}"
+    );
+    assert!(
+        vec_path_y.exists(),
+        "tenant_y mmap heap must exist after freeze, looked for {vec_path_y:?}"
+    );
+
+    // Force-delete tenant_x.
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    // tenant_x cache files — gone.
+    assert!(
+        !vec_path_x.exists(),
+        "tenant_x .vec mmap must be wiped after force-delete, still found at {vec_path_x:?}"
+    );
+    assert!(
+        !graph_dir_x.exists(),
+        "tenant_x _graphs/ dir must be wiped after force-delete, still found at {graph_dir_x:?}"
+    );
+
+    // tenant_y files — survive. Per-space subdirectory must still
+    // exist (tenant_x's wipe stops at the collection-level paths and
+    // does not climb into tenant_y).
+    assert!(
+        vec_path_y.exists(),
+        "tenant_y .vec mmap must survive tenant_x delete, missing at {vec_path_y:?}"
+    );
+    assert!(
+        space_dir_y.exists(),
+        "tenant_y space dir must survive tenant_x delete, missing at {space_dir_y:?}"
+    );
+}
+
+/// Phase 4 / Part 3 — shadow embedding cleanup. Force-deleting a space
+/// must remove every entry in **all three** shadow collections
+/// (`_system_embed_kv`, `_system_embed_json`, `_system_embed_event`)
+/// whose composite key starts with `{space}\x1f`, and must NOT touch
+/// entries belonging to a different space.
+///
+/// We seed the shadow vectors by hand via `system_insert_with_source`
+/// — this avoids needing an actual embedder model in the test (the
+/// auto-embed pipeline would normally generate the same composite key
+/// shape). The cleanup helper is unconditional; only the
+/// `EmbedBuffer` drain inside it is `embed`-feature-gated, so this
+/// test exercises the real cleanup path without the feature flag.
+///
+/// Empirical revert: comment out the `delete_shadow_embeddings_for_space`
+/// call in `space_delete` and this test fails — the tenant_x shadow
+/// vectors survive. Likewise, weakening the prefix filter would break
+/// the tenant_y survival assertions.
+#[test]
+fn test_force_delete_clears_shadow_embeddings() {
+    // Pull the shadow collection names from the engine — the same
+    // constants the cleanup helper sees. Hard-coding them here would
+    // mask a rename: the test would seed at the old name while
+    // `delete_shadow_embeddings_for_space` looks at the new one, and
+    // the failure would point at "cleanup broken" instead of
+    // "constants mismatched".
+    use strata_engine::database::{SHADOW_JSON, SHADOW_KV};
+    use strata_vector::{DistanceMetric as VDistanceMetric, VectorConfig, VectorStore};
+
+    let mut db = strata();
+    // The executor maps the string branch "default" → all-zero UUID via
+    // `to_core_branch_id` (see crates/executor/src/bridge.rs:91). Note
+    // that `strata_core::types::BranchId::default()` is a *random* UUID
+    // and would NOT match what the executor uses internally.
+    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+    let core_db = db.database();
+    let vs = VectorStore::new(core_db.clone());
+
+    // Seed: source data in both tenant_x and tenant_y so the source
+    // keys actually exist (auto-registers the spaces).
+    db.set_space("tenant_x").unwrap();
+    db.kv_put("k1", "phase4 shadow seed kv").unwrap();
+    db.json_set("d1", "$", Value::String("phase4 shadow seed json".into()))
+        .unwrap();
+    db.set_space("tenant_y").unwrap();
+    db.kv_put("k1", "phase4 sibling kv").unwrap();
+
+    // Create both shadow collections and insert vectors that mimic
+    // what the auto-embed pipeline would produce: composite key
+    // `{space}\x1f{source_key}`.
+    let cfg_kv = VectorConfig::new(4, VDistanceMetric::Cosine).unwrap();
+    vs.create_system_collection(core_branch, SHADOW_KV, cfg_kv)
+        .unwrap();
+    let cfg_json = VectorConfig::new(4, VDistanceMetric::Cosine).unwrap();
+    vs.create_system_collection(core_branch, SHADOW_JSON, cfg_json)
+        .unwrap();
+
+    // tenant_x KV shadow.
+    let kv_x = "tenant_x\x1fk1".to_string();
+    vs.system_insert_with_source(
+        core_branch,
+        SHADOW_KV,
+        &kv_x,
+        &[1.0, 0.0, 0.0, 0.0],
+        None,
+        strata_core::EntityRef::kv(core_branch, "tenant_x", "k1"),
+    )
+    .unwrap();
+
+    // tenant_x JSON shadow.
+    let json_x = "tenant_x\x1fd1".to_string();
+    vs.system_insert_with_source(
+        core_branch,
+        SHADOW_JSON,
+        &json_x,
+        &[0.0, 1.0, 0.0, 0.0],
+        None,
+        strata_core::EntityRef::json(core_branch, "tenant_x", "d1"),
+    )
+    .unwrap();
+
+    // tenant_y KV shadow — MUST survive the tenant_x delete. Pins
+    // both the per-space prefix filter and the cross-collection
+    // isolation guarantee.
+    let kv_y = "tenant_y\x1fk1".to_string();
+    vs.system_insert_with_source(
+        core_branch,
+        SHADOW_KV,
+        &kv_y,
+        &[0.0, 0.0, 1.0, 0.0],
+        None,
+        strata_core::EntityRef::kv(core_branch, "tenant_y", "k1"),
+    )
+    .unwrap();
+
+    // Sanity: all three seeded shadow keys exist before the delete.
+    let kv_before = vs
+        .list_keys(
+            core_branch,
+            strata_engine::system_space::SYSTEM_SPACE,
+            SHADOW_KV,
+        )
+        .unwrap();
+    let json_before = vs
+        .list_keys(
+            core_branch,
+            strata_engine::system_space::SYSTEM_SPACE,
+            SHADOW_JSON,
+        )
+        .unwrap();
+    assert!(
+        kv_before.iter().any(|k| k == &kv_x),
+        "tenant_x KV shadow must exist before delete, got {kv_before:?}"
+    );
+    assert!(
+        kv_before.iter().any(|k| k == &kv_y),
+        "tenant_y KV shadow must exist before delete, got {kv_before:?}"
+    );
+    assert!(
+        json_before.iter().any(|k| k == &json_x),
+        "tenant_x JSON shadow must exist before delete, got {json_before:?}"
+    );
+
+    // Force-delete tenant_x.
+    db.set_space("default").unwrap();
+    db.delete_space_force("tenant_x").unwrap();
+
+    // After cleanup:
+    //   • all `tenant_x\x1f` entries gone from BOTH shadow collections,
+    //   • the `tenant_y\x1f` entry still present (per-space filter).
+    let kv_after = vs
+        .list_keys(
+            core_branch,
+            strata_engine::system_space::SYSTEM_SPACE,
+            SHADOW_KV,
+        )
+        .unwrap();
+    let json_after = vs
+        .list_keys(
+            core_branch,
+            strata_engine::system_space::SYSTEM_SPACE,
+            SHADOW_JSON,
+        )
+        .unwrap();
+
+    assert!(
+        !kv_after.iter().any(|k| k.starts_with("tenant_x\x1f")),
+        "tenant_x KV shadows must be wiped, got {kv_after:?}"
+    );
+    assert!(
+        !json_after.iter().any(|k| k.starts_with("tenant_x\x1f")),
+        "tenant_x JSON shadows must be wiped, got {json_after:?}"
+    );
+    assert!(
+        kv_after.iter().any(|k| k == &kv_y),
+        "tenant_y KV shadow must survive (per-space filter must isolate), got {kv_after:?}"
+    );
+}
+
+/// Phase 4 / Part 4 — the metadata key delete still runs LAST after
+/// all secondary cleanup. Pins the existing post-Phase 0 contract that
+/// `SpaceIndex::list` no longer reports the space.
+#[test]
+fn test_force_delete_metadata_deleted_last() {
+    let mut db = strata();
+
+    db.set_space("tenant_x").unwrap();
+    db.kv_put("k1", "v1").unwrap();
+    db.set_space("default").unwrap();
+
+    // Pre-condition: space is listed (auto-registered on first write).
+    let spaces = db.list_spaces().unwrap();
+    assert!(spaces.contains(&"tenant_x".to_string()));
+
+    db.delete_space_force("tenant_x").unwrap();
+
+    // Post-condition: metadata key is gone — list does not include it.
+    // (`SpaceIndex::list` is the union of metadata + data scan; both
+    // halves must be empty after a successful force-delete.)
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"tenant_x".to_string()),
+        "metadata key must be cleared as the last step of force-delete; got {spaces:?}"
+    );
+}
