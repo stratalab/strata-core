@@ -867,7 +867,7 @@ fn test_session_kv_batch_put_registers_non_default_space() {
             options: None,
         })
         .unwrap();
-    session
+    let out = session
         .execute(Command::KvBatchPut {
             branch: None,
             space: Some("session_kv_batch".to_string()),
@@ -883,6 +883,22 @@ fn test_session_kv_batch_put_registers_non_default_space() {
             ],
         })
         .unwrap();
+
+    // Inspect the per-entry results — a buggy refactor that silently
+    // fails individual entries while returning command-level Ok would
+    // otherwise slip through. The metadata check below is meaningful
+    // ONLY when each entry actually wrote.
+    match out {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2, "expected 2 batch results");
+            assert!(
+                results.iter().all(|r| r.error.is_none()),
+                "every batch entry must succeed; got {results:?}"
+            );
+        }
+        other => panic!("expected BatchResults, got {other:?}"),
+    }
+
     session.execute(Command::TxnCommit).unwrap();
 
     assert!(
@@ -944,7 +960,7 @@ fn test_session_event_batch_append_registers_non_default_space() {
         .unwrap();
     let payload1 = Value::object(HashMap::from([("n".into(), Value::Int(1))]));
     let payload2 = Value::object(HashMap::from([("n".into(), Value::Int(2))]));
-    session
+    let out = session
         .execute(Command::EventBatchAppend {
             branch: None,
             space: Some("session_events_batch".to_string()),
@@ -960,6 +976,20 @@ fn test_session_event_batch_append_registers_non_default_space() {
             ],
         })
         .unwrap();
+
+    // Inspect per-entry results so a silent partial failure cannot
+    // mask the registration test.
+    match out {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2, "expected 2 batch results");
+            assert!(
+                results.iter().all(|r| r.error.is_none()),
+                "every batch entry must succeed; got {results:?}"
+            );
+        }
+        other => panic!("expected BatchResults, got {other:?}"),
+    }
+
     session.execute(Command::TxnCommit).unwrap();
 
     assert!(
