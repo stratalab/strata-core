@@ -542,14 +542,27 @@ Write operations update both KV (first) and cache (if loaded). KV-first guarante
 
 **TDD sequence:**
 1. Write tests: create graph, shutdown, reopen, verify adjacency populated
-2. Implement recovery participant following `search/recovery.rs` pattern
+2. Implement a `GraphSubsystem` that follows the same shape as `SearchSubsystem` in `crates/engine/src/search/recovery.rs`.
 
 Manifest key `_graph_/__loaded__` tracks materialized graphs. Updated on first load.
 
 ```rust
-pub fn register_graph_recovery() {
-    register_recovery_participant(RecoveryParticipant::new("graph", recover_graph_state));
+pub struct GraphSubsystem;
+
+impl strata_engine::Subsystem for GraphSubsystem {
+    fn name(&self) -> &'static str { "graph" }
+    fn recover(&self, db: &Arc<Database>) -> StrataResult<()> {
+        recover_graph_state(db)
+    }
 }
+
+// Executor installs it alongside VectorSubsystem / SearchSubsystem in
+// `strata_db_builder()`:
+//
+//     DatabaseBuilder::new()
+//         .with_subsystem(VectorSubsystem)
+//         .with_subsystem(SearchSubsystem)
+//         .with_subsystem(GraphSubsystem)
 ```
 
 **Tests (write first):**

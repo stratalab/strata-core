@@ -10,7 +10,7 @@ The engine crate sits above `strata-concurrency` and `strata-durability`, provid
 
 1. **Transaction** -- `TransactionOps` wrapper over `TransactionContext` with per-primitive key construction and event buffering
 2. **Transaction Pool** -- Thread-local `TransactionContext` recycling for zero-allocation hot paths
-3. **Recovery** -- Deterministic branch replay (P1-P6 invariants) and a participant registry for primitives with runtime state
+3. **Recovery** -- Deterministic branch replay (P1-P6 invariants) and the per-database `Subsystem` list for primitives with runtime state
 4. **Branch Operations** -- Fork, diff, merge, and bundle (export/import) working directly against storage
 
 ## Module Map
@@ -22,9 +22,9 @@ engine/src/
 │   ├── context.rs          Transaction wrapper, TransactionOps impl (1,186 lines)
 │   └── pool.rs             Thread-local TransactionContext pooling (372 lines)
 ├── recovery/
-│   ├── mod.rs              Module re-exports (19 lines)
-│   ├── replay.rs           BranchIndex, ReadOnlyView, BranchDiff, replay invariants (1,128 lines)
-│   └── participant.rs      RecoveryParticipant registry (440 lines)
+│   ├── mod.rs              Module re-exports (8 lines)
+│   ├── subsystem.rs        Subsystem trait (name/recover/freeze)
+│   └── replay.rs           BranchIndex, ReadOnlyView, BranchDiff, replay invariants (1,128 lines)
 ├── branch_ops.rs           Fork, diff, merge operations (1,546 lines)
 └── bundle.rs               Branch export/import via branchbundle archives (483 lines)
 ```
@@ -213,45 +213,52 @@ Two error enums handle branch lifecycle and replay failures:
 
 ---
 
-## 4. Recovery: Participant Registry (`recovery/participant.rs`)
+## 4. Recovery: `Subsystem` trait (`recovery/subsystem.rs`)
 
-Extensible recovery mechanism for primitives with runtime state that lives outside `ShardedStore` (e.g., `VectorStore`'s in-memory HNSW backends).
+Extensible recovery mechanism for primitives with runtime state that lives outside `ShardedStore` (e.g., `VectorStore`'s in-memory HNSW backends, `InvertedIndex` for search). A single ordered `Vec<Box<dyn Subsystem>>` per `Database` drives both open-time recovery and drop-time freeze.
 
 ### 4.1 Design
 
-```
-static RECOVERY_REGISTRY: Lazy<RwLock<Vec<RecoveryParticipant>>>
+```rust
+pub trait Subsystem: Send + Sync + 'static {
+    fn name(&self) -> &'static str;
+    fn recover(&self, db: &Arc<Database>) -> StrataResult<()>;
+    fn freeze(&self, db: &Database) -> StrataResult<()>;
+}
 ```
 
-| Type | Definition |
-|------|-----------|
-| `RecoveryFn` | `fn(&Database) -> StrataResult<()>` |
-| `RecoveryParticipant` | `{ name: &'static str, recover: RecoveryFn }` |
+Each `Database` holds `subsystems: RwLock<Vec<Box<dyn Subsystem>>>`. The list is installed via `DatabaseBuilder::with_subsystem(...)` or the internal `set_subsystems` path. The **same** list drives recovery (on open) and freeze (on `Drop` / `shutdown`), so no caller can accidentally recover one set while freezing a different set — the design guarantee that the whole lifecycle-unification refactor in #2354 exists to enforce.
 
 ### 4.2 Recovery Flow
 
 ```
-Database::open_with_mode()
-  1. KV recovery via RecoveryCoordinator (durability crate)
-     -> ShardedStore now has all committed data
-  2. recover_all_participants(&db)
-     -> Each participant scans KV for relevant entries
-     -> Rebuilds runtime state into Database extensions
-  3. Database ready for use
+DatabaseBuilder::open(path)
+  1. Database::open_internal_with_subsystems(path, subsystems)
+     a. KV recovery via RecoveryCoordinator (durability crate)
+        -> ShardedStore now has all committed data
+     b. For each subsystem in registration order:
+          subsystem.recover(&db)
+            -> Scan KV for relevant entries
+            -> Rebuild runtime state into Database extensions
+     c. db.set_subsystems(subsystems)  // installs the same list for freeze
+  2. Database ready for use
+
+Drop for Database / Database::shutdown
+  3. run_freeze_hooks()
+     For each subsystem in **reverse** order:
+       subsystem.freeze(&db)
+         -> Persist runtime state to disk (e.g. .vec mmap cache)
 ```
 
-### 4.3 Registration Protocol
+### 4.3 Composition boundary
 
-- `register_recovery_participant(participant)` -- called once at startup, before any Database opens
-- Deduplication by name: re-registering the same name is a no-op
-- Registration order determines execution order
-- Thread-safe: `RwLock` protects the global registry
+The engine crate declares the `Subsystem` trait and the builder, but cannot construct `[VectorSubsystem, SearchSubsystem]` itself because the engine does not depend on `strata-vector` (adding that edge would cycle — `strata-vector → strata-engine`). Composition happens one layer up, in the **executor**: `strata_db_builder()` in `crates/executor/src/api/mod.rs` returns a `DatabaseBuilder` preloaded with `[VectorSubsystem, SearchSubsystem]`, and every `Strata::open` / `open_with` / `cache` path routes through it.
 
 ### 4.4 Error Semantics
 
-- First error stops execution -- subsequent participants are not called
-- This is intentional: a failed participant may leave state inconsistent, so continuing could compound errors
-- Participants are stateless functions: they use `Database::extension::<T>()` to access shared state
+- First error during recovery stops execution — subsequent subsystems are not called. A failed subsystem may leave state inconsistent, so continuing could compound errors.
+- Freeze hooks are best-effort: a failed freeze logs a warning and the next subsystem still runs. The KV data is already durable on WAL, so the worst case is a cold-start that has to rebuild from KV instead of mmap cache.
+- Subsystem implementations are stateless structs: they access shared state via `Database::extension::<T>()`.
 
 ---
 
@@ -473,17 +480,19 @@ Database::open_with_mode()
                │
                ▼
 ┌─────────────────────────────────┐
-│  Phase 2: Participant Recovery   │
-│  recover_all_participants(&db)   │
+│  Phase 2: Subsystem Recovery    │
+│  subsystems.iter().for_each(     │
+│      |s| s.recover(&db))         │
 │                                  │
-│  For each registered participant │
-│  (in registration order):        │
-│    participant.recover(&db)      │
+│  For each subsystem in the       │
+│  list supplied to the builder    │
+│  (registration order):           │
+│    subsystem.recover(&db)        │
 │    -> Scan KV for relevant data  │
 │    -> Rebuild runtime state      │
 │    -> Store in db.extension()    │
 │                                  │
-│  Example: VectorStore scans      │
+│  Example: VectorSubsystem scans  │
 │  TypeTag::Vector entries and     │
 │  rebuilds HNSW indexes in memory │
 └──────────────┬──────────────────┘
@@ -519,7 +528,7 @@ Merge:  diff(target, source)
 |-----------|----------------|-------|
 | `Transaction` | Single-threaded (`&'a mut`) | Borrows `TransactionContext` exclusively |
 | `TransactionPool` | `RefCell` (thread-local) | No cross-thread contention |
-| `RECOVERY_REGISTRY` | `RwLock<Vec<...>>` | Write during startup, read during recovery |
+| `Database::subsystems` | `RwLock<Vec<Box<dyn Subsystem>>>` | Installed once during open, read during drop-time freeze |
 | `BranchIndex` (replay) | Single-threaded | Used during recovery before DB accepts connections |
 | `fork_branch` | Serialized via `db.transaction()` | Per-branch commit lock in concurrency crate |
 | `diff_branches` | Read-only storage scans | No locks needed |
@@ -552,14 +561,14 @@ The `last_hash` / `base_sequence` state is threaded through `TransactionContext`
 
 Fork and merge call `post_merge_reload_vectors_from()` after writing data to rebuild HNSW indexes. This is best-effort (warnings on failure, not errors) because the KV data is already committed -- vector indexes can be rebuilt on next database open if the reload fails.
 
-### Global Recovery Registry
+### Per-Database Subsystem List
 
-The participant registry uses a process-global `static` with `once_cell::Lazy`. This means:
-- Registration must happen before any `Database::open()` call
-- Tests must serialize access via a mutex and clear the registry between tests
-- Duplicate names are silently ignored (idempotent registration)
+The subsystem list lives on the `Database` struct (`RwLock<Vec<Box<dyn Subsystem>>>`), not in a process-global. This means:
+- Each `Database` instance owns its own recovery + freeze list, installed at open time via `DatabaseBuilder::with_subsystem(...)`.
+- Multiple `Database` instances in the same process can run different subsystem lists without stepping on each other (useful for test isolation).
+- The same ordered list drives both recovery and freeze, so no caller can accidentally recover one set and freeze another.
 
-The alternative (per-Database registry) was rejected because recovery participants are typically registered once during process initialization, not per-database.
+Composition happens one layer up in the executor (`strata_db_builder()`), because the engine cannot depend on `strata-vector` without creating a dependency cycle.
 
 ### Bundle Export Preserves Full Version History
 

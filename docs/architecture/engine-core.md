@@ -98,7 +98,7 @@ Database::open(path)
        │   Acquire exclusive file lock (.lock)                      │
        │   Call open_finish()                                       │
        │   Register Weak<Database> in OPEN_DATABASES                │
-       │   Register + run recovery participants (vector, search)    │
+       │   Run subsystem recovery (vector, search)                  │
        │   Enable InvertedIndex                                     │
        │                                                            │
        ├─ [Multi-process] ──────────────────────────────────────────┘

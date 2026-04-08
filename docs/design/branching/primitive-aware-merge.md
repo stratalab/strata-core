@@ -501,12 +501,12 @@ For each `(space, TypeTag::Graph)` cell that the merge touches:
 
 ### Architecture
 
-The graph crate cannot be a direct dependency of the engine crate (graph already depends on engine — adding the reverse edge would be a cycle). Phase 3b uses a registration callback pattern, mirroring the existing `register_recovery_participant` / `register_vector_recovery` hooks:
+The graph crate cannot be a direct dependency of the engine crate (graph already depends on engine — adding the reverse edge would be a cycle). Phase 3b uses a registration callback pattern: the engine exposes a function-pointer slot, and the graph crate installs its implementation at startup. This mirrors the same cross-crate seam that `VectorSubsystem` uses for vector-aware merge and that `register_branch_dag_hook_implementation` uses for DAG event hooks.
 
 - **`crates/graph/src/merge.rs`** — pure algorithm. `compute_graph_merge`, decode helpers, `GraphMergeOutput`/`GraphMergeConflict` types. Independent of engine dispatch.
 - **`crates/graph/src/merge_handler.rs`** — engine bridge. Defines a `graph_plan_fn(&MergePlanCtx) -> StrataResult<PrimitiveMergePlan>` function that decodes typed entries, calls `compute_graph_merge`, converts the output into engine-side `MergeAction`/`ConflictEntry`, and returns the plan. `pub fn register_graph_semantic_merge()` registers the function with the engine via `strata_engine::register_graph_merge_plan`.
 - **`crates/engine/src/branch_ops/primitive_merge.rs`** — `GraphMergeHandler::plan` dispatches to the registered function if present. If unset (e.g. engine-only unit tests), falls back to Phase 3's tactical refusal of divergent graph merges + the default classify path. The trait gains a `plan` method with a default impl (`classify_typed_entries_for_tag`) that KV/JSON/Vector/Event handlers use unchanged.
-- **Test fixtures** call `strata_graph::register_graph_semantic_merge()` from `ensure_recovery_registered` so all integration tests exercise the semantic merge path.
+- **Test fixtures** call `strata_graph::register_graph_semantic_merge()` from `ensure_test_handlers_registered` in `tests/common/mod.rs` so all integration tests exercise the semantic merge path.
 
 ### Conflict semantics
 
@@ -728,7 +728,7 @@ After the per-doc pass, `plan` runs a second pass that loads `IndexDef`s from `_
 
 The merge transaction's apply loop in `branch_ops/mod.rs::merge_branches` filters `_idx/...` and `_idx_meta/...` spaces out of the OCC validation list (since secondary indexes are derived from the doc-level actions whose OCC is already checked) and out of `SpaceIndex::register` (since these are internal namespaces, not user spaces). The `is_user_visible_space` helper drives both filters.
 
-`JsonMergeHandler::post_commit` is BM25-only after this work: it refreshes the in-memory `InvertedIndex` extension via `JsonStore::index_json_doc` (puts) or `deindex_json_doc` (deletes). BM25 is non-transactional and is already crash-safe via `register_search_recovery` (the search recovery participant rebuilds BM25 from KV state on `Database::open`), so a missed BM25 refresh self-heals on the next restart.
+`JsonMergeHandler::post_commit` is BM25-only after this work: it refreshes the in-memory `InvertedIndex` extension via `JsonStore::index_json_doc` (puts) or `deindex_json_doc` (deletes). BM25 is non-transactional and is already crash-safe via `SearchSubsystem::recover` (which rebuilds BM25 from KV state on `Database::open`), so a missed BM25 refresh self-heals on the next restart.
 
 The atomic-merge-transaction design eliminates the crash window that the old separate-transaction post_commit had: every JSON merge state — docs and secondary indexes — is durable in WAL by the time `merge_branches` returns, so a crash mid-merge cannot leave indexes stale relative to docs.
 
@@ -839,14 +839,14 @@ The lower-level `GraphStore::*` API takes `space: &str` as a required parameter 
 
 ### Step 7.0: Atomic JSON merge transaction (precondition for test #5, shipped)
 
-A precondition for the rollback test (#5 below) was that *every* primitive's merged state had to be durable in WAL by the time `merge_branches` returns. After Phase 5, JSON secondary index updates lived in `JsonMergeHandler::post_commit`, which ran in a *separate* transaction *after* the merge transaction committed. A crash between merge-commit and post-commit would leave secondary indexes stale, and no recovery participant existed to heal them.
+A precondition for the rollback test (#5 below) was that *every* primitive's merged state had to be durable in WAL by the time `merge_branches` returns. After Phase 5, JSON secondary index updates lived in `JsonMergeHandler::post_commit`, which ran in a *separate* transaction *after* the merge transaction committed. A crash between merge-commit and post-commit would leave secondary indexes stale, and no subsystem recovery hook existed to heal them.
 
 Phase 7 closes that gap by **inlining JSON secondary index writes into the merge transaction**:
 
 - `MergePlanCtx` gained a `db: &'a Arc<Database>` field so handlers can read auxiliary state (like `IndexDef`s) during plan construction.
 - `JsonMergeHandler::plan` runs a second pass over the per-doc affected list that loads `IndexDef`s via `JsonStore::load_indexes` and emits `MergeAction`s for the corresponding `_idx/{space}/{name}` entries (delete for the old field value, put for the new). These flow through the same merge transaction as the doc updates.
 - `merge_branches` and `cherry_pick_from_diff` filter `_idx/...` and `_idx_meta/...` spaces out of `SpaceIndex::register` (so internal namespaces don't pollute `db.list_spaces()`) and out of OCC validation (since secondary indexes are derived from the doc-level actions whose OCC is already enforced). The new helper `is_user_visible_space` drives both filters.
-- `JsonMergeHandler::post_commit` is BM25-only after this work: it refreshes the in-memory `InvertedIndex` extension via `index_json_doc` / `deindex_json_doc`. BM25 has its own crash-recovery via `register_search_recovery`, so a missed refresh self-heals on next open.
+- `JsonMergeHandler::post_commit` is BM25-only after this work: it refreshes the in-memory `InvertedIndex` extension via `index_json_doc` / `deindex_json_doc`. BM25 has its own crash-recovery via `SearchSubsystem::recover`, so a missed refresh self-heals on next open.
 
 The atomic-transaction design eliminates the JSON crash window and removes a moving part — `post_commit` no longer touches KV.
 
@@ -945,9 +945,9 @@ The architectural-claims doc lives only in this design document; there is no sep
 
 2. **Crash recovery for `post_commit` handlers** — RESOLVED. The chosen design moves all KV-touching post_commit logic *into* the merge transaction so a crash mid-merge cannot leave KV in a half-merged state:
    - **JSON secondary indexes**: emitted as `MergeAction`s inside `JsonMergeHandler::plan` (Phase 7 Step 7.0).
-   - **Vector HNSW backends**: rebuilt on `Database::open` by `register_vector_recovery`, since HNSW is in-memory and doesn't survive restart by definition.
-   - **BM25 inverted index**: rebuilt on `Database::open` by `register_search_recovery`, also in-memory.
-   `post_commit` handlers that survive after Phase 7 (`VectorMergeHandler::post_commit` for incremental HNSW rebuild, `JsonMergeHandler::post_commit` for BM25 refresh) are best-effort and self-heal via the corresponding recovery participants on next open. Phase 7 test #5 (`cross_primitive_merge_rollback_via_reopen`) exercises this end-to-end.
+   - **Vector HNSW backends**: rebuilt on `Database::open` by `VectorSubsystem::recover`, since HNSW is in-memory and doesn't survive restart by definition.
+   - **BM25 inverted index**: rebuilt on `Database::open` by `SearchSubsystem::recover`, also in-memory.
+   `post_commit` handlers that survive after Phase 7 (`VectorMergeHandler::post_commit` for incremental HNSW rebuild, `JsonMergeHandler::post_commit` for BM25 refresh) are best-effort and self-heal via the corresponding `Subsystem::recover` hooks on next open. Phase 7 test #5 (`cross_primitive_merge_rollback_via_reopen`) exercises this end-to-end.
 
 3. **Graph space symmetry rollout** — should Phase 6 happen before the per-primitive handlers or after? Doing it first means handlers are built space-generic from the start; doing it later avoids mixing a handler refactor with an API change.
 

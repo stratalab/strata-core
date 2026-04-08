@@ -145,7 +145,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         // Phase 3 cross-reference: this metadata scan now matches the
         // semantics of `SpaceIndex::discover_used_spaces` + `list` (union
         // of metadata and discovery) because Phase 3's startup repair runs
-        // BEFORE this recovery participant. By the time we get here, every
+        // BEFORE `VectorSubsystem::recover`. By the time we get here, every
         // space with real data has a metadata entry, so the metadata-only
         // scan below is functionally equivalent to a full data scan. If
         // that ordering ever changes, switch this loop to use

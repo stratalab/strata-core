@@ -357,7 +357,7 @@ pub fn ensure_branch_dag(db: &Arc<Database>) -> StrataResult<()> {
 /// Initialize the full system branch infrastructure.
 ///
 /// Called during `Database::open()` and `Database::cache()` after
-/// recovery participants have run. Order:
+/// subsystem recovery has run. Order:
 /// 1. Create `_system_` branch (if needed)
 /// 2. Create `_branch_dag` graph on `_system_` (if needed)
 /// 3. Seed default branch node in DAG (if needed)
@@ -408,21 +408,23 @@ pub mod branch_dag;
 
 Call `init_system_branch()` in all three init paths:
 
-**1. `open_internal` path (line 374-386)** — after `recover_all_participants(&db)?`:
+**1. Executor open path (`Strata::open_with`)** — called after the builder finishes running subsystem recovery:
 ```rust
-crate::recovery::recover_all_participants(&db)?;
-let index = db.extension::<crate::search::InvertedIndex>()?;
-if !index.is_enabled() {
-    index.enable();
+// Executor: crates/executor/src/api/mod.rs (schematic)
+match strata_db_builder().open_with_config(&data_dir, cfg) {
+    Ok(db) => {
+        // NEW: initialize system branch infrastructure
+        strata_graph::branch_dag::init_system_branch(&db);
+        // ...
+    }
+    Err(e) => { /* IPC fallback etc. */ }
 }
-
-// NEW: initialize system branch infrastructure
-if let Err(e) = crate::branch_dag::init_system_branch(&db) {
-    warn!(target: "strata::db", error = %e, "Failed to initialize system branch — DAG tracking unavailable");
-}
-
-Ok(db)
 ```
+
+Note: as of #2354 (Epics 1-5), recovery is driven by the executor's
+`strata_db_builder()` with an explicit `[VectorSubsystem, SearchSubsystem]`
+list — there is no longer a `recover_all_participants` call in the
+engine's open path.
 
 **2. `cache()` path (line 688-691)** — after InvertedIndex setup:
 ```rust

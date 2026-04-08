@@ -427,7 +427,7 @@ Each `SegmentManifestEntry` contains: `segment_id`, `doc_count`, `total_doc_len`
 
 ## 7. Recovery (`recovery.rs`)
 
-Integrates with the engine's `RecoveryParticipant` system.
+Integrates with the engine's `Subsystem` trait. Search recovery is driven by `SearchSubsystem::recover()`, installed on every production-opened `Database` by the executor's `strata_db_builder()` helper.
 
 ### 7.1 Recovery Flow
 

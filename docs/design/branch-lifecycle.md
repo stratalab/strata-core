@@ -218,7 +218,7 @@ if name.starts_with("_system_") {
 
 **File: `crates/engine/src/database/mod.rs`**
 
-Add a new method `ensure_system_branch()` called during `open_finish()` (after recovery participants, before returning the `Arc<Database>`):
+Add a new method `ensure_system_branch()` called during `open_finish()` (after subsystem recovery, before returning the `Arc<Database>`):
 
 ```rust
 fn ensure_system_branch(db: &Arc<Database>) -> StrataResult<()> {
@@ -231,7 +231,7 @@ fn ensure_system_branch(db: &Arc<Database>) -> StrataResult<()> {
 ```
 
 **Call sites:**
-- `open_finish()` — after `recover_all_participants()` (disk databases)
+- `open_finish()` — after subsystem recovery has run (disk databases)
 - `cache()` — after `InvertedIndex` setup (ephemeral databases)
 
 **Idempotent**: Safe for existing databases that already have it.

@@ -36,7 +36,7 @@ vector/
 ├── segmented.rs        SegmentedHnswBackend: active buffer + sealed segments  (3,175 lines)
 ├── mmap.rs             SVEC format: heap freeze/load with CompactIndex        (567 lines)
 ├── mmap_graph.rs       SHGR format: sealed graph freeze/load                 (610 lines)
-├── recovery.rs         mmap-accelerated recovery participant                  (362 lines)
+├── recovery.rs         mmap-accelerated VectorSubsystem (recover + freeze)    (362 lines)
 ├── wal.rs              WAL entry types 0x70-0x73, MessagePack serialization   (492 lines)
 ├── snapshot.rs         Deterministic snapshot v0x01, raw f32 LE embeddings    (633 lines)
 └── store.rs            VectorStore facade, VectorBackendState, upsert logic   (4,496 lines)
