@@ -372,42 +372,45 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
                     .collect::<Vec<_>>()
             };
 
-            // Mode precedence: as_of > time_range > current. When `as_of` is
-            // set, this branch ignores `time_range` and runs a pure point-in-
-            // time search. Note this is **asymmetric vs BM25**, which since
-            // PR #2365 applies both filters as an intersection (visible at
-            // `as_of` AND `created_at` inside `time_range`).
-            //
-            // Closing the asymmetry doesn't need a new backend trait method:
-            // `find_vector_record_at` already returns the full `VectorRecord`
-            // (with `created_at`), so a `search_at_in_range_with_sources`
-            // can be built at the `VectorStore` layer by post-filtering
-            // each candidate's `record.created_at`. Tracked as follow-up to
-            // Audit Finding 3 (Gap G); not in scope for this PR. Until then,
-            // callers that combine `as_of` with `time_range` get vector hits
-            // filtered only by `as_of` while BM25 hits are filtered by both.
+            // Mode selection: 4-way match on (as_of, time_range). All four
+            // arms feed `to_hits`, which centralises orphan-drop and
+            // cross-space filtering. Symmetric with the BM25 branch — when
+            // both knobs are set, the vector path now applies them as an
+            // intersection (visible at `as_of` AND `created_at` inside
+            // `[start, end]`), matching the contract PR #2365 made on the
+            // BM25 side.
             let vec_hits: Vec<SearchHit> = collection_names
                 .par_iter()
                 .flat_map(|coll| {
-                    let result = if let Some(as_of_ts) = request.as_of {
-                        vector.system_search_at_with_sources(
+                    let result = match (request.as_of, request.time_range) {
+                        (Some(as_of_ts), Some((s, e))) => vector
+                            .system_search_at_in_range_with_sources(
+                                request.branch_id,
+                                coll,
+                                embedding,
+                                k,
+                                as_of_ts,
+                                s,
+                                e,
+                            ),
+                        (Some(as_of_ts), None) => vector.system_search_at_with_sources(
                             request.branch_id,
                             coll,
                             embedding,
                             k,
                             as_of_ts,
-                        )
-                    } else if let Some((s, e)) = request.time_range {
-                        vector.system_search_with_sources_in_range(
+                        ),
+                        (None, Some((s, e))) => vector.system_search_with_sources_in_range(
                             request.branch_id,
                             coll,
                             embedding,
                             k,
                             s,
                             e,
-                        )
-                    } else {
-                        vector.system_search_with_sources(request.branch_id, coll, embedding, k)
+                        ),
+                        (None, None) => {
+                            vector.system_search_with_sources(request.branch_id, coll, embedding, k)
+                        }
                     };
                     to_hits(result)
                 })
@@ -2015,5 +2018,266 @@ mod tests {
             0,
             "as_of before any insert must yield zero vector hits"
         );
+    }
+
+    // ---- Gap G' (#2370): vector intersection of as_of + time_range ----
+    //
+    // Pin that the vector branch applies BOTH knobs as an intersection,
+    // matching the BM25 contract from PR #2365. Pre-fix the vector branch
+    // ignored `time_range` whenever `as_of` was set, leaving a documented
+    // asymmetry where a fused hybrid response could mix BM25 hits filtered
+    // by both bounds with vector hits filtered by only one.
+
+    #[test]
+    fn test_substrate_temporal_hybrid_intersect_as_of_and_time_range() {
+        // Insert 4 shadow vectors sequentially, capturing a wall-clock
+        // checkpoint after each one (with 10ms sleeps so each shadow_N is
+        // reliably committed *before* tN). Request as_of=t3 + time_range=(t2, t4):
+        //   - shadow_1 (created < t1 < t2)        excluded by time_range
+        //   - shadow_2 (created in (t1, t2))      excluded by time_range
+        //   - shadow_3 (created in (t2, t3))      INCLUDED (in range, visible at t3)
+        //   - shadow_4 (created in (t3, t4))      excluded by as_of (created > t3)
+        //
+        // The single hit must be k_3. Pre-fix the vector branch would
+        // return shadow_1, shadow_2, shadow_3 (everything visible at t3),
+        // breaking the assertion.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        let insert_shadow = |idx: u32| {
+            let shadow = format!("shadow_{}", idx);
+            let key = format!("k_{}", idx);
+            vector_store
+                .system_insert_with_source(
+                    branch_id,
+                    "_system_embed_kv",
+                    &shadow,
+                    &[1.0, 0.0, 0.0],
+                    None,
+                    EntityRef::kv(branch_id, "default", &key),
+                )
+                .unwrap();
+            db.flush().unwrap();
+        };
+        let checkpoint = || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let ts = strata_core::Timestamp::now().as_micros();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            ts
+        };
+
+        insert_shadow(1);
+        // _t1 isn't asserted on directly — it documents the timeline and
+        // also enforces the 20ms gap between shadow_1's commit and t2 (via
+        // checkpoint()'s sleep-before-and-after pattern), so shadow_1's
+        // created_at is reliably strictly less than t2.
+        let _t1 = checkpoint();
+        insert_shadow(2);
+        let t2 = checkpoint();
+        insert_shadow(3);
+        let t3 = checkpoint();
+        insert_shadow(4);
+        let t4 = checkpoint();
+
+        let recipe = temporal_hybrid_recipe();
+
+        // Query 1: intersection — exactly shadow_3.
+        let req_intersect = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe: recipe.clone(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: Some((t2, t4)),
+            primitive_filter: None,
+            as_of: Some(t3),
+            budget_ms: None,
+        };
+        let resp_intersect = retrieve(&db, &req_intersect).unwrap();
+
+        // BM25 contributes nothing (no KV/Json/Event/Graph data) — any hit
+        // came from the vector branch. Pin this so a future BM25 change
+        // can't make this test pass for the wrong reason.
+        assert_eq!(
+            resp_intersect
+                .stats
+                .stages
+                .get("bm25")
+                .map(|s| s.candidates)
+                .unwrap_or(0),
+            0,
+            "BM25 must produce zero hits — vector branch is the only source"
+        );
+        assert_eq!(
+            resp_intersect.hits.len(),
+            1,
+            "intersection of as_of=t3 and time_range=(t2, t4) should yield \
+             exactly k_3; got {} hits: {:?}",
+            resp_intersect.hits.len(),
+            resp_intersect
+                .hits
+                .iter()
+                .map(|h| &h.doc_ref)
+                .collect::<Vec<_>>()
+        );
+        match &resp_intersect.hits[0].doc_ref {
+            EntityRef::Kv { space, key, .. } => {
+                assert_eq!(space, "default");
+                assert_eq!(key, "k_3");
+            }
+            other => panic!("expected EntityRef::Kv k_3, got {:?}", other),
+        }
+
+        // Query 2: as_of-only — proves the intersection actually narrows.
+        // Without time_range, k_1, k_2, k_3 are all visible at t3, k_4 is
+        // not. So 3 hits, not 1.
+        let req_as_of_only = RetrievalRequest {
+            query: "anything".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(t3),
+            budget_ms: None,
+        };
+        let resp_as_of_only = retrieve(&db, &req_as_of_only).unwrap();
+        assert_eq!(
+            resp_as_of_only.hits.len(),
+            3,
+            "as_of=t3 alone should yield k_1, k_2, k_3 (k_4 not yet visible)"
+        );
+        let keys: std::collections::BTreeSet<String> = resp_as_of_only
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Kv { key, .. } => Some(key.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            keys,
+            ["k_1", "k_2", "k_3"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<std::collections::BTreeSet<_>>(),
+            "as_of-only result must contain exactly k_1, k_2, k_3"
+        );
+    }
+
+    #[test]
+    fn test_substrate_temporal_hybrid_intersect_matches_bm25_pattern() {
+        // For each tN, insert one shadow vector pointing at k_N AND a KV
+        // doc at k_N with text "rust N". Query "rust" with as_of=t3 and
+        // time_range=(t2, t4) exercises BM25 + vector in the same call.
+        //
+        // BM25 (already intersection-correct since #2365) → 1 candidate
+        // Vector (post-fix intersection) → 1 candidate
+        //
+        // Pre-fix the vector stage would report 3 candidates (k_1, k_2,
+        // k_3 — everything visible at t3) while BM25 reports 1, breaking
+        // the symmetry. Post-fix both branches converge on the same
+        // {k_3} set.
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let vector_store = strata_vector::VectorStore::new(db.clone());
+        let config =
+            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        vector_store
+            .create_system_collection(branch_id, "_system_embed_kv", config)
+            .unwrap();
+
+        let insert_pair = |idx: u32| {
+            let shadow = format!("shadow_{}", idx);
+            let key = format!("k_{}", idx);
+            let body = format!("rust {}", idx);
+            vector_store
+                .system_insert_with_source(
+                    branch_id,
+                    "_system_embed_kv",
+                    &shadow,
+                    &[1.0, 0.0, 0.0],
+                    None,
+                    EntityRef::kv(branch_id, "default", &key),
+                )
+                .unwrap();
+            // put_kv_and_observe_ts flushes internally; we ignore the
+            // returned ts and rely on wall-clock checkpoints below for
+            // bounds, since the BM25 and vector stages each see slightly
+            // different created_at values for the (kv, vector) pair.
+            let _ = put_kv_and_observe_ts(&db, &branch_id, "default", &key, &body);
+        };
+        let checkpoint = || {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let ts = strata_core::Timestamp::now().as_micros();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            ts
+        };
+
+        insert_pair(1);
+        let _t1 = checkpoint();
+        insert_pair(2);
+        let t2 = checkpoint();
+        insert_pair(3);
+        let t3 = checkpoint();
+        insert_pair(4);
+        let t4 = checkpoint();
+
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe: temporal_hybrid_recipe(),
+            embedding: Some(vec![1.0, 0.0, 0.0]),
+            time_range: Some((t2, t4)),
+            primitive_filter: None,
+            as_of: Some(t3),
+            budget_ms: None,
+        };
+        let response = retrieve(&db, &request).unwrap();
+
+        let bm25_count = response
+            .stats
+            .stages
+            .get("bm25")
+            .map(|s| s.candidates)
+            .unwrap_or(0);
+        let vec_count = response
+            .stats
+            .stages
+            .get("vector")
+            .map(|s| s.candidates)
+            .unwrap_or(0);
+
+        assert_eq!(bm25_count, 1, "BM25 intersection should yield exactly k_3");
+        // The asymmetry pin: vector must agree with BM25 on the cardinality
+        // of the intersection window. Pre-fix this would be 3 (everything
+        // visible at t3 with time_range silently dropped).
+        assert_eq!(
+            vec_count, bm25_count,
+            "vector intersection should match BM25 intersection cardinality \
+             (asymmetry would give vector={}, bm25={})",
+            vec_count, bm25_count
+        );
+
+        // The fused result: BM25 and vector both point at the same
+        // EntityRef::Kv k_3, so RRF dedupes them into a single hit.
+        assert_eq!(response.hits.len(), 1, "fused result should be exactly k_3");
+        match &response.hits[0].doc_ref {
+            EntityRef::Kv { space, key, .. } => {
+                assert_eq!(space, "default");
+                assert_eq!(key, "k_3");
+            }
+            other => panic!("expected EntityRef::Kv k_3, got {:?}", other),
+        }
     }
 }

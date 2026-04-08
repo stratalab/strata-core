@@ -565,6 +565,109 @@ impl VectorStore {
         Ok(matches)
     }
 
+    /// Temporal search with sources, intersected with a `[start_ts, end_ts]`
+    /// time range.
+    ///
+    /// Combines `search_at` visibility (only vectors alive at `as_of_ts`)
+    /// with a `created_at` post-filter, mirroring the BM25 intersection
+    /// semantics PR #2365 made the contract on the BM25 side. Used by
+    /// hybrid retrieval when the request sets both `as_of` and `time_range`.
+    ///
+    /// Bounds are **inclusive on both ends**, matching the existing
+    /// `HnswBackend::search_in_range` and `db.get_at_timestamp` upper-bound
+    /// semantics so the four temporal modes agree on what `time_range` means.
+    ///
+    /// **Filter timestamp**: this uses `record.created_at` (the *original*
+    /// vector creation time, carried over across `update_with_source` calls
+    /// per `VectorRecord::update_with_source`). It is NOT the per-version
+    /// commit timestamp. This mirrors the existing `search_in_range` HNSW
+    /// convention, but differs from BM25 (which uses `versioned.timestamp`,
+    /// the per-version commit time). For vectors that are inserted once and
+    /// never updated — the common case — both interpretations coincide.
+    /// Closing the BM25/vector convention gap is a separate issue (vectors
+    /// would need a "latest update visible at as_of_ts" timestamp), out of
+    /// scope for #2370.
+    ///
+    /// Like `search_at_with_sources`, this intentionally does NOT use the
+    /// inline-meta fast path: historical correctness requires the version
+    /// chain because `InlineMeta::source_ref` reflects current state.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn search_at_in_range_with_sources(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        as_of_ts: u64,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        if k == 0 {
+            return Ok(Vec::new());
+        }
+
+        // Reject NaN/Infinity in query vector
+        validate_query_values(query)?;
+
+        // Ensure collection is loaded
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+
+        let collection_id = CollectionId::new(branch_id, space, collection);
+
+        // Validate query dimension
+        let config = self.get_collection_config_required(branch_id, space, collection)?;
+        if query.len() != config.dimension {
+            return Err(VectorError::DimensionMismatch {
+                expected: config.dimension,
+                got: query.len(),
+            });
+        }
+
+        let candidates = {
+            let state = self.state()?;
+            let backend = state.backends.get(&collection_id).ok_or_else(|| {
+                VectorError::CollectionNotFound {
+                    name: collection.to_string(),
+                }
+            })?;
+            backend.search_at(query, k, as_of_ts)
+        };
+
+        let mut matches: Vec<VectorMatchWithSource> = Vec::with_capacity(candidates.len());
+        for (vid, score) in candidates {
+            if let Some((key, record)) =
+                self.find_vector_record_at(branch_id, space, collection, vid, as_of_ts)?
+            {
+                // Intersection post-filter: drop candidates whose creation
+                // timestamp falls outside [start_ts, end_ts]. Inclusive on
+                // both ends to match the BM25 in-range contract.
+                if record.created_at < start_ts || record.created_at > end_ts {
+                    continue;
+                }
+                matches.push(VectorMatchWithSource::new(
+                    key,
+                    score,
+                    None, // substrate doesn't need metadata; matches search_with_sources
+                    record.source_ref,
+                    record.version,
+                ));
+            }
+        }
+
+        // Facade-level tie-breaking (score desc, key asc)
+        matches.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.key.cmp(&b.key))
+        });
+
+        matches.truncate(k);
+
+        Ok(matches)
+    }
+
     /// Temporal search returning results with source references (internal).
     ///
     /// Like `search_with_sources` but resolves candidates via the version
