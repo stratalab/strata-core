@@ -125,10 +125,11 @@ static BRANCH_DAG_HOOKS: OnceCell<BranchDagHooks> = OnceCell::new();
 /// Register the branch DAG hook implementation.
 ///
 /// Should be called once at application/test startup, before any branch
-/// operation. The standard test fixture in `tests/common/mod.rs` calls this
-/// from `ensure_recovery_registered` alongside the existing graph/vector
-/// semantic-merge registrations. The executor's recovery init in
-/// `crates/executor/src/api/mod.rs` does the same for production startup.
+/// operation. The standard test fixture in `tests/common/mod.rs` calls
+/// this from `ensure_test_handlers_registered` alongside the graph/vector
+/// semantic-merge registrations. The executor's
+/// `ensure_merge_handlers_registered` in `crates/executor/src/api/mod.rs`
+/// does the same for production startup.
 ///
 /// `strata_graph::register_branch_dag_hook_implementation()` is the
 /// canonical caller — it builds the `BranchDagHooks` struct and forwards

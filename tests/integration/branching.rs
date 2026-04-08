@@ -6769,7 +6769,7 @@ fn cross_primitive_merge_rollback_via_reopen() {
 // these tests silently bypassed the DAG. After the fix, the engine's
 // `branch_ops::*` functions fire registered hooks at the end of every
 // successful operation. The hook implementation (`graph::dag_hook_impl`) is
-// registered by `tests/common/mod.rs::ensure_recovery_registered`.
+// registered by `tests/common/mod.rs::ensure_test_handlers_registered`.
 // ============================================================================
 
 /// Read a node from the branch DAG graph (`_branch_dag` on `_system_`).

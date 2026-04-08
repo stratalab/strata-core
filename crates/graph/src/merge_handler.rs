@@ -12,10 +12,8 @@
 //!
 //! The engine crate cannot depend on `strata-graph` (graph already
 //! depends on engine — adding the reverse edge would be a cycle). The
-//! function-pointer registration pattern matches the existing
-//! `register_recovery_participant` / `register_vector_recovery` pattern
-//! that vector and search use, and avoids exposing graph-internal types
-//! through the engine crate's public API.
+//! function-pointer registration pattern keeps graph-internal types out
+//! of the engine crate's public API.
 //!
 //! ## Lifecycle
 //!
@@ -43,7 +41,7 @@ use crate::types::{EdgeData, NodeData};
 /// Idempotent: the engine's `OnceCell` slot only accepts the first call.
 /// Test fixtures and application startup should call this exactly once,
 /// before any `merge_branches` call. The standard test fixtures register
-/// it alongside `register_vector_recovery` / `register_search_recovery`.
+/// it alongside `register_vector_semantic_merge` and the branch DAG hook.
 pub fn register_graph_semantic_merge() {
     register_graph_merge_plan(graph_plan_fn);
 }

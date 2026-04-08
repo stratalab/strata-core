@@ -17,24 +17,24 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
 pub use strata_engine::{
-    register_search_recovery, BranchIndex, Database, EventLog, JsonStore, KVStore, StrataConfig,
+    BranchIndex, Database, DatabaseBuilder, EventLog, JsonStore, KVStore, SearchSubsystem,
+    StrataConfig,
 };
 pub use strata_graph::GraphStore;
-pub use strata_vector::{
-    register_vector_recovery, DistanceMetric, StorageDtype, VectorConfig, VectorStore,
-};
+pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
 // ============================================================================
 // Initialization
 // ============================================================================
 
-static INIT_RECOVERY: Once = Once::new();
+static INIT_HANDLERS: Once = Once::new();
 
-fn ensure_recovery_registered() {
-    INIT_RECOVERY.call_once(|| {
-        register_vector_recovery();
-        register_search_recovery();
+/// Register process-global merge handlers and DAG event hooks. These are
+/// idempotent and installed once per test binary. Recovery, by contrast,
+/// is driven per-open through `test_db_builder()` / `DatabaseBuilder`.
+fn ensure_test_handlers_registered() {
+    INIT_HANDLERS.call_once(|| {
         // Register the graph semantic merge plan with the engine's
         // GraphMergeHandler. Without this call, the engine falls back to
         // a tactical refusal of divergent graph merges (which still
@@ -52,6 +52,17 @@ fn ensure_recovery_registered() {
         // assert on DAG state need this to fire.
         strata_graph::register_branch_dag_hook_implementation();
     });
+}
+
+/// Fresh `DatabaseBuilder` wired with the two production subsystems
+/// (`VectorSubsystem` + `SearchSubsystem`), used by all test-helper open
+/// paths so integration tests exercise the same recovery pipeline the
+/// executor uses in production.
+fn test_db_builder() -> DatabaseBuilder {
+    ensure_test_handlers_registered();
+    DatabaseBuilder::new()
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
 }
 
 /// Create a StrataConfig with always durability mode.
@@ -78,29 +89,31 @@ pub struct TestDb {
 impl TestDb {
     /// Create a new test database with standard durability (default for tests).
     pub fn new() -> Self {
-        ensure_recovery_registered();
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let db = Database::open(dir.path()).expect("Failed to create test database");
+        let db = test_db_builder()
+            .open(dir.path())
+            .expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
     }
 
     /// Create a test database with always durability.
     pub fn new_strict() -> Self {
-        ensure_recovery_registered();
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let config = always_config();
-        let db =
-            Database::open_with_config(dir.path(), config).expect("Failed to create test database");
+        let db = test_db_builder()
+            .open_with_config(dir.path(), config)
+            .expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
     }
 
     /// Create an in-memory test database.
     pub fn new_in_memory() -> Self {
-        ensure_recovery_registered();
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let db = Database::cache().expect("Failed to create test database");
+        let db = test_db_builder()
+            .cache()
+            .expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
     }
@@ -165,7 +178,9 @@ impl TestDb {
             Database::cache().expect("temporary cache for swap"),
         ));
         // Now open fresh from the same path (reads strata.toml)
-        self.db = Database::open(&path).expect("Failed to reopen database");
+        self.db = test_db_builder()
+            .open(&path)
+            .expect("Failed to reopen database");
     }
 
     /// Create a new branch ID for this test.
@@ -197,23 +212,28 @@ pub struct AllPrimitives {
 
 /// Create an in-memory test database (fastest, no persistence).
 pub fn create_test_db() -> Arc<Database> {
-    ensure_recovery_registered();
-    Database::cache().expect("Failed to create test database")
+    test_db_builder()
+        .cache()
+        .expect("Failed to create test database")
 }
 
 /// Create a persistent database at the given path.
 pub fn create_persistent_db(path: &Path) -> Arc<Database> {
-    ensure_recovery_registered();
-    Database::open(path).expect("Failed to create persistent database")
+    test_db_builder()
+        .open(path)
+        .expect("Failed to create persistent database")
 }
 
 /// Create in-memory, standard, and always databases for cross-mode testing.
 fn all_mode_databases() -> Vec<(&'static str, Arc<Database>, Option<TempDir>)> {
     let standard_dir = tempfile::tempdir().expect("Failed to create temp dir for standard db");
-    let standard_db = Database::open(standard_dir.path()).expect("standard db");
+    let standard_db = test_db_builder()
+        .open(standard_dir.path())
+        .expect("standard db");
     let always_dir = tempfile::tempdir().expect("Failed to create temp dir for always db");
-    let always_db =
-        Database::open_with_config(always_dir.path(), always_config()).expect("always db");
+    let always_db = test_db_builder()
+        .open_with_config(always_dir.path(), always_config())
+        .expect("always db");
     vec![
         ("in_memory", create_test_db(), None),
         ("standard", standard_db, Some(standard_dir)),

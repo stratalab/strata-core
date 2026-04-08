@@ -284,54 +284,37 @@ impl Database {
         Ok((db, true))
     }
 
+    /// Convenience entry point used by `Database::open` / `open_with_config`.
+    ///
+    /// Delegates to `open_internal_with_subsystems` with a hardcoded
+    /// `[SearchSubsystem]` list. The engine crate does not depend on
+    /// `strata-vector`, so vector recovery is only available through the
+    /// builder with an explicit `VectorSubsystem` registration (see
+    /// `DatabaseBuilder`).
     pub(super) fn open_internal<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
-        let (db, is_fresh) = Self::acquire_primary_db(path.as_ref(), durability_mode, cfg)?;
-        if !is_fresh {
-            return Ok(db);
-        }
-
-        // Register and run recovery for search subsystem.
-        // Vector recovery is now handled by strata-vector (caller must register).
-        // Also sets subsystems on the Database for freeze-on-drop.
-        crate::search::register_search_recovery();
-
-        // Repair space metadata BEFORE search/vector recovery so that those
-        // participants see the complete set of spaces. Without this, legacy
-        // databases (or any bypass write that ever skipped the registration
-        // helper) leave orphan data in spaces invisible to enumeration.
-        // Followers are read-only and skip the metadata writes — the union
-        // behaviour in `SpaceIndex::list/exists` still gives them correct
-        // discovery via the data scan.
-        Self::repair_space_metadata_on_open(&db);
-
-        crate::recovery::recover_all_participants(&db)?;
-        let index = db.extension::<crate::search::InvertedIndex>()?;
-        if !index.is_enabled() {
-            index.enable();
-        }
-        db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
-
-        Ok(db)
+        Self::open_internal_with_subsystems(
+            path,
+            durability_mode,
+            cfg,
+            vec![Box::new(crate::search::SearchSubsystem)],
+        )
     }
 
     /// Open a primary database with an explicit subsystem list.
     ///
     /// The supplied subsystems drive both recovery (called in registration
     /// order) and freeze-on-drop (called in reverse order). This is the
-    /// subsystem-aware path used by `DatabaseBuilder` and, via the executor,
-    /// production opens.
+    /// canonical open path — both `DatabaseBuilder` and the `Database::open`
+    /// convenience API route through here, so the supplied `subsystems` list
+    /// is the sole driver of recovery.
     ///
     /// Recovery runs after WAL replay completes. Subsystems are installed on
     /// the `Database` only after every `recover()` succeeds, so a partial
     /// recovery failure does not freeze partially-rebuilt state on drop.
-    ///
-    /// Note: this path does **not** call `recover_all_participants` and does
-    /// **not** read the legacy `RecoveryParticipant` registry. The supplied
-    /// `subsystems` list is the sole driver of recovery for this open.
     pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
@@ -549,28 +532,21 @@ impl Database {
         Ok(db)
     }
 
+    /// Convenience entry point used by `Database::open_follower`.
+    ///
+    /// Delegates to `open_follower_internal_with_subsystems` with a hardcoded
+    /// `[SearchSubsystem]` list. The engine crate does not depend on
+    /// `strata-vector`, so vector recovery for followers is only available
+    /// through the builder with an explicit `VectorSubsystem` registration.
     fn open_follower_internal(
         canonical_path: PathBuf,
         cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
-        let db = Self::acquire_follower_db(canonical_path, cfg)?;
-
-        crate::search::register_search_recovery();
-
-        // Followers are read-only — `repair_space_metadata_on_open` is a
-        // no-op for them but kept on the same code path for symmetry. The
-        // union behaviour in `SpaceIndex::list/exists` still gives the
-        // follower correct discovery via a data scan.
-        Self::repair_space_metadata_on_open(&db);
-
-        crate::recovery::recover_all_participants(&db)?;
-        let index = db.extension::<crate::search::InvertedIndex>()?;
-        if !index.is_enabled() {
-            index.enable();
-        }
-        db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
-
-        Ok(db)
+        Self::open_follower_internal_with_subsystems(
+            canonical_path,
+            cfg,
+            vec![Box::new(crate::search::SearchSubsystem)],
+        )
     }
 
     /// Open a follower database with an explicit subsystem list.
@@ -579,10 +555,8 @@ impl Database {
     /// order). Followers do not freeze on drop — `Drop for Database`
     /// short-circuits on `is_follower()` — but the supplied subsystems
     /// are still installed via `set_subsystems` for symmetry with the
-    /// primary path.
-    ///
-    /// Note: this path does **not** call `recover_all_participants` and
-    /// does **not** read the legacy `RecoveryParticipant` registry.
+    /// primary path. The supplied `subsystems` list is the sole driver
+    /// of recovery for this open.
     pub(crate) fn open_follower_internal_with_subsystems(
         canonical_path: PathBuf,
         cfg: StrataConfig,

@@ -34,8 +34,7 @@ use crate::recovery::Subsystem;
 /// reverse order on shutdown / drop. The builder routes through the
 /// subsystem-aware open paths on `Database`, so the supplied list is the
 /// sole driver of recovery for builder-opened databases — there is no
-/// implicit hardcoded subsystem and no read of the legacy
-/// `RecoveryParticipant` registry.
+/// implicit hardcoded subsystem.
 pub struct DatabaseBuilder {
     subsystems: Vec<Box<dyn Subsystem>>,
 }

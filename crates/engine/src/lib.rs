@@ -43,10 +43,7 @@ pub use database::{
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
 };
 pub use instrumentation::PerfTrace;
-pub use recovery::{
-    recover_all_participants, register_recovery_participant, RecoveryFn, RecoveryParticipant,
-    Subsystem,
-};
+pub use recovery::Subsystem;
 pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
@@ -68,8 +65,7 @@ pub use search::{SearchBudget, SearchHit, SearchMode, SearchRequest, SearchRespo
 // Re-export branch ops types at crate root for convenience
 pub use branch_ops::MaterializeInfo;
 
-// Re-export search recovery registration and subsystem implementations
-pub use search::register_search_recovery;
+// Re-export search subsystem implementation
 pub use search::SearchSubsystem;
 
 // Re-export submodules for `strata_engine::extensions::*` access
