@@ -266,6 +266,33 @@ impl Database {
 
         if let Some(weak) = registry.get(&canonical_path) {
             if let Some(db) = weak.upgrade() {
+                // Mixed-opener detection (audit follow-up to #2354
+                // Finding 2): compare the requested subsystem list to
+                // the list that is actually installed on the existing
+                // instance. If they differ, the second caller's
+                // subsystems are silently dropped — the single-
+                // instance-per-path contract requires us to return
+                // the existing Arc unchanged. Log a warning so the
+                // misuse surfaces at runtime. Order matters: reversed
+                // lists produce different freeze orders.
+                let installed = db.installed_subsystem_names();
+                let requested: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
+                if installed != requested {
+                    tracing::warn!(
+                        target: "strata::db",
+                        path = ?canonical_path,
+                        installed = ?installed,
+                        requested = ?requested,
+                        "Mixed-opener detected: an earlier caller opened this \
+                         database with a different subsystem list. Returning \
+                         the existing instance with the EARLIER subsystems; \
+                         the requested subsystems were silently dropped. Use \
+                         the same opener (e.g. `Strata::open` everywhere, or \
+                         `DatabaseBuilder` with the same list) across all \
+                         call sites for this path. See audit follow-up to \
+                         #2354 Finding 2."
+                    );
+                }
                 info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
                 return Ok(db);
             }

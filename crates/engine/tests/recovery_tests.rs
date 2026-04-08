@@ -2214,3 +2214,97 @@ fn test_recovery_panic_does_not_deadlock() {
         ),
     }
 }
+
+// ============================================================================
+// Audit-follow-up regression for stratalab/strata-core#2354 Finding 2:
+// mixed-opener bypass must preserve the earlier subsystem list. See the
+// fast-path mismatch warning in `acquire_primary_db`.
+// ============================================================================
+
+/// Trivial test-only `Subsystem` whose `recover()` is a no-op. Used by
+/// `test_mixed_opener_returns_earlier_subsystems` to construct a second
+/// caller's subsystem list that is intentionally distinct from
+/// `Database::open`'s hardcoded `[SearchSubsystem]`.
+struct NoopRegressionSubsystem;
+
+impl strata_engine::Subsystem for NoopRegressionSubsystem {
+    fn name(&self) -> &'static str {
+        "noop-mixed-opener-regression"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+}
+
+/// Audit follow-up to stratalab/strata-core#2354 Finding 2.
+///
+/// When two callers open the same canonical path through
+/// `acquire_primary_db` with different subsystem lists, the fast-path
+/// single-instance-per-path contract returns the **earlier** instance
+/// unchanged — the second caller's requested subsystems are silently
+/// dropped. This is the behavior we are locking in, not the behavior
+/// we wish we had: `Strata` / `DatabaseBuilder` callers must notice
+/// the mismatch via the `tracing::warn!` that `acquire_primary_db`'s
+/// fast path emits. "Upgrading" the subsystem list instead would
+/// break the singleton-per-path contract and surprise callers who
+/// mix `Database::open` and `Strata::open` in the same process.
+///
+/// The test asserts two invariants:
+///   1. Singleton-per-path: `Arc::ptr_eq(&db_a, &db_b)`.
+///   2. The installed subsystem list on the returned Arc is what the
+///      FIRST caller requested — the second caller's distinct
+///      subsystems are not present.
+///
+/// Lives in the integration test binary (not `crates/engine/src/database/tests.rs`)
+/// because several lib tests call `OPEN_DATABASES.lock().clear()` for
+/// their own isolation; in parallel test runs they would wipe this
+/// test's fresh registry entry out from under it, causing the second
+/// `open()` to fall through to a file-lock collision. Integration
+/// tests run in a separate process so the race cannot fire.
+#[test]
+fn test_mixed_opener_returns_earlier_subsystems() {
+    use strata_engine::DatabaseBuilder;
+
+    let temp = TempDir::new().unwrap();
+
+    // Caller A: bare `Database::open` → `[SearchSubsystem]`.
+    let db_a = Database::open(temp.path()).unwrap();
+    assert_eq!(
+        db_a.installed_subsystem_names(),
+        vec!["search"],
+        "Database::open should install only SearchSubsystem"
+    );
+
+    // Caller B: `DatabaseBuilder` with an intentionally different
+    // subsystem list (`SearchSubsystem` + `NoopRegressionSubsystem`).
+    // This enters `acquire_primary_db`, hits the registry fast path,
+    // and must return the SAME Arc as caller A — with caller A's
+    // subsystem list, not caller B's.
+    let db_b = DatabaseBuilder::new()
+        .with_subsystem(strata_engine::SearchSubsystem)
+        .with_subsystem(NoopRegressionSubsystem)
+        .open(temp.path())
+        .unwrap();
+
+    // Singleton-per-path invariant.
+    assert!(
+        Arc::ptr_eq(&db_a, &db_b),
+        "same-path opens must return the same Arc<Database> \
+         (single-instance-per-path contract)"
+    );
+
+    // Key assertion: the installed list is A's, not B's. Caller B's
+    // `NoopRegressionSubsystem` was silently dropped. If a future
+    // refactor ever makes the second caller's list win, this
+    // assertion fires.
+    assert_eq!(
+        db_b.installed_subsystem_names(),
+        vec!["search"],
+        "mixed-opener bypass must preserve the EARLIER subsystem list; \
+         caller B's requested `noop-mixed-opener-regression` subsystem \
+         was silently dropped (see tracing::warn! in \
+         acquire_primary_db's fast path, audit follow-up to #2354 \
+         Finding 2)"
+    );
+}

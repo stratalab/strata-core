@@ -441,6 +441,23 @@ impl Database {
         *self.subsystems.write() = subsystems;
     }
 
+    /// Return the names of the subsystems currently installed on this
+    /// `Database`, in registration order.
+    ///
+    /// Used by `acquire_primary_db`'s fast-path mixed-opener detection
+    /// and by `Strata::from_database` to surface cases where a caller
+    /// wrapped a `Database` that was opened without the production
+    /// subsystem set (see audit follow-up to stratalab/strata-core#2354,
+    /// Finding 2). Also useful as a general diagnostic accessor.
+    ///
+    /// Returns an empty vec for cache databases or any `Database`
+    /// whose subsystems have not yet been installed (e.g. a partially-
+    /// opened instance inside `acquire_primary_db` after `open_finish`
+    /// but before the recovery loop completes).
+    pub fn installed_subsystem_names(&self) -> Vec<&'static str> {
+        self.subsystems.read().iter().map(|s| s.name()).collect()
+    }
+
     /// Run freeze hooks on all registered subsystems.
     ///
     /// Called during shutdown and drop. Attempts all hooks even if one fails,
