@@ -1922,3 +1922,110 @@ fn test_startup_repair_registers_orphan_data_spaces() {
         drop(db);
     }
 }
+
+// ============================================================================
+// Audit-follow-up regression for stratalab/strata-core#2354 Finding 1:
+// concurrent open must not observe a half-recovered Database. See the race
+// trace in the PR that introduced this test.
+// ============================================================================
+
+/// Test-only `Subsystem` that flips a flag on entry to `recover()`, sleeps
+/// for a configurable delay, then flips a completion flag. Used to force an
+/// observable window between "Database struct exists" and "subsystem
+/// recovery complete" so a concurrent opener can try to race into it.
+struct SlowRecoverySubsystem {
+    started: Arc<std::sync::atomic::AtomicBool>,
+    done: Arc<std::sync::atomic::AtomicBool>,
+    delay: std::time::Duration,
+}
+
+impl strata_engine::Subsystem for SlowRecoverySubsystem {
+    fn name(&self) -> &'static str {
+        "slow-recovery-regression-test"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        self.started
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        std::thread::sleep(self.delay);
+        self.done.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// Audit-follow-up regression for stratalab/strata-core#2354 Finding 1.
+///
+/// Before the fix, `acquire_primary_db` inserted the fresh `Arc<Database>`
+/// into the process-global `OPEN_DATABASES` registry **before**
+/// `open_internal_with_subsystems` ran the `subsystem.recover()` loop. A
+/// concurrent opener for the same path that came in during the recovery
+/// window would upgrade the weak ref, return `(db, false)`, and hand the
+/// caller a reference to a `Database` whose in-memory subsystem state was
+/// still being rebuilt.
+///
+/// This test pins a `SlowRecoverySubsystem` on thread A and waits for
+/// thread A to enter `recover()` (via the `started` flag). While thread A
+/// is deterministically inside the sleep, thread B calls
+/// `DatabaseBuilder::new().open(path)` for the same path. With the fix,
+/// thread B blocks on the `OPEN_DATABASES` mutex until thread A finishes
+/// recovery and inserts. When thread B's call returns, the `done` flag
+/// must be `true` — proving thread B saw the Arc only after recovery
+/// fully completed.
+#[test]
+fn test_concurrent_open_blocks_until_recovery_completes() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    use strata_engine::DatabaseBuilder;
+
+    let temp = TempDir::new().unwrap();
+    let path = Arc::new(temp.path().to_path_buf());
+
+    let started = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+
+    // Thread A: opens with SlowRecoverySubsystem that sleeps 500ms inside
+    // recover(). This is deterministically longer than the window the
+    // main thread spends waiting for `started` + spawning thread B, so
+    // thread A is guaranteed to still be in recover() when thread B tries
+    // to acquire the OPEN_DATABASES mutex.
+    let path_a = Arc::clone(&path);
+    let started_a = Arc::clone(&started);
+    let done_a = Arc::clone(&done);
+    let handle_a = std::thread::spawn(move || {
+        DatabaseBuilder::new()
+            .with_subsystem(SlowRecoverySubsystem {
+                started: started_a,
+                done: done_a,
+                delay: Duration::from_millis(500),
+            })
+            .open(&*path_a)
+            .unwrap()
+    });
+
+    // Spin until thread A has definitely entered recover(). This removes
+    // any "did thread A actually start?" flakiness.
+    while !started.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    // Thread B: concurrent open of the same path. With the fix, this
+    // blocks on OPEN_DATABASES until thread A finishes recovery and
+    // publishes the Arc. Without the fix, thread B returns immediately
+    // and the `done` flag load below is `false`.
+    let path_b = Arc::clone(&path);
+    let done_b = Arc::clone(&done);
+    let handle_b = std::thread::spawn(move || {
+        let _db = DatabaseBuilder::new().open(&*path_b).unwrap();
+        done_b.load(Ordering::SeqCst)
+    });
+
+    let _db_a = handle_a.join().unwrap();
+    let b_observed_recovery_done = handle_b.join().unwrap();
+
+    assert!(
+        b_observed_recovery_done,
+        "concurrent opener returned a Database before the first opener's \
+         subsystem recovery completed — OPEN_DATABASES registry published \
+         the Arc too early (Finding 1 regressed). See audit follow-up to #2354."
+    );
+}

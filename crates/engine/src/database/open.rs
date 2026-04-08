@@ -218,20 +218,40 @@ impl Database {
         Self::open_internal_with_subsystems(path, mode, cfg, subsystems)
     }
 
-    /// Acquire a primary `Database` for `path`, or return an existing instance
-    /// if one is already open at the same canonicalized path.
+    /// Acquire a primary `Database` for `path`, running subsystem recovery
+    /// while holding the `OPEN_DATABASES` mutex so concurrent openers for
+    /// the same path cannot observe a half-initialized instance.
     ///
-    /// Handles directory creation, canonicalization, the `OPEN_DATABASES`
-    /// registry lookup, exclusive `.lock` acquisition, hardware-profile
-    /// application, and the shared `open_finish` tail. Returns
-    /// `Ok((db, true))` for a freshly opened instance that still needs
-    /// recovery, and `Ok((db, false))` for an existing instance whose
-    /// recovery has already run.
+    /// Ordering inside the locked region:
+    ///
+    ///   1. Fast path — if a live `Arc<Database>` already exists for this
+    ///      canonical path, return it. The existing instance has already
+    ///      completed recovery (enforced by this same lock).
+    ///   2. Acquire the `.lock` file for single-process exclusion.
+    ///   3. `open_finish` — create the `Database` struct from WAL replay.
+    ///   4. `repair_space_metadata_on_open` + the `subsystem.recover(&db)`
+    ///      loop. A recovery error propagates out; the registry is never
+    ///      populated for a failed open, so a later opener gets a clean
+    ///      slate instead of a stale weak ref pointing at a half-baked
+    ///      instance.
+    ///   5. `db.set_subsystems(subsystems)` — install the same ordered list
+    ///      for drop-time freeze. Matches Epic 5's partial-failure
+    ///      contract: only install after every `recover()` succeeds.
+    ///   6. Insert `Arc::downgrade(&db)` into `OPEN_DATABASES`.
+    ///   7. Drop the mutex (via end-of-scope).
+    ///
+    /// A concurrent opener that blocks on step (1)'s mutex will not see
+    /// the new `Arc` until step (6), by which point recovery is complete
+    /// and subsystems are installed. This closes the race where the
+    /// previous version of this function inserted into the registry
+    /// before recovery ran (audit follow-up to stratalab/strata-core#2354,
+    /// Finding 1).
     fn acquire_primary_db(
         path: &Path,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
-    ) -> StrataResult<(Arc<Self>, bool)> {
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
         // Create directory first so we can canonicalize the path
         let data_dir = path.to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
@@ -240,13 +260,14 @@ impl Database {
         // Canonicalize path for consistent registry keys
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
 
-        // Single-process mode: use registry and exclusive lock
+        // Lock OPEN_DATABASES for the ENTIRE open-and-recover sequence.
+        // See the doc comment above for ordering rationale.
         let mut registry = OPEN_DATABASES.lock();
 
         if let Some(weak) = registry.get(&canonical_path) {
             if let Some(db) = weak.upgrade() {
                 info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
-                return Ok((db, false));
+                return Ok(db);
             }
         }
 
@@ -278,10 +299,41 @@ impl Database {
             Some(lock_file),
         )?;
 
-        registry.insert(canonical_path, Arc::downgrade(&db));
-        drop(registry);
+        // Repair space metadata BEFORE running subsystem recovery so each
+        // subsystem sees the complete set of spaces. Without this, legacy
+        // databases (or any bypass write that ever skipped the registration
+        // helper) leave orphan data in spaces invisible to enumeration, and
+        // subsystems that scan by space would silently miss it.
+        Self::repair_space_metadata_on_open(&db);
 
-        Ok((db, true))
+        // Run recovery via subsystems in registration order. Stop on first
+        // error. We hold `registry` for the whole loop, so a concurrent
+        // opener for the same path cannot observe the `Arc` mid-recovery.
+        for subsystem in &subsystems {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running subsystem recovery"
+            );
+            subsystem.recover(&db)?;
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Subsystem recovery complete"
+            );
+        }
+
+        // Install subsystems for freeze-on-drop AFTER every recover()
+        // succeeded, so a partial-recovery failure does not leave a
+        // populated subsystems vec for `Drop for Database` to freeze.
+        db.set_subsystems(subsystems);
+
+        // Publish the fully-recovered Arc. Concurrent openers that were
+        // waiting on the mutex will now see a Database with recovery
+        // complete and subsystems installed.
+        registry.insert(canonical_path, Arc::downgrade(&db));
+
+        Ok(db)
     }
 
     /// Convenience entry point used by `Database::open` / `open_with_config`.
@@ -312,51 +364,19 @@ impl Database {
     /// convenience API route through here, so the supplied `subsystems` list
     /// is the sole driver of recovery.
     ///
-    /// Recovery runs after WAL replay completes. Subsystems are installed on
-    /// the `Database` only after every `recover()` succeeds, so a partial
-    /// recovery failure does not freeze partially-rebuilt state on drop.
+    /// All the heavy lifting (directory prep, registry dedup, WAL replay,
+    /// `repair_space_metadata_on_open`, the `subsystem.recover(&db)` loop,
+    /// `set_subsystems`, and the final registry insert) happens inside
+    /// `acquire_primary_db` while it holds the `OPEN_DATABASES` mutex, so
+    /// concurrent openers for the same path cannot observe a half-
+    /// initialized instance.
     pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
         subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
     ) -> StrataResult<Arc<Self>> {
-        let (db, is_fresh) = Self::acquire_primary_db(path.as_ref(), durability_mode, cfg)?;
-        if !is_fresh {
-            // The existing instance was opened (possibly by an earlier caller
-            // with a different subsystem list). Return it unchanged — matching
-            // the existing single-instance-per-path contract in `open_internal`.
-            return Ok(db);
-        }
-
-        // Repair space metadata BEFORE running subsystem recovery so each
-        // subsystem sees the complete set of spaces. Without this, legacy
-        // databases (or any bypass write that ever skipped the registration
-        // helper) leave orphan data in spaces invisible to enumeration, and
-        // subsystems that scan by space would silently miss it.
-        Self::repair_space_metadata_on_open(&db);
-
-        // Run recovery via subsystems in registration order. Stop on first error.
-        for subsystem in &subsystems {
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Running subsystem recovery"
-            );
-            subsystem.recover(&db)?;
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Subsystem recovery complete"
-            );
-        }
-
-        // Install subsystems for freeze-on-drop AFTER recovery succeeds, so
-        // a partial-recovery failure does not leave a populated subsystems
-        // vec for `Drop for Database` to freeze.
-        db.set_subsystems(subsystems);
-
-        Ok(db)
+        Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems)
     }
 
     /// Repair space metadata at open time by reconciling registered metadata
