@@ -8,6 +8,10 @@ use strata_executor::{Executor, Output, Session, Strata};
 pub fn create_executor() -> Executor {
     let db = Database::cache().unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
+    // Register the branch DAG hook so that fork / merge / revert /
+    // cherry-pick / create / delete operations through this executor
+    // record events in the `_branch_dag` graph. Idempotent via OnceCell.
+    strata_graph::register_branch_dag_hook_implementation();
     Executor::new(db)
 }
 
@@ -20,6 +24,7 @@ pub fn create_strata() -> Strata {
 pub fn create_session() -> Session {
     let db = Database::cache().unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
+    strata_graph::register_branch_dag_hook_implementation();
     Session::new(db)
 }
 
@@ -27,6 +32,7 @@ pub fn create_session() -> Session {
 pub fn create_db() -> Arc<Database> {
     let db = Database::cache().unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
+    strata_graph::register_branch_dag_hook_implementation();
     db
 }
 

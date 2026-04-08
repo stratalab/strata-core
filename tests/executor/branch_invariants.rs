@@ -304,3 +304,137 @@ fn default_branch_always_works() {
         _ => panic!("Explicit 'default' branch should work"),
     }
 }
+
+// ============================================================================
+// Branch DAG: executor-path end-to-end
+//
+// This test proves that fork / merge operations going through the executor
+// API (`Strata::branches().fork()`, `Strata::branches().merge()`) record DAG
+// events. The mirror engine-direct tests live in
+// `tests/integration/branching.rs::dag_*`. After PR "branch DAG: close
+// engine bypass", both code paths must produce identical DAG state.
+// ============================================================================
+
+#[test]
+fn dag_records_via_executor_api() {
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_executor::Strata;
+    use strata_graph::types::{Direction, NodeData};
+    use strata_graph::GraphStore;
+
+    // fork_branch / merge_branches need a disk-backed database (storage
+    // requires segment files). The executor's `Strata::open` registers the
+    // branch DAG hook implementation as part of its recovery init.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("dag_executor.strata");
+    let mut db = Strata::open(path.to_str().unwrap()).unwrap();
+
+    // Seed default branch with one write so the storage layer registers it
+    // as forkable.
+    db.kv_put("seed", strata_core::Value::Int(1)).unwrap();
+
+    // Fork via executor API.
+    db.branches().fork("default", "exec_fork").unwrap();
+
+    // Diverge on the fork and merge back.
+    db.set_branch("exec_fork").unwrap();
+    db.kv_put("only_in_fork", strata_core::Value::Int(99))
+        .unwrap();
+    db.branches()
+        .merge(
+            "exec_fork",
+            "default",
+            strata_executor::MergeStrategy::LastWriterWins,
+        )
+        .unwrap();
+
+    // Query the DAG via the GraphStore on the underlying Database. This is
+    // exactly the same state the engine-direct integration test asserts on,
+    // proving the executor path also funnels through the same hook.
+    let inner = db.database();
+    let graph = GraphStore::new(inner.clone());
+    let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+
+    let read_node = |name: &str| -> Option<NodeData> {
+        graph
+            .get_node(system_id, "_graph_", "_branch_dag", name)
+            .unwrap()
+    };
+
+    // Both branches present in the DAG.
+    assert!(
+        read_node("default").is_some(),
+        "default branch missing from DAG (was seeded at db init)"
+    );
+    assert!(
+        read_node("exec_fork").is_some(),
+        "executor-forked branch missing from DAG"
+    );
+
+    // Fork event hangs off the parent (default) via `parent` edge — exactly
+    // one because this is a fresh tempdir with one fork.
+    let fork_neighbors = graph
+        .neighbors(
+            system_id,
+            "_graph_",
+            "_branch_dag",
+            "default",
+            Direction::Outgoing,
+            Some("parent"),
+        )
+        .unwrap();
+    assert_eq!(
+        fork_neighbors.len(),
+        1,
+        "executor fork should produce exactly one fork event from default — \
+         a value of 0 means the executor path bypassed the DAG hook"
+    );
+    let fork_event_id = &fork_neighbors[0].node_id;
+    let fork_event = read_node(fork_event_id).expect("fork event missing");
+    assert_eq!(fork_event.object_type.as_deref(), Some("fork"));
+    let fork_props = fork_event.properties.expect("fork event has no properties");
+    assert!(
+        fork_props
+            .get("fork_version")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .is_some(),
+        "fork_version must be recorded for executor-driven fork"
+    );
+
+    // Merge event hangs off the source (exec_fork) via `source` edge.
+    let merge_neighbors = graph
+        .neighbors(
+            system_id,
+            "_graph_",
+            "_branch_dag",
+            "exec_fork",
+            Direction::Outgoing,
+            Some("source"),
+        )
+        .unwrap();
+    assert_eq!(
+        merge_neighbors.len(),
+        1,
+        "executor merge did not produce exactly one merge event"
+    );
+    let merge_event_id = &merge_neighbors[0].node_id;
+    let merge_event = read_node(merge_event_id).expect("merge event node missing");
+    assert_eq!(merge_event.object_type.as_deref(), Some("merge"));
+    let merge_props = merge_event
+        .properties
+        .expect("merge event has no properties");
+    assert_eq!(
+        merge_props.get("strategy").and_then(|v| v.as_str()),
+        Some("last_writer_wins"),
+        "merge strategy must be recorded as last_writer_wins for executor-driven merge"
+    );
+    assert!(
+        merge_props
+            .get("merge_version")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .is_some(),
+        "merge_version must be recorded for executor-driven merge"
+    );
+}

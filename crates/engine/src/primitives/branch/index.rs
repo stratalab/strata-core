@@ -225,7 +225,7 @@ impl BranchIndex {
     /// ## Errors
     /// - `InvalidInput` if branch already exists
     pub fn create_branch(&self, branch_id: &str) -> StrataResult<Versioned<BranchMetadata>> {
-        self.db.transaction(global_branch_id(), |txn| {
+        let result = self.db.transaction(global_branch_id(), |txn| {
             let key = self.key_for(branch_id);
 
             // Check if branch already exists
@@ -241,7 +241,18 @@ impl BranchIndex {
 
             info!(target: "strata::branch", %branch_id, "Branch created");
             Ok(branch_meta.into_versioned())
-        })
+        })?;
+
+        // Fire the branch DAG `on_create` hook. Best-effort: the hook
+        // implementation logs warnings on failure and never propagates an
+        // error back. Hook implementations early-return for `_system*`
+        // names because `init_system_branch` calls this function during
+        // db open before the `_branch_dag` graph exists.
+        if let Some(hooks) = crate::branch_ops::branch_dag_hooks() {
+            (hooks.on_create)(&self.db, branch_id);
+        }
+
+        Ok(result)
     }
 
     /// Get branch metadata
@@ -395,6 +406,14 @@ impl BranchIndex {
         // kept: any pre-existing transaction that tries to commit on
         // this branch after deletion will be rejected (#1916).
         self.db.remove_branch_lock(&executor_branch_id);
+
+        // Fire the branch DAG `on_delete` hook. Best-effort: marks the
+        // branch's DAG node as `status = deleted` (the node itself stays
+        // so the historical lineage is preserved). Hook implementations
+        // early-return for `_system*` names.
+        if let Some(hooks) = crate::branch_ops::branch_dag_hooks() {
+            (hooks.on_delete)(&self.db, branch_id);
+        }
 
         Ok(())
     }

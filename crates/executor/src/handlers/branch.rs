@@ -136,13 +136,10 @@ pub fn branch_create(
         None => uuid::Uuid::new_v4().to_string(),
     };
 
-    // MVP: ignore metadata, use simple create_branch
+    // MVP: ignore metadata, use simple create_branch.
+    // The branch DAG entry is recorded automatically by the engine via
+    // the `on_create` hook fired from `BranchIndex::create_branch`.
     let versioned = convert_result(p.branch.create_branch(&branch_str))?;
-
-    // Best-effort: record branch creation in the DAG
-    if let Err(e) = branch_dag::dag_add_branch(&p.db, &branch_str, None, None) {
-        tracing::warn!(target: "strata::branch_dag", branch = %branch_str, error = %e, "Failed to record branch creation in DAG");
-    }
 
     emit_audit_event(
         p,
@@ -241,10 +238,9 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         }
     }
 
-    // Best-effort: mark branch as deleted in the DAG
-    if let Err(e) = branch_dag::dag_mark_deleted(&p.db, branch.as_str()) {
-        tracing::warn!(target: "strata::branch_dag", branch = %branch.as_str(), error = %e, "Failed to mark branch as deleted in DAG");
-    }
+    // The DAG `on_delete` hook fires automatically from
+    // `BranchIndex::delete_branch` (which p.branch.delete_branch calls
+    // above).
 
     emit_audit_event(
         p,
@@ -310,27 +306,20 @@ pub fn branch_fork(
         });
     }
     validate_branch_name(&destination)?;
-    let info =
-        strata_engine::branch_ops::fork_branch(&p.db, &source, &destination).map_err(|e| {
-            Error::Internal {
-                reason: e.to_string(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            }
-        })?;
-
-    // Best-effort: record fork in the DAG
-    // dag_record_fork internally calls ensure_branch_node_exists for both
-    // parent and child, so no separate dag_add_branch call is needed.
-    if let Err(e) = branch_dag::dag_record_fork(
+    // The DAG `on_fork` hook fires automatically from inside
+    // `fork_branch_with_metadata`. We pass message/creator through so the
+    // hook can record them on the fork event node.
+    let info = strata_engine::branch_ops::fork_branch_with_metadata(
         &p.db,
         &source,
         &destination,
-        info.fork_version,
         message.as_deref(),
         creator.as_deref(),
-    ) {
-        tracing::warn!(target: "strata::branch_dag", source = %source, destination = %destination, error = %e, "Failed to record fork in DAG");
-    }
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    })?;
 
     emit_audit_event(
         p,
@@ -394,34 +383,27 @@ pub fn branch_merge(
     // Compute merge base override from DAG (for repeated merges and materialized branches)
     let merge_base_override = compute_merge_base_from_dag(&p.db, &source, &target);
 
-    let info = strata_engine::branch_ops::merge_branches(
+    // The DAG `on_merge` hook fires automatically from inside
+    // `merge_branches_with_metadata`. We pass message/creator through so
+    // the hook can record them on the merge event node.
+    let info = strata_engine::branch_ops::merge_branches_with_metadata(
         &p.db,
         &source,
         &target,
         strategy,
         merge_base_override,
+        message.as_deref(),
+        creator.as_deref(),
     )
     .map_err(|e| Error::Internal {
         reason: e.to_string(),
         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })?;
 
-    // Best-effort: record merge in the DAG (merge_version now comes from MergeInfo)
     let strategy_str = match strategy {
         strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
         strata_engine::MergeStrategy::Strict => "strict",
     };
-    if let Err(e) = branch_dag::dag_record_merge(
-        &p.db,
-        &source,
-        &target,
-        &info,
-        Some(strategy_str),
-        message.as_deref(),
-        creator.as_deref(),
-    ) {
-        tracing::warn!(target: "strata::branch_dag", source = %source, target = %target, error = %e, "Failed to record merge in DAG");
-    }
 
     emit_audit_event(
         p,
@@ -588,15 +570,12 @@ pub fn branch_export(p: &Arc<Primitives>, branch_id: String, path: String) -> Re
 /// Handle BranchImport command.
 pub fn branch_import(p: &Arc<Primitives>, path: String) -> Result<Output> {
     let import_path = std::path::Path::new(&path);
+    // The DAG `on_create` hook fires automatically from inside
+    // `bundle::import_branch` after the branch is created.
     let info = strata_engine::bundle::import_branch(&p.db, import_path).map_err(|e| Error::Io {
         reason: format!("Import failed: {}", e),
         hint: None,
     })?;
-
-    // Best-effort: record imported branch in the DAG
-    if let Err(e) = branch_dag::dag_add_branch(&p.db, &info.branch_id, None, None) {
-        tracing::warn!(target: "strata::branch_dag", branch = %info.branch_id, error = %e, "Failed to record imported branch in DAG");
-    }
 
     Ok(Output::BranchImported(crate::types::BranchImportResult {
         branch_id: info.branch_id,

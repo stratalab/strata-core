@@ -104,8 +104,18 @@ fn metrics_returns_all_subsystem_data() {
             assert!(m.storage.total_branches >= 1);
             // Scheduler should have workers
             assert!(m.scheduler.worker_count >= 1);
-            // Cache hit ratio should be 0.0 on fresh DB
-            assert_eq!(m.cache.hit_ratio, 0.0);
+            // Cache hit ratio is a process-wide global counter (see
+            // `strata_storage::block_cache::global_cache()` in
+            // `database/mod.rs`), so it can be polluted by any other
+            // parallel test running in the same process. Assert only the
+            // sanity bound that the ratio is a valid probability — testing
+            // == 0.0 was inherently flaky and only passed when this test
+            // happened to run before any other cache activity.
+            assert!(
+                (0.0..=1.0).contains(&m.cache.hit_ratio),
+                "hit_ratio should be in [0.0, 1.0], got {}",
+                m.cache.hit_ratio
+            );
         }
         _ => panic!("Expected Metrics output"),
     }

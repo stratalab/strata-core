@@ -6753,3 +6753,659 @@ fn cross_primitive_merge_rollback_via_reopen() {
         Some(Value::Int(7))
     );
 }
+
+// ============================================================================
+// Branch DAG end-to-end integration
+//
+// These tests prove the architectural fix from PR "branch DAG: close engine
+// bypass, record revert, add e2e tests": every fork / merge / revert /
+// cherry-pick / create / delete operation through the engine fires the DAG
+// hook regardless of caller. They go through `TestDb::new()` + the engine's
+// `branch_ops::*` API directly (no executor in the loop) and assert on the
+// DAG state stored in the `_branch_dag` graph on the `_system_` branch.
+//
+// Before this fix the DAG writes lived in the executor handler layer
+// (`crates/executor/src/handlers/branch.rs`), so engine-direct callers like
+// these tests silently bypassed the DAG. After the fix, the engine's
+// `branch_ops::*` functions fire registered hooks at the end of every
+// successful operation. The hook implementation (`graph::dag_hook_impl`) is
+// registered by `tests/common/mod.rs::ensure_recovery_registered`.
+// ============================================================================
+
+/// Read a node from the branch DAG graph (`_branch_dag` on `_system_`).
+///
+/// Returns `None` if the DAG node does not exist. Used by every DAG e2e
+/// test below to assert that hooks fired and produced the expected nodes.
+fn dag_query_node(p: &AllPrimitives, name: &str) -> Option<strata_graph::types::NodeData> {
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+    let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    p.graph
+        .get_node(system_id, "_graph_", "_branch_dag", name)
+        .expect("DAG read failed")
+}
+
+/// List all node IDs in the branch DAG graph.
+fn dag_list_nodes(p: &AllPrimitives) -> Vec<String> {
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+    let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    p.graph
+        .list_nodes(system_id, "_graph_", "_branch_dag")
+        .expect("DAG list failed")
+}
+
+/// Get outgoing neighbors of a DAG node (used to walk fork/merge/cherry-pick
+/// event edges from a branch node to its associated event nodes).
+fn dag_outgoing(
+    p: &AllPrimitives,
+    name: &str,
+    edge_type: &str,
+) -> Vec<strata_graph::types::Neighbor> {
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_graph::types::Direction;
+    let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    p.graph
+        .neighbors(
+            system_id,
+            "_graph_",
+            "_branch_dag",
+            name,
+            Direction::Outgoing,
+            Some(edge_type),
+        )
+        .expect("DAG neighbors read failed")
+}
+
+#[test]
+fn dag_records_fork_with_version() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_fork_src").unwrap();
+    let src_id = strata_engine::primitives::branch::resolve_branch_name("dag_fork_src");
+    // Storage needs at least one write to register the branch for forking.
+    kv.put(&src_id, "default", "seed", Value::Int(1)).unwrap();
+    branch_ops::fork_branch(&test_db.db, "dag_fork_src", "dag_fork_dst").unwrap();
+
+    // Both branch nodes should now exist in the DAG.
+    assert!(
+        dag_query_node(&p, "dag_fork_src").is_some(),
+        "source branch node missing from DAG after fork"
+    );
+    assert!(
+        dag_query_node(&p, "dag_fork_dst").is_some(),
+        "destination branch node missing from DAG after fork"
+    );
+
+    // The fork event node hangs off the source via a `parent` edge.
+    let fork_events = dag_outgoing(&p, "dag_fork_src", "parent");
+    assert_eq!(
+        fork_events.len(),
+        1,
+        "expected exactly one fork event from dag_fork_src, got {}",
+        fork_events.len()
+    );
+    let event_id = &fork_events[0].node_id;
+
+    // Verify the event is a fork event with a populated fork_version.
+    let event = dag_query_node(&p, event_id).expect("fork event node missing");
+    assert_eq!(event.object_type.as_deref(), Some("fork"));
+    let props = event.properties.expect("fork event has no properties");
+    let fv = props
+        .get("fork_version")
+        .and_then(|v| v.as_u64())
+        .expect("fork event missing fork_version");
+    assert!(fv > 0, "fork_version should be > 0, got {fv}");
+
+    // The fork event must have an outgoing `child` edge pointing at the
+    // destination — without this assertion the test would pass even if the
+    // event was created but the child link was wrong or missing.
+    let children = dag_outgoing(&p, event_id, "child");
+    assert_eq!(
+        children.len(),
+        1,
+        "fork event should have exactly one child edge"
+    );
+    assert_eq!(
+        children[0].node_id, "dag_fork_dst",
+        "fork event's child edge must point at the destination branch"
+    );
+}
+
+#[test]
+fn dag_records_merge_with_version_and_keys() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_merge_target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_merge_target");
+    kv.put(&target_id, "default", "shared", Value::Int(1))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "dag_merge_target", "dag_merge_source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_merge_source");
+
+    // Diverge: source updates "shared" and adds a new key.
+    kv.put(&source_id, "default", "shared", Value::Int(2))
+        .unwrap();
+    kv.put(&source_id, "default", "new_key", Value::Int(99))
+        .unwrap();
+
+    let merge_info = branch_ops::merge_branches(
+        &test_db.db,
+        "dag_merge_source",
+        "dag_merge_target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .unwrap();
+    assert!(
+        merge_info.keys_applied >= 2,
+        "merge should apply at least 2 keys"
+    );
+
+    // The merge event hangs off the source via a `source` edge.
+    let merge_events = dag_outgoing(&p, "dag_merge_source", "source");
+    assert_eq!(merge_events.len(), 1, "expected one merge event");
+    let event_id = &merge_events[0].node_id;
+
+    let event = dag_query_node(&p, event_id).expect("merge event node missing");
+    assert_eq!(event.object_type.as_deref(), Some("merge"));
+    let props = event.properties.expect("merge event has no properties");
+    assert_eq!(
+        props.get("strategy").and_then(|v| v.as_str()),
+        Some("last_writer_wins"),
+        "merge strategy should be recorded as last_writer_wins"
+    );
+    let keys = props
+        .get("keys_applied")
+        .and_then(|v| v.as_u64())
+        .expect("merge event missing keys_applied");
+    assert!(
+        keys >= 2,
+        "keys_applied should reflect actual keys merged, got {keys}"
+    );
+    let mv = props
+        .get("merge_version")
+        .and_then(|v| v.as_u64())
+        .expect("merge event missing merge_version");
+    assert!(mv > 0, "merge_version should be > 0, got {mv}");
+
+    // The merge event must point at the target via a `target` edge.
+    let targets = dag_outgoing(&p, event_id, "target");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].node_id, "dag_merge_target");
+}
+
+#[test]
+fn dag_records_revert() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_revert_branch").unwrap();
+    let branch_id = strata_engine::primitives::branch::resolve_branch_name("dag_revert_branch");
+
+    // Write a few versions so we have a non-trivial range to revert.
+    kv.put(&branch_id, "default", "k1", Value::Int(1)).unwrap();
+    let v_before = test_db.db.current_version();
+    kv.put(&branch_id, "default", "k2", Value::Int(2)).unwrap();
+    kv.put(&branch_id, "default", "k1", Value::Int(99)).unwrap();
+    let v_after = test_db.db.current_version();
+
+    let revert_info =
+        branch_ops::revert_version_range(&test_db.db, "dag_revert_branch", v_before + 1, v_after)
+            .unwrap();
+    // The range covers the v2 (k2 add) and v3 (k1 update) writes, so both
+    // keys must come back to their pre-range states: k1 → 1, k2 → gone.
+    assert_eq!(
+        revert_info.keys_reverted, 2,
+        "expected exactly 2 keys reverted (k1 restored, k2 deleted), got {}",
+        revert_info.keys_reverted
+    );
+    assert!(
+        revert_info.revert_version.is_some(),
+        "revert_version must be set when there are mutations to apply"
+    );
+    // Spot-check the actual data to prove the revert ran for real (so a
+    // bug that records a DAG event without doing the work would be caught).
+    assert_eq!(
+        kv.get(&branch_id, "default", "k1").unwrap(),
+        Some(Value::Int(1)),
+        "k1 should be restored to its pre-range value of 1"
+    );
+    assert_eq!(
+        kv.get(&branch_id, "default", "k2").unwrap(),
+        None,
+        "k2 should be deleted (didn't exist before the range)"
+    );
+
+    // The revert event hangs off the branch via the `reverted` edge (single
+    // direction — revert is a self-event, not a binary op between branches).
+    let revert_events = dag_outgoing(&p, "dag_revert_branch", "reverted");
+    assert_eq!(
+        revert_events.len(),
+        1,
+        "expected one revert event in DAG, got {}",
+        revert_events.len()
+    );
+    let event_id = &revert_events[0].node_id;
+
+    let event = dag_query_node(&p, event_id).expect("revert event node missing");
+    assert_eq!(event.object_type.as_deref(), Some("revert"));
+    let props = event.properties.expect("revert event has no properties");
+    assert_eq!(
+        props.get("from_version").and_then(|v| v.as_u64()),
+        Some(v_before + 1),
+        "from_version not recorded correctly"
+    );
+    assert_eq!(
+        props.get("to_version").and_then(|v| v.as_u64()),
+        Some(v_after),
+        "to_version not recorded correctly"
+    );
+    assert_eq!(
+        props.get("keys_reverted").and_then(|v| v.as_u64()),
+        Some(2),
+        "keys_reverted on the DAG event must match the engine's RevertInfo"
+    );
+    assert_eq!(
+        props.get("revert_version").and_then(|v| v.as_u64()),
+        revert_info.revert_version,
+        "revert_version on the DAG event must match the engine's RevertInfo"
+    );
+    assert_eq!(
+        props.get("branch").and_then(|v| v.as_str()),
+        Some("dag_revert_branch"),
+        "branch name must be denormalized onto the revert event for cheap lookups"
+    );
+}
+
+#[test]
+fn dag_records_cherry_pick() {
+    use strata_engine::branch_ops::CherryPickFilter;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_cp_target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_cp_target");
+    kv.put(&target_id, "default", "base", Value::Int(0))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "dag_cp_target", "dag_cp_source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_cp_source");
+
+    // Source-only divergence: a single new key to cherry-pick.
+    kv.put(&source_id, "default", "picked", Value::Int(42))
+        .unwrap();
+
+    let cp_info = branch_ops::cherry_pick_from_diff(
+        &test_db.db,
+        "dag_cp_source",
+        "dag_cp_target",
+        CherryPickFilter::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        cp_info.keys_applied, 1,
+        "should have picked exactly one key"
+    );
+    // Spot-check actual data to prove the cherry-pick ran (a bug that
+    // recorded the DAG event without applying writes would be caught).
+    assert_eq!(
+        kv.get(&target_id, "default", "picked").unwrap(),
+        Some(Value::Int(42)),
+        "picked key should be present on target after cherry-pick"
+    );
+
+    // Cherry-pick uses its own edge type to be distinguishable from a full merge.
+    let cp_events = dag_outgoing(&p, "dag_cp_source", "cherry_pick_source");
+    assert_eq!(
+        cp_events.len(),
+        1,
+        "expected one cherry-pick event in DAG, got {}",
+        cp_events.len()
+    );
+    let event_id = &cp_events[0].node_id;
+
+    let event = dag_query_node(&p, event_id).expect("cherry-pick event node missing");
+    assert_eq!(event.object_type.as_deref(), Some("cherry_pick"));
+    let props = event
+        .properties
+        .expect("cherry-pick event has no properties");
+    assert_eq!(
+        props.get("keys_applied").and_then(|v| v.as_u64()),
+        Some(1),
+        "keys_applied on the DAG event must match the engine's CherryPickInfo"
+    );
+    assert_eq!(
+        props.get("cherry_pick_version").and_then(|v| v.as_u64()),
+        cp_info.cherry_pick_version,
+        "cherry_pick_version on the DAG event must match the engine's CherryPickInfo"
+    );
+
+    // The event points at the target via the cherry_pick_target edge type.
+    let targets = dag_outgoing(&p, event_id, "cherry_pick_target");
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].node_id, "dag_cp_target");
+
+    // The fork edge from the prior fork should NOT have produced a merge or
+    // cherry-pick event by itself — verify there's exactly one cherry-pick
+    // event and no merge events on this branch pair.
+    let merge_events_on_source = dag_outgoing(&p, "dag_cp_source", "source");
+    assert!(
+        merge_events_on_source.is_empty(),
+        "cherry-pick should not produce a merge event"
+    );
+}
+
+#[test]
+fn dag_records_branch_create_and_delete() {
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_lifecycle").unwrap();
+
+    // After create, branch should exist in DAG with status=active and a
+    // populated created_at timestamp.
+    let node = dag_query_node(&p, "dag_lifecycle").expect("branch node missing after create");
+    assert_eq!(node.object_type.as_deref(), Some("branch"));
+    let props = node.properties.expect("branch node has no properties");
+    assert_eq!(props.get("status").and_then(|v| v.as_str()), Some("active"));
+    let created_at = props
+        .get("created_at")
+        .and_then(|v| v.as_u64())
+        .expect("created_at should be set on the branch node");
+    assert!(created_at > 0, "created_at should be a real timestamp");
+
+    branch_index.delete_branch("dag_lifecycle").unwrap();
+
+    // After delete, the same node should still exist (lineage is preserved)
+    // but with status flipped to deleted and a deleted_at marker.
+    let node = dag_query_node(&p, "dag_lifecycle").expect("branch node missing after delete");
+    let props = node.properties.expect("branch node has no properties");
+    assert_eq!(
+        props.get("status").and_then(|v| v.as_str()),
+        Some("deleted"),
+        "status should flip to deleted after delete_branch"
+    );
+    assert!(
+        props
+            .get("deleted_at")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .is_some(),
+        "deleted_at should be set after delete_branch"
+    );
+    // The branch's original created_at must still be present — we preserve
+    // lineage rather than rewriting the node from scratch.
+    assert_eq!(
+        props.get("created_at").and_then(|v| v.as_u64()),
+        Some(created_at),
+        "created_at must be preserved across delete (no lineage erasure)"
+    );
+}
+
+#[test]
+fn dag_repeated_merge_advances_merge_base() {
+    // After merging source → target, then diverging and merging again, the
+    // DAG must contain TWO merge events with monotonically increasing
+    // `merge_version` values. This is what powers
+    // `compute_merge_base_from_dag` (in the executor merge handler):
+    // `find_last_merge_version` returns the most recent merge version,
+    // which becomes the merge-base override for the next merge call.
+    // Without this property, repeated merges would always re-walk back to
+    // the original fork point and re-apply already-merged changes.
+    use strata_graph::branch_dag::find_last_merge_version;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+
+    branch_index.create_branch("dag_rep_target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_rep_target");
+    kv.put(&target_id, "default", "base", Value::Int(0))
+        .unwrap();
+
+    branch_ops::fork_branch(&test_db.db, "dag_rep_target", "dag_rep_source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_rep_source");
+
+    // First divergence + merge.
+    kv.put(&source_id, "default", "round1", Value::Int(1))
+        .unwrap();
+    branch_ops::merge_branches(
+        &test_db.db,
+        "dag_rep_source",
+        "dag_rep_target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .unwrap();
+    let first_mv = find_last_merge_version(&test_db.db, "dag_rep_source", "dag_rep_target")
+        .unwrap()
+        .expect("first merge_version should be recorded");
+
+    // Second divergence + merge.
+    kv.put(&source_id, "default", "round2", Value::Int(2))
+        .unwrap();
+    branch_ops::merge_branches(
+        &test_db.db,
+        "dag_rep_source",
+        "dag_rep_target",
+        MergeStrategy::LastWriterWins,
+        None,
+    )
+    .unwrap();
+    let second_mv = find_last_merge_version(&test_db.db, "dag_rep_source", "dag_rep_target")
+        .unwrap()
+        .expect("second merge_version should be recorded");
+
+    assert!(
+        second_mv > first_mv,
+        "merge_base should advance: second={second_mv} should be > first={first_mv}"
+    );
+
+    // Defensive: there must be exactly TWO merge events on the source branch
+    // — not one (where the second merge somehow overwrote the first) and
+    // not three (where some extra event leaked in).
+    let p = test_db.all_primitives();
+    let merge_events = dag_outgoing(&p, "dag_rep_source", "source");
+    assert_eq!(
+        merge_events.len(),
+        2,
+        "two consecutive merges should produce exactly two merge events in the DAG, got {}",
+        merge_events.len()
+    );
+}
+
+#[test]
+fn dag_skips_system_branch() {
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let p = test_db.all_primitives();
+
+    // The DAG must NOT contain a node literally named `_system_`. The hook
+    // implementation early-returns for `is_system_branch(name)`, which
+    // matters because `init_system_branch` calls
+    // `BranchIndex::create_branch(SYSTEM_BRANCH)` BEFORE the `_branch_dag`
+    // graph itself exists. Without the guard, every db.open() would log a
+    // "failed to record branch creation in DAG" warning.
+    assert!(
+        dag_query_node(&p, SYSTEM_BRANCH).is_none(),
+        "_system_ branch should never appear as a self-referential DAG node"
+    );
+
+    // Prove the guard is *selective* — non-system branches DO get recorded.
+    // If `is_system_branch` were too broad (e.g. matching everything), this
+    // assertion would catch it.
+    branch_index.create_branch("dag_guard_check").unwrap();
+    assert!(
+        dag_query_node(&p, "dag_guard_check").is_some(),
+        "non-system branches must still be recorded in the DAG"
+    );
+
+    // Defensive sweep: nothing system-named should appear in the DAG. Catches
+    // any other code path that might write a `_system*` entry by accident.
+    let names = dag_list_nodes(&p);
+    for n in &names {
+        assert!(
+            !strata_core::branch_dag::is_system_branch(n),
+            "DAG must not contain any system-branch node, found: {n}"
+        );
+    }
+}
+
+#[test]
+fn dag_survives_database_reopen() {
+    let mut test_db = TestDb::new();
+    {
+        let branch_index = test_db.branch_index();
+        let kv = test_db.kv();
+        branch_index.create_branch("dag_persist").unwrap();
+        let persist_id = strata_engine::primitives::branch::resolve_branch_name("dag_persist");
+        // Storage requires at least one write to register the branch for forking.
+        kv.put(&persist_id, "default", "seed", Value::Int(1))
+            .unwrap();
+        branch_ops::fork_branch(&test_db.db, "dag_persist", "dag_persist_fork").unwrap();
+    }
+
+    // Reopen — DAG state lives on the durable `_system_` branch and must
+    // survive WAL replay.
+    test_db.reopen();
+    let p = test_db.all_primitives();
+
+    assert!(
+        dag_query_node(&p, "dag_persist").is_some(),
+        "branch node should survive reopen"
+    );
+    assert!(
+        dag_query_node(&p, "dag_persist_fork").is_some(),
+        "forked branch node should survive reopen"
+    );
+
+    // Fork event must also survive.
+    let fork_events = dag_outgoing(&p, "dag_persist", "parent");
+    assert_eq!(
+        fork_events.len(),
+        1,
+        "fork event should survive reopen, got {} events",
+        fork_events.len()
+    );
+
+    // The fork event's properties (fork_version, etc.) must survive too —
+    // not just the node's existence. A bug that wrote the node header but
+    // dropped properties on WAL replay would be caught here.
+    let event_id = &fork_events[0].node_id;
+    let event = dag_query_node(&p, event_id).expect("fork event missing after reopen");
+    let props = event
+        .properties
+        .expect("fork event lost properties on reopen");
+    assert!(
+        props
+            .get("fork_version")
+            .and_then(|v| v.as_u64())
+            .filter(|&v| v > 0)
+            .is_some(),
+        "fork_version must be preserved across reopen"
+    );
+
+    // The fork event's child edge must also survive.
+    let children = dag_outgoing(&p, event_id, "child");
+    assert_eq!(children.len(), 1, "fork child edge missing after reopen");
+    assert_eq!(children[0].node_id, "dag_persist_fork");
+}
+
+#[test]
+fn dag_records_fork_metadata_end_to_end() {
+    // Verify that the message/creator parameters survive the entire chain:
+    // executor → engine `_with_metadata` variant → hook → `dag_record_fork`
+    // → DAG event node properties. A refactor that drops the parameters
+    // anywhere along the chain would silently lose audit metadata; this
+    // test catches that.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_meta_src").unwrap();
+    let src_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_src");
+    kv.put(&src_id, "default", "seed", Value::Int(1)).unwrap();
+
+    strata_engine::branch_ops::fork_branch_with_metadata(
+        &test_db.db,
+        "dag_meta_src",
+        "dag_meta_dst",
+        Some("releasing v1.2"),
+        Some("alice@example.com"),
+    )
+    .unwrap();
+
+    let fork_events = dag_outgoing(&p, "dag_meta_src", "parent");
+    assert_eq!(fork_events.len(), 1);
+    let event = dag_query_node(&p, &fork_events[0].node_id).unwrap();
+    let props = event.properties.unwrap();
+    assert_eq!(
+        props.get("message").and_then(|v| v.as_str()),
+        Some("releasing v1.2"),
+        "fork message must flow from caller through to DAG event"
+    );
+    assert_eq!(
+        props.get("creator").and_then(|v| v.as_str()),
+        Some("alice@example.com"),
+        "fork creator must flow from caller through to DAG event"
+    );
+}
+
+#[test]
+fn dag_records_merge_metadata_end_to_end() {
+    // Mirror of `dag_records_fork_metadata_end_to_end` for merge.
+    let test_db = TestDb::new();
+    let branch_index = test_db.branch_index();
+    let kv = test_db.kv();
+    let p = test_db.all_primitives();
+
+    branch_index.create_branch("dag_meta_target").unwrap();
+    let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_target");
+    kv.put(&target_id, "default", "base", Value::Int(0))
+        .unwrap();
+    branch_ops::fork_branch(&test_db.db, "dag_meta_target", "dag_meta_source").unwrap();
+    let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_source");
+    kv.put(&source_id, "default", "new", Value::Int(1)).unwrap();
+
+    strata_engine::branch_ops::merge_branches_with_metadata(
+        &test_db.db,
+        "dag_meta_source",
+        "dag_meta_target",
+        MergeStrategy::LastWriterWins,
+        None,
+        Some("hotfix release"),
+        Some("bob@example.com"),
+    )
+    .unwrap();
+
+    let merge_events = dag_outgoing(&p, "dag_meta_source", "source");
+    assert_eq!(merge_events.len(), 1);
+    let event = dag_query_node(&p, &merge_events[0].node_id).unwrap();
+    let props = event.properties.unwrap();
+    assert_eq!(
+        props.get("message").and_then(|v| v.as_str()),
+        Some("hotfix release"),
+        "merge message must flow from caller through to DAG event"
+    );
+    assert_eq!(
+        props.get("creator").and_then(|v| v.as_str()),
+        Some("bob@example.com"),
+        "merge creator must flow from caller through to DAG event"
+    );
+}

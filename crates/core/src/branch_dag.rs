@@ -76,6 +76,14 @@ impl DagEventId {
     pub fn new_merge() -> Self {
         Self(format!("merge:{}", uuid::Uuid::new_v4()))
     }
+    /// Create a new revert event ID.
+    pub fn new_revert() -> Self {
+        Self(format!("revert:{}", uuid::Uuid::new_v4()))
+    }
+    /// Create a new cherry-pick event ID.
+    pub fn new_cherry_pick() -> Self {
+        Self(format!("cherry_pick:{}", uuid::Uuid::new_v4()))
+    }
     /// Create a `DagEventId` from an existing string (e.g. loaded from storage).
     pub fn from_string(s: String) -> Self {
         Self(s)
@@ -91,6 +99,14 @@ impl DagEventId {
     /// Returns `true` if this is a merge event.
     pub fn is_merge(&self) -> bool {
         self.0.starts_with("merge:")
+    }
+    /// Returns `true` if this is a revert event.
+    pub fn is_revert(&self) -> bool {
+        self.0.starts_with("revert:")
+    }
+    /// Returns `true` if this is a cherry-pick event.
+    pub fn is_cherry_pick(&self) -> bool {
+        self.0.starts_with("cherry_pick:")
     }
 }
 
@@ -145,6 +161,50 @@ pub struct MergeRecord {
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+}
+
+/// Record of a revert event in the DAG.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevertRecord {
+    /// Unique event identifier.
+    pub event_id: DagEventId,
+    /// Branch that was reverted.
+    pub branch: String,
+    /// Start of the reverted version range (inclusive).
+    pub from_version: u64,
+    /// End of the reverted version range (inclusive).
+    pub to_version: u64,
+    /// MVCC version of the revert transaction itself.
+    #[serde(default)]
+    pub revert_version: Option<u64>,
+    /// Number of keys reverted.
+    pub keys_reverted: u64,
+    /// Timestamp in microseconds.
+    pub timestamp: u64,
+    /// Optional descriptive message.
+    pub message: Option<String>,
+    /// Optional creator identifier.
+    pub creator: Option<String>,
+}
+
+/// Record of a cherry-pick event in the DAG.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CherryPickRecord {
+    /// Unique event identifier.
+    pub event_id: DagEventId,
+    /// Source branch that the changes were picked from.
+    pub source: String,
+    /// Target branch that received the picked changes.
+    pub target: String,
+    /// MVCC version of the cherry-pick transaction.
+    #[serde(default)]
+    pub cherry_pick_version: Option<u64>,
+    /// Number of keys written by the cherry-pick.
+    pub keys_applied: u64,
+    /// Number of keys deleted by the cherry-pick.
+    pub keys_deleted: u64,
+    /// Timestamp in microseconds.
+    pub timestamp: u64,
 }
 
 /// Full information about a branch in the DAG.
