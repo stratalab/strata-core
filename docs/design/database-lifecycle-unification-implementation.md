@@ -1,26 +1,32 @@
 # Database Lifecycle Unification — Implementation Plan
 
 **Date:** 2026-04-07
-**Status:** Implementation plan (epics)
+**Status:** ✅ Implemented. Epics 1-5 merged (#2364, #2368, #2371, #2372, #2375); Epic 6 (this docs pass) in flight.
 **Tracks design doc:** [`database-lifecycle-unification-plan.md`](./database-lifecycle-unification-plan.md)
 **Issue:** [stratalab/strata-core#2354](https://github.com/stratalab/strata-core/issues/2354)
 
 ---
 
-## Context
+## Outcome
 
-Strata currently has two parallel lifecycle mechanisms:
+Strata now has a single lifecycle mechanism: the `Subsystem` trait (`crates/engine/src/recovery/subsystem.rs`). The same ordered list drives both recovery and freeze — composed by the executor above the engine boundary via `strata_db_builder()` in `crates/executor/src/api/mod.rs`, which installs `[VectorSubsystem, SearchSubsystem]` on every `Strata::open` / `open_with` / `cache` path. Recovery runs in registration order; freeze runs in reverse. A production-shaped regression in `crates/executor/src/tests/lifecycle_regression.rs` asserts that drop-time freeze writes the `.vec` mmap cache file through `VectorSubsystem::freeze` without any explicit `freeze_vector_heaps()` call.
 
-1. A global `RecoveryParticipant` registry (`crates/engine/src/recovery/participant.rs`) used for open-time recovery.
-2. A per-database `Vec<Box<dyn Subsystem>>` used for freeze-on-drop.
+## Context (pre-refactor)
 
-In production these lists are sourced from different code paths, so vector state recovers correctly but never freezes on shutdown:
+_This section is the historical state the refactor was written against. It does **not** describe current code._
 
-- `Database::open_internal` (`crates/engine/src/database/open.rs:164-239`) hardcodes `db.set_subsystems(vec![Box::new(SearchSubsystem)])` at line 236, with the same hardcoded line at 394 in `open_follower_internal`.
-- `Strata::open_with` (`crates/executor/src/api/mod.rs:141-290`) calls `ensure_vector_recovery()` (lines 70-89), which registers `VectorSubsystem`'s recovery via the global participant registry — but never installs `VectorSubsystem` on the database's freeze list.
-- `DatabaseBuilder::open` (`crates/engine/src/database/builder.rs:60-64`) only overwrites `subsystems` *after* `Database::open()` already ran with the hardcoded list.
+Prior to this work, Strata had two parallel lifecycle mechanisms:
 
-The fix is to make `Subsystem` the single lifecycle contract: the same ordered list drives both recovery and freeze, composed by the executor (above the engine boundary, since `strata-vector → strata-engine` makes the reverse direction a cycle).
+1. A global `RecoveryParticipant` registry (`crates/engine/src/recovery/participant.rs`) used for open-time recovery. _Deleted in Epic 4 (#2372)._
+2. A per-database `Vec<Box<dyn Subsystem>>` used for freeze-on-drop. _Now the sole mechanism._
+
+In production these lists were sourced from different code paths, so vector state recovered correctly but never froze on shutdown:
+
+- `Database::open_internal` hardcoded `db.set_subsystems(vec![Box::new(SearchSubsystem)])`, with the same hardcoded line in `open_follower_internal`.
+- `Strata::open_with` called `ensure_vector_recovery()`, which registered `VectorSubsystem`'s recovery via the global participant registry — but never installed `VectorSubsystem` on the database's freeze list.
+- `DatabaseBuilder::open` only overwrote `subsystems` *after* `Database::open()` already ran with the hardcoded list.
+
+The fix was to make `Subsystem` the single lifecycle contract: the same ordered list drives both recovery and freeze, composed by the executor (above the engine boundary, since `strata-vector → strata-engine` makes the reverse direction a cycle).
 
 ---
 
@@ -51,7 +57,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ## Epics
 
-### Epic 1 — Subsystem-aware engine open plumbing
+### Epic 1 — Subsystem-aware engine open plumbing ✅ shipped in #2364
 
 **Goal:** make `Database` open paths recover from a caller-supplied subsystem list, not from a global registry, and stop hardcoding `SearchSubsystem`.
 
@@ -82,7 +88,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ---
 
-### Epic 2 — DatabaseBuilder owns disk-backed open
+### Epic 2 — DatabaseBuilder owns disk-backed open ✅ shipped in #2368
 
 **Goal:** make `DatabaseBuilder` the authoritative explicit-composition path. Stop the "open then overwrite" anti-pattern.
 
@@ -100,7 +106,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ---
 
-### Epic 3 — Executor production composition via builder
+### Epic 3 — Executor production composition via builder ✅ shipped in #2371
 
 **Goal:** move `Strata::open`, `Strata::open_with`, `Strata::cache`, and follower open over to `DatabaseBuilder` with explicit `[VectorSubsystem, SearchSubsystem]`.
 
@@ -129,7 +135,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ---
 
-### Epic 4 — Delete the legacy participant registry
+### Epic 4 — Delete the legacy participant registry ✅ shipped in #2372
 
 **Goal:** remove the second lifecycle mechanism so the bug class cannot recur.
 
@@ -149,7 +155,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ---
 
-### Epic 5 — Production-shaped regression tests
+### Epic 5 — Production-shaped regression tests ✅ shipped in #2375
 
 **Goal:** prove that drop-time freeze works *through the production code path*, not just through the builder. Today's `recovery_tests.rs` proves the builder path works — that test stays as-is, but it does not catch the production gap.
 
@@ -177,7 +183,7 @@ The fix is to make `Subsystem` the single lifecycle contract: the same ordered l
 
 ---
 
-### Epic 6 — Documentation cleanup
+### Epic 6 — Documentation cleanup ✅ this PR
 
 **Goal:** kill stale docs that describe the participant model as canonical.
 

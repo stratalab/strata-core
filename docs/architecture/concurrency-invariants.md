@@ -20,7 +20,7 @@
 | # | Location | Type | Readers | Writers |
 |---|----------|------|---------|---------|
 | 1 | `engine/src/primitives/vector/store.rs:71` | `RwLock<BTreeMap<CollectionId, Box<dyn VectorIndexBackend>>>` | Concurrent searches | Upsert, delete, create collection |
-| 2 | `engine/src/recovery/participant.rs:75` | `RwLock<Vec<RecoveryParticipant>>` | `recover_all_participants()` | `register_recovery_participant()` (startup only) |
+| 2 | `engine/src/database/mod.rs` | `RwLock<Vec<Box<dyn Subsystem>>>` | `run_freeze_hooks()` on drop | `set_subsystems()` (open-time only, once per `Database`) |
 | 3 | `core/src/traits.rs:226` | `RwLock<BTreeMap<Key, Vec<VersionedValue>>>` | Test-only MockStorage | — |
 
 ### Mutexes (5 production, 3 test)
@@ -50,14 +50,13 @@
 | 11 | `engine/src/search/index.rs:122` | `AtomicU64` | Release/Acquire | Index version watermark |
 | 12 | `engine/src/search/index.rs:123` | `AtomicUsize` | Relaxed | Total document length (BM25) |
 
-### Global/Static Mutable State (3 production, 1 test-framework)
+### Global/Static Mutable State (2 production, 1 test-framework)
 
 | # | Location | Type | Purpose |
 |---|----------|------|---------|
 | 1 | `engine/src/database/registry.rs:26` | `static OPEN_DATABASES: Lazy<Mutex<...>>` | Singleton database per path |
-| 2 | `engine/src/recovery/participant.rs:75` | `static RECOVERY_REGISTRY: Lazy<RwLock<...>>` | Recovery participant registration |
-| 3 | `engine/src/transaction/pool.rs:29` | `thread_local! { TXN_POOL: RefCell<Vec<...>> }` | Per-thread transaction context reuse |
-| 4 | `executor/src/api/mod.rs:61` | `static VECTOR_RECOVERY_INIT: Once` | One-time vector recovery registration |
+| 2 | `engine/src/transaction/pool.rs:29` | `thread_local! { TXN_POOL: RefCell<Vec<...>> }` | Per-thread transaction context reuse |
+| 3 | `executor/src/api/mod.rs:77` | `static MERGE_HANDLERS_INIT: Once` | One-time merge handler + DAG hook registration |
 
 ### Unsafe Code (2 blocks, both in `core`)
 

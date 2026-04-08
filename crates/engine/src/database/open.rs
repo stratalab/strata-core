@@ -976,7 +976,7 @@ impl Database {
         // because they have no path and should always be independent instances
 
         // Enable the inverted index for keyword/BM25 search.
-        // Cache databases skip recovery participants (nothing to recover),
+        // Cache databases skip subsystem recovery (nothing to recover),
         // so we enable the index directly.
         let index = db.extension::<crate::search::InvertedIndex>()?;
         index.enable();

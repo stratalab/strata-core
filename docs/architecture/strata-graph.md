@@ -500,7 +500,7 @@ impl Default for AdjacencyIndex {
 | **First access** | `db.extension::<AdjacencyIndex>()` creates an empty index via `Default` |
 | **First query on graph G** | Full prefix scan of `_graph_/{G}/` to populate `GraphAdjacency`. Cached for subsequent queries. |
 | **Writes** | `add_node`, `add_edge`, `remove_node`, `remove_edge` update both KV (source of truth) and the in-memory index (if loaded). KV-first — if the KV write fails, the in-memory index is not updated. |
-| **Recovery** | A `RecoveryParticipant` (like `register_search_recovery()`) rebuilds the index from KV at startup for any graphs that were loaded in the previous session. The graphs to recover are tracked in a manifest KV entry `_graph_/__loaded__`. |
+| **Recovery** | A `Subsystem::recover()` hook (following the same shape as `SearchSubsystem`) rebuilds the index from KV at startup for any graphs that were loaded in the previous session. The graphs to recover are tracked in a manifest KV entry `_graph_/__loaded__`. |
 | **Branch fork** | The in-memory index is per-branch. Forking creates a CoW snapshot in KV; the adjacency index for the child branch is lazily populated on first query. |
 
 ### Performance Comparison
@@ -532,7 +532,7 @@ crates/engine/src/graph/
 ├── keys.rs         — Key construction/parsing for forward/reverse/node/meta/ref-index
 ├── traversal.rs    — BFS, subgraph extraction, degree counting
 ├── snapshot.rs     — GraphSnapshot, GraphAlgorithm trait, export methods
-├── adjacency.rs    — AdjacencyIndex (Database extension), GraphAdjacency, recovery participant
+├── adjacency.rs    — AdjacencyIndex (Database extension), GraphAdjacency, Subsystem recover hook
 ├── integrity.rs    — Referential integrity hook, cascade policies
 ├── ref_index.rs    — Reverse EntityRef index (nodes_for_entity queries)
 ├── boost.rs        — Graph-boosted search scoring (post-fusion injection)
@@ -883,7 +883,7 @@ Direct dependency. `GraphStore` holds a reference to `KvPrimitive` and delegates
 
 ### With Database Extensions (`crates/engine/src/database/mod.rs`)
 
-The `AdjacencyIndex` (§4.9) is stored as a `Database` extension via `db.extension::<AdjacencyIndex>()`, following the same pattern as `VectorBackendState` and `InvertedIndex`. A `RecoveryParticipant` rebuilds it from KV at startup.
+The `AdjacencyIndex` (§4.9) is stored as a `Database` extension via `db.extension::<AdjacencyIndex>()`, following the same pattern as `VectorBackendState` and `InvertedIndex`. A `Subsystem::recover()` hook rebuilds it from KV at startup.
 
 ### With Executor Write Handlers (`crates/executor/src/handlers/`)
 
@@ -903,7 +903,7 @@ The referential integrity hook (§4.6) is called from executor delete handlers (
 | Integrity hook slows deletes | Best-effort (log + continue); reverse EntityRef index makes lookup O(1), not O(all nodes) |
 | AdjacencyIndex memory pressure | Lazy per-graph loading; graphs not queried are never materialized; document size limits |
 | Graph boost distorts search relevance | Conservative default weight (0.3); multiplicative not additive; user-tunable; opt-in per query |
-| Stale adjacency cache after crash | KV is source of truth; `RecoveryParticipant` rebuilds from KV at startup |
+| Stale adjacency cache after crash | KV is source of truth; `Subsystem::recover()` rebuilds from KV at startup |
 | Users expect algorithms | Clear v1 scope, export methods for external tools, `GraphAlgorithm` for future built-ins |
 
 ---

@@ -136,7 +136,7 @@ The most important gaps fall into five cross-cutting themes:
 | E-1 | Recovery failure returns `RecoveryResult::empty()` — silent data loss | **CRITICAL** | `database/mod.rs:466-476` | SQLite refuses to open a corrupt database | #1313 |
 | E-2 | Shutdown timeout ignores in-flight transactions after 30s | **CRITICAL** | `database/mod.rs:1954-1959` | PostgreSQL's `smart` shutdown waits for all sessions | #1314 |
 | E-3 | Search index updated non-atomically during refresh | **HIGH** | `database/mod.rs:1004-1091` | — | #1322 |
-| E-4 | Vector recovery requires manual `register_vector_recovery()` | **HIGH** | `primitives/vector/recovery.rs:42-44` | — | #1313 |
+| E-4 | ~~Vector recovery requires manual `register_vector_recovery()`~~ **RESOLVED** in #2354 (Epics 1-5). Executor's `strata_db_builder()` installs `[VectorSubsystem, SearchSubsystem]` through `DatabaseBuilder`, so vector recovery + drop-freeze run automatically on every production-opened database. | **RESOLVED** | `executor/src/api/mod.rs:108` | — | #2354 |
 | E-5 | WAL flush thread shutdown race (flag check without lock) | **HIGH** | `database/mod.rs:538-546` | — | #1314 |
 | E-6 | Vector heap freeze errors silently ignored in Drop | **HIGH** | `database/mod.rs:1985-1986` | — | #1313 |
 | E-7 | Multi-process counter file seeding failure allows wrong starting versions | **HIGH** | `database/mod.rs:505-521` | — | #1313 |

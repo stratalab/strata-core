@@ -28,8 +28,10 @@
 //!
 //! ## Lifecycle
 //!
-//! 1. `Database::open()` creates the `_system_` branch and the `_branch_dag`
-//!    graph via the `GraphSubsystem` recovery participant.
+//! 1. The executor's `Strata::open_with` calls
+//!    `strata_graph::branch_dag::init_system_branch(&db)` on the newly
+//!    built `Database`, which creates the `_system_` branch and the
+//!    `_branch_dag` graph if they do not already exist.
 //! 2. Application startup (or test fixture init) calls
 //!    `strata_graph::register_branch_dag_hook_implementation()`, which calls
 //!    `register_branch_dag_hooks(...)` from this module.
