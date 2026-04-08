@@ -129,8 +129,8 @@ fn test_embed_model_state_caches_across_calls() {
     let state = EmbedModelState::default();
     let dir = std::path::Path::new("/unused");
 
-    let arc1 = state.get_or_load(dir, "miniLM").expect("first load");
-    let arc2 = state.get_or_load(dir, "miniLM").expect("second load");
+    let arc1 = state.get_or_load(dir, "miniLM", None).expect("first load");
+    let arc2 = state.get_or_load(dir, "miniLM", None).expect("second load");
 
     // Same Arc (pointer equality) — engine was only loaded once.
     assert!(
@@ -147,14 +147,20 @@ fn test_embed_model_state_dim_after_load() {
     assert!(state.embedding_dim().is_none());
 
     let engine = state
-        .get_or_load(std::path::Path::new("/unused"), "miniLM")
+        .get_or_load(std::path::Path::new("/unused"), "miniLM", None)
         .expect("load failed");
 
-    // After load, dim should match what the engine reports.
+    // After load, dim should match what the engine reports. `engine` is a
+    // `SharedEngine` (Arc<Mutex<Box<dyn InferenceEngine>>>), so we lock to
+    // call the trait method on the boxed engine.
     let dim = state
         .embedding_dim()
         .expect("dim should be Some after load");
-    assert_eq!(dim, engine.embedding_dim());
+    let engine_dim = engine
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .embedding_dim();
+    assert_eq!(dim, engine_dim);
     assert!(dim > 0, "dimension should be positive");
 }
 

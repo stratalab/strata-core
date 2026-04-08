@@ -138,7 +138,9 @@ mod tests {
 
     #[test]
     fn test_float() {
-        assert_eq!(extract_text(&Value::Float(3.14)), Some("3.14".into()));
+        // Avoid 3.14 (clippy::approx_constant trips on PI). The point of the
+        // assertion is the round-trip formatting, not the specific value.
+        assert_eq!(extract_text(&Value::Float(2.5)), Some("2.5".into()));
     }
 
     #[test]
