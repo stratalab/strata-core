@@ -7,7 +7,7 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
 use strata_core::types::BranchId;
-use strata_core::StrataResult;
+use strata_core::{StrataError, StrataResult};
 
 use super::adjacency::AdjacencyIndex;
 use super::types::*;
@@ -388,6 +388,192 @@ pub fn pagerank_with_index(index: &AdjacencyIndex, opts: &PageRankOptions) -> Pa
     }
 
     PageRankResult { ranks, iterations }
+}
+
+/// Personalized PageRank (HippoRAG-style).
+///
+/// Runs power iteration with a per-node teleport vector. Unlike the standard
+/// PageRank, both the teleport term and the dangling-mass redistribution are
+/// proportional to the personalization weights — so probability mass
+/// concentrates around the seed nodes rather than diffusing uniformly.
+///
+/// The `personalization` map is L1-normalized internally, so callers can pass
+/// raw seed weights (e.g., BM25 scores) without pre-normalizing. Entries
+/// whose keys are not in the graph are silently ignored (they cannot anchor
+/// any walk), so stale anchors from a prior snapshot do not leak probability
+/// mass. Nodes absent from the map receive zero teleport mass.
+///
+/// Returns `Err(StrataError::InvalidInput)` if:
+///   - `personalization` is empty,
+///   - any individual weight is negative, NaN, or non-finite (Infinity),
+///   - no positive weight lands on a graph node.
+///
+/// All three cases are programmer bugs, not runtime conditions.
+///
+/// Reference: Gutierrez et al., "HippoRAG", NeurIPS 2024
+/// (https://arxiv.org/abs/2405.14831).
+pub fn pagerank_personalized_with_index(
+    index: &AdjacencyIndex,
+    opts: &PageRankOptions,
+    personalization: &HashMap<String, f64>,
+) -> StrataResult<PageRankResult> {
+    if personalization.is_empty() {
+        return Err(StrataError::invalid_input(
+            "personalization vector is empty",
+        ));
+    }
+
+    // Validate each individual weight up front: negative, NaN, or infinite
+    // entries would silently produce negative or NaN ranks downstream.
+    for v in personalization.values() {
+        if !v.is_finite() || *v < 0.0 {
+            return Err(StrataError::invalid_input(
+                "personalization contains a negative, NaN, or infinite weight",
+            ));
+        }
+    }
+
+    // Collect all nodes.
+    let mut all_nodes: Vec<String> = Vec::new();
+    let mut node_set: HashSet<&str> = HashSet::new();
+
+    for node_id in &index.nodes {
+        if node_set.insert(node_id.as_str()) {
+            all_nodes.push(node_id.clone());
+        }
+    }
+    for (src, edges) in &index.outgoing {
+        if node_set.insert(src.as_str()) {
+            all_nodes.push(src.clone());
+        }
+        for (dst, _, _) in edges {
+            if node_set.insert(dst.as_str()) {
+                all_nodes.push(dst.clone());
+            }
+        }
+    }
+    for (dst, edges) in &index.incoming {
+        if node_set.insert(dst.as_str()) {
+            all_nodes.push(dst.clone());
+        }
+        for (src, _, _) in edges {
+            if node_set.insert(src.as_str()) {
+                all_nodes.push(src.clone());
+            }
+        }
+    }
+
+    // Sort for deterministic iteration: per-node personalization makes the
+    // floating-point sums even more order-sensitive than uniform PageRank, so
+    // the sort is load-bearing for bitwise-reproducible output.
+    all_nodes.sort();
+
+    let n = all_nodes.len();
+    if n == 0 {
+        return Ok(PageRankResult {
+            ranks: HashMap::new(),
+            iterations: 0,
+        });
+    }
+
+    // L1-normalize the personalization vector over the intersection with the
+    // graph. Filtering to graph nodes before normalizing preserves the mass
+    // invariant (sum of ranks = 1) — a personalization entry whose key is not
+    // in the graph would otherwise drain probability mass into a void.
+    //
+    // Single-pass: filter once into a Vec, then derive `total` and `normalized`
+    // from it. Avoids drift between two separately-maintained filter predicates.
+    let filtered: Vec<(&str, f64)> = personalization
+        .iter()
+        .filter_map(|(k, v)| {
+            if node_set.contains(k.as_str()) {
+                Some((k.as_str(), *v))
+            } else {
+                None
+            }
+        })
+        .collect();
+    let total: f64 = filtered.iter().map(|(_, v)| *v).sum();
+    // `total` may be non-finite if the sum overflows even though each summand
+    // is finite. Reject that case alongside the trivial zero case.
+    if !total.is_finite() || total <= 0.0 {
+        return Err(StrataError::invalid_input(
+            "personalization has no positive weight on any graph node",
+        ));
+    }
+    let normalized: HashMap<&str, f64> =
+        filtered.into_iter().map(|(k, v)| (k, v / total)).collect();
+
+    // Initialize ranks from the normalized personalization vector. Nodes
+    // outside the personalization map start at 0.0. Total initial mass = 1.0.
+    let mut ranks: HashMap<String, f64> = all_nodes
+        .iter()
+        .map(|id| {
+            let r = normalized.get(id.as_str()).copied().unwrap_or(0.0);
+            (id.clone(), r)
+        })
+        .collect();
+
+    // Precompute out-degrees.
+    let mut out_degree: HashMap<&str, usize> = HashMap::new();
+    for node_id in &all_nodes {
+        let deg = index
+            .outgoing
+            .get(node_id.as_str())
+            .map(|e| e.len())
+            .unwrap_or(0);
+        out_degree.insert(node_id.as_str(), deg);
+    }
+
+    let d = opts.damping;
+    let mut iterations = 0;
+
+    for _ in 0..opts.max_iterations {
+        iterations += 1;
+
+        // Compute dangling node mass: sum of ranks for nodes with no outgoing edges.
+        let dangling_sum: f64 = all_nodes
+            .iter()
+            .filter(|id| *out_degree.get(id.as_str()).unwrap_or(&0) == 0)
+            .map(|id| ranks[id])
+            .sum();
+
+        let mut new_ranks: HashMap<String, f64> = HashMap::with_capacity(n);
+
+        for node_id in &all_nodes {
+            // Per-node teleport weight (HippoRAG).
+            let p = normalized.get(node_id.as_str()).copied().unwrap_or(0.0);
+            let base = (1.0 - d) * p;
+            // Per-node dangling redistribution (HippoRAG).
+            let dangling_contrib = d * dangling_sum * p;
+
+            let mut sum = 0.0;
+            // Sum contributions from incoming neighbors.
+            if let Some(incoming) = index.incoming.get(node_id.as_str()) {
+                for (src, _, _) in incoming {
+                    let src_rank = ranks.get(src.as_str()).copied().unwrap_or(0.0);
+                    let src_deg = *out_degree.get(src.as_str()).unwrap_or(&1);
+                    if src_deg > 0 {
+                        sum += src_rank / src_deg as f64;
+                    }
+                }
+            }
+            new_ranks.insert(node_id.clone(), base + dangling_contrib + d * sum);
+        }
+
+        // Check convergence (L1 norm).
+        let delta: f64 = all_nodes
+            .iter()
+            .map(|id| (new_ranks[id] - ranks[id]).abs())
+            .sum();
+
+        ranks = new_ranks;
+        if delta < opts.tolerance {
+            break;
+        }
+    }
+
+    Ok(PageRankResult { ranks, iterations })
 }
 
 /// Local Clustering Coefficient.
@@ -838,6 +1024,349 @@ mod tests {
         // All ranks should be equal (1/3 each).
         for &rank in result.ranks.values() {
             assert!((rank - 1.0 / 3.0).abs() < 1e-6, "rank {} != 1/3", rank);
+        }
+    }
+
+    // =========================================================================
+    // Personalized PageRank (HippoRAG)
+    // =========================================================================
+
+    #[test]
+    fn ppr_concentrates_around_seeds() {
+        // Chain A→B→C with seed on A. Closed-form steady state:
+        //   rank(A) = (1-d) / (1 - d^3)
+        //   rank(B) = d * rank(A)
+        //   rank(C) = d^2 * rank(A)
+        // With default damping 0.85: A≈0.389, B≈0.330, C≈0.281 — strictly
+        // monotonically decreasing. Note we bump max_iterations above the
+        // default because the "wave" of seed mass walking the chain oscillates
+        // for many iterations before the dangling feedback loop settles.
+        let idx = make_unweighted_index(&[("A", "B"), ("B", "C")]);
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 1.0);
+
+        let opts = PageRankOptions {
+            max_iterations: 200,
+            tolerance: 1e-8,
+            ..PageRankOptions::default()
+        };
+        let result = pagerank_personalized_with_index(&idx, &opts, &pers).unwrap();
+
+        // Monotonic decay along the chain: the seed dominates and rank falls
+        // off with each hop — the core PPR guarantee.
+        assert!(
+            result.ranks["A"] > result.ranks["B"],
+            "rank(A)={} should exceed rank(B)={}",
+            result.ranks["A"],
+            result.ranks["B"]
+        );
+        assert!(
+            result.ranks["B"] > result.ranks["C"],
+            "rank(B)={} should exceed rank(C)={}",
+            result.ranks["B"],
+            result.ranks["C"]
+        );
+        // Closed-form sanity check — within 1e-4 of the analytical value.
+        let d: f64 = 0.85;
+        let expected_a = (1.0 - d) / (1.0 - d.powi(3));
+        assert!(
+            (result.ranks["A"] - expected_a).abs() < 1e-4,
+            "rank(A)={} vs closed-form {}",
+            result.ranks["A"],
+            expected_a
+        );
+    }
+
+    #[test]
+    fn ppr_two_seeds_balance() {
+        // Two disconnected, structurally identical bidirectional chains:
+        //   Left:  A↔B↔C
+        //   Right: X↔Y↔Z
+        // Seed each endpoint equally (A=0.5, X=0.5). Because the components
+        // are isomorphic, the seeds are mirror images, and the algorithm is
+        // deterministic Jacobi iteration (reads only previous-iteration values),
+        // symmetric inputs must produce *bitwise-equal* ranks. Asserting
+        // `to_bits()` equality catches subtle drift that a numeric tolerance
+        // would hide.
+        let idx = make_unweighted_index(&[
+            ("A", "B"),
+            ("B", "A"),
+            ("B", "C"),
+            ("C", "B"),
+            ("X", "Y"),
+            ("Y", "X"),
+            ("Y", "Z"),
+            ("Z", "Y"),
+        ]);
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 0.5);
+        pers.insert("X".to_string(), 0.5);
+
+        let result =
+            pagerank_personalized_with_index(&idx, &PageRankOptions::default(), &pers).unwrap();
+
+        for (left, right) in [("A", "X"), ("B", "Y"), ("C", "Z")] {
+            assert_eq!(
+                result.ranks[left].to_bits(),
+                result.ranks[right].to_bits(),
+                "rank({})={} vs rank({})={} (expected bitwise equal)",
+                left,
+                result.ranks[left],
+                right,
+                result.ranks[right]
+            );
+        }
+    }
+
+    #[test]
+    fn ppr_dangling_mass_redistributes_via_personalization() {
+        // Core HippoRAG correctness test.
+        //
+        // Graph: A→B, plus two isolated dangling nodes C and D.
+        // With all personalization on A, dangling mass from C and D must
+        // flow back to A (via per-node redistribution), NOT spread uniformly
+        // across {A, B, C, D} the way standard PageRank would.
+        let mut idx = make_unweighted_index(&[("A", "B")]);
+        idx.add_node("C");
+        idx.add_node("D");
+
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 1.0);
+
+        let opts = PageRankOptions::default();
+        let ppr = pagerank_personalized_with_index(&idx, &opts, &pers).unwrap();
+
+        // Baseline: standard (uniform-redistribution) PageRank on the same graph.
+        // HippoRAG's per-node redistribution should concentrate significantly
+        // more mass on A than the uniform variant does.
+        let uniform = pagerank_with_index(&idx, &opts);
+
+        assert!(
+            ppr.ranks["A"] > uniform.ranks["A"] + 0.15,
+            "PPR rank(A)={} should exceed uniform rank(A)={} by >0.15",
+            ppr.ranks["A"],
+            uniform.ranks["A"]
+        );
+        // And PPR rank(A) should be a clear majority of mass.
+        assert!(
+            ppr.ranks["A"] > 0.5,
+            "PPR rank(A)={} should exceed 0.5 (seed dominates)",
+            ppr.ranks["A"]
+        );
+        // C and D have no teleport and no incoming edges — they never receive
+        // any mass (neither from the personalization vector nor from the
+        // dangling redistribution, since their own `p` is zero). Assert they
+        // stay at exactly zero throughout iteration.
+        assert_eq!(ppr.ranks["C"], 0.0, "rank(C) should be exactly 0");
+        assert_eq!(ppr.ranks["D"], 0.0, "rank(D) should be exactly 0");
+    }
+
+    #[test]
+    fn ppr_zero_iterations_returns_initial_state() {
+        // With max_iterations=0 the iteration loop never runs, so the result
+        // must be the initial personalization-weighted state: ranks equal
+        // the (normalized) personalization weights, and iterations == 0.
+        // This guards against regressions in the counter initialization or
+        // the zero-iteration early exit path.
+        let idx = make_unweighted_index(&[("A", "B"), ("B", "C")]);
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 0.75);
+        pers.insert("B".to_string(), 0.25);
+
+        let opts = PageRankOptions {
+            max_iterations: 0,
+            ..PageRankOptions::default()
+        };
+        let result = pagerank_personalized_with_index(&idx, &opts, &pers).unwrap();
+
+        assert_eq!(result.iterations, 0);
+        // Initial ranks come straight from the normalized personalization
+        // vector (already L1 — total is 1.0) and nodes not in the map get 0.
+        assert_eq!(result.ranks["A"].to_bits(), 0.75_f64.to_bits());
+        assert_eq!(result.ranks["B"].to_bits(), 0.25_f64.to_bits());
+        assert_eq!(result.ranks["C"].to_bits(), 0.0_f64.to_bits());
+        // Mass invariant holds even at iteration 0.
+        let sum: f64 = result.ranks.values().sum();
+        assert!((sum - 1.0).abs() < 1e-12, "sum was {}", sum);
+    }
+
+    #[test]
+    fn ppr_personalization_preserves_mass() {
+        // Chain A→B→C (C is dangling). With any personalization the total
+        // rank mass must stay at 1.0 regardless of damping.
+        let idx = make_unweighted_index(&[("A", "B"), ("B", "C")]);
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 0.6);
+        pers.insert("B".to_string(), 0.4);
+
+        for damping in [0.3_f64, 0.5, 0.85] {
+            let opts = PageRankOptions {
+                damping,
+                ..PageRankOptions::default()
+            };
+            let result = pagerank_personalized_with_index(&idx, &opts, &pers).unwrap();
+            let sum: f64 = result.ranks.values().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "damping={} sum={} (mass leaked)",
+                damping,
+                sum
+            );
+        }
+    }
+
+    #[test]
+    fn ppr_empty_personalization_errors() {
+        let idx = make_unweighted_index(&[("A", "B")]);
+        let opts = PageRankOptions::default();
+
+        // Empty map → error.
+        let empty: HashMap<String, f64> = HashMap::new();
+        let result = pagerank_personalized_with_index(&idx, &opts, &empty);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput for empty personalization, got {:?}",
+            result
+        );
+
+        // Non-empty but all-zero weights → error (no positive weight on any node).
+        let mut all_zero: HashMap<String, f64> = HashMap::new();
+        all_zero.insert("A".to_string(), 0.0);
+        all_zero.insert("B".to_string(), 0.0);
+        let result = pagerank_personalized_with_index(&idx, &opts, &all_zero);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput for all-zero personalization, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ppr_rejects_invalid_weights() {
+        // Negative, NaN, and infinite individual weights must be rejected
+        // up front rather than silently producing bad ranks downstream.
+        let idx = make_unweighted_index(&[("A", "B")]);
+        let opts = PageRankOptions::default();
+
+        // Negative weight.
+        let mut negative: HashMap<String, f64> = HashMap::new();
+        negative.insert("A".to_string(), 5.0);
+        negative.insert("B".to_string(), -2.0);
+        let result = pagerank_personalized_with_index(&idx, &opts, &negative);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput for negative weight, got {:?}",
+            result
+        );
+
+        // NaN weight.
+        let mut nan: HashMap<String, f64> = HashMap::new();
+        nan.insert("A".to_string(), f64::NAN);
+        let result = pagerank_personalized_with_index(&idx, &opts, &nan);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput for NaN weight, got {:?}",
+            result
+        );
+
+        // Infinite weight.
+        let mut inf: HashMap<String, f64> = HashMap::new();
+        inf.insert("A".to_string(), f64::INFINITY);
+        let result = pagerank_personalized_with_index(&idx, &opts, &inf);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput for infinite weight, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ppr_ignores_non_graph_keys_and_preserves_mass() {
+        // Personalization containing a key that isn't a graph node (e.g., a
+        // stale BM25 anchor from a prior snapshot) must be filtered out
+        // before normalization. Otherwise the mass invariant (sum=1) breaks
+        // because probability is assigned to a non-existent node and lost.
+        let idx = make_unweighted_index(&[("A", "B"), ("B", "C")]);
+        let opts = PageRankOptions::default();
+
+        let mut pers: HashMap<String, f64> = HashMap::new();
+        pers.insert("A".to_string(), 3.0);
+        pers.insert("GHOST".to_string(), 2.0); // not in the graph
+        let result = pagerank_personalized_with_index(&idx, &opts, &pers).unwrap();
+
+        // Mass invariant must hold: total rank = 1.0 despite the GHOST entry.
+        let sum: f64 = result.ranks.values().sum();
+        assert!(
+            (sum - 1.0).abs() < 1e-6,
+            "mass leak from non-graph personalization key: sum={}",
+            sum
+        );
+
+        // The result should be bitwise-identical to passing only {A: 1.0}
+        // (the only surviving entry after filtering, renormalized to 1.0).
+        let mut a_only: HashMap<String, f64> = HashMap::new();
+        a_only.insert("A".to_string(), 1.0);
+        let a_only_result = pagerank_personalized_with_index(&idx, &opts, &a_only).unwrap();
+        for node in ["A", "B", "C"] {
+            assert_eq!(
+                result.ranks[node].to_bits(),
+                a_only_result.ranks[node].to_bits(),
+                "bitwise mismatch at {}: with-ghost={} vs a-only={}",
+                node,
+                result.ranks[node],
+                a_only_result.ranks[node]
+            );
+        }
+
+        // If ALL personalization keys are non-graph nodes, that's an error.
+        let mut all_ghosts: HashMap<String, f64> = HashMap::new();
+        all_ghosts.insert("GHOST1".to_string(), 1.0);
+        all_ghosts.insert("GHOST2".to_string(), 2.0);
+        let result = pagerank_personalized_with_index(&idx, &opts, &all_ghosts);
+        assert!(
+            matches!(result, Err(StrataError::InvalidInput { .. })),
+            "expected InvalidInput when all personalization keys are non-graph, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn ppr_normalizes_personalization() {
+        // Unnormalized raw weights (total=8.0) should produce bitwise-identical
+        // output to pre-normalized {A: 0.625, B: 0.375}. This is the core
+        // guarantee: callers can pass raw BM25-style scores without pre-
+        // normalizing, and the function handles it internally.
+        let idx = make_unweighted_index(&[("A", "B"), ("B", "C")]);
+
+        let mut raw: HashMap<String, f64> = HashMap::new();
+        raw.insert("A".to_string(), 5.0);
+        raw.insert("B".to_string(), 3.0);
+
+        let mut normalized: HashMap<String, f64> = HashMap::new();
+        normalized.insert("A".to_string(), 0.625);
+        normalized.insert("B".to_string(), 0.375);
+
+        let opts = PageRankOptions::default();
+        let raw_result = pagerank_personalized_with_index(&idx, &opts, &raw).unwrap();
+        let norm_result = pagerank_personalized_with_index(&idx, &opts, &normalized).unwrap();
+
+        // Mass invariant holds for the raw-weight call.
+        let sum: f64 = raw_result.ranks.values().sum();
+        assert!((sum - 1.0).abs() < 1e-6, "sum was {}", sum);
+
+        // Raw and pre-normalized inputs must produce bitwise-identical
+        // results: normalization is deterministic, iteration order is sorted,
+        // and 5.0/8.0 == 0.625, 3.0/8.0 == 0.375 exactly in f64. Any drift
+        // here would indicate a correctness bug in the normalization path.
+        for node in ["A", "B", "C"] {
+            assert_eq!(
+                raw_result.ranks[node].to_bits(),
+                norm_result.ranks[node].to_bits(),
+                "bitwise mismatch at {}: raw={} norm={}",
+                node,
+                raw_result.ranks[node],
+                norm_result.ranks[node]
+            );
         }
     }
 
