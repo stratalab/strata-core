@@ -107,9 +107,54 @@ impl VectorStore {
     /// 1. Deletes all vectors in the collection
     /// 2. Deletes the collection configuration
     /// 3. Removes the in-memory backend
+    /// 4. Wipes the on-disk `.vec` and `_graphs/` cache files
     ///
     /// # Errors
     /// - `CollectionNotFound` if collection doesn't exist
+    ///
+    /// # Concurrency note (latent race — read before changing)
+    ///
+    /// Steps 1-2 happen inside an MVCC transaction (atomic, isolated).
+    /// Steps 3-4 are post-commit side-effects on the in-memory
+    /// `backends` map and the on-disk cache files — they are NOT
+    /// covered by the transaction's isolation boundary.
+    ///
+    /// As a result, a concurrent `create_collection` of the same name
+    /// can interleave between this function's KV commit (step 2) and
+    /// its disk cache purge (step 4):
+    ///
+    /// 1. T1 (delete) commits the KV txn — config key gone.
+    /// 2. T2 (create) sees `collection_exists() == false`, commits a
+    ///    new config record, initialises a fresh in-memory backend.
+    /// 3. T1 wipes the `.vec` / `_graphs/` files at the path.
+    /// 4. T2's eventual freeze re-writes the cache.
+    ///
+    /// **Today this race is benign** because:
+    ///
+    /// - **The cache is write-through.** Every vector that lives in
+    ///   the on-disk cache is also in KV. A wiped cache is rebuilt by
+    ///   `recover_from_db` (`crates/vector/src/recovery.rs`) by
+    ///   scanning KV. Worst case: T2's first recovery after a crash
+    ///   takes the slow KV-scan path instead of the mmap fast path.
+    ///   No data loss.
+    ///
+    /// - **New collections start in `Owned` heap mode, not `Mmap`.**
+    ///   T2's freshly-initialised backend does not alias the file we
+    ///   are deleting in step 4, so the `remove_file` call cannot
+    ///   pull memory out from under T2's heap.
+    ///
+    /// **Both invariants are load-bearing.** If a future change makes
+    /// the cache write-back (vectors only in `.vec`, not in KV), or
+    /// makes new collections start with a heap mmap'd from
+    /// `{name}.vec`, this race becomes a real data-loss bug.
+    ///
+    /// The fix would be either (a) per-`CollectionId` lifecycle
+    /// serialisation, or (b) generation-suffixed cache paths
+    /// (`{name}_{created_at}.vec`) so a delete-then-recreate uses
+    /// distinct files by construction. Neither is wired in today —
+    /// the current code relies on the two invariants above. Any PR
+    /// that touches the cache representation MUST re-audit this race
+    /// or add one of those mechanisms.
     pub fn delete_collection(
         &self,
         branch_id: BranchId,
@@ -140,9 +185,71 @@ impl VectorStore {
             state.backends.remove(&collection_id);
         }
 
+        // Wipe the on-disk `.vec` mmap and `_graphs/` cache so the next
+        // recovery pass cannot resurrect this collection from a stale
+        // cache. Best-effort: missing files / I/O failures are logged
+        // but never returned (the primary delete already committed).
+        // See the concurrency note on this function for the latent
+        // race with concurrent `create_collection` of the same name.
+        crate::recovery::purge_collection_disk_cache(self.db.data_dir(), &collection_id);
+
         info!(target: "strata::vector", collection = name, branch_id = %branch_id, "Collection deleted");
 
         Ok(())
+    }
+
+    /// Purge every collection in the in-memory backend state for
+    /// `(branch_id, space)` and wipe each collection's on-disk caches.
+    /// Returns the number of collections removed.
+    ///
+    /// **Best-effort cleanup hook for `space_delete --force`.** This
+    /// helper reads `state.backends` directly (not the KV config keys)
+    /// so callers may invoke it AFTER the primary-delete transaction
+    /// has wiped the config rows — the in-memory state still has the
+    /// `CollectionId` entries that the recovery pass loaded earlier,
+    /// which is what we need to evict here.
+    ///
+    /// Disk cache purge is gated on a non-empty `data_dir` (ephemeral
+    /// databases never write caches in the first place).
+    ///
+    /// # Concurrency note
+    ///
+    /// Same latent race as `delete_collection`: a concurrent
+    /// `create_collection` for one of the target `CollectionId`s can
+    /// interleave with this purge and have its freshly-written cache
+    /// wiped. Today this is benign for the same two reasons listed on
+    /// `delete_collection` (write-through cache + new heaps in
+    /// `Owned` mode). Read that note before changing the cache
+    /// representation.
+    pub fn purge_collections_in_space(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+    ) -> VectorResult<usize> {
+        let state = self.state()?;
+        let target_cids: Vec<CollectionId> = state
+            .backends
+            .iter()
+            .filter(|entry| entry.key().branch_id == branch_id && entry.key().space == space)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let n = target_cids.len();
+        let data_dir = self.db.data_dir().to_path_buf();
+        for cid in &target_cids {
+            state.backends.remove(cid);
+            crate::recovery::purge_collection_disk_cache(&data_dir, cid);
+        }
+        if n > 0 {
+            info!(
+                target: "strata::vector",
+                branch_id = %branch_id,
+                space = space,
+                purged = n,
+                "Purged vector collections during space delete"
+            );
+        }
+        Ok(n)
     }
 
     /// List all collections for a branch

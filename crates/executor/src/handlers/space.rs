@@ -73,7 +73,51 @@ pub fn space_delete(
         Ok(())
     }))?;
 
-    // Delete the space metadata key
+    // Post-commit secondary cleanup. Each step is best-effort: a failure
+    // logs a warning but never rolls back the primary delete (which has
+    // already committed above). Without this block, force-deleting a
+    // space leaves stale BM25 docs, ghost vector backends, dangling
+    // on-disk vector caches, and orphan shadow embeddings — see Phase 4
+    // of `docs/design/space-correctness-fix-plan.md`.
+
+    // 1) BM25 inverted index — drop every doc whose EntityRef lives in
+    //    (branch, space). Skipped if the search index is not registered.
+    if let Ok(index) = p.db.extension::<strata_engine::search::InvertedIndex>() {
+        let removed = index.remove_documents_in_space(core_branch_id, &space);
+        if removed > 0 {
+            tracing::info!(
+                target: "strata::space",
+                branch_id = %core_branch_id,
+                space = space.as_str(),
+                removed,
+                "Removed BM25 documents during space delete"
+            );
+        }
+    }
+
+    // 2) Vector backends + on-disk caches — purge every collection in
+    //    (branch, space) from the in-memory state and wipe its `.vec`
+    //    and `_graphs/` cache files.
+    if let Err(e) = p.vector.purge_collections_in_space(core_branch_id, &space) {
+        tracing::warn!(
+            target: "strata::space",
+            branch_id = %core_branch_id,
+            space = space.as_str(),
+            error = %e,
+            "Failed to purge vector collections during space delete"
+        );
+    }
+
+    // 3) Shadow embeddings — delete every entry in `_system_embed_*`
+    //    whose source-key prefix matches the deleted space, and drain
+    //    the in-memory embed buffer for the same (branch, space).
+    //    No-op when the `embed` feature is not compiled in.
+    let _ =
+        crate::handlers::embed_hook::delete_shadow_embeddings_for_space(p, core_branch_id, &space);
+
+    // Delete the space metadata key (last — keeps the metadata key as
+    // the externally observable "space exists" signal until all
+    // secondary cleanup has had a chance to run).
     convert_result(p.space.delete(core_branch_id, &space))?;
 
     Ok(Output::Unit)

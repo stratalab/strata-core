@@ -1229,6 +1229,35 @@ impl InvertedIndex {
         }
     }
 
+    /// Remove every indexed document whose `EntityRef` lives in
+    /// `(branch_id, space)`. Returns the number of refs removed.
+    ///
+    /// Snapshots `doc_id_map.id_to_ref` under a read lock, then drops the
+    /// lock before delegating to `remove_document` for each match — that
+    /// way we never hold the read lock while taking the write locks
+    /// `remove_document` needs.
+    ///
+    /// Cost: O(total_docs) snapshot + O(matching_docs × terms_per_doc)
+    /// removal. Administrative-only — used by `space_delete --force`.
+    pub fn remove_documents_in_space(&self, branch_id: BranchId, space: &str) -> usize {
+        if !self.is_enabled() {
+            return 0;
+        }
+        let to_remove: Vec<EntityRef> = {
+            let guard = self.doc_id_map.id_to_ref.read().unwrap();
+            guard
+                .iter()
+                .filter(|r| r.branch_id() == branch_id && r.space() == Some(space))
+                .cloned()
+                .collect()
+        };
+        let n = to_remove.len();
+        for r in &to_remove {
+            self.remove_document(r);
+        }
+        n
+    }
+
     // ========================================================================
     // Seal & Persistence
     // ========================================================================

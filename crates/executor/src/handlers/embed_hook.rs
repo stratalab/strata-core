@@ -431,6 +431,106 @@ pub fn maybe_remove_embedding(
 ) {
 }
 
+/// Delete every shadow embedding whose source lives in `target_space`.
+///
+/// Shadow vectors live in the `_system_` space inside `SHADOW_KV`,
+/// `SHADOW_JSON`, and `SHADOW_EVENT`. Their key is composed as
+/// `format!("{source_space}\x1f{source_key}")`, so a single prefix scan
+/// per shadow collection is enough to find every entry that belongs to
+/// a deleted space. The `\x1f` separator is the same one
+/// `maybe_remove_embedding` and `queue_embed_text` use; it is hard-coded
+/// here so the cleanup path runs even when the `embed` feature is not
+/// compiled in (the on-disk shadow collections survive across feature
+/// flag changes).
+///
+/// When the `embed` feature *is* compiled in, this also drains the
+/// in-memory `EmbedBuffer` so any not-yet-flushed pending embed for
+/// `(branch_id, target_space)` is dropped before it can resurrect a
+/// ghost vector after the delete — the same write-behind race
+/// `maybe_remove_embedding` already guards against per-key.
+///
+/// **Best-effort:** missing shadow collections, missing keys, and per-key
+/// failures are logged and skipped — the caller (the `space_delete`
+/// handler) must never roll back the primary delete because of a
+/// secondary cleanup failure.
+///
+/// Returns the number of shadow embeddings actually deleted.
+pub fn delete_shadow_embeddings_for_space(
+    p: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    target_space: &str,
+) -> usize {
+    // Step 1: drain any pending embeds in the buffer FIRST so a
+    // background flush cannot insert new shadow vectors after our
+    // prefix scan completes. This matches `maybe_remove_embedding`'s
+    // drain-then-delete order — anything an in-flight flush already
+    // grabbed will be caught by the prefix scan in step 2; anything
+    // not yet grabbed is dropped here and never inserted. The buffer
+    // only exists when the `embed` feature is compiled in.
+    #[cfg(feature = "embed")]
+    if let Ok(buf) = p.db.extension::<EmbedBuffer>() {
+        let mut pending = buf.pending.lock().unwrap_or_else(|e| e.into_inner());
+        pending.retain(|pe| !(pe.branch_id == branch_id && pe.space == target_space));
+    }
+
+    // Step 2: prefix-scan each shadow collection and delete every
+    // entry whose composite key starts with `{target_space}\x1f`.
+    // Hard-coded prefix separator: same byte as `SHADOW_KEY_SEP` in
+    // the embed-feature path, repeated here so cleanup is
+    // unconditional (the on-disk shadow collections survive across
+    // feature flag changes).
+    let prefix = format!("{}\x1f", target_space);
+    let mut total = 0usize;
+    for shadow in [SHADOW_KV, SHADOW_JSON, SHADOW_EVENT] {
+        let keys =
+            match p
+                .vector
+                .list_keys(branch_id, strata_engine::system_space::SYSTEM_SPACE, shadow)
+            {
+                Ok(ks) => ks,
+                Err(e) if e.is_not_found() => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::embed",
+                        shadow = shadow,
+                        error = %e,
+                        "Failed to list shadow keys during space cleanup"
+                    );
+                    continue;
+                }
+            };
+        for key in keys {
+            if !key.starts_with(&prefix) {
+                continue;
+            }
+            match p.vector.system_delete(branch_id, shadow, &key) {
+                Ok(_) => total += 1,
+                Err(e) if e.is_not_found() => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::embed",
+                        shadow = shadow,
+                        key = key.as_str(),
+                        error = %e,
+                        "Failed to delete shadow embedding during space cleanup"
+                    );
+                }
+            }
+        }
+    }
+
+    if total > 0 {
+        tracing::info!(
+            target: "strata::embed",
+            branch_id = %branch_id,
+            space = target_space,
+            deleted = total,
+            "Deleted shadow embeddings during space cleanup"
+        );
+    }
+    total
+}
+
 /// Extract embeddable text from a Value.
 #[cfg(feature = "embed")]
 pub fn extract_text(value: &strata_core::Value) -> Option<String> {
