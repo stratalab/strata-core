@@ -150,6 +150,18 @@ impl<'a> TransactionOps for Transaction<'a> {
     fn kv_put(&mut self, key: &str, value: Value) -> Result<Version, StrataError> {
         let full_key = self.kv_key(key);
 
+        // Phase 3 contract: every write that touches a non-default,
+        // non-system space must atomically register that space's
+        // metadata key inside the same transaction. Without this, a
+        // session-driven KV put against `tenant_x` commits the user
+        // value but leaves the space invisible to `space list` /
+        // `space exists` until startup repair re-discovers it via
+        // data scan. The helper is idempotent and skips `default` /
+        // `_system_`.
+        let branch_id = self.branch_id();
+        let space = self.namespace.space.as_str();
+        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
+
         // Use the ctx.put() method which handles all the bookkeeping
         self.ctx.put(full_key, value)?;
 
@@ -205,6 +217,14 @@ impl<'a> TransactionOps for Transaction<'a> {
     // =========================================================================
 
     fn event_append(&mut self, event_type: &str, payload: Value) -> Result<Version, StrataError> {
+        // Phase 3 contract: register the space atomically with the
+        // first write of this txn. See `kv_put` for the rationale —
+        // session-driven event appends to a non-default space must
+        // not leave the space invisible to discovery.
+        let branch_id = self.branch_id();
+        let space = self.namespace.space.as_str();
+        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
+
         // Read persisted meta BEFORE writing — adds meta_key to the read_set
         // so OCC detects concurrent appends (#1914).
         // ctx.get() checks write_set first (our prior appends), then snapshot.
@@ -363,6 +383,12 @@ impl<'a> TransactionOps for Transaction<'a> {
             ));
         }
 
+        // Phase 3 contract: register the space atomically with the
+        // first write. See `kv_put` for the rationale.
+        let branch_id = self.branch_id();
+        let space = self.namespace.space.as_str();
+        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
+
         // Create the document by setting at root path
         self.ctx.json_set(&full_key, &JsonPath::root(), value)?;
 
@@ -397,6 +423,12 @@ impl<'a> TransactionOps for Transaction<'a> {
         value: JsonValue,
     ) -> Result<Version, StrataError> {
         let full_key = self.json_key(doc_id);
+
+        // Phase 3 contract: register the space atomically with the
+        // first write. See `kv_put` for the rationale.
+        let branch_id = self.branch_id();
+        let space = self.namespace.space.as_str();
+        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
 
         // Call ctx.json_set (same pattern as kv_put calling ctx.put)
         self.ctx.json_set(&full_key, path, value)?;

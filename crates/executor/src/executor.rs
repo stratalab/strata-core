@@ -1075,7 +1075,11 @@ impl Executor {
                     hint: None,
                 })?;
                 let space = space.unwrap_or_else(|| "default".to_string());
-                self.ensure_space_registered(&branch, &space)?;
+                // Phase 3 contract: deletes must NOT auto-register
+                // their target space. The previous pre-registration
+                // call was a Phase 3 cleanup miss — it created phantom
+                // empty space metadata entries on a batch delete
+                // against a never-used space.
                 crate::handlers::vector::vector_batch_delete(
                     &self.primitives,
                     branch,
