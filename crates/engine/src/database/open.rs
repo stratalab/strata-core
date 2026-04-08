@@ -161,6 +161,63 @@ impl Database {
         Ok(db)
     }
 
+    /// Open a primary database with an explicit subsystem list.
+    ///
+    /// Subsystem-aware mirror of `Database::open`. Reads `strata.toml` from
+    /// the data directory (creating a default if missing) and delegates to
+    /// [`Database::open_with_config_and_subsystems`]. The same subsystem
+    /// list drives recovery on open and freeze-on-drop.
+    pub(crate) fn open_with_subsystems<P: AsRef<Path>>(
+        path: P,
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
+        let data_dir = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
+
+        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
+        config::StrataConfig::write_default_if_missing(&config_path)?;
+        let cfg = config::StrataConfig::from_file(&config_path)?;
+
+        Self::open_with_config_and_subsystems(path, cfg, subsystems)
+    }
+
+    /// Open a primary database with an explicit `StrataConfig` and an
+    /// explicit subsystem list.
+    ///
+    /// Subsystem-aware mirror of `Database::open_with_config`. The supplied
+    /// config is written to `strata.toml` so that subsequent opens pick up
+    /// the same settings, then control is handed to
+    /// [`Database::open_internal_with_subsystems`].
+    pub(crate) fn open_with_config_and_subsystems<P: AsRef<Path>>(
+        path: P,
+        cfg: StrataConfig,
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
+        let data_dir = path.as_ref().to_path_buf();
+        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
+
+        #[cfg(not(feature = "embed"))]
+        let cfg = {
+            let mut cfg = cfg;
+            if cfg.auto_embed {
+                warn!(
+                    "auto_embed=true but the 'embed' feature is not compiled; \
+                     auto-embedding is disabled"
+                );
+                cfg.auto_embed = false;
+            }
+            cfg
+        };
+
+        let mode = cfg.durability_mode()?;
+
+        // Write config to strata.toml so restarts pick it up
+        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
+        cfg.write_to_file(&config_path)?;
+
+        Self::open_internal_with_subsystems(path, mode, cfg, subsystems)
+    }
+
     /// Acquire a primary `Database` for `path`, or return an existing instance
     /// if one is already open at the same canonicalized path.
     ///
@@ -275,10 +332,6 @@ impl Database {
     /// Note: this path does **not** call `recover_all_participants` and does
     /// **not** read the legacy `RecoveryParticipant` registry. The supplied
     /// `subsystems` list is the sole driver of recovery for this open.
-    //
-    // Wired in by `DatabaseBuilder` in Epic 2 of the lifecycle unification
-    // refactor; allow dead_code in the meantime.
-    #[allow(dead_code)]
     pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
@@ -367,6 +420,30 @@ impl Database {
         };
 
         Self::open_follower_internal(canonical_path, cfg)
+    }
+
+    /// Open a read-only follower of an existing database with an explicit
+    /// subsystem list.
+    ///
+    /// Subsystem-aware mirror of `Database::open_follower`. Reads
+    /// `strata.toml` if present (else defaults) and delegates to
+    /// [`Database::open_follower_internal_with_subsystems`]. Followers do
+    /// not freeze on drop, but the supplied subsystems still drive recovery.
+    pub(crate) fn open_follower_with_subsystems<P: AsRef<Path>>(
+        path: P,
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
+        let data_dir = path.as_ref().to_path_buf();
+        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
+
+        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
+        let cfg = if config_path.exists() {
+            config::StrataConfig::from_file(&config_path)?
+        } else {
+            config::StrataConfig::default()
+        };
+
+        Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)
     }
 
     /// Open a follower `Database` at the given canonicalized path.
@@ -506,10 +583,6 @@ impl Database {
     ///
     /// Note: this path does **not** call `recover_all_participants` and
     /// does **not** read the legacy `RecoveryParticipant` registry.
-    //
-    // Wired in by `DatabaseBuilder` in Epic 2 of the lifecycle unification
-    // refactor; allow dead_code in the meantime.
-    #[allow(dead_code)]
     pub(crate) fn open_follower_internal_with_subsystems(
         canonical_path: PathBuf,
         cfg: StrataConfig,
