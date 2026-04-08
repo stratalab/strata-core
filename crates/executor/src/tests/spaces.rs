@@ -756,6 +756,323 @@ fn test_vector_delete_collection_in_new_space_does_not_register_it() {
     );
 }
 
+#[test]
+fn test_vector_batch_delete_in_new_space_does_not_register_it() {
+    let db = strata();
+
+    // VectorBatchDelete against a never-used space. Pre-audit, the
+    // executor's `Command::VectorBatchDelete` arm called
+    // `ensure_space_registered` *before* dispatch, so this batch delete
+    // would silently create a permanent empty `phantom_vec_batch`
+    // metadata entry even though no vector was ever written there.
+    // The fix removed that pre-registration call. Empirical revert:
+    // re-add `self.ensure_space_registered(&branch, &space)?` to the
+    // `VectorBatchDelete` arm in `executor.rs` and this test fails.
+    let _ = db.executor().execute(Command::VectorBatchDelete {
+        branch: None,
+        space: Some("phantom_vec_batch".to_string()),
+        collection: "missing".to_string(),
+        keys: vec!["a".to_string(), "b".to_string()],
+    });
+
+    let spaces = db.list_spaces().unwrap();
+    assert!(
+        !spaces.contains(&"phantom_vec_batch".to_string()),
+        "VectorBatchDelete must not auto-register its target space; got {spaces:?}"
+    );
+}
+
+// =============================================================================
+// Audit follow-up — Session transactions must register non-default spaces.
+// =============================================================================
+//
+// Background: `Session::execute_in_txn` builds a per-command Transaction
+// wrapper that delegates writes through `crates/engine/src/transaction/`
+// `context.rs`. Before this fix, the engine-layer Transaction methods
+// (`kv_put`, `event_append`, `json_create`, `json_set`) called
+// `ctx.put` / `ctx.json_set` directly without going through the Phase 3
+// `ensure_space_registered_in_txn` helper. The user data committed
+// correctly, but the space metadata key was missing — `space list` /
+// `space exists` were silently wrong until startup repair re-discovered
+// the space via a data scan.
+//
+// These tests pin the contract for ALL session-driven write paths and
+// double as empirical revert checks: remove the
+// `ensure_space_registered_in_txn` call from one of the Transaction
+// methods (or revert the `KvBatchPut` refactor to use raw `ctx.put`)
+// and the matching test below fails.
+//
+// IMPORTANT: these tests must NOT use `db.list_spaces()` to verify the
+// metadata, because `SpaceIndex::list` returns the *union* of metadata
+// and data-scan discovery — a missing metadata key would be masked by
+// the user data the test just committed. Instead, the helper below
+// reads `Key::new_space(...)` directly via the storage layer, which is
+// the same metadata-only check `SpaceIndex::exists_metadata` uses.
+
+/// Read the space metadata key directly. Bypasses
+/// `SpaceIndex::list`'s union-with-data-scan behaviour so the test
+/// actually proves the metadata key was written by the txn.
+fn space_metadata_registered(db: &std::sync::Arc<strata_engine::Database>, space: &str) -> bool {
+    use strata_core::types::{BranchId, Key};
+    let bid = BranchId::from_bytes([0u8; 16]);
+    db.transaction(bid, |txn| {
+        let key = Key::new_space(bid, space);
+        txn.get(&key).map(|v| v.is_some())
+    })
+    .unwrap()
+}
+
+#[test]
+fn test_session_kv_put_registers_non_default_space() {
+    use crate::Session;
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("session_kv".to_string()),
+            key: "k1".to_string(),
+            value: Value::Int(42),
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    assert!(
+        space_metadata_registered(&db, "session_kv"),
+        "Session txn KV write must register the metadata key in `_space_/session_kv`"
+    );
+}
+
+#[test]
+fn test_session_kv_batch_put_registers_non_default_space() {
+    use crate::types::BatchKvEntry;
+    use crate::Session;
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    let out = session
+        .execute(Command::KvBatchPut {
+            branch: None,
+            space: Some("session_kv_batch".to_string()),
+            entries: vec![
+                BatchKvEntry {
+                    key: "a".to_string(),
+                    value: Value::Int(1),
+                },
+                BatchKvEntry {
+                    key: "b".to_string(),
+                    value: Value::Int(2),
+                },
+            ],
+        })
+        .unwrap();
+
+    // Inspect the per-entry results — a buggy refactor that silently
+    // fails individual entries while returning command-level Ok would
+    // otherwise slip through. The metadata check below is meaningful
+    // ONLY when each entry actually wrote.
+    match out {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2, "expected 2 batch results");
+            assert!(
+                results.iter().all(|r| r.error.is_none()),
+                "every batch entry must succeed; got {results:?}"
+            );
+        }
+        other => panic!("expected BatchResults, got {other:?}"),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    assert!(
+        space_metadata_registered(&db, "session_kv_batch"),
+        "Session txn KvBatchPut must register the metadata key (the raw `ctx.put` path bypassed it before the fix)"
+    );
+}
+
+#[test]
+fn test_session_event_append_registers_non_default_space() {
+    use crate::Session;
+    use std::collections::HashMap;
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    let payload = Value::object(HashMap::from([(
+        "msg".into(),
+        Value::String("hello".into()),
+    )]));
+    session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: Some("session_events".to_string()),
+            event_type: "click".to_string(),
+            payload,
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    assert!(
+        space_metadata_registered(&db, "session_events"),
+        "Session txn EventAppend must register the metadata key"
+    );
+}
+
+#[test]
+fn test_session_event_batch_append_registers_non_default_space() {
+    use crate::types::BatchEventEntry;
+    use crate::Session;
+    use std::collections::HashMap;
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    let payload1 = Value::object(HashMap::from([("n".into(), Value::Int(1))]));
+    let payload2 = Value::object(HashMap::from([("n".into(), Value::Int(2))]));
+    let out = session
+        .execute(Command::EventBatchAppend {
+            branch: None,
+            space: Some("session_events_batch".to_string()),
+            entries: vec![
+                BatchEventEntry {
+                    event_type: "click".to_string(),
+                    payload: payload1,
+                },
+                BatchEventEntry {
+                    event_type: "click".to_string(),
+                    payload: payload2,
+                },
+            ],
+        })
+        .unwrap();
+
+    // Inspect per-entry results so a silent partial failure cannot
+    // mask the registration test.
+    match out {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2, "expected 2 batch results");
+            assert!(
+                results.iter().all(|r| r.error.is_none()),
+                "every batch entry must succeed; got {results:?}"
+            );
+        }
+        other => panic!("expected BatchResults, got {other:?}"),
+    }
+
+    session.execute(Command::TxnCommit).unwrap();
+
+    assert!(
+        space_metadata_registered(&db, "session_events_batch"),
+        "Session txn EventBatchAppend must register the metadata key"
+    );
+}
+
+#[test]
+fn test_session_json_set_registers_non_default_space() {
+    use crate::Session;
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: Some("session_json".to_string()),
+            key: "doc1".to_string(),
+            path: "$".to_string(),
+            value: Value::String("phase3 audit follow-up".into()),
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    assert!(
+        space_metadata_registered(&db, "session_json"),
+        "Session txn JsonSet must register the metadata key"
+    );
+}
+
+#[test]
+fn test_session_default_space_skipped() {
+    // The Phase 3 helper explicitly skips `default` and `_system_`,
+    // so a session txn write to the implicit default space must NOT
+    // create an explicit metadata key for it (the default space is
+    // already implicit in `SpaceIndex::list` / `exists`). This pins
+    // the skip rule and prevents an over-eager fix from registering
+    // the implicit space.
+    use crate::Session;
+    use strata_core::traits::Storage;
+    use strata_core::types::{BranchId, Key};
+    use strata_engine::Database;
+
+    let db = Database::cache().unwrap();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None, // → default
+            key: "k1".to_string(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    // The default-space metadata key must remain absent after a write
+    // to the default space — the helper short-circuits before the put.
+    let bid = BranchId::from_bytes([0u8; 16]);
+    let key = Key::new_space(bid, "default");
+    let version = db.storage().version();
+    let entry = db.storage().get_versioned(&key, version).unwrap();
+    assert!(
+        entry.is_none(),
+        "Session txn write to `default` must not create an explicit metadata key for it"
+    );
+}
+
 // =============================================================================
 // Phase 4 — Force-delete must wipe ALL secondary state for the space.
 // =============================================================================

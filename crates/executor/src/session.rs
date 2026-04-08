@@ -1067,6 +1067,12 @@ impl Session {
             }
 
             // === Batch KV operations — txn-aware ===
+            // Route through `Transaction::kv_put` (not raw `ctx.put`)
+            // so each entry inherits the space-registration contract
+            // from the engine layer (Phase 3). Without the wrapper,
+            // a batch put against a never-used non-default space
+            // committed the data but left the space metadata key
+            // unwritten.
             Command::KvBatchPut { entries, .. } => {
                 let mut results = vec![
                     crate::types::BatchItemResult {
@@ -1075,10 +1081,10 @@ impl Session {
                     };
                     entries.len()
                 ];
+                let mut txn = Transaction::new(ctx, ns);
                 for (i, entry) in entries.into_iter().enumerate() {
-                    let full_key = Key::new_kv(ns.clone(), &entry.key);
-                    match ctx.put(full_key, entry.value) {
-                        Ok(()) => {} // version assigned at commit time
+                    match txn.kv_put(&entry.key, entry.value) {
+                        Ok(_) => {} // version assigned at commit time
                         Err(e) => results[i].error = Some(e.to_string()),
                     }
                 }
