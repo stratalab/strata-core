@@ -184,6 +184,24 @@ impl VectorStore {
         self.search_with_sources(branch_id, SYSTEM_SPACE, collection, query, k)
     }
 
+    /// Temporal system search returning results with source references.
+    ///
+    /// Mirrors `system_search_with_sources()` but resolves candidates via the
+    /// version chain at `as_of_ts`. Used by hybrid search for point-in-time
+    /// retrieval (`request.as_of`).
+    pub fn system_search_at_with_sources(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        as_of_ts: u64,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.search_at_with_sources(branch_id, SYSTEM_SPACE, collection, query, k, as_of_ts)
+    }
+
     /// System search with sources, filtered by time range.
     ///
     /// Mirrors `system_search_with_sources()` but uses `search_in_range()` to
