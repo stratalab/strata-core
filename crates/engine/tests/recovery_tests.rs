@@ -2029,3 +2029,163 @@ fn test_concurrent_open_blocks_until_recovery_completes() {
          the Arc too early (Finding 1 regressed). See audit follow-up to #2354."
     );
 }
+
+/// Test-only `Subsystem` whose `recover()` panics. Used to verify that
+/// a recovery panic does not deadlock against the OPEN_DATABASES mutex
+/// (see `test_recovery_panic_does_not_deadlock`). The `Drop for Database`
+/// impl must use `try_lock` on the registry so unwinding through the
+/// `Arc` in `acquire_primary_db`'s locked region does not re-enter the
+/// same non-reentrant `parking_lot::Mutex`.
+struct PanickingSubsystem;
+
+impl strata_engine::Subsystem for PanickingSubsystem {
+    fn name(&self) -> &'static str {
+        "panicking-regression-test"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        panic!("test subsystem intentionally panics during recover");
+    }
+}
+
+/// Test-only `Subsystem` whose `recover()` always returns `Err`. Used to
+/// verify that a recovery failure does not deadlock against the
+/// OPEN_DATABASES mutex (see `test_recovery_failure_does_not_deadlock`).
+struct AlwaysFailingSubsystem;
+
+impl strata_engine::Subsystem for AlwaysFailingSubsystem {
+    fn name(&self) -> &'static str {
+        "always-failing-regression-test"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Err(strata_core::StrataError::internal(
+            "test subsystem intentionally fails recovery",
+        ))
+    }
+}
+
+/// Recovery-failure must not deadlock on `OPEN_DATABASES`.
+///
+/// With the Finding 1 fix, `acquire_primary_db` holds the
+/// `OPEN_DATABASES` mutex across `subsystem.recover()`. If a subsystem
+/// returns `Err`, Rust unwinds the function and drops locals in reverse
+/// declaration order: the `Arc<Database>` drops **before** the
+/// `MutexGuard`. `Drop for Database` then tries to reacquire
+/// `OPEN_DATABASES` to remove itself from the registry, and because
+/// `parking_lot::Mutex` is non-reentrant, the same thread deadlocks
+/// against its own still-held guard.
+///
+/// The fix must drop the guard before `return Err(...)` on the recovery
+/// error path. This test exercises that path by passing an
+/// `AlwaysFailingSubsystem` through `DatabaseBuilder::open`. A failing
+/// version of this fix will deadlock and never return — the test is
+/// wrapped in a joined thread with a hard deadline so a deadlock
+/// surfaces as a visible timeout rather than a hung test binary.
+#[test]
+fn test_recovery_failure_does_not_deadlock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use strata_engine::DatabaseBuilder;
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().to_path_buf();
+
+    // Run the open on a worker thread and signal completion via an
+    // mpsc channel. If the main thread times out waiting for the
+    // signal, we know the worker deadlocked.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let result = DatabaseBuilder::new()
+            .with_subsystem(AlwaysFailingSubsystem)
+            .open(&path);
+        let _ = tx.send(result.is_err());
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    match result {
+        Ok(true) => {
+            // Correct: recovery failed and the error propagated without
+            // deadlocking. The Arc dropped cleanly, Drop for Database
+            // removed any stale registry entry, and the function
+            // returned Err.
+        }
+        Ok(false) => panic!(
+            "AlwaysFailingSubsystem unexpectedly succeeded — test is \
+             not exercising the failure path it was designed for"
+        ),
+        Err(_) => panic!(
+            "acquire_primary_db deadlocked on recovery failure. \
+             Drop for Database tries to reacquire OPEN_DATABASES, but \
+             acquire_primary_db was still holding the guard when the \
+             Arc unwound through it. The error path must drop the \
+             registry guard BEFORE the Arc drops. See audit follow-up \
+             to #2354 Finding 1 review."
+        ),
+    }
+}
+
+/// Recovery-panic must not deadlock on `OPEN_DATABASES`.
+///
+/// This is the panic-unwinding companion to
+/// `test_recovery_failure_does_not_deadlock`. A subsystem's `recover()`
+/// can panic (not just return `Err`) — e.g. a bug, a failed assertion,
+/// or an arithmetic overflow in the rebuild path. Rust unwinds out of
+/// `acquire_primary_db` and drops the `Arc<Database>` before the
+/// `OPEN_DATABASES` `MutexGuard` it was holding, because the Arc was
+/// declared later in the function. `Drop for Database` then tries to
+/// remove the database's entry from `OPEN_DATABASES`, which must use
+/// `try_lock` to avoid self-deadlocking against the still-held guard.
+///
+/// The fix is in `Drop for Database` (see `crates/engine/src/database/mod.rs`):
+/// the registry-remove path uses `OPEN_DATABASES.try_lock()` and silently
+/// skips the remove on contention. Stale weak refs self-heal — the next
+/// call to `acquire_primary_db` for this path will find the dead weak
+/// ref, fail to upgrade, fall through to a fresh open, and overwrite
+/// the entry.
+///
+/// Like the Err-path test, this runs on a worker thread with a bounded
+/// deadline so a deadlock surfaces as a visible timeout.
+#[test]
+fn test_recovery_panic_does_not_deadlock() {
+    use std::sync::mpsc;
+    use std::time::Duration;
+    use strata_engine::DatabaseBuilder;
+
+    let temp = TempDir::new().unwrap();
+    let path = temp.path().to_path_buf();
+
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        // catch_unwind the panic so it doesn't abort the test process.
+        // The worker thread reports back whether it reached here at all
+        // (i.e. whether it did not deadlock).
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            DatabaseBuilder::new()
+                .with_subsystem(PanickingSubsystem)
+                .open(&path)
+        }));
+        let _ = tx.send(caught.is_err());
+    });
+
+    let result = rx.recv_timeout(Duration::from_secs(5));
+    match result {
+        Ok(true) => {
+            // Correct: the panic unwound through acquire_primary_db,
+            // Drop for Database's try_lock skipped the registry remove
+            // (guard was still held), and catch_unwind captured the
+            // panic. No deadlock.
+        }
+        Ok(false) => panic!(
+            "PanickingSubsystem::recover() unexpectedly did not panic \
+             — test is not exercising the panic path"
+        ),
+        Err(_) => panic!(
+            "acquire_primary_db deadlocked when subsystem recovery \
+             panicked. Drop for Database must use try_lock on \
+             OPEN_DATABASES to avoid self-deadlock against the \
+             still-held guard from acquire_primary_db. See audit \
+             follow-up to #2354 Finding 1 review."
+        ),
+    }
+}

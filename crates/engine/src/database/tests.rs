@@ -2401,11 +2401,26 @@ fn test_issue_1380_default_codec_is_identity() {
     assert_eq!(m.manifest().codec_id, "identity");
 }
 
+/// Serializes tests that mutate `STRATA_ENCRYPTION_KEY`, which is a
+/// process-global env var. Without this mutex, parallel tests
+/// (e.g. `test_issue_1380_codec_mismatch_rejected` and
+/// `test_issue_1380_encryption_rejected_with_wal`) can interleave their
+/// set/remove calls — one test's `remove_var` lands between another
+/// test's `set_var` and the internal `open_internal` read, producing a
+/// "STRATA_ENCRYPTION_KEY environment variable not set" error instead
+/// of the codec-mismatch / WAL-unsupported error the test expects.
+///
+/// Using `std::sync::Mutex` + `Lazy` rather than pulling in
+/// `serial_test` keeps the fix local and dependency-free.
+static ENV_VAR_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
+    once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
+
 #[test]
 fn test_issue_1380_codec_mismatch_rejected() {
     // A database created with "identity" must reject reopen with a different codec.
     // Use Cache mode to bypass the WAL-not-supported guard (encryption works in
     // Cache mode, WAL codec support is pending).
+    let _env_guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = TempDir::new().unwrap();
 
     // First open with Cache mode: creates MANIFEST with "identity"
@@ -2449,6 +2464,7 @@ fn test_issue_1380_codec_mismatch_rejected() {
 fn test_issue_1380_encryption_rejected_with_wal() {
     // Non-identity codecs must be rejected when WAL recovery is required,
     // because the WalReader does not yet support codec decoding.
+    let _env_guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = TempDir::new().unwrap();
     std::env::set_var(
         "STRATA_ENCRYPTION_KEY",

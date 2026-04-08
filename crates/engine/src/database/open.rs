@@ -309,13 +309,24 @@ impl Database {
         // Run recovery via subsystems in registration order. Stop on first
         // error. We hold `registry` for the whole loop, so a concurrent
         // opener for the same path cannot observe the `Arc` mid-recovery.
+        //
+        // DEADLOCK AVOIDANCE: on a recovery error we must drop `registry`
+        // BEFORE propagating the Err. `registry` is declared before `db`,
+        // so under normal Rust drop order the `Arc<Self>` would unwind
+        // first and `Drop for Database` would reacquire `OPEN_DATABASES`
+        // (to remove its own entry) — which self-deadlocks against our
+        // still-held `parking_lot::Mutex` guard. Explicit `drop(registry)`
+        // releases the mutex so the Arc's Drop can clean up.
         for subsystem in &subsystems {
             info!(
                 target: "strata::recovery",
                 subsystem = subsystem.name(),
                 "Running subsystem recovery"
             );
-            subsystem.recover(&db)?;
+            if let Err(e) = subsystem.recover(&db) {
+                drop(registry);
+                return Err(e);
+            }
             info!(
                 target: "strata::recovery",
                 subsystem = subsystem.name(),
