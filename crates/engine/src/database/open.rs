@@ -161,13 +161,22 @@ impl Database {
         Ok(db)
     }
 
-    pub(super) fn open_internal<P: AsRef<Path>>(
-        path: P,
+    /// Acquire a primary `Database` for `path`, or return an existing instance
+    /// if one is already open at the same canonicalized path.
+    ///
+    /// Handles directory creation, canonicalization, the `OPEN_DATABASES`
+    /// registry lookup, exclusive `.lock` acquisition, hardware-profile
+    /// application, and the shared `open_finish` tail. Returns
+    /// `Ok((db, true))` for a freshly opened instance that still needs
+    /// recovery, and `Ok((db, false))` for an existing instance whose
+    /// recovery has already run.
+    fn acquire_primary_db(
+        path: &Path,
         durability_mode: DurabilityMode,
-        mut cfg: StrataConfig,
-    ) -> StrataResult<Arc<Self>> {
+        cfg: StrataConfig,
+    ) -> StrataResult<(Arc<Self>, bool)> {
         // Create directory first so we can canonicalize the path
-        let data_dir = path.as_ref().to_path_buf();
+        let data_dir = path.to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
         restrict_dir(&data_dir);
 
@@ -180,7 +189,7 @@ impl Database {
         if let Some(weak) = registry.get(&canonical_path) {
             if let Some(db) = weak.upgrade() {
                 info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
-                return Ok(db);
+                return Ok((db, false));
             }
         }
 
@@ -202,6 +211,7 @@ impl Database {
 
         // Apply hardware profile to any fields still at their default value.
         // In-memory only — does NOT persist to strata.toml. See profile.rs.
+        let mut cfg = cfg;
         crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
 
         let db = Self::open_finish(
@@ -213,6 +223,19 @@ impl Database {
 
         registry.insert(canonical_path, Arc::downgrade(&db));
         drop(registry);
+
+        Ok((db, true))
+    }
+
+    pub(super) fn open_internal<P: AsRef<Path>>(
+        path: P,
+        durability_mode: DurabilityMode,
+        cfg: StrataConfig,
+    ) -> StrataResult<Arc<Self>> {
+        let (db, is_fresh) = Self::acquire_primary_db(path.as_ref(), durability_mode, cfg)?;
+        if !is_fresh {
+            return Ok(db);
+        }
 
         // Register and run recovery for search subsystem.
         // Vector recovery is now handled by strata-vector (caller must register).
@@ -234,6 +257,68 @@ impl Database {
             index.enable();
         }
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
+
+        Ok(db)
+    }
+
+    /// Open a primary database with an explicit subsystem list.
+    ///
+    /// The supplied subsystems drive both recovery (called in registration
+    /// order) and freeze-on-drop (called in reverse order). This is the
+    /// subsystem-aware path used by `DatabaseBuilder` and, via the executor,
+    /// production opens.
+    ///
+    /// Recovery runs after WAL replay completes. Subsystems are installed on
+    /// the `Database` only after every `recover()` succeeds, so a partial
+    /// recovery failure does not freeze partially-rebuilt state on drop.
+    ///
+    /// Note: this path does **not** call `recover_all_participants` and does
+    /// **not** read the legacy `RecoveryParticipant` registry. The supplied
+    /// `subsystems` list is the sole driver of recovery for this open.
+    //
+    // Wired in by `DatabaseBuilder` in Epic 2 of the lifecycle unification
+    // refactor; allow dead_code in the meantime.
+    #[allow(dead_code)]
+    pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
+        path: P,
+        durability_mode: DurabilityMode,
+        cfg: StrataConfig,
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
+        let (db, is_fresh) = Self::acquire_primary_db(path.as_ref(), durability_mode, cfg)?;
+        if !is_fresh {
+            // The existing instance was opened (possibly by an earlier caller
+            // with a different subsystem list). Return it unchanged — matching
+            // the existing single-instance-per-path contract in `open_internal`.
+            return Ok(db);
+        }
+
+        // Repair space metadata BEFORE running subsystem recovery so each
+        // subsystem sees the complete set of spaces. Without this, legacy
+        // databases (or any bypass write that ever skipped the registration
+        // helper) leave orphan data in spaces invisible to enumeration, and
+        // subsystems that scan by space would silently miss it.
+        Self::repair_space_metadata_on_open(&db);
+
+        // Run recovery via subsystems in registration order. Stop on first error.
+        for subsystem in &subsystems {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running subsystem recovery"
+            );
+            subsystem.recover(&db)?;
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Subsystem recovery complete"
+            );
+        }
+
+        // Install subsystems for freeze-on-drop AFTER recovery succeeds, so
+        // a partial-recovery failure does not leave a populated subsystems
+        // vec for `Drop for Database` to freeze.
+        db.set_subsystems(subsystems);
 
         Ok(db)
     }
@@ -284,7 +369,13 @@ impl Database {
         Self::open_follower_internal(canonical_path, cfg)
     }
 
-    fn open_follower_internal(
+    /// Open a follower `Database` at the given canonicalized path.
+    ///
+    /// Handles hardware-profile application, read-only WAL recovery,
+    /// segment recovery, and `Arc<Database>` construction with
+    /// `follower: true` and an empty `subsystems` vec. Caller is
+    /// responsible for installing subsystems and running recovery.
+    fn acquire_follower_db(
         canonical_path: PathBuf,
         mut cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
@@ -378,6 +469,15 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
         });
 
+        Ok(db)
+    }
+
+    fn open_follower_internal(
+        canonical_path: PathBuf,
+        cfg: StrataConfig,
+    ) -> StrataResult<Arc<Self>> {
+        let db = Self::acquire_follower_db(canonical_path, cfg)?;
+
         crate::search::register_search_recovery();
 
         // Followers are read-only — `repair_space_metadata_on_open` is a
@@ -392,6 +492,52 @@ impl Database {
             index.enable();
         }
         db.set_subsystems(vec![Box::new(crate::search::SearchSubsystem)]);
+
+        Ok(db)
+    }
+
+    /// Open a follower database with an explicit subsystem list.
+    ///
+    /// The supplied subsystems drive recovery (called in registration
+    /// order). Followers do not freeze on drop — `Drop for Database`
+    /// short-circuits on `is_follower()` — but the supplied subsystems
+    /// are still installed via `set_subsystems` for symmetry with the
+    /// primary path.
+    ///
+    /// Note: this path does **not** call `recover_all_participants` and
+    /// does **not** read the legacy `RecoveryParticipant` registry.
+    //
+    // Wired in by `DatabaseBuilder` in Epic 2 of the lifecycle unification
+    // refactor; allow dead_code in the meantime.
+    #[allow(dead_code)]
+    pub(crate) fn open_follower_internal_with_subsystems(
+        canonical_path: PathBuf,
+        cfg: StrataConfig,
+        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
+    ) -> StrataResult<Arc<Self>> {
+        let db = Self::acquire_follower_db(canonical_path, cfg)?;
+
+        // Followers are read-only — `repair_space_metadata_on_open` is a
+        // no-op for them but kept on the same code path for symmetry. The
+        // union behaviour in `SpaceIndex::list/exists` still gives the
+        // follower correct discovery via a data scan.
+        Self::repair_space_metadata_on_open(&db);
+
+        for subsystem in &subsystems {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running follower subsystem recovery"
+            );
+            subsystem.recover(&db)?;
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Follower subsystem recovery complete"
+            );
+        }
+
+        db.set_subsystems(subsystems);
 
         Ok(db)
     }
