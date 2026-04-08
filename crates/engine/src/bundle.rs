@@ -277,6 +277,12 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         keys_written += put_count;
     }
 
+    // Note: the DAG `on_create` hook already fired from inside
+    // `BranchIndex::create_branch(branch_id_str)` above (step 3). We do
+    // NOT fire it again here — doing so would upsert the branch node and
+    // clobber the timestamps from the first fire. Branch import shows up
+    // in the lineage graph as a freshly-created branch automatically.
+
     Ok(ImportInfo {
         branch_id: branch_id_str.to_string(),
         transactions_applied,

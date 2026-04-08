@@ -332,6 +332,143 @@ pub fn dag_record_merge(
     Ok(event_id)
 }
 
+/// Record a revert event in the DAG.
+///
+/// Creates a `revert` event node and a single `branch → revert_event` edge
+/// of type `reverted`. Revert is a self-event (one branch, no source/target
+/// pair) so it has only one edge, unlike fork and merge.
+pub fn dag_record_revert(
+    db: &Arc<Database>,
+    revert_info: &strata_engine::branch_ops::RevertInfo,
+    message: Option<&str>,
+    creator: Option<&str>,
+) -> StrataResult<DagEventId> {
+    ensure_branch_node_exists(db, &revert_info.branch)?;
+
+    let graph_store = GraphStore::new(db.clone());
+    let branch_id = resolve_branch_name(SYSTEM_BRANCH);
+    let event_id = DagEventId::new_revert();
+    let now = Timestamp::now().as_micros();
+
+    let mut props = serde_json::json!({
+        "timestamp": now,
+        "branch": &revert_info.branch,
+        "from_version": revert_info.from_version,
+        "to_version": revert_info.to_version,
+        "keys_reverted": revert_info.keys_reverted,
+    });
+    if let Some(rv) = revert_info.revert_version {
+        props["revert_version"] = serde_json::json!(rv);
+    }
+    if let Some(msg) = message {
+        props["message"] = serde_json::json!(msg);
+    }
+    if let Some(cr) = creator {
+        props["creator"] = serde_json::json!(cr);
+    }
+
+    let node = NodeData {
+        entity_ref: None,
+        properties: Some(props),
+        object_type: Some("revert".to_string()),
+    };
+    graph_store.add_node(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        event_id.as_str(),
+        node,
+    )?;
+
+    // branch --[reverted]--> revert_event
+    graph_store.add_edge(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        &revert_info.branch,
+        event_id.as_str(),
+        "reverted",
+        EdgeData {
+            weight: 1.0,
+            properties: None,
+        },
+    )?;
+
+    Ok(event_id)
+}
+
+/// Record a cherry-pick event in the DAG.
+///
+/// Creates a `cherry_pick` event node and `source → event → target` edges
+/// of types `cherry_pick_source` and `cherry_pick_target`. The shape mirrors
+/// merge but uses distinct edge types so callers can distinguish full
+/// merges from partial cherry-picks when walking the DAG.
+pub fn dag_record_cherry_pick(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    info: &strata_engine::branch_ops::CherryPickInfo,
+) -> StrataResult<DagEventId> {
+    ensure_branch_node_exists(db, source)?;
+    ensure_branch_node_exists(db, target)?;
+
+    let graph_store = GraphStore::new(db.clone());
+    let branch_id = resolve_branch_name(SYSTEM_BRANCH);
+    let event_id = DagEventId::new_cherry_pick();
+    let now = Timestamp::now().as_micros();
+
+    let mut props = serde_json::json!({
+        "timestamp": now,
+        "keys_applied": info.keys_applied,
+        "keys_deleted": info.keys_deleted,
+    });
+    if let Some(cv) = info.cherry_pick_version {
+        props["cherry_pick_version"] = serde_json::json!(cv);
+    }
+
+    let node = NodeData {
+        entity_ref: None,
+        properties: Some(props),
+        object_type: Some("cherry_pick".to_string()),
+    };
+    graph_store.add_node(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        event_id.as_str(),
+        node,
+    )?;
+
+    // source --[cherry_pick_source]--> event
+    graph_store.add_edge(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        source,
+        event_id.as_str(),
+        "cherry_pick_source",
+        EdgeData {
+            weight: 1.0,
+            properties: None,
+        },
+    )?;
+    // event --[cherry_pick_target]--> target
+    graph_store.add_edge(
+        branch_id,
+        GRAPH_SPACE,
+        BRANCH_DAG_GRAPH,
+        event_id.as_str(),
+        target,
+        "cherry_pick_target",
+        EdgeData {
+            weight: 1.0,
+            properties: None,
+        },
+    )?;
+
+    Ok(event_id)
+}
+
 /// Set the status of a branch in the DAG.
 pub fn dag_set_status(db: &Arc<Database>, name: &str, status: DagBranchStatus) -> StrataResult<()> {
     let graph_store = GraphStore::new(db.clone());

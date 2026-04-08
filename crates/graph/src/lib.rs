@@ -10,6 +10,7 @@ pub mod boost;
 pub mod branch_dag;
 pub mod branch_status_cache;
 mod bulk;
+pub mod dag_hook_impl;
 mod edges;
 pub mod ext;
 pub mod integrity;
@@ -25,6 +26,8 @@ pub mod traversal;
 pub mod types;
 
 pub use merge_handler::register_graph_semantic_merge;
+
+pub use dag_hook_impl::register_branch_dag_hook_implementation;
 
 pub use branch_dag::GraphSubsystem;
 pub use strata_core::branch_dag::{

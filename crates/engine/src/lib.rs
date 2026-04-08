@@ -139,6 +139,19 @@ pub use branch_ops::primitive_merge::{
     register_vector_merge, VectorMergePostCommitFn, VectorMergePrecheckFn,
 };
 
+// Registration hook for branch DAG events. The graph crate registers its
+// `dag_record_*` adapters here at startup; engine functions
+// (`fork_branch`, `merge_branches`, `revert_version_range`,
+// `cherry_pick_*`, `BranchIndex::create_branch` / `delete_branch`,
+// `bundle::import_branch`) dispatch to them. This is what makes
+// engine-direct callers (tests, internal subsystems) record DAG events
+// uniformly with executor-driven callers — no one can bypass the DAG by
+// reaching into the engine API.
+pub use branch_ops::{
+    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
+    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
+};
+
 // Re-export branch_dag types from core at crate root for convenience
 pub use strata_core::branch_dag::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,

@@ -16,8 +16,17 @@
 //! - [`json_merge`] — Per-document JSON three-way merge helpers used by
 //!   `JsonMergeHandler` to combine disjoint path edits on the same doc.
 
+pub mod dag_hooks;
 pub(crate) mod json_merge;
 pub mod primitive_merge;
+
+pub use dag_hooks::{
+    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
+    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
+};
+// Crate-internal accessor: not re-exported, used directly via
+// `dag_hooks::branch_dag_hooks()` from inside the engine.
+pub(crate) use dag_hooks::branch_dag_hooks;
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
@@ -726,7 +735,30 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 /// - Source branch does not exist
 /// - Destination branch already exists
 /// - Database is ephemeral (no segments directory)
+///
+/// # See also
+///
+/// [`fork_branch_with_metadata`] — same operation but accepts an optional
+/// human-readable message and creator that flow into the branch DAG event
+/// for audit / lineage queries.
 pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
+    fork_branch_with_metadata(db, source, destination, None, None)
+}
+
+/// Same as [`fork_branch`] but records `message` and `creator` on the
+/// resulting branch DAG fork event.
+///
+/// The executor's `branch_fork` handler calls this variant so that
+/// user-supplied audit metadata (`fork_with_options(message, creator)`)
+/// flows through to the DAG. Engine-direct callers (tests, internal
+/// subsystems) typically use the no-metadata [`fork_branch`] wrapper.
+pub fn fork_branch_with_metadata(
+    db: &Arc<Database>,
+    source: &str,
+    destination: &str,
+    message: Option<&str>,
+    creator: Option<&str>,
+) -> StrataResult<ForkInfo> {
     let branch_index = BranchIndex::new(db.clone());
     let space_index = SpaceIndex::new(db.clone());
 
@@ -835,13 +867,23 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
         "Branch forked (COW)"
     );
 
-    Ok(ForkInfo {
+    let info = ForkInfo {
         source: source.to_string(),
         destination: destination.to_string(),
         keys_copied: 0,
         spaces_copied,
         fork_version: Some(fork_version),
-    })
+    };
+
+    // Fire the branch DAG hook. Best-effort: the hook implementation
+    // logs warnings on failure and never propagates an error back.
+    // Engine-direct callers and executor-driven callers go through the
+    // same hook dispatch — no one can bypass the DAG.
+    if let Some(hooks) = branch_dag_hooks() {
+        (hooks.on_fork)(db, &info, message, creator);
+    }
+
+    Ok(info)
 }
 
 // =============================================================================
@@ -1815,12 +1857,43 @@ fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id:
 /// - Either branch does not exist
 /// - No fork or merge relationship between branches
 /// - `Strict` strategy with conflicts
+///
+/// # See also
+///
+/// [`merge_branches_with_metadata`] — same operation but accepts an optional
+/// human-readable message and creator that flow into the branch DAG event.
 pub fn merge_branches(
     db: &Arc<Database>,
     source: &str,
     target: &str,
     strategy: MergeStrategy,
     merge_base_override: Option<(BranchId, u64)>,
+) -> StrataResult<MergeInfo> {
+    merge_branches_with_metadata(
+        db,
+        source,
+        target,
+        strategy,
+        merge_base_override,
+        None,
+        None,
+    )
+}
+
+/// Same as [`merge_branches`] but records `message` and `creator` on the
+/// resulting branch DAG merge event.
+///
+/// The executor's `branch_merge` handler calls this variant so that
+/// user-supplied audit metadata flows through to the DAG.
+#[allow(clippy::too_many_arguments)]
+pub fn merge_branches_with_metadata(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    strategy: MergeStrategy,
+    merge_base_override: Option<(BranchId, u64)>,
+    message: Option<&str>,
+    creator: Option<&str>,
 ) -> StrataResult<MergeInfo> {
     let source_id = resolve_and_verify(db, source)?;
     let target_id = resolve_and_verify(db, target)?;
@@ -2022,7 +2095,7 @@ pub fn merge_branches(
         "Branches merged (three-way)"
     );
 
-    Ok(MergeInfo {
+    let info = MergeInfo {
         source: source.to_string(),
         target: target.to_string(),
         keys_applied,
@@ -2030,7 +2103,15 @@ pub fn merge_branches(
         conflicts,
         spaces_merged: spaces_touched.len() as u64,
         merge_version,
-    })
+    };
+
+    // Fire the branch DAG hook. Best-effort: the hook implementation
+    // logs warnings on failure and never propagates an error back.
+    if let Some(hooks) = branch_dag_hooks() {
+        (hooks.on_merge)(db, &info, strategy, message, creator);
+    }
+
+    Ok(info)
 }
 
 // =============================================================================
@@ -2611,11 +2692,30 @@ pub struct RevertInfo {
 /// to what it was at (from_version - 1). Only reverts keys whose current
 /// value matches the state at to_version — keys modified after to_version
 /// are left untouched (preserving subsequent work).
+///
+/// # See also
+///
+/// [`revert_version_range_with_metadata`] — same operation but accepts an
+/// optional human-readable message and creator that flow into the branch
+/// DAG revert event.
 pub fn revert_version_range(
     db: &Arc<Database>,
     branch: &str,
     from_version: u64,
     to_version: u64,
+) -> StrataResult<RevertInfo> {
+    revert_version_range_with_metadata(db, branch, from_version, to_version, None, None)
+}
+
+/// Same as [`revert_version_range`] but records `message` and `creator`
+/// on the resulting branch DAG revert event.
+pub fn revert_version_range_with_metadata(
+    db: &Arc<Database>,
+    branch: &str,
+    from_version: u64,
+    to_version: u64,
+    message: Option<&str>,
+    creator: Option<&str>,
 ) -> StrataResult<RevertInfo> {
     // Validate range
     if from_version == 0 {
@@ -2721,13 +2821,20 @@ pub fn revert_version_range(
         "Version range reverted"
     );
 
-    Ok(RevertInfo {
+    let info = RevertInfo {
         branch: branch.to_string(),
         from_version,
         to_version,
         keys_reverted,
         revert_version,
-    })
+    };
+
+    // Fire the branch DAG hook. Best-effort.
+    if let Some(hooks) = branch_dag_hooks() {
+        (hooks.on_revert)(db, &info, message, creator);
+    }
+
+    Ok(info)
 }
 
 // =============================================================================
@@ -2819,13 +2926,19 @@ pub fn cherry_pick_keys(
         "Keys cherry-picked"
     );
 
-    Ok(CherryPickInfo {
+    let info = CherryPickInfo {
         source: source.to_string(),
         target: target.to_string(),
         keys_applied,
         keys_deleted: 0,
         cherry_pick_version,
-    })
+    };
+
+    if let Some(hooks) = branch_dag_hooks() {
+        (hooks.on_cherry_pick)(db, source, target, &info);
+    }
+
+    Ok(info)
 }
 
 /// Graph cherry-pick atomicity guard.
@@ -3165,13 +3278,19 @@ pub fn cherry_pick_from_diff(
         "Cherry-picked from diff"
     );
 
-    Ok(CherryPickInfo {
+    let info = CherryPickInfo {
         source: source.to_string(),
         target: target.to_string(),
         keys_applied,
         keys_deleted,
         cherry_pick_version,
-    })
+    };
+
+    if let Some(hooks) = branch_dag_hooks() {
+        (hooks.on_cherry_pick)(db, source, target, &info);
+    }
+
+    Ok(info)
 }
 
 // =============================================================================

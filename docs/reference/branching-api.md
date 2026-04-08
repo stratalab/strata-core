@@ -374,6 +374,10 @@ let info = db.branches().cherry_pick_filtered("source", "target", filter)?;
 - All `merge_branches` errors (cherry-pick goes through the same handlers)
 - `Graph cherry-pick atomicity violation: filter would split cell ...` — the `keys` filter would split a graph cell across the filter boundary; widen the filter or remove `keys`
 
+**Storage**
+
+Both cherry-pick variants record a `cherry_pick` event in the branch DAG (`_branch_dag` graph on the `_system_` branch), connected via `cherry_pick_source` / `cherry_pick_target` edges. Distinct edge types let DAG walks distinguish a partial cherry-pick from a full merge of the same source/target pair.
+
 ---
 
 ## Maintenance
@@ -428,6 +432,10 @@ let info = db.branches().revert("main", 100, 150)?;
 - `from_version > to_version`
 - `to_version` exceeds the current database version
 - Branch does not exist
+
+**Storage**
+
+Every successful revert is recorded in the branch DAG (`_branch_dag` graph on the `_system_` branch) as a `revert` event node attached to the branch via a `reverted` edge. The event carries `from_version`, `to_version`, `revert_version`, `keys_reverted`, and any optional `message` / `creator` metadata. This means revert history is queryable through the same DAG walk used for fork/merge lineage.
 
 ---
 

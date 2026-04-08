@@ -45,6 +45,12 @@ fn ensure_recovery_registered() {
         // is a pass-through and the legacy full-branch rebuild fallback
         // applies.
         strata_vector::register_vector_semantic_merge();
+        // Register the branch DAG hooks with the engine. Without this,
+        // engine-direct branch operations (fork, merge, revert,
+        // cherry-pick, create, delete) do not record events in the
+        // `_branch_dag` graph on the `_system_` branch. Tests that
+        // assert on DAG state need this to fire.
+        strata_graph::register_branch_dag_hook_implementation();
     });
 }
 

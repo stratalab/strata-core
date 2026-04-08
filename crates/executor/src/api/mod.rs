@@ -85,6 +85,13 @@ fn ensure_vector_recovery() {
         // Without this, the engine's VectorMergeHandler is a no-op and
         // the legacy full-branch rebuild applies.
         strata_vector::register_vector_semantic_merge();
+        // Register the branch DAG hooks. Without this, fork / merge /
+        // revert / cherry-pick / create / delete operations do not
+        // record events in the `_branch_dag` graph on the `_system_`
+        // branch — and `compute_merge_base_from_dag` cannot advance the
+        // merge base across repeated merges of the same source/target
+        // pair.
+        strata_graph::register_branch_dag_hook_implementation();
     });
 }
 
