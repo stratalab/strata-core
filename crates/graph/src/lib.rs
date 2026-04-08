@@ -124,6 +124,54 @@ impl GraphStore {
         }
         Ok(index)
     }
+
+    /// Build a fully-populated adjacency index atomically in a single transaction.
+    ///
+    /// Unlike `build_adjacency_index`, this helper also loads every node ID
+    /// (including isolated nodes) and opens exactly ONE read transaction for both
+    /// the edge scan and the node list. This guarantees the returned index reflects
+    /// a single snapshot version of the graph, fixing the torn-read window analytics
+    /// would otherwise observe between two sequential reads.
+    ///
+    /// Used by `pagerank`, `wcc`, `cdlp`, and `lcc`. `sssp` does not need this
+    /// because it does not load isolated nodes.
+    pub(crate) fn build_full_adjacency_index_atomic(
+        &self,
+        branch_id: BranchId,
+        space: &str,
+        graph: &str,
+    ) -> StrataResult<AdjacencyIndex> {
+        use crate::ext::GraphStoreExt;
+
+        let fwd_prefix = keys::all_forward_adj_prefix(graph);
+        let fwd_prefix_key = keys::storage_key(branch_id, space, &fwd_prefix);
+
+        self.db.transaction(branch_id, |txn| {
+            let mut index = AdjacencyIndex::new();
+
+            // 1. Scan forward adjacency lists (mirrors all_edges() body).
+            for (key, val) in txn.scan_prefix(&fwd_prefix_key)? {
+                if let Some(user_key) = key.user_key_string() {
+                    if let Some(src) = keys::parse_forward_adj_key(graph, &user_key) {
+                        if let Value::Bytes(bytes) = val {
+                            let adj = packed::decode(&bytes)?;
+                            for (dst, edge_type, data) in adj {
+                                index.add_edge(&src, &dst, &edge_type, data);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // 2. Load all node IDs in the SAME txn (picks up isolated nodes).
+            let node_ids = txn.graph_list_nodes(branch_id, space, graph)?;
+            for node_id in node_ids {
+                index.nodes.insert(node_id);
+            }
+
+            Ok(index)
+        })
+    }
 }
 
 // =============================================================================

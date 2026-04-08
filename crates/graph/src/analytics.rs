@@ -16,14 +16,8 @@ use super::GraphStore;
 impl GraphStore {
     /// Weakly Connected Components using union-find.
     pub fn wcc(&self, branch_id: BranchId, space: &str, graph: &str) -> StrataResult<WccResult> {
-        let index = self.build_adjacency_index(branch_id, space, graph)?;
-        // Also load isolated nodes (nodes with no edges).
-        let all_nodes = self.list_nodes(branch_id, space, graph)?;
-        let mut full_index = index;
-        for node_id in &all_nodes {
-            full_index.nodes.insert(node_id.clone());
-        }
-        Ok(wcc_with_index(&full_index))
+        let index = self.build_full_adjacency_index_atomic(branch_id, space, graph)?;
+        Ok(wcc_with_index(&index))
     }
 
     /// Community Detection via Label Propagation.
@@ -34,13 +28,8 @@ impl GraphStore {
         graph: &str,
         opts: CdlpOptions,
     ) -> StrataResult<CdlpResult> {
-        let index = self.build_adjacency_index(branch_id, space, graph)?;
-        let all_nodes = self.list_nodes(branch_id, space, graph)?;
-        let mut full_index = index;
-        for node_id in &all_nodes {
-            full_index.nodes.insert(node_id.clone());
-        }
-        Ok(cdlp_with_index(&full_index, &opts))
+        let index = self.build_full_adjacency_index_atomic(branch_id, space, graph)?;
+        Ok(cdlp_with_index(&index, &opts))
     }
 
     /// PageRank iterative importance scoring.
@@ -51,24 +40,14 @@ impl GraphStore {
         graph: &str,
         opts: PageRankOptions,
     ) -> StrataResult<PageRankResult> {
-        let index = self.build_adjacency_index(branch_id, space, graph)?;
-        let all_nodes = self.list_nodes(branch_id, space, graph)?;
-        let mut full_index = index;
-        for node_id in &all_nodes {
-            full_index.nodes.insert(node_id.clone());
-        }
-        Ok(pagerank_with_index(&full_index, &opts))
+        let index = self.build_full_adjacency_index_atomic(branch_id, space, graph)?;
+        Ok(pagerank_with_index(&index, &opts))
     }
 
     /// Local Clustering Coefficient.
     pub fn lcc(&self, branch_id: BranchId, space: &str, graph: &str) -> StrataResult<LccResult> {
-        let index = self.build_adjacency_index(branch_id, space, graph)?;
-        let all_nodes = self.list_nodes(branch_id, space, graph)?;
-        let mut full_index = index;
-        for node_id in &all_nodes {
-            full_index.nodes.insert(node_id.clone());
-        }
-        Ok(lcc_with_index(&full_index))
+        let index = self.build_full_adjacency_index_atomic(branch_id, space, graph)?;
+        Ok(lcc_with_index(&index))
     }
 
     /// Single-Source Shortest Path (Dijkstra).
@@ -335,6 +314,11 @@ pub fn pagerank_with_index(index: &AdjacencyIndex, opts: &PageRankOptions) -> Pa
             }
         }
     }
+
+    // Sort for deterministic iteration: floating-point sums in the rank update
+    // and L1 convergence check below are not associative, so the iteration order
+    // affects bitwise output. Matches `wcc_with_index` and `cdlp_with_index`.
+    all_nodes.sort();
 
     let n = all_nodes.len();
     if n == 0 {
@@ -1094,5 +1078,200 @@ mod tests {
         assert!((result.distances["A"] - 0.0).abs() < 1e-10);
         assert!((result.distances["B"] - 2.0).abs() < 1e-10);
         assert!((result.distances["C"] - 5.0).abs() < 1e-10);
+    }
+
+    // =========================================================================
+    // Determinism + snapshot consistency (regression guards for v0.4 PageRank)
+    // =========================================================================
+
+    /// PageRank must return bitwise-identical scores across repeated runs over
+    /// the same graph. Without `all_nodes.sort()` in `pagerank_with_index`, the
+    /// `HashSet`-driven iteration order can shift between runs, and the
+    /// non-associative floating-point sums in the rank update + L1 convergence
+    /// check produce different bits. This is a v0.4 prerequisite because
+    /// personalization vectors will skew the sums even further.
+    ///
+    /// Uses a 64-node graph with long, varied string keys and 20 runs to make
+    /// the test reliably catch the bug — small graphs with short ASCII keys
+    /// can incidentally produce the same `HashSet` iteration order across
+    /// different hash seeds because of low collision counts in tiny tables.
+    #[test]
+    fn pagerank_bitwise_deterministic_across_runs() {
+        let (_db, gs) = setup();
+        let b = default_branch();
+        gs.create_graph(b, "default", "g", None).unwrap();
+
+        // 64 nodes with long, varied keys to defeat any "small set looks
+        // stable under different seeds" coincidence in HashSet iteration.
+        let node_ids: Vec<String> = (0..64)
+            .map(|i| format!("node_with_a_long_label_to_diversify_hashing_{:04}", i))
+            .collect();
+        for id in &node_ids {
+            gs.add_node(b, "default", "g", id, NodeData::default())
+                .unwrap();
+        }
+
+        // Dense edges with deliberate dangling nodes. The dangling-mass
+        // sum in `pagerank_with_index` iterates `all_nodes` in order, and
+        // `dangling_sum: f64 = ... .sum()` is the sum that becomes
+        // order-sensitive when the values come from differently-rounded
+        // ranks. Without enough dangling nodes (or with all-uniform ranks)
+        // the sum is the same regardless of order, hiding the bug.
+        //
+        // First half: each non-dangling node points to ~6 others.
+        // Second half (last 16 nodes): no outgoing edges → dangling.
+        let dangling_start = node_ids.len() - 16;
+        for i in 0..dangling_start {
+            let dsts = [
+                (i + 1) % node_ids.len(),
+                (i + 3) % node_ids.len(),
+                (i + 7) % node_ids.len(),
+                (i + 13) % node_ids.len(),
+                (i + 23) % node_ids.len(),
+                (i + 31) % node_ids.len(),
+            ];
+            for &j in &dsts {
+                if i != j {
+                    gs.add_edge(
+                        b,
+                        "default",
+                        "g",
+                        &node_ids[i],
+                        &node_ids[j],
+                        "E",
+                        EdgeData::default(),
+                    )
+                    .unwrap();
+                }
+            }
+        }
+
+        let opts = PageRankOptions::default();
+        let baseline = gs
+            .pagerank(b, "default", "g", opts.clone())
+            .expect("baseline pagerank run");
+
+        // 19 more runs — across all 20 the bitwise output must be identical.
+        // With the sort, this is mathematically guaranteed; without the sort,
+        // at least one of these runs is overwhelmingly likely to land on a
+        // different `HashSet` iteration order and produce different f64 bits.
+        for run_idx in 1..20 {
+            let result = gs
+                .pagerank(b, "default", "g", opts.clone())
+                .expect("repeat pagerank run");
+            assert_eq!(
+                result.ranks.len(),
+                baseline.ranks.len(),
+                "rank set size differs on run {}",
+                run_idx
+            );
+            assert_eq!(
+                result.iterations, baseline.iterations,
+                "iteration count differs on run {}",
+                run_idx
+            );
+            for (k, v_base) in &baseline.ranks {
+                let v_now = result.ranks.get(k).expect("missing key in repeat run");
+                // Use `to_bits()` for bitwise equality (canonical f64 idiom
+                // that also satisfies `clippy::float_cmp`).
+                assert_eq!(
+                    v_base.to_bits(),
+                    v_now.to_bits(),
+                    "rank for {} not bitwise-equal on run {}: baseline={} now={}",
+                    k,
+                    run_idx,
+                    v_base,
+                    v_now
+                );
+            }
+        }
+    }
+
+    /// Concurrent-safety smoke test for `pagerank()` under a busy writer.
+    /// Asserts the mass invariant (sum ≈ 1.0, all ranks finite) holds across
+    /// many concurrent runs. This is a regression guard for "pagerank does not
+    /// crash, panic, deadlock, or produce invalid distributions when reads
+    /// race against writes" — NOT a strict snapshot-isolation regression test.
+    ///
+    /// The atomic single-transaction read in `build_full_adjacency_index_atomic`
+    /// is a structural correctness improvement (one snapshot per analytic
+    /// invocation), but its absence does not break the mass invariant because
+    /// `pagerank_with_index` picks up edge endpoints via its own iteration and
+    /// renormalises by `n = all_nodes.len()`. Snapshot consistency is enforced
+    /// structurally by the helper opening one txn; this test is the
+    /// safety-net that proves "structurally consistent does not regress
+    /// numerical correctness under contention."
+    ///
+    /// Not flaky: the assertion is a numerical invariant any correct PageRank
+    /// must satisfy regardless of which valid graph state it observed.
+    /// Iteration count is fixed; no wall-clock waits.
+    #[test]
+    fn pagerank_consistent_under_concurrent_writer() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::thread;
+
+        let (_db, gs) = setup();
+        let gs = Arc::new(gs);
+        let b = default_branch();
+        gs.create_graph(b, "default", "g", None).unwrap();
+
+        // Seed with 20 nodes in a ring.
+        for i in 0..20 {
+            gs.add_node(b, "default", "g", &format!("n{}", i), NodeData::default())
+                .unwrap();
+        }
+        for i in 0..20 {
+            let s = format!("n{}", i);
+            let d = format!("n{}", (i + 1) % 20);
+            gs.add_edge(b, "default", "g", &s, &d, "E", EdgeData::default())
+                .unwrap();
+        }
+
+        let stop = Arc::new(AtomicBool::new(false));
+
+        // Writer: continuously add+delete a temporary node with one outbound
+        // edge. Generates contention against the reader's analytic transactions.
+        // Note: this race does NOT directly drift the rank sum — pagerank
+        // picks up edge endpoints via its own iteration of `outgoing`/
+        // `incoming` and renormalises by `n = all_nodes.len()`, so a
+        // slightly-blended graph view still produces a valid distribution.
+        // The point of this writer is to stress the read path itself
+        // (locking, OCC, scan-prefix iteration) under load.
+        let gs_w = Arc::clone(&gs);
+        let stop_w = Arc::clone(&stop);
+        let writer = thread::spawn(move || {
+            let b = default_branch();
+            let mut counter = 0u64;
+            while !stop_w.load(Ordering::Relaxed) {
+                let node_id = format!("tmp{}", counter);
+                // Best-effort: ignore OCC retries — we just want load.
+                let _ = gs_w.add_node(b, "default", "g", &node_id, NodeData::default());
+                let _ = gs_w.add_edge(b, "default", "g", "n0", &node_id, "E", EdgeData::default());
+                let _ = gs_w.remove_node(b, "default", "g", &node_id);
+                counter = counter.wrapping_add(1);
+            }
+        });
+
+        // Reader: 500 pagerank invocations, asserting the sum invariant on
+        // every run.
+        let opts = PageRankOptions::default();
+        for i in 0..500 {
+            let result = gs
+                .pagerank(b, "default", "g", opts.clone())
+                .expect("pagerank should not error under concurrent writer");
+            let sum: f64 = result.ranks.values().sum();
+            assert!(
+                (sum - 1.0).abs() < 1e-6,
+                "pagerank sum drifted to {} on iteration {} (concurrent writer)",
+                sum,
+                i
+            );
+            for (k, v) in &result.ranks {
+                assert!(v.is_finite(), "non-finite rank {} for {}", v, k);
+            }
+        }
+
+        stop.store(true, Ordering::Relaxed);
+        writer.join().unwrap();
     }
 }
