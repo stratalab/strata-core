@@ -401,6 +401,29 @@ impl Strata {
     ///
     /// Use this when you need more control over database configuration.
     /// For most cases, prefer [`Strata::open()`].
+    ///
+    /// # Subsystem contract
+    ///
+    /// The supplied `Arc<Database>` **must** have been opened through a
+    /// builder that installed the production subsystem set
+    /// (`VectorSubsystem` + `SearchSubsystem`). The recommended path is:
+    ///
+    /// ```text
+    /// use strata_engine::{DatabaseBuilder, SearchSubsystem};
+    /// use strata_vector::VectorSubsystem;
+    ///
+    /// let db = DatabaseBuilder::new()
+    ///     .with_subsystem(VectorSubsystem)
+    ///     .with_subsystem(SearchSubsystem)
+    ///     .open("/path/to/data")?;
+    /// let strata = Strata::from_database(db)?;
+    /// ```
+    ///
+    /// If you hand in a `Database` opened via `Database::open` or a
+    /// plain `DatabaseBuilder::new().open(...)` without
+    /// `VectorSubsystem`, vector recovery and drop-time freeze will
+    /// silently not run for this handle. A `tracing::warn!` is
+    /// emitted in that case so the misuse surfaces at runtime.
     pub fn from_database(db: Arc<Database>) -> Result<Self> {
         Self::from_database_with_mode(db, AccessMode::ReadWrite)
     }
@@ -409,6 +432,35 @@ impl Strata {
     /// specific access mode.
     fn from_database_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Result<Self> {
         ensure_merge_handlers_registered();
+
+        // Mixed-opener detection (audit follow-up to #2354 Finding 2).
+        // A caller wrapping a bare `Database::open` / plain-builder
+        // result loses vector recovery + drop-freeze guarantees
+        // silently. We can't reject this — `new_handle` and test
+        // fixtures both route through here with already-valid dbs —
+        // but we can surface the mismatch. Skip for cache databases:
+        // they have no persistent vector state and their subsystems
+        // are no-ops by design, so test fixtures using
+        // `Database::cache()` should not trip the warning.
+        if !db.is_cache() {
+            let installed = db.installed_subsystem_names();
+            if !installed.contains(&"vector") {
+                tracing::warn!(
+                    target: "strata::executor",
+                    installed = ?installed,
+                    "Strata::from_database was handed a disk-backed Database \
+                     without VectorSubsystem installed. Vector recovery and \
+                     drop-time freeze will not run for this handle. If you \
+                     opened the Database via `Database::open` or plain \
+                     `DatabaseBuilder::new().open(...)` without explicitly \
+                     adding `VectorSubsystem`, vector state will not survive \
+                     drop+reopen. Prefer `Strata::open` / `Strata::open_with` \
+                     for the full production subsystem set. See audit \
+                     follow-up to #2354 Finding 2."
+                );
+            }
+        }
+
         let executor = Executor::new_with_mode(db, access_mode);
 
         match access_mode {

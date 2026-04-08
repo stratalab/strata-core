@@ -104,11 +104,20 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 /// # Example
 ///
 /// ```text
-/// use strata_primitives::VectorStore;
-/// use strata_engine::Database;
+/// use strata_engine::DatabaseBuilder;
+/// use strata_vector::{VectorConfig, VectorStore, VectorSubsystem};
 /// use strata_core::types::BranchId;
 ///
-/// let db = Database::open("/path/to/data")?;
+/// // Open via DatabaseBuilder with VectorSubsystem so vector recovery
+/// // and drop-time freeze are installed. `Database::open` alone does
+/// // NOT install VectorSubsystem — always use the builder (or
+/// // `strata_executor::Strata::open`, which wraps this pattern) for
+/// // disk-backed vector stores, otherwise vector state will not
+/// // survive drop+reopen.
+/// let db = DatabaseBuilder::new()
+///     .with_subsystem(VectorSubsystem)
+///     .open("/path/to/data")?;
+///
 /// let store = VectorStore::new(db.clone());
 /// let branch_id = BranchId::new();
 ///
@@ -116,7 +125,8 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 /// let config = VectorConfig::for_minilm();
 /// store.create_collection(branch_id, "embeddings", config)?;
 ///
-/// // Multiple stores share the same backend state
+/// // Multiple stores share the same backend state (VectorBackendState
+/// // is a Database extension)
 /// let store2 = VectorStore::new(db.clone());
 /// // store2 sees the same collections as store
 /// ```
