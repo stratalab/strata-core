@@ -1234,12 +1234,7 @@ fn test_json_slow_path_skips_secondary_index_storage() {
 fn test_vector_collections_isolated_across_spaces_after_restart() {
     use strata_core::primitives::vector::DistanceMetric;
     use strata_engine::{DatabaseBuilder, SearchSubsystem, SpaceIndex};
-    use strata_vector::{register_vector_recovery, VectorConfig, VectorStore, VectorSubsystem};
-
-    // Vector recovery is registered globally by the executor in production;
-    // tests that bypass the executor must register it themselves. This is
-    // a global Once, safe to call repeatedly across tests.
-    register_vector_recovery();
+    use strata_vector::{VectorConfig, VectorStore, VectorSubsystem};
 
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();

@@ -317,8 +317,8 @@ struct JsonAffectedDoc {
 ///
 /// `post_commit` is BM25-only: it refreshes the in-memory `InvertedIndex`
 /// extension for the affected docs. BM25 is non-transactional and is
-/// already crash-safe via `register_search_recovery` (the search
-/// recovery participant rebuilds BM25 from KV state on `Database::open`).
+/// already crash-safe via `SearchSubsystem` (the search subsystem
+/// rebuilds BM25 from KV state on `Database::open`).
 ///
 /// Each merge gets a fresh handler instance via `build_merge_registry()`,
 /// so the `affected` mutex is uncontended in practice — it exists only
@@ -510,9 +510,9 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
         // the merge transaction by `plan`. The BM25 `InvertedIndex`
         // engine extension is non-transactional and lives in memory,
         // so it gets refreshed here in a best-effort loop. Failures
-        // are logged and swallowed; the `register_search_recovery`
-        // recovery participant rebuilds BM25 state from KV on the
-        // next `Database::open()`, so a missed refresh self-heals.
+        // are logged and swallowed; `SearchSubsystem` rebuilds BM25
+        // state from KV on the next `Database::open()`, so a missed
+        // refresh self-heals.
         let affected = std::mem::take(&mut *self.affected.lock());
         for doc in &affected {
             let r = match &doc.new_value {
@@ -914,9 +914,9 @@ static VECTOR_MERGE_CALLBACKS: OnceCell<VectorMergeCallbacks> = OnceCell::new();
 /// `merge_branches` calls. Subsequent calls are no-ops (the first
 /// registration wins).
 ///
-/// The standard test fixtures call this from `ensure_recovery_registered`
-/// alongside the existing `register_vector_recovery` /
-/// `register_search_recovery` / `register_graph_semantic_merge` hooks.
+/// The standard test fixtures call this from
+/// `ensure_test_handlers_registered` alongside the
+/// `register_graph_semantic_merge` and branch DAG hook installations.
 pub fn register_vector_merge(
     precheck: VectorMergePrecheckFn,
     post_commit: VectorMergePostCommitFn,
@@ -1073,9 +1073,9 @@ static GRAPH_MERGE_PLAN_FN: OnceCell<GraphMergePlanFn> = OnceCell::new();
 /// `merge_branches` calls. Subsequent calls are no-ops (the first
 /// registration wins).
 ///
-/// The standard test fixtures call this from `ensure_recovery_registered`
-/// alongside the existing `register_vector_recovery` / `register_search_recovery`
-/// hooks.
+/// The standard test fixtures call this from
+/// `ensure_test_handlers_registered` alongside the vector semantic merge
+/// and branch DAG hook installations.
 pub fn register_graph_merge_plan(plan_fn: GraphMergePlanFn) {
     let _ = GRAPH_MERGE_PLAN_FN.set(plan_fn);
 }

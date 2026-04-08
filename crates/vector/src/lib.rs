@@ -15,9 +15,9 @@
 //!
 //! ## Recovery
 //!
-//! VectorStore participates in Database recovery via the recovery participant
-//! mechanism. Call `register_vector_recovery()` during application startup
-//! to enable vector state recovery after database restart.
+//! VectorStore participates in Database recovery via `VectorSubsystem`.
+//! Register it with `DatabaseBuilder::with_subsystem(VectorSubsystem)` to
+//! enable vector state recovery after database restart.
 
 pub mod backend;
 pub mod brute_force;
@@ -52,7 +52,7 @@ pub use heap::VectorHeap;
 pub use hnsw::{HnswBackend, HnswConfig};
 pub use merge_handler::register_vector_semantic_merge;
 pub use quantize::{QuantizationParams, RaBitQParams};
-pub use recovery::{register_vector_recovery, VectorSubsystem};
+pub use recovery::VectorSubsystem;
 pub use segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
 pub use snapshot::{CollectionSnapshotHeader, VECTOR_SNAPSHOT_VERSION};
 pub use store::{RecoveryStats, VectorBackendState, VectorStore};

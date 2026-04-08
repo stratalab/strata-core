@@ -1,15 +1,14 @@
-//! Vector Recovery Participant
+//! Vector Recovery
 //!
-//! Registers VectorStore as a recovery participant so that vector state
-//! (in-memory backends with embeddings) is restored when the Database reopens.
+//! `VectorSubsystem` restores vector state (in-memory backends with embeddings)
+//! when the Database reopens.
 //!
 //! ## How It Works
 //!
-//! 1. `register_vector_recovery()` registers a recovery function with the engine
-//! 2. When `Database::open()` runs, it calls all registered recovery participants
-//! 3. The vector recovery function scans KV store for vector config and data entries
-//! 4. For each collection config found, it creates a backend and loads embeddings
-//! 5. The Database is ready with all vector embeddings restored
+//! 1. `DatabaseBuilder` installs `VectorSubsystem`, which is invoked during open
+//! 2. `VectorSubsystem::recover` scans KV store for vector config and data entries
+//! 3. For each collection config found, it creates a backend and loads embeddings
+//! 4. The Database is ready with all vector embeddings restored
 //!
 //! ## mmap Acceleration
 //!
@@ -32,7 +31,6 @@
 //! with no data loss.
 
 use strata_core::StrataResult;
-use strata_engine::recovery::{register_recovery_participant, RecoveryParticipant};
 use strata_engine::Database;
 use tracing::info;
 
@@ -458,15 +456,6 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     }
 
     Ok(())
-}
-
-/// Register VectorStore as a recovery participant
-///
-/// Call this once during application startup, before opening any Database.
-/// This ensures that vector state (in-memory backends with embeddings) is
-/// automatically restored when a Database is reopened.
-pub fn register_vector_recovery() {
-    register_recovery_participant(RecoveryParticipant::new("vector", recover_vector_state));
 }
 
 /// Subsystem implementation for vector recovery and shutdown hooks.

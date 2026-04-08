@@ -70,11 +70,10 @@ use crate::{Command, Error, Executor, Output, Result, Session};
 
 /// Register the per-process primitive merge handlers and branch DAG hooks.
 ///
-/// This used to also register the legacy `RecoveryParticipant` entries for
-/// vector and search, but recovery is now driven by `DatabaseBuilder`'s
-/// subsystem list (see `strata_db_builder` below). The remaining
-/// registrations are merge handlers and DAG event hooks — global, idempotent,
-/// and unrelated to per-database recovery state.
+/// These are global, idempotent registrations — merge handlers and DAG
+/// event hooks — and are unrelated to per-database recovery state. Recovery
+/// is driven by `DatabaseBuilder`'s subsystem list (see `strata_db_builder`
+/// below).
 static MERGE_HANDLERS_INIT: Once = Once::new();
 
 fn ensure_merge_handlers_registered() {

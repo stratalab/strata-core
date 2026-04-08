@@ -7,10 +7,10 @@
 //!
 //! Call [`register_branch_dag_hook_implementation`] once at application or
 //! test startup, before any branch operation. The standard test fixture in
-//! `tests/common/mod.rs::ensure_recovery_registered` does this alongside
-//! the existing graph/vector semantic-merge registrations. The executor's
-//! recovery init in `crates/executor/src/api/mod.rs` does the same for
-//! production startup.
+//! `tests/common/mod.rs::ensure_test_handlers_registered` does this alongside
+//! the graph/vector semantic-merge registrations. The executor's
+//! `ensure_merge_handlers_registered` in `crates/executor/src/api/mod.rs`
+//! does the same for production startup.
 //!
 //! ## Failure model
 //!

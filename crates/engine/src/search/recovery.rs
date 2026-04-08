@@ -1,17 +1,15 @@
-//! Search Recovery Participant
+//! Search Recovery
 //!
-//! Registers the InvertedIndex as a recovery participant so that search
-//! index state is restored when the Database reopens.
+//! `SearchSubsystem` restores the InvertedIndex when the Database reopens.
 //!
 //! ## How It Works
 //!
-//! 1. `register_search_recovery()` registers a recovery function with the engine
-//! 2. When `Database::open()` runs, it calls all registered recovery participants
-//! 3. The search recovery function either:
+//! 1. `DatabaseBuilder` installs `SearchSubsystem`, which is invoked during open
+//! 2. `SearchSubsystem::recover` calls `recover_search_state`, which either:
 //!    - **Fast path**: Loads manifest + mmap'd sealed segments (sub-second)
 //!    - **Slow path**: Scans all KV/Event entries, indexes them, and
 //!      freezes to disk for the next open
-//! 4. Enables the index for search operations
+//! 3. Enables the index for search operations
 //!
 //! ## mmap Acceleration
 //!
@@ -24,7 +22,6 @@
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
-use crate::recovery::{register_recovery_participant, RecoveryParticipant};
 use crate::search::InvertedIndex;
 use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::types::TypeTag;
@@ -421,15 +418,6 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
     }
 
     Ok(reconciled)
-}
-
-/// Register the InvertedIndex as a recovery participant.
-///
-/// Call this once during application startup, before opening any Database.
-/// This ensures that the search index is automatically restored when a
-/// Database is reopened.
-pub fn register_search_recovery() {
-    register_recovery_participant(RecoveryParticipant::new("search", recover_search_state));
 }
 
 /// Subsystem implementation for search index recovery and shutdown hooks.

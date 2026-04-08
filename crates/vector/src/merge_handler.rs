@@ -10,11 +10,11 @@
 //!
 //! ## Why this layering
 //!
-//! Mirrors the existing `register_recovery_participant` /
-//! `register_vector_recovery` / `register_graph_semantic_merge` pattern.
-//! Avoids exposing vector-internal types (`CollectionRecord`,
-//! `VectorConfig`) through the engine crate's public API while still
-//! letting per-primitive merge logic live in the primitive's own crate.
+//! Mirrors the `register_graph_semantic_merge` function-pointer
+//! registration pattern. Avoids exposing vector-internal types
+//! (`CollectionRecord`, `VectorConfig`) through the engine crate's public
+//! API while still letting per-primitive merge logic live in the
+//! primitive's own crate.
 //!
 //! ## What runs here
 //!
@@ -37,10 +37,9 @@
 //!
 //! Test fixtures and application startup must call
 //! `register_vector_merge` before any `merge_branches` invocation. The
-//! standard test fixtures register it alongside the existing
-//! `register_vector_recovery` / `register_search_recovery` /
-//! `register_graph_semantic_merge` hooks. Idempotent — the engine's
-//! `OnceCell`-backed slot ignores subsequent calls.
+//! standard test fixtures register it alongside
+//! `register_graph_semantic_merge` and the branch DAG hook. Idempotent —
+//! the engine's `OnceCell`-backed slot ignores subsequent calls.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;

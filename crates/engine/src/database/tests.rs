@@ -943,29 +943,6 @@ fn test_lossy_recovery_discards_valid_data_before_corruption() {
 }
 
 // ========================================================================
-// E-4: Auto-Registration Tests
-// ========================================================================
-
-#[test]
-fn test_recovery_participants_auto_registered() {
-    // After Database::open, search recovery should be registered automatically.
-    // Vector recovery is now handled by strata-vector crate (caller must register).
-    let temp_dir = TempDir::new().unwrap();
-    let _db = Database::open(temp_dir.path().join("db")).unwrap();
-
-    // The registry is global and additive (idempotent), so other tests
-    // may have already registered participants. We just verify the count
-    // is at least 1 (search). Vector recovery is registered by the caller
-    // (executor/Strata API) since it moved to the strata-vector crate.
-    let count = crate::recovery::recovery_registry_count();
-    assert!(
-        count >= 1,
-        "Expected at least 1 recovery participant (search), got {}",
-        count
-    );
-}
-
-// ========================================================================
 // E-5 + E-2: Shutdown coordination tests
 // ========================================================================
 

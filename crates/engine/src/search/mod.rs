@@ -6,7 +6,7 @@
 //! - `index`: Optional inverted index for fast keyword search
 //! - `segment`: Sealed segment file format (.sidx) for persistence
 //! - `manifest`: Search manifest for persisting segmented index state
-//! - `recovery`: Recovery participant for restoring index on startup
+//! - `recovery`: SearchSubsystem for restoring the inverted index on startup
 //! - `tokenizer`: Basic text tokenization
 
 mod index;
@@ -23,7 +23,7 @@ pub use index::{
     InvertedIndex, PhraseConfig, PostingEntry, PostingList, ProximityConfig, ScoredDocId,
 };
 pub use recipe::Recipe;
-pub use recovery::{extract_indexable_text, register_search_recovery, SearchSubsystem};
+pub use recovery::{extract_indexable_text, SearchSubsystem};
 pub use searchable::{
     build_search_response, build_search_response_with_index, build_search_response_with_scorer,
     truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate, SearchDoc, Searchable,
