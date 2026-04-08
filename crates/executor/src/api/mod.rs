@@ -58,8 +58,9 @@ pub use system::SystemBranch;
 use std::path::Path;
 use std::sync::Arc;
 
-use strata_engine::Database;
+use strata_engine::{Database, DatabaseBuilder, SearchSubsystem};
 use strata_security::{AccessMode, OpenOptions};
+use strata_vector::VectorSubsystem;
 
 use std::sync::Once;
 
@@ -67,14 +68,17 @@ use crate::ipc::{Backend, IpcClient};
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result, Session};
 
-/// Ensure recovery participants and primitive merge handlers are registered
-/// before opening any database.
-static RECOVERY_INIT: Once = Once::new();
+/// Register the per-process primitive merge handlers and branch DAG hooks.
+///
+/// This used to also register the legacy `RecoveryParticipant` entries for
+/// vector and search, but recovery is now driven by `DatabaseBuilder`'s
+/// subsystem list (see `strata_db_builder` below). The remaining
+/// registrations are merge handlers and DAG event hooks — global, idempotent,
+/// and unrelated to per-database recovery state.
+static MERGE_HANDLERS_INIT: Once = Once::new();
 
-fn ensure_vector_recovery() {
-    RECOVERY_INIT.call_once(|| {
-        strata_vector::register_vector_recovery();
-        strata_engine::register_search_recovery();
+fn ensure_merge_handlers_registered() {
+    MERGE_HANDLERS_INIT.call_once(|| {
         // Register the semantic graph merge implementation. Without this,
         // `merge_branches` falls back to a tactical refusal and rejects
         // all divergent graph merges, even disjoint ones that the
@@ -93,6 +97,19 @@ fn ensure_vector_recovery() {
         // pair.
         strata_graph::register_branch_dag_hook_implementation();
     });
+}
+
+/// Construct a `DatabaseBuilder` pre-loaded with the standard production
+/// subsystem set. The same ordered list drives recovery on open and
+/// freeze-on-drop, so production opens cannot diverge from the test path
+/// validated by `crates/engine/tests/recovery_tests.rs`.
+///
+/// Order: `VectorSubsystem` then `SearchSubsystem` (recovery runs in this
+/// order; freeze runs in reverse).
+fn strata_db_builder() -> DatabaseBuilder {
+    DatabaseBuilder::new()
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
 }
 
 /// High-level typed wrapper for database operations.
@@ -146,13 +163,13 @@ impl Strata {
     /// let db = Strata::open_with("/var/data/myapp", OpenOptions::new().access_mode(AccessMode::ReadOnly))?;
     /// ```
     pub fn open_with<P: AsRef<Path>>(path: P, opts: OpenOptions) -> Result<Self> {
-        ensure_vector_recovery();
+        ensure_merge_handlers_registered();
 
         let data_dir = path.as_ref().to_path_buf();
 
         if opts.follower {
             // Follower mode: read-only, never write to the database directory
-            let db = Database::open_follower(&data_dir).map_err(|e| Error::Internal {
+            let db = strata_db_builder().open_follower(&data_dir).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (follower): {}", e),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
@@ -189,7 +206,7 @@ impl Strata {
         let access_mode = opts.access_mode;
 
         // Try to open the database directly
-        match Database::open_with_config(&data_dir, cfg) {
+        match strata_db_builder().open_with_config(&data_dir, cfg) {
             Ok(db) => {
                 strata_graph::branch_dag::init_system_branch(&db);
                 // Seed built-in recipes if not already present
@@ -249,7 +266,7 @@ impl Strata {
                                             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                                         }
                                     })?;
-                                match Database::open_with_config(&data_dir, cfg2) {
+                                match strata_db_builder().open_with_config(&data_dir, cfg2) {
                                     Ok(db) => {
                                         let executor = Executor::new_with_mode(db, access_mode);
                                         match access_mode {
@@ -308,8 +325,8 @@ impl Strata {
     /// db.kv_put("key", Value::Int(42))?;
     /// ```
     pub fn cache() -> Result<Self> {
-        ensure_vector_recovery();
-        let db = Database::cache().map_err(|e| Error::Internal {
+        ensure_merge_handlers_registered();
+        let db = strata_db_builder().cache().map_err(|e| Error::Internal {
             reason: format!("Failed to open cache database: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
@@ -383,7 +400,7 @@ impl Strata {
     /// Create a new Strata instance from an existing database with a
     /// specific access mode.
     fn from_database_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Result<Self> {
-        ensure_vector_recovery();
+        ensure_merge_handlers_registered();
         let executor = Executor::new_with_mode(db, access_mode);
 
         match access_mode {
