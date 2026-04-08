@@ -202,6 +202,38 @@ impl VectorStore {
         self.search_at_with_sources(branch_id, SYSTEM_SPACE, collection, query, k, as_of_ts)
     }
 
+    /// Temporal system search with sources, intersected with a time range.
+    ///
+    /// Mirrors `system_search_at_with_sources()` but additionally drops any
+    /// candidate whose `record.created_at` falls outside `[start_ts, end_ts]`.
+    /// Used by hybrid search when the request sets both `as_of` and
+    /// `time_range`, so the vector branch matches the BM25 intersection
+    /// contract from PR #2365.
+    #[allow(clippy::too_many_arguments)]
+    pub fn system_search_at_in_range_with_sources(
+        &self,
+        branch_id: BranchId,
+        collection: &str,
+        query: &[f32],
+        k: usize,
+        as_of_ts: u64,
+        start_ts: u64,
+        end_ts: u64,
+    ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        use crate::collection::validate_system_collection_name;
+        validate_system_collection_name(collection)?;
+        self.search_at_in_range_with_sources(
+            branch_id,
+            SYSTEM_SPACE,
+            collection,
+            query,
+            k,
+            as_of_ts,
+            start_ts,
+            end_ts,
+        )
+    }
+
     /// System search with sources, filtered by time range.
     ///
     /// Mirrors `system_search_with_sources()` but uses `search_in_range()` to
