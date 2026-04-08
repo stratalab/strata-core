@@ -755,7 +755,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("key-{}", i),
                 &format!("text for key {}", i),
-                strata_core::EntityRef::kv(branch_id, "default", &format!("key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", format!("key-{}", i)),
             );
         }
     }
@@ -941,7 +941,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("drop-key-{}", i),
                 &format!("text {}", i),
-                strata_core::EntityRef::kv(branch_id, "default", &format!("drop-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", format!("drop-key-{}", i)),
             );
         }
         assert_eq!(buffer_len(&p), 5);
@@ -980,7 +980,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("nrt-key-{}", i),
                 &format!("nrt text {}", i),
-                strata_core::EntityRef::kv(branch_id, "default", &format!("nrt-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", format!("nrt-key-{}", i)),
             );
         }
         assert_eq!(buffer_len(&p), 3);
@@ -1019,7 +1019,7 @@ mod tests {
                 SHADOW_KV,
                 &format!("flush-cmd-key-{}", i),
                 &format!("text {}", i),
-                strata_core::EntityRef::kv(branch_id, "default", &format!("flush-cmd-key-{}", i)),
+                strata_core::EntityRef::kv(branch_id, "default", format!("flush-cmd-key-{}", i)),
             );
         }
 

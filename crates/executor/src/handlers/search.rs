@@ -11,8 +11,8 @@ use strata_search::substrate::{self, RetrievalRequest};
 
 use crate::bridge::{to_core_branch_id, Primitives};
 use crate::types::{
-    BranchId, ChangedHit, DiffOutput, EntityRefOutput, SearchQuery, SearchResultHit,
-    SearchStatsOutput, VersionInfo,
+    AnswerResponse, BranchId, ChangedHit, DiffOutput, EntityRefOutput, SearchQuery,
+    SearchResultHit, SearchStatsOutput, VersionInfo,
 };
 use crate::{Error, Output, Result};
 
@@ -159,6 +159,16 @@ pub fn search(
         (fused, false)
     };
 
+    // ---- RAG generation (intelligence layer, after rerank) ----
+    //
+    // Gated on `recipe.prompt.is_some()` inside `generate_rag_answer`.
+    // Returns `None` when prompt is unset, model load fails, or generation
+    // errors — in all those cases hits are still returned, just without
+    // an answer. This is the trigger pattern that mirrors how
+    // `recipe.expansion.is_some()` and `recipe.rerank.is_some()` gate
+    // their respective layers.
+    let rag_answer = generate_rag_answer(p, &sq.query, &final_hits, &resolved);
+
     // ---- Convert to Output ----
     let mut hits: Vec<SearchResultHit> = final_hits
         .iter()
@@ -233,6 +243,26 @@ pub fn search(
             (None, None)
         };
 
+    // Split the rag_answer into the executor-level AnswerResponse + stats
+    // fields. The intelligence-layer RagAnswer carries both the user-visible
+    // answer and the bookkeeping (model, elapsed, tokens) — we project them
+    // into the wire types here.
+    let (answer_output, rag_used_flag, rag_model_field, rag_elapsed, rag_in, rag_out) =
+        match rag_answer {
+            Some(ans) => (
+                Some(AnswerResponse {
+                    text: ans.text,
+                    sources: ans.sources,
+                }),
+                Some(true),
+                Some(ans.model),
+                Some(ans.elapsed_ms),
+                Some(ans.tokens_in),
+                Some(ans.tokens_out),
+            ),
+            None => (None, None, None, None, None, None),
+        };
+
     let stats = SearchStatsOutput {
         elapsed_ms: 0.0, // TODO: track total elapsed
         candidates_considered: 0,
@@ -255,12 +285,18 @@ pub fn search(
         embedding_pending,
         embedding_total,
         snapshot_version: Some(p.db.current_version()),
+        rag_used: rag_used_flag,
+        rag_model: rag_model_field,
+        rag_elapsed_ms: rag_elapsed,
+        rag_tokens_in: rag_in,
+        rag_tokens_out: rag_out,
     };
 
     Ok(Output::SearchResults {
         hits,
         stats,
         diff: diff_output,
+        answer: answer_output,
     })
 }
 
@@ -531,6 +567,52 @@ fn rerank_hits(
     _model_spec: &str,
 ) -> (Vec<strata_engine::search::SearchHit>, bool) {
     (hits, false)
+}
+
+// ============================================================================
+// RAG generation orchestration
+// ============================================================================
+//
+// Thin shim around the intelligence-layer RAG module. Mirrors the cfg-gated
+// pattern used by `rerank_hits` and `try_expand_query`. The intelligence
+// layer owns the prompt construction, model loading, and citation
+// extraction; this handler is just the call site that decides whether to
+// run RAG and folds the result back into the executor wire types.
+
+#[cfg(feature = "embed")]
+fn generate_rag_answer(
+    p: &Arc<Primitives>,
+    query: &str,
+    hits: &[strata_engine::search::SearchHit],
+    recipe: &Recipe,
+) -> Option<strata_intelligence::rag::RagAnswer> {
+    strata_intelligence::rag::generate_answer(&p.db, query, hits, recipe)
+}
+
+#[cfg(not(feature = "embed"))]
+fn generate_rag_answer(
+    _p: &Arc<Primitives>,
+    _query: &str,
+    _hits: &[strata_engine::search::SearchHit],
+    _recipe: &Recipe,
+) -> Option<RagAnswerStub> {
+    None
+}
+
+// Stub type for non-embed builds. The compiler still needs `rag_answer`
+// to have a concrete type with `text`/`sources`/`model`/`elapsed_ms`/
+// `tokens_in`/`tokens_out` fields, even though None is the only value
+// produced. This avoids leaking `strata_intelligence::rag::RagAnswer`
+// into the non-embed code path.
+#[cfg(not(feature = "embed"))]
+#[allow(dead_code)]
+struct RagAnswerStub {
+    text: String,
+    sources: Vec<usize>,
+    model: String,
+    elapsed_ms: f64,
+    tokens_in: u32,
+    tokens_out: u32,
 }
 
 // ============================================================================
