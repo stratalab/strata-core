@@ -907,6 +907,7 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
     {
         let db = Database::open(&path).unwrap();
         let kv = KVStore::new(db.clone());
+        let event_log = EventLog::new(db.clone());
 
         // KV data from session 2 must exist (WAL replay)
         assert_eq!(
@@ -933,9 +934,16 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
             "Session 2 KV data should be searchable after crash recovery reconciliation"
         );
 
-        // Search for session 2 event data — fails without the fix
+        // Search for session 2 event data — fails without the fix.
+        // Use EventLog::search (not KVStore::search) because each
+        // primitive's search() filters to its own EntityRef variant.
+        // KVStore::search used to return all variants from the shared
+        // inverted index, but that pre-existing inconsistency was
+        // fixed alongside the v0.3 Gap A+C work — every primitive now
+        // returns only its own type, mirroring how JSON/Event/Graph
+        // already worked.
         let req = SearchRequest::new(branch_id, "anomaly");
-        let response = kv.search(&req).unwrap();
+        let response = event_log.search(&req).unwrap();
         assert!(
             !response.hits.is_empty(),
             "Session 2 event data should be searchable after crash recovery reconciliation"

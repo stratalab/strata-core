@@ -222,30 +222,74 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             });
             bm25_hits.truncate(k);
 
-            // Temporal post-filter: discard hits not visible at as_of timestamp.
+            // Temporal post-filter: enforce as_of and time_range against BM25 hits.
             //
-            // The namespace must come from **the hit's own space**, not
-            // the request's. After Phase 0 the hit carries its real
-            // space; using `request.space` here would silently miss
-            // hits in other tenants (and potentially fetch the wrong
-            // entity if a key happens to exist in `request.space` too).
-            if let Some(as_of_ts) = request.as_of {
+            // Vector hits get their own temporal filtering inside the vector
+            // primitive (search_at for as_of, system_search_with_sources_in_range
+            // for time_range — though the as_of path is currently a no-op
+            // pending search_at_with_sources, see Phase 1 Part 2 below). BM25
+            // primitives have no version-aware index, so the substrate filters
+            // here by looking up each hit's commit timestamp via
+            // `db.get_at_timestamp` and dropping hits that fall outside the
+            // window.
+            //
+            // The namespace must come from **the hit's own space**, not the
+            // request's. After Phase 0 the hit carries its real space; using
+            // `request.space` here would silently miss hits in other tenants
+            // (and potentially fetch the wrong entity if a key happens to
+            // exist in `request.space` too).
+            //
+            // Coverage:
+            //   - KV    : uses hit.doc_ref.space (Phase 0)
+            //   - JSON  : uses hit.doc_ref.space (Phase 0)
+            //   - Graph : uses hit.doc_ref.space (NEW — fixes Gap A leak)
+            //   - Event : passes through (intrinsic event_time semantic
+            //             deferred to v0.5)
+            //   - Branch/Vector : pass through (don't appear in bm25_hits)
+            if request.as_of.is_some() || request.time_range.is_some() {
+                // Effective upper bound: the tighter of as_of and time_range.end.
+                let upper = match (request.as_of, request.time_range) {
+                    (Some(a), Some((_, e))) => a.min(e),
+                    (Some(a), None) => a,
+                    (None, Some((_, e))) => e,
+                    (None, None) => unreachable!("outer guard ensures one is Some"),
+                };
+
+                // Closure: visibility + lower-bound check for any storage key.
+                // Returns false on miss, tombstone, storage error, or commit
+                // timestamp before time_range.start. Dropping on error is
+                // safer than leaking unfiltered hits — `get_at_timestamp` is
+                // unlikely to fail since the hit's underlying key was just
+                // resolved by the inverted index a moment earlier.
+                let time_range = request.time_range;
+                let visible_in_window = |key: &Key| -> bool {
+                    let versioned = match db.get_at_timestamp(key, upper) {
+                        Ok(Some(v)) => v,
+                        _ => return false,
+                    };
+                    if let Some((start, _)) = time_range {
+                        if versioned.timestamp.as_micros() < start {
+                            return false;
+                        }
+                    }
+                    true
+                };
+
                 bm25_hits.retain(|hit| match &hit.doc_ref {
                     EntityRef::Kv { key, space, .. } => {
                         let ns = Arc::new(Namespace::new(request.branch_id, space.clone()));
-                        db.get_at_timestamp(&Key::new_kv(ns, key.as_bytes()), as_of_ts)
-                            .ok()
-                            .flatten()
-                            .is_some()
+                        visible_in_window(&Key::new_kv(ns, key.as_bytes()))
                     }
                     EntityRef::Json { doc_id, space, .. } => {
                         let ns = Arc::new(Namespace::new(request.branch_id, space.clone()));
-                        db.get_at_timestamp(&Key::new_json(ns, doc_id), as_of_ts)
-                            .ok()
-                            .flatten()
-                            .is_some()
+                        visible_in_window(&Key::new_json(ns, doc_id))
                     }
-                    // Events are append-only — always visible once indexed.
+                    EntityRef::Graph { key, space, .. } => {
+                        let ns = Arc::new(Namespace::new(request.branch_id, space.clone()));
+                        visible_in_window(&Key::new_graph(ns, key.as_bytes()))
+                    }
+                    // Events: append-only with intrinsic event_time, deferred to v0.5.
+                    // Branch/Vector: don't appear in bm25_hits.
                     _ => true,
                 });
             }
@@ -1082,6 +1126,475 @@ mod tests {
 
         let response = retrieve(&db, &request).unwrap();
         assert_eq!(response.hits.len(), 2, "Both docs should be returned");
+    }
+
+    // ---- Gap A + Gap C: temporal post-filter for graph + time_range ----
+
+    /// Insert a KV value and return its observed commit timestamp.
+    /// Reads the value back via `get_at_timestamp(u64::MAX)` so the test
+    /// uses the actual storage commit time, robust against clock variance.
+    fn put_kv_and_observe_ts(
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        space: &str,
+        key: &str,
+        value: &str,
+    ) -> u64 {
+        let kv = KVStore::new(db.clone());
+        kv.put(branch_id, space, key, Value::String(value.into()))
+            .expect("kv put");
+        db.flush().expect("flush");
+        let storage_key = Key::new_kv(
+            Arc::new(Namespace::new(*branch_id, space.to_string())),
+            key.as_bytes(),
+        );
+        db.get_at_timestamp(&storage_key, u64::MAX)
+            .expect("get_at_timestamp")
+            .expect("just-written value should be visible")
+            .timestamp
+            .as_micros()
+    }
+
+    /// Insert a JSON document and return its observed commit timestamp.
+    fn put_json_and_observe_ts(
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        space: &str,
+        doc_id: &str,
+        json_str: &str,
+    ) -> u64 {
+        use strata_core::primitives::json::JsonValue;
+        let json_store = JsonStore::new(db.clone());
+        let value: JsonValue = json_str.parse().expect("parse json");
+        json_store
+            .create(branch_id, space, doc_id, value)
+            .expect("json create");
+        db.flush().expect("flush");
+        let storage_key = Key::new_json(
+            Arc::new(Namespace::new(*branch_id, space.to_string())),
+            doc_id,
+        );
+        db.get_at_timestamp(&storage_key, u64::MAX)
+            .expect("get_at_timestamp")
+            .expect("just-written value should be visible")
+            .timestamp
+            .as_micros()
+    }
+
+    /// Insert a graph node and return its observed commit timestamp.
+    /// `text` becomes the node's properties JSON so BM25 can index it.
+    fn put_graph_node_and_observe_ts(
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        space: &str,
+        graph: &str,
+        node_id: &str,
+        text: &str,
+    ) -> u64 {
+        use strata_graph::types::NodeData;
+        let graph_store = GraphStore::new(db.clone());
+        let data = NodeData {
+            entity_ref: None,
+            properties: Some(serde_json::json!({ "body": text })),
+            object_type: None,
+        };
+        graph_store
+            .add_node(*branch_id, space, graph, node_id, data)
+            .expect("add_node");
+        db.flush().expect("flush");
+        // Use the graph crate's own key helper rather than hardcoding the
+        // "{graph}/n/{node_id}" format — protects against future format
+        // changes in the graph crate.
+        let user_key = strata_graph::keys::node_key(graph, node_id);
+        let storage_key = Key::new_graph(
+            Arc::new(Namespace::new(*branch_id, space.to_string())),
+            user_key.as_bytes(),
+        );
+        db.get_at_timestamp(&storage_key, u64::MAX)
+            .expect("get_at_timestamp")
+            .expect("just-written graph node should be visible")
+            .timestamp
+            .as_micros()
+    }
+
+    /// Gap A regression: a graph node created after `as_of` must not appear
+    /// in the result set. Without the new Graph arm in the post-filter, the
+    /// `_ => true` fallthrough would let it leak through. Uses a non-default
+    /// space ("tenant_a") to also exercise the multi-space namespace path.
+    #[test]
+    fn test_as_of_filters_graph_node_created_after_target() {
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        // Insert "early" graph node, then "late" 10ms later.
+        let _t1 = put_graph_node_and_observe_ts(
+            &db,
+            &branch_id,
+            "tenant_a",
+            "g",
+            "early",
+            "rust language",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let mid = strata_core::Timestamp::now().as_micros();
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _t2 = put_graph_node_and_observe_ts(
+            &db,
+            &branch_id,
+            "tenant_a",
+            "g",
+            "late",
+            "rust language",
+        );
+
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "tenant_a".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: Some(mid),
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        let graph_node_ids: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Graph { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            graph_node_ids.iter().any(|k| k.contains("early")),
+            "early graph node should be visible at as_of=mid, got: {:?}",
+            graph_node_ids
+        );
+        assert!(
+            !graph_node_ids.iter().any(|k| k.contains("late")),
+            "late graph node should be filtered out at as_of=mid, got: {:?}",
+            graph_node_ids
+        );
+    }
+
+    /// Gap C regression for KV: a hybrid query with `time_range` must drop
+    /// BM25 hits whose latest visible commit timestamp falls outside the
+    /// range. Without the new outer guard `... || request.time_range.is_some()`,
+    /// the post-filter never fires for time_range and BM25 hits leak from
+    /// any time, producing inconsistent result sets relative to vector hits.
+    #[test]
+    fn test_time_range_filters_kv_outside_range() {
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let _t1 = put_kv_and_observe_ts(&db, &branch_id, "default", "before", "rust early");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = put_kv_and_observe_ts(&db, &branch_id, "default", "inside", "rust middle");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _t3 = put_kv_and_observe_ts(&db, &branch_id, "default", "after", "rust late");
+
+        // time_range = (t2, t2) — point at the middle doc only.
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: Some((t2, t2)),
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        let kv_keys: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Kv { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kv_keys,
+            vec!["inside"],
+            "only the middle doc should survive the time_range filter, got: {:?}",
+            kv_keys
+        );
+    }
+
+    /// Same shape as above but for JSON documents — exercises the JSON arm
+    /// of the post-filter through the time_range path.
+    #[test]
+    fn test_time_range_filters_json_outside_range() {
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let _t1 = put_json_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "before",
+            r#"{"text":"rust early doc"}"#,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = put_json_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "inside",
+            r#"{"text":"rust middle doc"}"#,
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _t3 = put_json_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "after",
+            r#"{"text":"rust late doc"}"#,
+        );
+
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: Some((t2, t2)),
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        let json_doc_ids: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Json { doc_id, .. } => Some(doc_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            json_doc_ids,
+            vec!["inside"],
+            "only the middle JSON doc should survive the time_range filter, got: {:?}",
+            json_doc_ids
+        );
+    }
+
+    /// Same shape for graph nodes — exercises the new Graph arm through
+    /// the time_range path.
+    #[test]
+    fn test_time_range_filters_graph_outside_range() {
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let _t1 = put_graph_node_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "g",
+            "before",
+            "rust early node",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = put_graph_node_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "g",
+            "inside",
+            "rust middle node",
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let _t3 = put_graph_node_and_observe_ts(
+            &db,
+            &branch_id,
+            "default",
+            "g",
+            "after",
+            "rust late node",
+        );
+
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: Some((t2, t2)),
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        let graph_keys: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Graph { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            graph_keys.len(),
+            1,
+            "exactly one graph hit, got: {:?}",
+            graph_keys
+        );
+        assert!(
+            graph_keys[0].contains("inside"),
+            "only the middle graph node should survive, got: {:?}",
+            graph_keys
+        );
+    }
+
+    /// Both filters together: as_of upper bound + time_range lower+upper bound
+    /// must compose by intersection. With docs at T1, T2, T3, T4 and
+    /// `as_of=T3, time_range=(T2, T4)`, the effective upper is `min(T3, T4) = T3`
+    /// and the lower is T2 — so docs at T2 and T3 should be returned, T1 and
+    /// T4 dropped.
+    #[test]
+    fn test_time_range_and_as_of_combine() {
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        let _t1 = put_kv_and_observe_ts(&db, &branch_id, "default", "d1", "rust one");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t2 = put_kv_and_observe_ts(&db, &branch_id, "default", "d2", "rust two");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t3 = put_kv_and_observe_ts(&db, &branch_id, "default", "d3", "rust three");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let t4 = put_kv_and_observe_ts(&db, &branch_id, "default", "d4", "rust four");
+
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: Some((t2, t4)),
+            primitive_filter: None,
+            as_of: Some(t3),
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+        let mut kv_keys: Vec<&str> = response
+            .hits
+            .iter()
+            .filter_map(|h| match &h.doc_ref {
+                EntityRef::Kv { key, .. } => Some(key.as_str()),
+                _ => None,
+            })
+            .collect();
+        kv_keys.sort();
+        assert_eq!(
+            kv_keys,
+            vec!["d2", "d3"],
+            "expected docs in [t2, min(t3,t4)=t3], got: {:?}",
+            kv_keys
+        );
+    }
+
+    /// Drive-by regression for the `KVStore::search` cross-primitive filter
+    /// (kv.rs:651): when a query matches both a KV doc and a JSON doc, the
+    /// substrate must return one hit per primitive owner — never duplicates.
+    ///
+    /// Before the kv.rs fix, `KVStore::search` returned every entity_ref that
+    /// `index.score_top_k` resolved (regardless of variant), only checking
+    /// `is_kv` for the snippet path. Combined with `rrf_fuse`'s single-source
+    /// pass-through optimization (substrate.rs:530-532), this caused the JSON
+    /// doc to appear twice in `bm25_hits` — once from `KVStore::search` and
+    /// once from `JsonStore::search` — and the duplicates leaked all the way
+    /// to the response. Adding the `if let EntityRef::Kv { .. } else None`
+    /// restructure in kv.rs fixes it.
+    ///
+    /// This test failed with `["inside", "inside"]` before the kv.rs fix
+    /// landed. It is the canonical regression guard for that filter.
+    #[test]
+    fn test_bm25_fan_out_no_cross_primitive_duplicates() {
+        use strata_core::primitives::json::JsonValue;
+
+        let db = Database::cache().expect("create db");
+        let branch_id = BranchId::new();
+
+        // One KV doc and one JSON doc, both indexed under the same branch+space
+        // and both containing the query term "rust".
+        let kv = KVStore::new(db.clone());
+        kv.put(
+            &branch_id,
+            "default",
+            "kv_doc",
+            Value::String("rust kv content".into()),
+        )
+        .expect("kv put");
+
+        let json_store = JsonStore::new(db.clone());
+        let value: JsonValue = r#"{"text":"rust json content"}"#.parse().expect("parse json");
+        json_store
+            .create(&branch_id, "default", "json_doc", value)
+            .expect("json create");
+        db.flush().expect("flush");
+
+        let recipe = test_recipe();
+        let request = RetrievalRequest {
+            query: "rust".into(),
+            branch_id,
+            space: "default".into(),
+            recipe,
+            embedding: None,
+            time_range: None,
+            primitive_filter: None,
+            as_of: None,
+            budget_ms: None,
+        };
+
+        let response = retrieve(&db, &request).unwrap();
+
+        let kv_count = response
+            .hits
+            .iter()
+            .filter(|h| matches!(h.doc_ref, EntityRef::Kv { .. }))
+            .count();
+        let json_count = response
+            .hits
+            .iter()
+            .filter(|h| matches!(h.doc_ref, EntityRef::Json { .. }))
+            .count();
+        let other_count = response.hits.len() - kv_count - json_count;
+
+        assert_eq!(
+            kv_count, 1,
+            "expected exactly 1 KV hit, got hits: {:?}",
+            response.hits
+        );
+        assert_eq!(
+            json_count, 1,
+            "expected exactly 1 JSON hit, got hits: {:?}",
+            response.hits
+        );
+        assert_eq!(
+            other_count, 0,
+            "expected no Event/Graph hits in this scenario, got hits: {:?}",
+            response.hits
+        );
+        assert_eq!(
+            response.hits.len(),
+            2,
+            "expected exactly 2 total hits with no duplicates, got: {:?}",
+            response.hits
+        );
     }
 
     // ---- Budget enforcement tests ----
