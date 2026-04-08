@@ -299,6 +299,110 @@ fn test_issue_1768_search_stats_no_embedding_when_nothing_pending() {
     }
 }
 
+// ============================================================================
+// v0.6 RAG wiring tests
+// ============================================================================
+//
+// These exercise the executor → intelligence layer wiring (`generate_rag_answer`
+// shim, projection into `Output::SearchResults.answer`, RAG stats fields).
+// They deliberately avoid loading a real model: the default-recipe path doesn't
+// invoke RAG at all, and the rag-recipe path only triggers the zero-hits canned
+// response which never calls a model.
+
+/// Default recipe must NOT invoke RAG. `Output::SearchResults.answer` must be
+/// `None` and the `rag_*` stats fields must all be `None`. Catches accidental
+/// RAG invocation regressions where the recipe gate is bypassed.
+#[test]
+fn test_search_default_recipe_no_rag_answer() {
+    let executor = create_executor();
+    let result = executor.execute(Command::Search {
+        branch: None,
+        space: None,
+        search: SearchQuery {
+            query: "anything".to_string(),
+            recipe: None,
+            precomputed_embedding: None,
+            k: None,
+            as_of: None,
+            diff: None,
+        },
+    });
+    match result {
+        Ok(Output::SearchResults { answer, stats, .. }) => {
+            assert!(answer.is_none(), "default recipe must not invoke RAG");
+            assert!(stats.rag_used.is_none());
+            assert!(stats.rag_model.is_none());
+            assert!(stats.rag_elapsed_ms.is_none());
+            assert!(stats.rag_tokens_in.is_none());
+            assert!(stats.rag_tokens_out.is_none());
+        }
+        other => panic!("Expected SearchResults, got {:?}", other),
+    }
+}
+
+/// An inline recipe with `prompt` set must invoke RAG, and over an empty index
+/// the intelligence layer returns the zero-hits canned response (no model call).
+/// This verifies the executor wiring end-to-end without requiring model
+/// infrastructure: `generate_rag_answer` → `AnswerResponse` projection → stats
+/// population → serialization.
+///
+/// Gated on `embed` because the non-embed `generate_rag_answer` shim always
+/// returns `None`, which would make this test pass vacuously.
+#[cfg(feature = "embed")]
+#[test]
+fn test_search_rag_recipe_zero_hits_canned_response() {
+    let executor = create_executor();
+    // Inline recipe with `prompt` set — RAG opt-in. No model is invoked because
+    // the index is empty (zero hits → canned response in `generate_answer`).
+    let recipe = serde_json::json!({
+        "prompt": "Answer using only the provided context. Cite sources with [N].",
+        "rag_context_hits": 3,
+        "rag_max_tokens": 200,
+        "models": {
+            "generate": "local:qwen3:1.7b"
+        }
+    });
+    let result = executor.execute(Command::Search {
+        branch: None,
+        space: None,
+        search: SearchQuery {
+            query: "what are the side effects of metformin".to_string(),
+            recipe: Some(recipe),
+            precomputed_embedding: None,
+            k: None,
+            as_of: None,
+            diff: None,
+        },
+    });
+    match result {
+        Ok(Output::SearchResults {
+            hits,
+            answer,
+            stats,
+            ..
+        }) => {
+            assert!(hits.is_empty(), "empty index should yield no hits");
+            let answer = answer.expect("rag recipe + zero hits must return canned answer");
+            assert!(
+                answer.text.contains("don't have enough information"),
+                "expected canned response, got {:?}",
+                answer.text
+            );
+            assert!(answer.sources.is_empty(), "canned response cites nothing");
+            assert_eq!(stats.rag_used, Some(true));
+            assert_eq!(stats.rag_model.as_deref(), Some("local:qwen3:1.7b"));
+            assert_eq!(
+                stats.rag_elapsed_ms,
+                Some(0.0),
+                "canned-response path skips the model"
+            );
+            assert_eq!(stats.rag_tokens_in, Some(0));
+            assert_eq!(stats.rag_tokens_out, Some(0));
+        }
+        other => panic!("Expected SearchResults, got {:?}", other),
+    }
+}
+
 /// Issue #1768: search stats should NOT include embedding progress when
 /// auto-embed is disabled.
 #[test]

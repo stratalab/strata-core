@@ -14,6 +14,8 @@ pub mod expand_cache;
 #[cfg(feature = "embed")]
 pub mod generate;
 #[cfg(feature = "embed")]
+pub mod rag;
+#[cfg(feature = "embed")]
 pub mod rerank;
 
 // Re-export key strata-inference types so that the executor depends only on

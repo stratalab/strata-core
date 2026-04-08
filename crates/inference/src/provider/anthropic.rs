@@ -75,7 +75,15 @@ impl AnthropicProvider {
 /// Build the Anthropic Messages API request JSON.
 ///
 /// Silently ignores `top_k`, `seed`, `stop_tokens` (not supported by this API).
-/// Omits `top_p` when it equals 1.0 (disabled).
+///
+/// **temperature vs top_p mutual exclusion:** newer Claude models (sonnet 4.5+,
+/// opus 4.6+, haiku 4.5+) reject requests that specify *both* `temperature`
+/// and `top_p` with `400 invalid_request_error`. We always send `temperature`
+/// (Anthropic defaults to 1.0 if omitted, which would silently break greedy
+/// decoding) and drop `top_p` when both would otherwise be sent. Callers that
+/// want top_p instead of temperature should set temperature to NaN or rely on
+/// Anthropic's default by passing top_p explicitly — but most callers prefer
+/// the temperature knob, so dropping top_p is the safer default.
 pub(crate) fn build_request_json(model: &str, request: &GenerateRequest) -> String {
     let mut obj = serde_json::json!({
         "model": model,
@@ -89,19 +97,16 @@ pub(crate) fn build_request_json(model: &str, request: &GenerateRequest) -> Stri
     });
 
     // Always include temperature — Anthropic defaults to 1.0 when omitted,
-    // which would break greedy decoding (temperature=0.0).
+    // which would break greedy decoding (temperature=0.0). top_p is dropped
+    // because Anthropic's API rejects requests that set both.
     obj["temperature"] = serde_json::json!(request.temperature);
-
-    // Only include top_p if it's not the default (disabled) value
-    if request.top_p < 1.0 {
-        obj["top_p"] = serde_json::json!(request.top_p);
-    }
 
     // Include stop_sequences if non-empty
     if !request.stop_sequences.is_empty() {
         obj["stop_sequences"] = serde_json::json!(request.stop_sequences);
     }
 
+    // top_p: dropped to satisfy Anthropic's mutual-exclusion constraint with temperature
     // top_k: silently ignored (not supported)
     // seed: silently ignored (not supported)
     // stop_tokens: silently ignored (token-level, local only)
@@ -298,7 +303,10 @@ mod tests {
     }
 
     #[test]
-    fn request_json_top_p_default_omitted() {
+    fn request_json_top_p_always_omitted_with_temperature() {
+        // Anthropic rejects requests that set both temperature and top_p.
+        // We always send temperature, so top_p must always be dropped — even
+        // when the caller explicitly requests it.
         let req = GenerateRequest {
             prompt: "test".into(),
             top_p: 1.0,
@@ -306,12 +314,14 @@ mod tests {
         };
         let json_str = build_request_json("model", &req);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
         assert!(json.get("top_p").is_none());
     }
 
     #[test]
-    fn request_json_top_p_custom_included() {
+    fn request_json_top_p_custom_dropped_to_satisfy_anthropic() {
+        // Even a non-default top_p is dropped, because Anthropic's API rejects
+        // `temperature` + `top_p` together. We always send temperature, so
+        // top_p loses. This was a 400-causing latent bug pre-2026-04.
         let req = GenerateRequest {
             prompt: "test".into(),
             top_p: 0.9,
@@ -319,9 +329,12 @@ mod tests {
         };
         let json_str = build_request_json("model", &req);
         let json: serde_json::Value = serde_json::from_str(&json_str).unwrap();
-
-        let top_p = json["top_p"].as_f64().unwrap();
-        assert!((top_p - 0.9).abs() < 0.01);
+        assert!(
+            json.get("top_p").is_none(),
+            "top_p must be dropped from Anthropic requests to avoid HTTP 400"
+        );
+        // Temperature must still be present.
+        assert!(json.get("temperature").is_some());
     }
 
     #[test]

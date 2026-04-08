@@ -1087,8 +1087,39 @@ fn format_human(output: &Output) -> String {
             }
             lines.join("\n")
         }
-        Output::SearchResults { hits, stats, .. } => {
+        Output::SearchResults {
+            hits,
+            stats,
+            answer,
+            ..
+        } => {
             let mut parts = Vec::new();
+
+            // RAG answer first — when present, this is the headline output
+            // the user opted into via `recipe.prompt`. Hits become the
+            // citation index that the answer references.
+            if let Some(ans) = answer {
+                let header = match (stats.rag_model.as_deref(), stats.rag_elapsed_ms) {
+                    (Some(model), Some(ms)) => {
+                        format!("=== answer ({}, {:.0}ms) ===", model, ms)
+                    }
+                    (Some(model), None) => format!("=== answer ({}) ===", model),
+                    _ => "=== answer ===".to_string(),
+                };
+                parts.push(header);
+                parts.push(format!("\n{}", ans.text));
+                if !ans.sources.is_empty() {
+                    let cites = ans
+                        .sources
+                        .iter()
+                        .map(|n| format!("[{}]", n))
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    parts.push(format!("\nsources: {}", cites));
+                }
+                parts.push("\n\n".to_string());
+            }
+
             if hits.is_empty() {
                 parts.push("(empty list)".to_string());
             } else {
@@ -1123,8 +1154,13 @@ fn format_human(output: &Output) -> String {
             } else {
                 stats.rerank_used.to_string()
             };
+            let rag_info = match (stats.rag_used, stats.rag_model.as_deref()) {
+                (Some(true), Some(model)) => format!(", rag: true ({})", model),
+                (Some(true), None) => ", rag: true".to_string(),
+                _ => String::new(),
+            };
             parts.push(format!(
-                "\n--- stats ---\nmode: {}, elapsed: {:.1}ms, candidates: {}, index: {}, truncated: {}, expansion: {}, rerank: {}",
+                "\n--- stats ---\nmode: {}, elapsed: {:.1}ms, candidates: {}, index: {}, truncated: {}, expansion: {}, rerank: {}{}",
                 stats.mode,
                 stats.elapsed_ms,
                 stats.candidates_considered,
@@ -1132,6 +1168,7 @@ fn format_human(output: &Output) -> String {
                 stats.truncated,
                 expansion_info,
                 rerank_info,
+                rag_info,
             ));
             parts.join("")
         }
@@ -1758,5 +1795,141 @@ mod tests {
             version: "0.6.0".to_string(),
         };
         assert_eq!(format_output(&pong, OutputMode::Human), "PONG 0.6.0");
+    }
+
+    /// v0.6 RAG: human-mode rendering must surface the answer text, the
+    /// source citations, and the `rag: true (model)` footer in stats.
+    /// Without this, the headline RAG feature is invisible at the CLI.
+    #[test]
+    fn test_format_search_results_with_rag_answer_human() {
+        use strata_executor::{
+            AnswerResponse, EntityRefOutput, SearchResultHit, SearchStatsOutput,
+        };
+        let out = Output::SearchResults {
+            hits: vec![SearchResultHit {
+                entity_ref: EntityRefOutput {
+                    kind: "kv".into(),
+                    branch_id: "00000000-0000-0000-0000-000000000000".into(),
+                    space: Some("default".into()),
+                    key: Some("metformin".into()),
+                    doc_id: None,
+                    sequence: None,
+                    collection: None,
+                },
+                score: 0.92,
+                rank: 1,
+                snippet: Some("metformin side effects include nausea".into()),
+                versions: None,
+            }],
+            stats: SearchStatsOutput {
+                elapsed_ms: 850.0,
+                candidates_considered: 1,
+                candidates_by_primitive: std::collections::HashMap::new(),
+                index_used: true,
+                truncated: false,
+                mode: "hybrid".into(),
+                expansion_used: false,
+                rerank_used: false,
+                expansion_model: None,
+                rerank_model: None,
+                embedding_pending: None,
+                embedding_total: None,
+                snapshot_version: None,
+                rag_used: Some(true),
+                rag_model: Some("anthropic:claude-sonnet-4-6".into()),
+                rag_elapsed_ms: Some(840.0),
+                rag_tokens_in: Some(420),
+                rag_tokens_out: Some(47),
+            },
+            diff: None,
+            answer: Some(AnswerResponse {
+                text: "Common side effects include nausea [1].".into(),
+                sources: vec![1],
+            }),
+        };
+        let rendered = format_output(&out, OutputMode::Human);
+        assert!(
+            rendered.contains("=== answer (anthropic:claude-sonnet-4-6, 840ms) ==="),
+            "answer header missing: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("Common side effects include nausea [1]."),
+            "answer text missing: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("sources: [1]"),
+            "sources line missing: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("metformin"),
+            "hit row missing: {}",
+            rendered
+        );
+        assert!(
+            rendered.contains("rag: true (anthropic:claude-sonnet-4-6)"),
+            "stats footer missing rag info: {}",
+            rendered
+        );
+    }
+
+    /// Default-recipe search (no RAG) must NOT render an answer block. The
+    /// `=== answer ===` header is the surface signal that RAG ran, so a
+    /// regression that always emitted it would mislead every CLI user.
+    #[test]
+    fn test_format_search_results_without_rag_answer_human() {
+        use strata_executor::{EntityRefOutput, SearchResultHit, SearchStatsOutput};
+        let out = Output::SearchResults {
+            hits: vec![SearchResultHit {
+                entity_ref: EntityRefOutput {
+                    kind: "kv".into(),
+                    branch_id: "00000000-0000-0000-0000-000000000000".into(),
+                    space: Some("default".into()),
+                    key: Some("k1".into()),
+                    doc_id: None,
+                    sequence: None,
+                    collection: None,
+                },
+                score: 0.5,
+                rank: 1,
+                snippet: None,
+                versions: None,
+            }],
+            stats: SearchStatsOutput {
+                elapsed_ms: 12.0,
+                candidates_considered: 1,
+                candidates_by_primitive: std::collections::HashMap::new(),
+                index_used: true,
+                truncated: false,
+                mode: "keyword".into(),
+                expansion_used: false,
+                rerank_used: false,
+                expansion_model: None,
+                rerank_model: None,
+                embedding_pending: None,
+                embedding_total: None,
+                snapshot_version: None,
+                rag_used: None,
+                rag_model: None,
+                rag_elapsed_ms: None,
+                rag_tokens_in: None,
+                rag_tokens_out: None,
+            },
+            diff: None,
+            answer: None,
+        };
+        let rendered = format_output(&out, OutputMode::Human);
+        assert!(
+            !rendered.contains("=== answer"),
+            "no answer header expected: {}",
+            rendered
+        );
+        assert!(
+            !rendered.contains("rag: true"),
+            "no rag flag expected in stats: {}",
+            rendered
+        );
     }
 }

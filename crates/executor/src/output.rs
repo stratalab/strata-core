@@ -293,6 +293,10 @@ pub enum Output {
         /// Temporal diff (present when `diff` parameter was provided).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         diff: Option<DiffOutput>,
+        /// RAG-generated answer (present when the recipe has `prompt` set
+        /// and generation succeeded). Absent for plain search.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        answer: Option<AnswerResponse>,
     },
 
     /// Sample of entries from a primitive (keys + values for shape discovery)

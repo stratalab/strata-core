@@ -603,8 +603,14 @@ fn test_output_search_results_with_stats() {
             embedding_pending: None,
             embedding_total: None,
             snapshot_version: None,
+            rag_used: None,
+            rag_model: None,
+            rag_elapsed_ms: None,
+            rag_tokens_in: None,
+            rag_tokens_out: None,
         },
         diff: None,
+        answer: None,
     });
 }
 
@@ -626,8 +632,14 @@ fn test_output_search_results_with_model_names() {
             embedding_pending: None,
             embedding_total: None,
             snapshot_version: None,
+            rag_used: None,
+            rag_model: None,
+            rag_elapsed_ms: None,
+            rag_tokens_in: None,
+            rag_tokens_out: None,
         },
         diff: None,
+        answer: None,
     });
 }
 
@@ -649,8 +661,63 @@ fn test_output_search_results_with_embedding_progress() {
             embedding_pending: Some(42),
             embedding_total: Some(100),
             snapshot_version: None,
+            rag_used: None,
+            rag_model: None,
+            rag_elapsed_ms: None,
+            rag_tokens_in: None,
+            rag_tokens_out: None,
         },
         diff: None,
+        answer: None,
+    });
+}
+
+#[test]
+fn test_output_search_results_with_rag_answer() {
+    // Round-trip a SearchResults that includes a populated RAG answer
+    // and matching stats fields. Verifies the AnswerResponse + RAG stats
+    // serialize cleanly and don't drop on the wire.
+    test_output_round_trip(Output::SearchResults {
+        hits: vec![SearchResultHit {
+            entity_ref: crate::types::EntityRefOutput {
+                kind: "kv".to_string(),
+                branch_id: "00000000-0000-0000-0000-000000000000".to_string(),
+                space: Some("default".to_string()),
+                key: Some("metformin".to_string()),
+                doc_id: None,
+                sequence: None,
+                collection: None,
+            },
+            score: 0.92,
+            rank: 1,
+            snippet: Some("metformin side effects include nausea".to_string()),
+            versions: None,
+        }],
+        stats: SearchStatsOutput {
+            elapsed_ms: 850.0,
+            candidates_considered: 1,
+            candidates_by_primitive: std::collections::HashMap::new(),
+            index_used: true,
+            truncated: false,
+            mode: "hybrid".to_string(),
+            expansion_used: false,
+            rerank_used: false,
+            expansion_model: None,
+            rerank_model: None,
+            embedding_pending: None,
+            embedding_total: None,
+            snapshot_version: None,
+            rag_used: Some(true),
+            rag_model: Some("anthropic:claude-sonnet-4-6".to_string()),
+            rag_elapsed_ms: Some(840.0),
+            rag_tokens_in: Some(420),
+            rag_tokens_out: Some(47),
+        },
+        diff: None,
+        answer: Some(crate::types::AnswerResponse {
+            text: "Common side effects include nausea [1].".to_string(),
+            sources: vec![1],
+        }),
     });
 }
 
