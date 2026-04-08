@@ -174,7 +174,16 @@ impl Strata {
             })?;
             let access_mode = AccessMode::ReadOnly;
             let executor = Executor::new_with_mode(db, access_mode);
-            Self::verify_default_branch(&executor)?;
+            // NOTE: We deliberately skip `verify_default_branch` on the
+            // follower path. `BranchExists` goes through
+            // `BranchIndex::exists` which wraps its read in
+            // `db.transaction(...)`; every transaction runs through
+            // `commit_internal`, which unconditionally rejects follower
+            // databases ("cannot commit: database opened in follower
+            // mode"). Verification is not load-bearing for followers:
+            // they cannot write anyway, so if the default branch does
+            // not yet exist on the primary, subsequent follower reads
+            // simply return empty — no user-visible failure mode.
             return Ok(Self {
                 backend: Backend::Local { executor },
                 current_branch: BranchId::default(),

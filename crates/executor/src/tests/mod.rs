@@ -9,6 +9,7 @@ pub mod determinism;
 pub mod execute_many;
 pub mod export;
 pub mod ipc;
+pub mod lifecycle_regression;
 pub mod parity;
 pub mod recipe;
 pub mod search;
