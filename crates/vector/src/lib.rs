@@ -37,7 +37,6 @@ pub mod segmented;
 pub mod snapshot;
 pub mod store;
 pub mod types;
-pub mod wal;
 
 pub use backend::{
     IndexBackendFactory, InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend,
@@ -60,11 +59,6 @@ pub use types::{
     CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, IndexBackendType,
     SearchOptions, StorageDtype, VectorConfig, VectorConfigSerde, VectorEntry, VectorId,
     VectorMatch, VectorMatchWithSource, VectorRecord,
-};
-pub use wal::{
-    create_wal_collection_create, create_wal_collection_delete, create_wal_delete,
-    create_wal_upsert, create_wal_upsert_with_source, VectorWalReplayer, WalVectorCollectionCreate,
-    WalVectorCollectionDelete, WalVectorDelete, WalVectorUpsert,
 };
 
 /// Compute the directory for sealed-segment graph mmap files.
