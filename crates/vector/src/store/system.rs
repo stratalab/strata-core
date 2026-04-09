@@ -105,17 +105,6 @@ impl VectorStore {
         )
     }
 
-    /// Get the vector count for a system collection (for filtering empty collections).
-    pub fn system_collection_len(
-        &self,
-        branch_id: BranchId,
-        collection: &str,
-    ) -> VectorResult<usize> {
-        let cid = CollectionId::new(branch_id, SYSTEM_SPACE, collection);
-        let state = self.state()?;
-        Ok(state.backends.get(&cid).map(|b| b.len()).unwrap_or(0))
-    }
-
     /// Delete a system collection (idempotent — returns Ok if it doesn't exist).
     pub fn delete_system_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
         use crate::collection::validate_system_collection_name;
@@ -153,25 +142,11 @@ impl VectorStore {
             .map(|v| v.value.config.dimension))
     }
 
-    /// Search a system collection (internal use only)
-    pub fn system_search(
-        &self,
-        branch_id: BranchId,
-        collection: &str,
-        query: &[f32],
-        k: usize,
-        filter: Option<MetadataFilter>,
-    ) -> VectorResult<Vec<VectorMatch>> {
-        use crate::collection::validate_system_collection_name;
-        validate_system_collection_name(collection)?;
-        self.search(branch_id, SYSTEM_SPACE, collection, query, k, filter)
-    }
-
     /// Search a system collection returning results with source references (internal use only)
     ///
-    /// Like `system_search()` but returns `VectorMatchWithSource` which includes the
-    /// `source_ref` and `version` from the original VectorRecord. Used by hybrid search
-    /// to trace shadow vectors back to their originating records.
+    /// Returns `VectorMatchWithSource` which includes the `source_ref` and `version`
+    /// from the original VectorRecord. Used by hybrid search to trace shadow vectors
+    /// back to their originating records.
     pub fn system_search_with_sources(
         &self,
         branch_id: BranchId,

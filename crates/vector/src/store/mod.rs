@@ -145,11 +145,6 @@ impl VectorStore {
         Self { db }
     }
 
-    /// Get the underlying database reference
-    pub fn database(&self) -> &Arc<Database> {
-        &self.db
-    }
-
     /// Get access to the shared backend state
     ///
     /// This returns the shared `VectorBackendState` stored in the Database.
@@ -1042,15 +1037,6 @@ mod tests {
     fn test_vector_store_is_send_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<VectorStore>();
-    }
-
-    #[test]
-    fn test_vector_store_clone() {
-        let (_temp, _db, store1) = setup();
-        let store2 = store1.clone();
-
-        // Both point to same database
-        assert!(Arc::ptr_eq(store1.database(), store2.database()));
     }
 
     // ========================================
@@ -2140,56 +2126,6 @@ mod tests {
             EntityRef::Kv { key, .. } => assert_eq!(key, "original_key"),
             other => panic!("Expected EntityRef::Kv, got {:?}", other),
         }
-    }
-
-    #[test]
-    fn test_system_collection_len_nonexistent() {
-        let (_temp, _db, store) = setup();
-        let branch_id = BranchId::new();
-
-        // Non-existent collection should return 0
-        let len = store
-            .system_collection_len(branch_id, "_system_missing")
-            .unwrap();
-        assert_eq!(len, 0);
-    }
-
-    #[test]
-    fn test_system_collection_len_with_vectors() {
-        let (_temp, _db, store) = setup();
-        let branch_id = BranchId::new();
-
-        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
-        store
-            .create_system_collection(branch_id, "_system_test", config)
-            .unwrap();
-
-        assert_eq!(
-            store
-                .system_collection_len(branch_id, "_system_test")
-                .unwrap(),
-            0
-        );
-
-        store
-            .system_insert(branch_id, "_system_test", "k1", &[1.0, 0.0, 0.0], None)
-            .unwrap();
-        assert_eq!(
-            store
-                .system_collection_len(branch_id, "_system_test")
-                .unwrap(),
-            1
-        );
-
-        store
-            .system_insert(branch_id, "_system_test", "k2", &[0.0, 1.0, 0.0], None)
-            .unwrap();
-        assert_eq!(
-            store
-                .system_collection_len(branch_id, "_system_test")
-                .unwrap(),
-            2
-        );
     }
 
     // ========================================
