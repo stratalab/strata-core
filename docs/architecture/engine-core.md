@@ -61,8 +61,7 @@ The central struct. Owns storage, WAL, coordinator, and background infrastructur
 | `scheduler` | `BackgroundScheduler` | Deferred task executor (2 threads, 4096 queue) |
 | `_lock_file` | `Option<File>` | Exclusive/shared file lock (lifetime = Database lifetime) |
 | `wal_dir` | `PathBuf` | WAL directory path |
-| `wal_watermark` | `AtomicU64` | Max txn_id applied from WAL (multi-process) |
-| `multi_process` | `bool` | Multi-process coordination mode |
+| `wal_watermark` | `AtomicU64` | Max txn_id applied from WAL (follower refresh) |
 
 ### 1.2 Persistence vs Durability
 
@@ -87,26 +86,19 @@ Database::open(path)
   ├─ Create directory, read/create strata.toml
   ├─ Parse StrataConfig → DurabilityMode
   │
-  └─ open_internal(path, mode, config, multi_process=false)
+  └─ open_internal(path, mode, config)
        │
        ├─ Canonicalize path for registry key
+       ├─ Lock OPEN_DATABASES registry
+       ├─ Check for existing Arc<Database> (Weak upgrade)
+       │     → hit: return existing instance
+       ├─ Acquire exclusive file lock (.lock)
+       ├─ Call open_finish()
+       ├─ Register Weak<Database> in OPEN_DATABASES
+       ├─ Run subsystem recovery (vector, search)
+       ├─ Enable InvertedIndex
        │
-       ├─ [Single-process] ─────────────────────────────────────────┐
-       │   Lock OPEN_DATABASES registry                             │
-       │   Check for existing Arc<Database> (Weak upgrade)          │
-       │     → hit: return existing instance                        │
-       │   Acquire exclusive file lock (.lock)                      │
-       │   Call open_finish()                                       │
-       │   Register Weak<Database> in OPEN_DATABASES                │
-       │   Run subsystem recovery (vector, search)                  │
-       │   Enable InvertedIndex                                     │
-       │                                                            │
-       ├─ [Multi-process] ──────────────────────────────────────────┘
-       │   Acquire shared file lock (.lock)
-       │   Call open_finish() (no registry)
-       │   Same recovery + index setup
-       │
-       └─ open_finish(path, mode, config, multi_process, lock_file)
+       └─ open_finish(path, mode, config, lock_file)
             │
             ├─ Create WAL directory
             ├─ RecoveryCoordinator::recover()
@@ -114,7 +106,6 @@ Database::open(path)
             │    → Err + allow_lossy_recovery: start empty
             │    → Err: refuse to open
             ├─ Open WalWriter for appending
-            ├─ [Multi-process] Seed counter file from recovery
             ├─ Spawn WAL flush thread (Standard mode only)
             ├─ Create TransactionCoordinator from recovery
             ├─ Apply storage limits from config
@@ -167,29 +158,16 @@ All three paths funnel through `commit_internal()`, which delegates to the coord
 ```
 commit_internal(txn, durability)
   │
-  ├─ [Single-process]
-  │   coordinator.commit_with_wal_arc(txn, storage, wal_arc)
-  │     → TransactionManager handles:
-  │        validate → version alloc → WAL append → storage apply
-  │
-  └─ [Multi-process] commit_coordinated(txn, durability)
-       │
-       ├─ Acquire WalFileLock (blocking)
-       ├─ self.refresh()  ← tail other processes' WAL entries
-       ├─ Read CounterFile → (max_version, max_txn_id)
-       ├─ max with local coordinator state
-       ├─ new_version = max + 1, new_txn_id = max + 1
-       ├─ Override txn.txn_id with globally-unique ID
-       ├─ coordinator.commit_with_version(txn, storage, wal, new_version)
-       ├─ WAL flush for cross-process visibility
-       ├─ Update CounterFile
-       ├─ Update local wal_watermark
-       └─ Drop WalFileLock
+  └─ coordinator.commit_with_wal_arc(txn, storage, wal_arc)
+       → TransactionManager handles:
+          validate → version alloc → WAL append → storage apply
 ```
 
-### 1.7 Multi-Process Refresh
+### 1.7 Follower Refresh
 
-`refresh()` brings local storage up-to-date with writes from other processes:
+`refresh()` is called on a follower-mode `Database` to bring local storage
+up-to-date with writes the primary has appended to the shared WAL directory
+since the last refresh:
 
 1. Read WAL records after `wal_watermark` via `WalReader::read_all_after_watermark()`
 2. For each record: decode `TransactionPayload`, apply puts/deletes to storage
@@ -628,10 +606,9 @@ When multiple locks are needed, they are acquired in this order to prevent deadl
 
 ```
 1. OPEN_DATABASES registry (global)
-2. WalFileLock (file lock, multi-process only)
-3. Per-branch commit lock (in TransactionManager)
-4. WAL writer mutex (narrow scope via commit_with_wal_arc)
-5. Extension-specific locks (e.g., VectorBackendState.backends)
+2. Per-branch commit lock (in TransactionManager)
+3. WAL writer mutex (narrow scope via commit_with_wal_arc)
+4. Extension-specific locks (e.g., VectorBackendState.backends)
 ```
 
 ### Contention Profile

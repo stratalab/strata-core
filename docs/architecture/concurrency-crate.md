@@ -199,7 +199,7 @@ Takes `Arc<Mutex<WalWriter>>` instead of `&mut WalWriter`. Pre-serializes the WA
 
 #### `commit_with_version(&self, txn, store, wal, version)` — External version
 
-Uses an externally-allocated version (from a shared counter file in multi-process mode) instead of incrementing the local counter. Calls `fetch_max` to keep the local counter in sync.
+Uses an externally-allocated version instead of incrementing the local counter. Calls `fetch_max` to keep the local counter in sync.
 
 ### 2.4 TOCTOU Prevention
 
@@ -232,12 +232,13 @@ Different branches commit in parallel (different shards, no cross-branch conflic
 - If lock is held → skip removal (stale entry cleaned up later)
 - If lock is free → remove entry from DashMap
 
-### 2.7 Multi-Process Support
+### 2.7 Follower Refresh Support
 
 - `catch_up_version(v)` — advances version counter to at least `v` via `fetch_max`
 - `catch_up_txn_id(id)` — advances txn_id counter to at least `id + 1`
 
-Used during multi-process refresh to reflect writes from other processes' WAL entries.
+Used by `Database::refresh()` in follower mode to sync the local counters with
+the primary's WAL watermark after tailing new records.
 
 ---
 

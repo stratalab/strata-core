@@ -20,8 +20,6 @@
 pub mod branch_bundle; // Portable execution artifacts (BranchBundle)
 pub mod codec; // Storage codec abstraction (identity, future encryption/compression)
 pub mod compaction; // WAL segment cleanup and tombstone tracking
-#[cfg(feature = "multi_process")]
-pub mod coordination; // WAL file lock + counter file (gated behind `multi_process` feature)
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
 pub mod wal; // WAL segment types, durability modes
