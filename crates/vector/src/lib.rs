@@ -34,7 +34,6 @@ pub(crate) mod mmap_graph;
 pub mod quantize;
 pub mod recovery;
 pub mod segmented;
-pub mod snapshot;
 pub mod store;
 pub mod types;
 
@@ -53,7 +52,6 @@ pub use merge_handler::register_vector_semantic_merge;
 pub use quantize::{QuantizationParams, RaBitQParams};
 pub use recovery::VectorSubsystem;
 pub use segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
-pub use snapshot::{CollectionSnapshotHeader, VECTOR_SNAPSHOT_VERSION};
 pub use store::{RecoveryStats, VectorBackendState, VectorStore};
 pub use types::{
     CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, IndexBackendType,

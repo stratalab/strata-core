@@ -609,24 +609,9 @@ impl VectorStore {
             .map(|b| (b.index_type_name(), b.memory_usage()))
     }
 
-    /// Get access to the shared backend state (for recovery/snapshot)
+    /// Test-only accessor for the shared backend state.
+    #[cfg(test)]
     pub(crate) fn backends(&self) -> Result<Arc<VectorBackendState>, VectorError> {
         self.state()
-    }
-
-    /// Get access to the database (for snapshot operations)
-    pub(crate) fn db(&self) -> &Database {
-        &self.db
-    }
-
-    /// Internal helper to create vector KV key
-    pub(crate) fn vector_key_internal(
-        &self,
-        branch_id: BranchId,
-        space: &str,
-        collection: &str,
-        key: &str,
-    ) -> Key {
-        Key::new_vector(self.namespace_for(branch_id, space), collection, key)
     }
 }
