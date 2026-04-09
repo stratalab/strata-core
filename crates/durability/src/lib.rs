@@ -19,7 +19,6 @@ pub mod codec; // Storage codec abstraction (identity, future encryption/compres
 pub mod compaction; // WAL segment cleanup and tombstone tracking
 #[cfg(feature = "multi_process")]
 pub mod coordination; // WAL file lock + counter file (gated behind `multi_process` feature)
-pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
 pub mod recovery; // WAL replay logic
@@ -116,12 +115,6 @@ pub use format::{
 pub use compaction::{
     CompactInfo, CompactMode, CompactionError, Tombstone, TombstoneError, TombstoneIndex,
     TombstoneReason, WalOnlyCompactor,
-};
-
-// Database lifecycle
-pub use database::{
-    ConfigError, DatabaseConfig, DatabaseHandle, DatabaseHandleError, DatabasePathError,
-    DatabasePaths,
 };
 
 // WAL segmented types
