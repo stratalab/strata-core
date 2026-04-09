@@ -34,10 +34,8 @@ pub(crate) mod mmap_graph;
 pub mod quantize;
 pub mod recovery;
 pub mod segmented;
-pub mod snapshot;
 pub mod store;
 pub mod types;
-pub mod wal;
 
 pub use backend::{
     IndexBackendFactory, InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend,
@@ -54,17 +52,11 @@ pub use merge_handler::register_vector_semantic_merge;
 pub use quantize::{QuantizationParams, RaBitQParams};
 pub use recovery::VectorSubsystem;
 pub use segmented::{SegmentedHnswBackend, SegmentedHnswConfig};
-pub use snapshot::{CollectionSnapshotHeader, VECTOR_SNAPSHOT_VERSION};
 pub use store::{RecoveryStats, VectorBackendState, VectorStore};
 pub use types::{
     CollectionId, CollectionInfo, CollectionRecord, DistanceMetric, IndexBackendType,
     SearchOptions, StorageDtype, VectorConfig, VectorConfigSerde, VectorEntry, VectorId,
     VectorMatch, VectorMatchWithSource, VectorRecord,
-};
-pub use wal::{
-    create_wal_collection_create, create_wal_collection_delete, create_wal_delete,
-    create_wal_upsert, create_wal_upsert_with_source, VectorWalReplayer, WalVectorCollectionCreate,
-    WalVectorCollectionDelete, WalVectorDelete, WalVectorUpsert,
 };
 
 /// Compute the directory for sealed-segment graph mmap files.

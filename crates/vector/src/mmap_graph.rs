@@ -390,8 +390,10 @@ mod tests {
             assert_eq!(orig_node.layer_ranges, loaded_node.layer_ranges);
         }
 
-        // Verify neighbor data is mmap-backed
-        assert!(loaded.is_neighbor_data_mmap());
+        // Verify neighbor data is mmap-backed (not materialized into an owned Vec).
+        // This guards against a regression where open_graph_file silently falls
+        // back to owned loading, which would defeat the memory-mapping invariant.
+        assert!(loaded.neighbor_data.is_mmap());
     }
 
     #[test]
@@ -633,7 +635,7 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.entry_point, Some(VectorId::new(42)));
-        assert!(loaded.is_neighbor_data_mmap());
+        assert!(loaded.neighbor_data.is_mmap());
 
         // Search should find the single node
         let mut heap = crate::heap::VectorHeap::new(config);
