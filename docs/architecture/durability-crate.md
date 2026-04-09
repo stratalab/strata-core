@@ -17,7 +17,6 @@ The durability crate is the largest in Strata and handles all persistent storage
 | Compaction | 3 | ~1,920 | WAL segment cleanup + tombstone tracking |
 | Branch Bundle | 8 | ~2,430 | Portable branch archives (tar.zst) |
 | Codec | 4 | ~740 | Encryption/compression abstraction |
-| Coordination | 1 | ~520 | Multi-process WAL file locking (feature-gated) |
 
 ## Module Map
 
@@ -50,11 +49,10 @@ durability/src/
 │   ├── wal_log.rs                  WAL.branchlog format (msgpack v2)
 │   ├── types.rs                    BundleManifest, BranchExportInfo, etc.
 │   └── error.rs                    BranchBundleError
-├── codec/
-│   ├── traits.rs                   StorageCodec trait (object-safe)
-│   ├── identity.rs                 IdentityCodec (no-op, zero-copy)
-│   └── aes_gcm.rs                  AesGcmCodec (AES-256-GCM encryption)
-└── coordination.rs                 WalFileLock + CounterFile (multi-process)
+└── codec/
+    ├── traits.rs                   StorageCodec trait (object-safe)
+    ├── identity.rs                 IdentityCodec (no-op, zero-copy)
+    └── aes_gcm.rs                  AesGcmCodec (AES-256-GCM encryption)
 ```
 
 ---
@@ -431,36 +429,7 @@ Factory: `get_codec(codec_id)` instantiates by ID string. The codec ID is stored
 
 ---
 
-## 8. Multi-Process Coordination (`coordination.rs`)
-
-### 9.1 WalFileLock
-
-Exclusive file lock on `{wal_dir}/.wal-lock` using `fs2` file locking.
-
-- `acquire()` — blocking exclusive lock
-- `try_acquire()` — non-blocking (returns None if already held)
-- `acquire_with_stale_check()` — fast non-blocking attempt, falls back to PID-based stale detection
-
-Lock file contains the holding process's PID. On Unix, `libc::kill(pid, 0)` checks if the process is alive. If the lock holder is dead, the lock is considered stale and can be reclaimed.
-
-### 9.2 CounterFile
-
-Atomic `(max_version, max_txn_id)` counter at `{wal_dir}/counters`. 16-byte file (two LE u64 values). Written with fsync for cross-process visibility.
-
-**Multi-process commit protocol:**
-```
-1. Acquire WalFileLock
-2. Read CounterFile → (version, txn_id)
-3. Validate transaction
-4. Allocate version from counter
-5. Append WAL record
-6. Write updated CounterFile
-7. Release WalFileLock
-```
-
----
-
-## 9. Branch Bundle (`branch_bundle/`)
+## 8. Branch Bundle (`branch_bundle/`)
 
 Portable archive format for exporting/importing branches.
 
@@ -560,7 +529,6 @@ strata_concurrency::RecoveryCoordinator::new(wal_dir).recover() →
 | WalWriter | Single-owner (`&mut self`) | External lock (TransactionManager branch lock or Arc<Mutex>) |
 | ManifestManager | `Arc<Mutex<ManifestManager>>` | Write-fsync-rename for atomic persistence |
 | SnapshotWriter | Single-owner | Write-fsync-rename (temp → final) |
-| CounterFile | `WalFileLock` (file lock) | Serialize multi-process access |
 | WalReader | Stateless | No synchronization needed |
 
 **Crash safety invariants:**

@@ -691,32 +691,6 @@ branchbundle/
 **Export constraint:** Only terminal branches (Completed, Failed, Cancelled,
 Archived) can be exported. Bundles are immutable and deterministic.
 
-### 4.7 Multi-Process Coordination
-
-#### WAL File Lock
-
-```rust
-// crates/durability/src/coordination.rs
-pub struct WalFileLock {
-    _file: File,  // Exclusive lock held while alive
-}
-```
-
-Lock file: `{wal_dir}/.wal-lock`. Writes PID for stale-lock detection.
-
-**Stale lock recovery:** If the lock holder process is dead (`kill(pid, 0)` returns
-ESRCH), the lock file is removed and reacquired.
-
-#### Counter File
-
-```
-// {wal_dir}/counters — 16 bytes
-[0..8):  max_version (u64 LE)
-[8..16): max_txn_id  (u64 LE)
-```
-
-Read and written while holding `WalFileLock`. `sync_all()` ensures durability.
-
 ---
 
 ## 5. Concurrency Layer

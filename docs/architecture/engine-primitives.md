@@ -578,7 +578,7 @@ Several primitives perform **post-commit side effects** (inverted index updates)
 
 ### Stateless Facades vs. Cached State
 
-The stateless facade pattern means every read goes through the storage layer (or transaction snapshot). An alternative would be caching frequently-accessed metadata (e.g., EventLog's `next_sequence`) in-memory. The stateless approach was chosen for simplicity, correctness under concurrent access, and compatibility with multi-process mode. The performance cost is acceptable because `ShardedStore` lookups are O(1) hash table operations.
+The stateless facade pattern means every read goes through the storage layer (or transaction snapshot). An alternative would be caching frequently-accessed metadata (e.g., EventLog's `next_sequence`) in-memory. The stateless approach was chosen for simplicity, correctness under concurrent access, and compatibility with follower refresh. The performance cost is acceptable because `ShardedStore` lookups are O(1) hash table operations.
 
 ### EventLog's Single-Writer Serialization
 
