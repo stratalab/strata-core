@@ -884,12 +884,6 @@ impl HnswGraph {
         }
     }
 
-    /// Count of non-deleted nodes in the graph
-    #[allow(dead_code)]
-    pub(crate) fn len(&self) -> usize {
-        self.nodes.values().filter(|n| !n.is_deleted()).count()
-    }
-
     /// Memory usage of the graph structure (excludes embedding data)
     pub(crate) fn memory_usage(&self) -> usize {
         self.nodes

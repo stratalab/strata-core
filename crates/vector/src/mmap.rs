@@ -327,12 +327,6 @@ impl MmapVectorData {
         self.index.to_btree()
     }
 
-    /// Iterate all VectorIds in deterministic order
-    #[allow(dead_code)]
-    pub(crate) fn ids(&self) -> impl Iterator<Item = VectorId> + '_ {
-        self.index.ids()
-    }
-
     /// Get dimension
     #[allow(dead_code)]
     pub(crate) fn dimension(&self) -> usize {
