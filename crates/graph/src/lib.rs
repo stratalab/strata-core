@@ -38,7 +38,7 @@ pub use strata_core::branch_dag::{
 use std::sync::Arc;
 
 use strata_core::types::{BranchId, Key};
-use strata_core::{StrataError, StrataResult, Value};
+use strata_core::{EntityRef, StrataError, StrataResult, Value};
 
 use adjacency::AdjacencyIndex;
 use strata_engine::Database;
@@ -391,5 +391,201 @@ impl GraphStore {
         }
 
         Some(strata_engine::search::truncate_text(&text, 100))
+    }
+}
+
+// =============================================================================
+// User-friendly entity-ref parsing (v0.4 PPR Epic 2)
+// =============================================================================
+
+/// Parse a user-friendly entity-reference URI into a typed `EntityRef`,
+/// injecting the caller's `branch_id`.
+///
+/// Supported schemes (matches the format stored in `NodeData.entity_ref`):
+///   - `kv://{space}/{key}`          → `EntityRef::Kv`
+///   - `json://{space}/{doc_id}`     → `EntityRef::Json`
+///   - `event://{space}/{sequence}`  → `EntityRef::Event` (sequence is `u64`)
+///
+/// Differs from the canonical [`EntityRef::Display`] format, which embeds the
+/// `branch_id` in the URI (`{scheme}://{branch_id}/{space}/{key}`). Graph nodes
+/// store the shorter branch-less form because the branch is implicit from the
+/// graph snapshot being queried; this helper injects it back on resolution.
+///
+/// Returns `None` on any malformed input (unknown scheme, missing scheme,
+/// missing key, invalid event sequence, empty string). Never panics.
+//
+// Allowed dead until Epic 3 (`ppr_retrieve`) consumes this helper; it is
+// already exercised by the unit tests below so the `allow` only covers the
+// production call site, not the function body.
+#[allow(dead_code)]
+fn parse_user_friendly_entity_ref(uri: &str, branch_id: BranchId) -> Option<EntityRef> {
+    let (scheme, rest) = uri.split_once("://")?;
+    let (space, key_part) = rest.split_once('/')?;
+    if space.is_empty() || key_part.is_empty() {
+        return None;
+    }
+    match scheme {
+        "kv" => Some(EntityRef::kv(branch_id, space, key_part)),
+        "json" => Some(EntityRef::json(branch_id, space, key_part)),
+        "event" => {
+            let sequence: u64 = key_part.parse().ok()?;
+            Some(EntityRef::event(branch_id, space, sequence))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_branch() -> BranchId {
+        BranchId::from_bytes([0u8; 16])
+    }
+
+    #[test]
+    fn parse_kv_uri() {
+        let branch = test_branch();
+        let parsed = parse_user_friendly_entity_ref("kv://main/patient-4821", branch);
+        assert_eq!(parsed, Some(EntityRef::kv(branch, "main", "patient-4821")));
+    }
+
+    #[test]
+    fn parse_json_uri() {
+        let branch = test_branch();
+        let parsed = parse_user_friendly_entity_ref("json://docs/recipe-42", branch);
+        assert_eq!(parsed, Some(EntityRef::json(branch, "docs", "recipe-42")));
+    }
+
+    #[test]
+    fn parse_event_uri_with_valid_sequence() {
+        let branch = test_branch();
+        let parsed = parse_user_friendly_entity_ref("event://audit/12345", branch);
+        assert_eq!(parsed, Some(EntityRef::event(branch, "audit", 12345)));
+    }
+
+    #[test]
+    fn parse_event_uri_with_invalid_sequence_returns_none() {
+        let branch = test_branch();
+        assert_eq!(
+            parse_user_friendly_entity_ref("event://audit/not-a-number", branch),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_unknown_scheme_returns_none() {
+        let branch = test_branch();
+        // Vector, graph, and branch schemes are all unsupported by this helper.
+        assert_eq!(
+            parse_user_friendly_entity_ref("vector://main/foo", branch),
+            None
+        );
+        assert_eq!(
+            parse_user_friendly_entity_ref("graph://main/mygraph", branch),
+            None
+        );
+        assert_eq!(
+            parse_user_friendly_entity_ref("branch://main/meta", branch),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_missing_scheme_returns_none() {
+        let branch = test_branch();
+        assert_eq!(
+            parse_user_friendly_entity_ref("main/patient-4821", branch),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_missing_key_returns_none() {
+        let branch = test_branch();
+        // No `/` after the space → `split_once('/')` returns None.
+        assert_eq!(parse_user_friendly_entity_ref("kv://main", branch), None);
+        // Trailing `/` with empty key-part → caught by the explicit empty guard.
+        assert_eq!(parse_user_friendly_entity_ref("kv://main/", branch), None);
+        // Empty space → caught by the explicit empty guard.
+        assert_eq!(parse_user_friendly_entity_ref("kv:///foo", branch), None);
+    }
+
+    #[test]
+    fn parse_empty_string_returns_none() {
+        let branch = test_branch();
+        assert_eq!(parse_user_friendly_entity_ref("", branch), None);
+    }
+
+    #[test]
+    fn parse_kv_uri_preserves_slashes_in_key() {
+        // KV keys may legally contain slashes. Only the first `/` after the
+        // space is a separator; the remainder is the verbatim key.
+        let branch = test_branch();
+        let parsed = parse_user_friendly_entity_ref("kv://main/users/alice/profile", branch);
+        assert_eq!(
+            parsed,
+            Some(EntityRef::kv(branch, "main", "users/alice/profile"))
+        );
+    }
+
+    #[test]
+    fn parse_rejects_uppercase_and_mixed_case_schemes() {
+        // Scheme match is strictly lowercase. The canonical
+        // `EntityRef::Display` format also emits lowercase, so any non-lower
+        // variant is treated as an unknown scheme and returns `None`.
+        let branch = test_branch();
+        assert_eq!(
+            parse_user_friendly_entity_ref("KV://main/patient-4821", branch),
+            None
+        );
+        assert_eq!(
+            parse_user_friendly_entity_ref("Kv://main/patient-4821", branch),
+            None
+        );
+        assert_eq!(
+            parse_user_friendly_entity_ref("JSON://docs/recipe-42", branch),
+            None
+        );
+        assert_eq!(
+            parse_user_friendly_entity_ref("Event://audit/12345", branch),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_event_u64_overflow_returns_none() {
+        // A sequence that exceeds `u64::MAX` must fail parsing, not wrap.
+        // 20 nines is well past `u64::MAX` (~1.8e19).
+        let branch = test_branch();
+        assert_eq!(
+            parse_user_friendly_entity_ref("event://audit/99999999999999999999", branch),
+            None
+        );
+        // `u64::MAX` itself is a valid accept.
+        let max = format!("event://audit/{}", u64::MAX);
+        assert_eq!(
+            parse_user_friendly_entity_ref(&max, branch),
+            Some(EntityRef::event(branch, "audit", u64::MAX))
+        );
+        // Negative numbers are not valid u64.
+        assert_eq!(
+            parse_user_friendly_entity_ref("event://audit/-1", branch),
+            None
+        );
+    }
+
+    #[test]
+    fn parse_event_zero_sequence_is_valid() {
+        // `0` is a legitimate `u64` sequence and must round-trip as a
+        // successful parse. Documenting this explicitly so future refactors
+        // don't conflate "zero" with "parse failure" (the two were
+        // indistinguishable under the buggy `unwrap_or(0)` form this test
+        // guards against).
+        let branch = test_branch();
+        assert_eq!(
+            parse_user_friendly_entity_ref("event://audit/0", branch),
+            Some(EntityRef::event(branch, "audit", 0))
+        );
     }
 }
