@@ -1,14 +1,17 @@
 //! Durability layer for Strata
 //!
-//! This crate handles everything that touches disk:
+//! This crate provides the on-disk building blocks consumed by the engine:
 //!
 //! - WAL: Segmented write-ahead log with one record per committed transaction
 //! - Durability modes: Always, Standard (default), Cache
-//! - Snapshot creation and loading
-//! - Recovery: Coordinator-based recovery (MANIFEST + snapshot + WAL)
-//! - Binary on-disk formats (segmented WAL, snapshots, manifest)
-//! - Storage codec abstraction (encryption/compression extension point)
-//! - WAL segment compaction
+//! - Snapshot creation and loading (crash-safe disk snapshot I/O)
+//! - Binary on-disk formats (segmented WAL, snapshots, manifest, writesets)
+//! - Storage codec abstraction (identity, AES-GCM, future compression)
+//! - WAL segment compaction and tombstone tracking
+//! - Branch bundle import/export
+//!
+//! Recovery planning lives in `strata_concurrency::RecoveryCoordinator`,
+//! which consumes the building blocks above.
 
 #![warn(missing_docs)]
 #![warn(clippy::all)]
@@ -19,10 +22,8 @@ pub mod codec; // Storage codec abstraction (identity, future encryption/compres
 pub mod compaction; // WAL segment cleanup and tombstone tracking
 #[cfg(feature = "multi_process")]
 pub mod coordination; // WAL file lock + counter file (gated behind `multi_process` feature)
-pub mod database; // Database handle, config, paths (DatabaseHandle, DatabaseConfig, etc.)
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
-pub mod recovery; // WAL replay logic
 pub mod wal; // WAL segment types, durability modes
 
 // === Utilities ===
@@ -118,21 +119,8 @@ pub use compaction::{
     TombstoneReason, WalOnlyCompactor,
 };
 
-// Database lifecycle
-pub use database::{
-    ConfigError, DatabaseConfig, DatabaseHandle, DatabaseHandleError, DatabasePathError,
-    DatabasePaths,
-};
-
 // WAL segmented types
 pub use wal::{
     TruncateInfo, WalConfig, WalConfigError, WalCounters, WalDiskUsage, WalReader, WalReaderError,
     WalRecordIterator, WalWriter,
 };
-
-// Recovery coordinator types
-pub use recovery::{
-    RecoveryCoordinator, RecoveryError, RecoveryPlan, RecoveryResult as SegmentedRecoveryResult,
-    RecoverySnapshot,
-};
-pub use recovery::{WalReplayError, WalReplayer};
