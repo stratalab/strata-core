@@ -985,9 +985,9 @@ impl SegmentCapable for SegmentedHnswBackend {
         let (all_ids, all_timestamps) = self.active.drain_sorted();
 
         // Filter to only IDs that have live embeddings in the global heap.
-        // During recovery, replay_delete removes embeddings from the heap,
-        // so deleted vectors must be excluded before chunking to get accurate
-        // segment sizes.
+        // Deleted vectors may be absent from the heap but still referenced
+        // in the active buffer, so they must be excluded before chunking to
+        // get accurate segment sizes.
         let live_ids: Vec<VectorId> = all_ids
             .into_iter()
             .filter(|id| self.heap.contains(*id))
