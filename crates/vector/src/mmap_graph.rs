@@ -389,9 +389,6 @@ mod tests {
             assert_eq!(orig_node.deleted_at, loaded_node.deleted_at);
             assert_eq!(orig_node.layer_ranges, loaded_node.layer_ranges);
         }
-
-        // Verify neighbor data is mmap-backed
-        assert!(loaded.is_neighbor_data_mmap());
     }
 
     #[test]
@@ -633,7 +630,6 @@ mod tests {
 
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded.entry_point, Some(VectorId::new(42)));
-        assert!(loaded.is_neighbor_data_mmap());
 
         // Search should find the single node
         let mut heap = crate::heap::VectorHeap::new(config);

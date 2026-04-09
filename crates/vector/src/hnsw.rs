@@ -832,12 +832,6 @@ impl HnswGraph {
     // Graph-only Operations (no heap needed)
     // ========================================================================
 
-    /// Check if a vector exists and is alive (not soft-deleted) in this graph
-    #[allow(dead_code)]
-    pub(crate) fn contains(&self, id: VectorId) -> bool {
-        self.nodes.get(&id).is_some_and(|n| !n.is_deleted())
-    }
-
     /// Soft-delete a vector in the graph. Returns true if the vector was alive.
     pub(crate) fn delete_with_timestamp(&mut self, id: VectorId, deleted_at: u64) -> bool {
         let was_alive = self.nodes.get(&id).is_some_and(|n| !n.is_deleted());
@@ -1626,12 +1620,6 @@ impl CompactHnswGraph {
     #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.node_count
-    }
-
-    /// Whether the neighbor data is backed by a memory-mapped file.
-    #[allow(dead_code)]
-    pub(crate) fn is_neighbor_data_mmap(&self) -> bool {
-        self.neighbor_data.is_mmap()
     }
 
     /// Memory usage of the compact graph (excludes embedding data)
