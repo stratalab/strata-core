@@ -925,7 +925,7 @@ ensures active snapshots always see consistent data.
 
 ### 5.10 Recovery
 
-WAL replay via `RecoveryCoordinator` + `WalReplayer`:
+WAL replay via `strata_concurrency::RecoveryCoordinator`:
 
 ```rust
 // crates/concurrency/src/recovery.rs

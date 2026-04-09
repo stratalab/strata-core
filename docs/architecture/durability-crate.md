@@ -2,8 +2,8 @@
 
 **Crate:** `strata-durability`
 **Dependencies:** `strata-core`, `parking_lot`, `serde`, `rmp-serde`, `crc32fast`, `fs2`, `aes-gcm`, `rand`, `tar`, `zstd`, `xxhash-rust`, `libc` (unix)
-**Source files:** 42 modules, ~20,900 lines total
-**Role:** Everything that touches disk — WAL, snapshots, recovery, compaction, coordination, binary formats
+**Source files:** ~32 modules, ~15,500 lines total
+**Role:** On-disk building blocks — WAL, snapshots, binary formats, codecs, compaction, branch bundles. Recovery orchestration itself lives in `strata_concurrency::RecoveryCoordinator`.
 
 ## Overview
 
@@ -11,16 +11,13 @@ The durability crate is the largest in Strata and handles all persistent storage
 
 | Subsystem | Files | Lines | Purpose |
 |-----------|-------|-------|---------|
-| WAL | 5 | ~3,050 | Write-ahead log with segmented files |
-| Format | 8 | ~4,000 | Binary on-disk formats (WAL, snapshot, MANIFEST) |
-| Recovery | 3 | ~1,690 | Crash recovery orchestration |
-| Disk Snapshot | 4 | ~1,460 | Crash-safe snapshot I/O |
-| Compaction | 3 | ~1,900 | WAL segment cleanup + tombstone tracking |
-| Database | 4 | ~1,280 | Database lifecycle (create/open/close) |
-| Branch Bundle | 6 | ~2,240 | Portable branch archives (tar.zst) |
-| Codec | 4 | ~710 | Encryption/compression abstraction |
-| Coordination | 1 | ~520 | Multi-process WAL file locking |
-| Snapshot (legacy) | 2 | ~1,810 | In-memory snapshot serialization |
+| WAL | 5 | ~3,800 | Write-ahead log with segmented files |
+| Format | 9 | ~3,500 | Binary on-disk formats (WAL, snapshot, MANIFEST) |
+| Disk Snapshot | 4 | ~1,450 | Crash-safe snapshot I/O |
+| Compaction | 3 | ~1,920 | WAL segment cleanup + tombstone tracking |
+| Branch Bundle | 8 | ~2,430 | Portable branch archives (tar.zst) |
+| Codec | 4 | ~740 | Encryption/compression abstraction |
+| Coordination | 1 | ~520 | Multi-process WAL file locking (feature-gated) |
 
 ## Module Map
 
@@ -40,9 +37,6 @@ durability/src/
 │   ├── primitives.rs               SnapshotSerializer (per-primitive binary format)
 │   ├── segment_meta.rs             SegmentMeta (optional sidecar files)
 │   └── watermark.rs                SnapshotWatermark, CheckpointInfo
-├── recovery/
-│   ├── coordinator.rs              RecoveryCoordinator (MANIFEST→snapshot→WAL)
-│   └── replayer.rs                 WalReplayer (watermark-filtered replay)
 ├── disk_snapshot/
 │   ├── writer.rs                   SnapshotWriter (write-fsync-rename)
 │   ├── reader.rs                   SnapshotReader (load + validate)
@@ -50,10 +44,6 @@ durability/src/
 ├── compaction/
 │   ├── wal_only.rs                 WalOnlyCompactor (remove covered segments)
 │   └── tombstone.rs                TombstoneIndex (deletion audit trail)
-├── database/
-│   ├── handle.rs                   DatabaseHandle (central coordinator)
-│   ├── config.rs                   DatabaseConfig (durability + codec)
-│   └── paths.rs                    DatabasePaths (directory structure)
 ├── branch_bundle/
 │   ├── writer.rs                   BranchBundleWriter (tar.zst archive)
 │   ├── reader.rs                   BranchBundleReader (validate + extract)
@@ -305,41 +295,18 @@ Semantics:
 
 ---
 
-## 3. Recovery (`recovery/`)
+## 3. Recovery
 
-### 3.1 RecoveryCoordinator (`coordinator.rs`, 1162 lines)
+Recovery orchestration lives in `strata_concurrency::RecoveryCoordinator`
+(`crates/concurrency/src/recovery.rs`), not in this crate. It consumes the
+durability building blocks described here: `WalReader` for segment iteration,
+`ManifestManager` for watermarks, `SnapshotReader` for restoring state.
 
-Orchestrates crash recovery from MANIFEST + snapshot + WAL.
-
-**Recovery algorithm:**
-
-```
-1. Load MANIFEST
-2. Determine recovery path:
-   a. Snapshot exists and file is readable:
-      → Load snapshot sections
-      → Replay WAL records with txn_id > watermark
-   b. No snapshot or file missing:
-      → Replay ALL WAL records
-3. Truncate partial records at WAL tail
-4. Rebuild missing .meta sidecars (backward compat)
-5. Return RecoveryResult with stats
-```
-
-**Watermark consistency (D-5 invariant):** Uses `min(manifest_watermark, snapshot_watermark)` to handle the case where MANIFEST was updated but snapshot write was incomplete.
-
-**Conservative approach:** If a snapshot file is referenced in MANIFEST but missing from disk, falls back to full WAL replay rather than failing. Replays extra data rather than risking data loss.
-
-### 3.2 WalReplayer (`replayer.rs`, 514 lines)
-
-Stateless WAL replay engine.
-
-- `replay_after(wal_dir, watermark, callback)` — replay records with `txn_id > watermark`
-- `replay_all(wal_dir, callback)` — replay all records
-- Uses WalReader's watermark-filtered reading (skips covered segments via `.meta`)
-- Returns `ReplayStats` (segments_read, records_read/skipped/applied, corrupted)
-
-**Properties:** Deterministic, idempotent, ordered by txn_id.
+A richer MANIFEST-first recovery planner was prototyped under
+`crates/durability/src/recovery/` but was never adopted by the live engine
+path. That prototype has been removed; the concepts it explored (explicit
+recovery plan, snapshot discovery) can be ported into the concurrency
+crate's coordinator as a future improvement.
 
 ---
 
@@ -424,48 +391,18 @@ Supports time-based cleanup via `cleanup_before(timestamp)`. Serializable for in
 
 ---
 
-## 6. Database Lifecycle (`database/`)
+## 6. Database Lifecycle
 
-### 6.1 DatabaseHandle (`handle.rs`, 595 lines)
+This crate does not own a top-level database handle. The engine
+(`crates/engine/src/database/open.rs`) wires `WalWriter`, `ManifestManager`,
+`CheckpointCoordinator`, and the storage engine together directly and owns
+the lifecycle (create/open/recover/close).
 
-Central coordinator wrapping MANIFEST, WAL, snapshots, and codec.
-
-**Lifecycle methods:**
-- `create(path, config)` — create new database with UUID, MANIFEST, WAL directory
-- `open(path, config)` — open existing (validates codec match)
-- `open_or_create(path, config)` — convenience
-- `recover(snapshot_callback, record_callback)` — run RecoveryCoordinator
-- `checkpoint(data)` — create snapshot, update MANIFEST watermark
-- `close()` — flush WAL, close handle
-
-**Thread safety:** Mutex-protected WAL and MANIFEST components.
-
-**UUID generation:** Combines timestamp microseconds with random seed for uniqueness.
-
-### 6.2 DatabasePaths (`paths.rs`)
-
-```
-{root}/
-├── MANIFEST           Physical metadata
-├── wal/               WAL segments + .meta sidecars
-│   ├── wal-000001.seg
-│   ├── wal-000001.meta
-│   └── ...
-├── snapshots/         Checkpoint files
-│   ├── snap-000001.chk
-│   └── ...
-└── data/              Auxiliary data (models, etc.)
-```
-
-### 6.3 DatabaseConfig (`config.rs`)
-
-Builder-pattern configuration:
-
-| Field | Type | Default |
-|-------|------|---------|
-| `durability` | `DurabilityMode` | Standard (100ms/1000) |
-| `wal_config` | `WalConfig` | 64MB segments |
-| `codec_id` | `String` | "identity" |
+An alternate `DatabaseHandle` facade was prototyped under
+`crates/durability/src/database/` with its own directory layout
+(`WAL/`, `SNAPSHOTS/`, `DATA/`) but was never adopted by the live engine
+path. That prototype has been removed; the engine uses lowercase
+`wal/`, `segments/`, `snapshots/`.
 
 ---
 
@@ -584,7 +521,7 @@ Client → TransactionContext.put()
 ### Checkpoint Path
 
 ```
-DatabaseHandle.checkpoint(data) →
+Engine checkpoint flow (crates/engine/src/database/compaction.rs) →
   1. CheckpointCoordinator.checkpoint()
      a. Serialize all primitive sections
      b. SnapshotWriter.create_snapshot()
@@ -596,19 +533,22 @@ DatabaseHandle.checkpoint(data) →
 
 ### Recovery Path
 
+Recovery is orchestrated by `strata_concurrency::RecoveryCoordinator`,
+not by the durability crate. From the engine open path:
+
 ```
-RecoveryCoordinator.recover() →
+strata_concurrency::RecoveryCoordinator::new(wal_dir).recover() →
   1. Load MANIFEST → get snapshot_id, watermark, active_segment
   2. Load snapshot (if exists):
      a. SnapshotReader.load() → validate CRC, decode sections
-     b. Callback: restore primitive state from sections
-  3. WalReplayer.replay_after(watermark):
-     a. Skip segments with meta.max_txn_id <= watermark
+     b. Restore primitive state from sections
+  3. WalReader.read_all_after_watermark(wal_dir, watermark):
+     a. Skip closed segments with meta.max_txn_id <= watermark
      b. For each record with txn_id > watermark:
-        → Callback: apply puts/deletes to storage
+        → Apply puts/deletes to storage
   4. Truncate partial records at WAL tail
   5. Rebuild missing .meta sidecars
-  6. Return (manifest, replay_stats)
+  6. Return (manifest, recovery_stats)
 ```
 
 ---
@@ -622,7 +562,6 @@ RecoveryCoordinator.recover() →
 | SnapshotWriter | Single-owner | Write-fsync-rename (temp → final) |
 | CounterFile | `WalFileLock` (file lock) | Serialize multi-process access |
 | WalReader | Stateless | No synchronization needed |
-| RecoveryCoordinator | Single-threaded | Runs before database accepts connections |
 
 **Crash safety invariants:**
 - WAL records are atomic (length-prefixed + CRC32)

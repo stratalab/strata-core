@@ -21,12 +21,8 @@
 //!    export STRATA_ENCRYPTION_KEY="000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
 //!    ```
 //!
-//! 2. Use `"aes-gcm-256"` as the codec ID when creating a database:
-//!    ```text
-//!    let config = DatabaseConfig { codec_id: "aes-gcm-256".to_string(), .. };
-//!    ```
-//!
-//! 3. Or obtain a codec directly via [`get_codec("aes-gcm-256")`](get_codec).
+//! 2. Obtain a codec via [`get_codec("aes-gcm-256")`](get_codec) and pass it
+//!    into the engine's durability wiring.
 //!
 //! **Important:** A database created with one codec cannot be opened with a
 //! different codec — the MANIFEST records the codec ID and validates on open.
