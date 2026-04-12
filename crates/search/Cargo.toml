@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 description = "Pluggable search orchestration for Strata"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 expand = ["dep:ureq"]

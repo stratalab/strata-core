@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 description = "Inference engine for Strata — local (llama.cpp) and cloud providers"
 
+[lints]
+workspace = true
+
 [features]
 default = ["local"]
 local = ["dep:cmake"]   # Compile llama.cpp from vendored source (GPU auto-detected)
@@ -24,7 +27,7 @@ cmake = { version = "0.1", optional = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 ureq = { workspace = true, optional = true }
-sha2 = { version = "0.10", optional = true }
+sha2 = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 

@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 description = "Command execution layer for Strata database"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 embed = ["strata-intelligence/embed", "strata-engine/embed"]
@@ -55,7 +58,7 @@ strsim = { workspace = true }
 tracing = { workspace = true }
 
 # Unix signals for IPC server
-libc = "0.2"
+libc = { workspace = true }
 
 # Arrow interoperability (optional)
 arrow = { workspace = true, optional = true }

@@ -10,9 +10,6 @@
 //!
 //! Persistence and durability are handled by the `strata-durability` crate.
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-
 pub mod block_cache;
 pub mod bloom;
 pub mod compaction;

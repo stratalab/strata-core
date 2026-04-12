@@ -20,9 +20,6 @@
 //! cargo build --features perf-trace
 //! ```
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-
 pub mod background;
 pub mod coordinator;
 pub mod database;
