@@ -4,6 +4,7 @@ use std::io;
 use thiserror::Error;
 
 /// Errors that can occur during BranchBundle operations
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BranchBundleError {
     /// Branch not found in BranchIndex

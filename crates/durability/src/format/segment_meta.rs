@@ -195,6 +195,7 @@ impl SegmentMeta {
 }
 
 /// Errors that can occur when reading or writing segment metadata.
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SegmentMetaError {
     /// Data too short to contain a valid metadata header.

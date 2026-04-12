@@ -156,6 +156,7 @@ pub fn compute_event_hash(
 }
 
 /// Validation error for EventLog operations
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventLogValidationError {
     /// Payload must be an object, not a primitive or array

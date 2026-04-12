@@ -58,6 +58,7 @@ pub const MAX_ARRAY_SIZE: usize = 1_000_000;
 ///
 /// This error type is specific to JSON document constraints (size, nesting, paths).
 /// For general value limits, see [`crate::limits::LimitError`].
+#[non_exhaustive]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum JsonLimitError {
     /// Document exceeds maximum size
@@ -407,6 +408,7 @@ impl<T: Into<JsonValue>> From<Option<T>> for JsonValue {
 // =============================================================================
 
 /// Error type for JSON path parsing
+#[non_exhaustive]
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum PathParseError {
     /// Empty key in path
@@ -986,6 +988,7 @@ impl fmt::Display for JsonPatch {
 // =============================================================================
 
 /// Error type for path operations
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum JsonPathError {
     /// Type mismatch during path traversal

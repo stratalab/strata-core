@@ -216,6 +216,7 @@ impl CheckpointData {
 }
 
 /// Errors that can occur during checkpoint creation
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CheckpointError {
     /// IO error during checkpoint

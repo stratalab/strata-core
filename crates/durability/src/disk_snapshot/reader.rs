@@ -238,6 +238,7 @@ impl LoadedSection {
 }
 
 /// Errors that can occur when reading a snapshot
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotReadError {
     /// File is too small to be a valid snapshot

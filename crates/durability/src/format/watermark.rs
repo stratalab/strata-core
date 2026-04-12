@@ -142,6 +142,7 @@ impl Default for SnapshotWatermark {
 }
 
 /// Errors that can occur with watermark operations
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WatermarkError {
     /// Insufficient data for deserialization

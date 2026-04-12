@@ -113,6 +113,7 @@ impl Default for CompactInfo {
 }
 
 /// Compaction error types
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum CompactionError {
     /// No snapshot available for compaction

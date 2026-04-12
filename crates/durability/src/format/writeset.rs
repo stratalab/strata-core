@@ -473,6 +473,7 @@ impl Writeset {
 }
 
 /// Writeset parsing errors.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WritesetError {
     /// Not enough data to parse

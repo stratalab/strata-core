@@ -71,6 +71,7 @@ impl WalConfig {
 }
 
 /// WAL configuration errors.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WalConfigError {
     /// Segment size is too small (minimum 1KB).

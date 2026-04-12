@@ -10,6 +10,7 @@ use std::fmt;
 // ============================================================================
 
 /// Errors that can occur when calling an external LLM endpoint
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum LlmClientError {
     /// HTTP request failed (network unreachable, connection refused, etc.)

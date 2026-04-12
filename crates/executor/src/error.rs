@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 ///     }
 /// }
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, thiserror::Error)]
 pub enum Error {
     // ==================== Not Found ====================
@@ -322,6 +323,7 @@ pub enum Error {
 }
 
 /// Error severity classification for CLI output formatting.
+#[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorSeverity {
     /// User made a mistake (wrong input, missing entity, wrong type).
