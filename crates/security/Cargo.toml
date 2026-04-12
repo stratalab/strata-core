@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 description = "Access control and configuration for Strata database"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true }
 zeroize = "1"

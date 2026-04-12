@@ -45,8 +45,6 @@
 //! // Data from experiment-1 is not visible here
 //! ```
 
-#![warn(missing_docs)]
-
 mod api;
 pub(crate) mod bridge;
 mod command;

@@ -9,6 +9,9 @@ repository.workspace = true
 publish = false
 description = "Embedding and inference infrastructure for Strata"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 embed = ["dep:strata-inference"]
@@ -25,7 +28,7 @@ strata-search = { path = "../search" }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sha2 = "0.10"
+sha2 = { workspace = true }
 strata-inference = { path = "../inference", optional = true, features = ["local", "download"] }
 
 [dev-dependencies]

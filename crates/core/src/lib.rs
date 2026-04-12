@@ -11,9 +11,6 @@
 //! - Primitive types: Event, JSON, Vector types (in `primitives` module)
 //! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-
 // Module declarations
 pub mod branch_dag; // Branch DAG types and constants
 pub mod branch_types; // Branch lifecycle types
