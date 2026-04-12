@@ -575,6 +575,7 @@ impl TruncateInfo {
 }
 
 /// WAL reader errors.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum WalReaderError {
     /// I/O error

@@ -449,6 +449,7 @@ impl std::fmt::Display for ConstraintReason {
 ///     Ok(value) => { /* success */ }
 /// }
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum StrataError {
     // =========================================================================

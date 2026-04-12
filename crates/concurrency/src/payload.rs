@@ -145,6 +145,7 @@ pub fn serialize_wal_record_into(
 }
 
 /// Errors from payload serialization/deserialization.
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum PayloadError {
     /// Failed to deserialize payload bytes

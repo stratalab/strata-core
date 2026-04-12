@@ -24,6 +24,7 @@ use strata_storage::SegmentedStore;
 /// Per spec Core Invariants:
 /// - All-or-nothing commit: transaction either commits or aborts entirely
 /// - First-committer-wins: conflicts are detected based on read-set
+#[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum CommitError {
     /// Transaction aborted due to validation conflicts

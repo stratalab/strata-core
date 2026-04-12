@@ -439,6 +439,7 @@ impl SnapshotSerializer {
 }
 
 /// Errors that can occur during primitive serialization
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum PrimitiveSerializeError {
     /// Unexpected end of data

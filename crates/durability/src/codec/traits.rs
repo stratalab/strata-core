@@ -50,6 +50,7 @@ pub trait StorageCodec: Send + Sync {
 }
 
 /// Codec errors.
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CodecError {
     /// Decoding failed (e.g., decryption failure, invalid format).

@@ -271,6 +271,7 @@ impl Limits {
 /// Limit validation errors
 ///
 /// These errors map to `ConstraintViolation` error codes in the wire protocol.
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum LimitError {
     /// Key exceeds maximum length

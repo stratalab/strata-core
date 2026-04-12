@@ -1,4 +1,5 @@
 /// Errors that can occur during inference operations.
+#[non_exhaustive]
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum InferenceError {
     #[error("llama.cpp: {0}")]

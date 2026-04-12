@@ -434,6 +434,7 @@ impl TombstoneIndex {
 }
 
 /// Tombstone errors
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum TombstoneError {
     /// Not enough data to parse tombstone

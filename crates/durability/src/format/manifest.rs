@@ -318,6 +318,7 @@ impl ManifestManager {
 }
 
 /// Errors that can occur with MANIFEST operations
+#[non_exhaustive]
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
     /// MANIFEST file too short

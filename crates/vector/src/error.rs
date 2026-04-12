@@ -4,6 +4,7 @@ use strata_core::{BranchId, EntityRef, StrataError};
 use thiserror::Error;
 
 /// Errors specific to the Vector primitive
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum VectorError {
     /// Collection with given name was not found

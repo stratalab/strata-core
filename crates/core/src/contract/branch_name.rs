@@ -53,6 +53,7 @@ pub const MAX_BRANCH_NAME_LENGTH: usize = 256;
 pub struct BranchName(String);
 
 /// Error when validating a branch name
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BranchNameError {
     /// Name is empty

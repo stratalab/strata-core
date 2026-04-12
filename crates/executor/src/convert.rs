@@ -167,6 +167,18 @@ impl From<StrataError> for Error {
                         .to_string(),
                 ),
             },
+
+            // Catch-all for future StrataError variants
+            _ => {
+                tracing::warn!(target: "strata::error::exhaustive", "unmapped StrataError variant in executor conversion");
+                Error::Internal {
+                    reason: format!("Unmapped error: {err}"),
+                    hint: Some(
+                        "A new error variant was added that the executor doesn't handle yet."
+                            .to_string(),
+                    ),
+                }
+            }
         }
     }
 }

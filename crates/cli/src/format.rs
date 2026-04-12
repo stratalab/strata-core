@@ -60,6 +60,7 @@ pub fn format_error(err: &Error, mode: OutputMode) -> String {
                 ErrorSeverity::UserError => "user_error",
                 ErrorSeverity::SystemFailure => "system_error",
                 ErrorSeverity::InternalBug => "internal_bug",
+                _ => "unknown",
             };
             serde_json::to_string_pretty(&serde_json::json!({
                 "error": format!("{}", err),
@@ -73,6 +74,7 @@ pub fn format_error(err: &Error, mode: OutputMode) -> String {
                 ErrorSeverity::UserError => "(error)",
                 ErrorSeverity::SystemFailure => "(system error)",
                 ErrorSeverity::InternalBug => "(internal bug)",
+                _ => "(unknown)",
             };
             format!("{} {}", prefix, err)
         }

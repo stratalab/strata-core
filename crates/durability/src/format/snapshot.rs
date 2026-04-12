@@ -123,6 +123,7 @@ impl SnapshotHeader {
 }
 
 /// Errors that can occur when validating a snapshot header
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum SnapshotHeaderError {
     /// Invalid magic bytes
