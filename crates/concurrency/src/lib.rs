@@ -10,9 +10,6 @@
 //! - WAL integration for durability
 //! - JSON region-based conflict detection
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-
 pub(crate) mod conflict;
 pub mod lock_ordering;
 pub mod manager;

@@ -13,9 +13,6 @@
 //! Recovery planning lives in `strata_concurrency::RecoveryCoordinator`,
 //! which consumes the building blocks above.
 
-#![warn(missing_docs)]
-#![warn(clippy::all)]
-
 // === Modules ===
 pub mod branch_bundle; // Portable execution artifacts (BranchBundle)
 pub mod codec; // Storage codec abstraction (identity, future encryption/compression)

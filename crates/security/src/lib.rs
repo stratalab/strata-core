@@ -3,8 +3,6 @@
 //! This crate provides the [`AccessMode`] and [`OpenOptions`] types used to
 //! control how a database is opened and what operations are permitted.
 
-#![warn(missing_docs)]
-
 mod sensitive;
 
 pub use sensitive::SensitiveString;

@@ -1,10 +1,16 @@
 [package]
 name = "strata-vector"
-version = "0.6.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Vector similarity search engine for StrataDB"
-license = "Apache-2.0"
 publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 strata-core = { path = "../core" }
@@ -25,7 +31,7 @@ parking_lot = { workspace = true }
 uuid = { workspace = true }
 thiserror = { workspace = true }
 rand = { workspace = true }
-fs2 = "0.4"
+fs2 = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

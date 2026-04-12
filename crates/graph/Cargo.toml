@@ -1,10 +1,16 @@
 [package]
 name = "strata-graph"
-version = "0.6.1"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Graph engine for StrataDB"
-license = "Apache-2.0"
 publish = false
+
+[lints]
+workspace = true
 
 [dependencies]
 strata-core = { path = "../core" }

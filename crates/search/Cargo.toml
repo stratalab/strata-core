@@ -4,10 +4,13 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
-license = "Apache-2.0"
+license.workspace = true
 repository.workspace = true
 publish = false
 description = "Pluggable search orchestration for Strata"
+
+[lints]
+workspace = true
 
 [features]
 default = []
