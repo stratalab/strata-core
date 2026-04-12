@@ -3,6 +3,7 @@ name = "strata-vector"
 version = "0.6.1"
 edition = "2021"
 description = "Vector similarity search engine for StrataDB"
+license.workspace = true
 
 [dependencies]
 strata-core = { path = "../core" }

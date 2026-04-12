@@ -3,6 +3,7 @@ name = "strata-graph"
 version = "0.6.1"
 edition = "2021"
 description = "Graph engine for StrataDB"
+license.workspace = true
 
 [dependencies]
 strata-core = { path = "../core" }
