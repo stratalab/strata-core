@@ -29,10 +29,15 @@ jobs:
         run: cargo metadata --locked --format-version 1 > /dev/null
       - name: Advisory + license check
         run: cargo deny check
-      - name: DAG guard (normal deps only - manifest guard added in E4)
+      - name: DAG guard
         run: |
+          # Guard: engine must not have normal dep on vector (dev-deps for tests are OK)
           if cargo tree --package strata-engine --edges=normal --format="{p}" | grep -q strata-vector; then
             echo "ERROR: strata-engine has normal dep on strata-vector" && exit 1
+          fi
+          # Guard: vector_benchmarks must live in vector crate, not engine
+          if [ -f crates/engine/benches/vector_benchmarks.rs ]; then
+            echo "ERROR: vector_benchmarks.rs belongs in crates/vector/benches/" && exit 1
           fi
 
   test:
