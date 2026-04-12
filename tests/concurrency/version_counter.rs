@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_concurrency::manager::TransactionManager;
+use strata_core::id::{CommitVersion, TxnId};
 
 // ============================================================================
 // Monotonic Increment
@@ -17,9 +18,9 @@ use strata_concurrency::manager::TransactionManager;
 
 #[test]
 fn versions_monotonically_increase() {
-    let manager = TransactionManager::new(1);
+    let manager = TransactionManager::new(CommitVersion(1));
 
-    let mut prev = 0u64;
+    let mut prev = CommitVersion::ZERO;
     for _ in 0..100 {
         let v = manager.allocate_version().unwrap();
         assert!(v > prev, "Version should increase: {} -> {}", prev, v);
@@ -29,9 +30,9 @@ fn versions_monotonically_increase() {
 
 #[test]
 fn txn_ids_monotonically_increase() {
-    let manager = TransactionManager::new(1);
+    let manager = TransactionManager::new(CommitVersion(1));
 
-    let mut prev = 0u64;
+    let mut prev = TxnId::ZERO;
     for _ in 0..100 {
         let id = manager.next_txn_id().unwrap();
         assert!(id > prev, "Txn ID should increase: {} -> {}", prev, id);
@@ -41,11 +42,11 @@ fn txn_ids_monotonically_increase() {
 
 #[test]
 fn version_starts_from_initial() {
-    let manager = TransactionManager::new(1000);
+    let manager = TransactionManager::new(CommitVersion(1000));
 
     let v = manager.allocate_version().unwrap();
     assert!(
-        v >= 1000,
+        v >= CommitVersion(1000),
         "First version should be >= initial (1000), got {}",
         v
     );
@@ -57,7 +58,7 @@ fn version_starts_from_initial() {
 
 #[test]
 fn concurrent_version_allocation_unique() {
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let barrier = Arc::new(Barrier::new(8));
     let count_per_thread = 1000;
 
@@ -77,7 +78,7 @@ fn concurrent_version_allocation_unique() {
         })
         .collect();
 
-    let mut all_versions: Vec<u64> = handles
+    let mut all_versions: Vec<CommitVersion> = handles
         .into_iter()
         .flat_map(|h| h.join().unwrap())
         .collect();
@@ -97,7 +98,7 @@ fn concurrent_version_allocation_unique() {
 
 #[test]
 fn concurrent_txn_id_allocation_unique() {
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let barrier = Arc::new(Barrier::new(4));
 
     let handles: Vec<_> = (0..4)
@@ -116,7 +117,7 @@ fn concurrent_txn_id_allocation_unique() {
         })
         .collect();
 
-    let mut all_ids: Vec<u64> = handles
+    let mut all_ids: Vec<TxnId> = handles
         .into_iter()
         .flat_map(|h| h.join().unwrap())
         .collect();
@@ -130,7 +131,7 @@ fn concurrent_txn_id_allocation_unique() {
 
 #[test]
 fn high_contention_version_allocation() {
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let barrier = Arc::new(Barrier::new(16));
     let total_allocated = Arc::new(AtomicU64::new(0));
 
@@ -164,7 +165,7 @@ fn high_contention_version_allocation() {
 
 #[test]
 fn sequential_allocation_no_gaps() {
-    let manager = TransactionManager::new(100);
+    let manager = TransactionManager::new(CommitVersion(100));
 
     let mut versions = Vec::new();
     for _ in 0..100 {
@@ -175,7 +176,7 @@ fn sequential_allocation_no_gaps() {
     for i in 1..versions.len() {
         assert_eq!(
             versions[i],
-            versions[i - 1] + 1,
+            versions[i - 1].next(),
             "Gap between {} and {}",
             versions[i - 1],
             versions[i]
@@ -190,11 +191,11 @@ fn sequential_allocation_no_gaps() {
 #[test]
 fn manager_with_txn_id_continues_from_max() {
     // Simulating recovery where max txn_id was 1000
-    let manager = TransactionManager::with_txn_id(100, 1000);
+    let manager = TransactionManager::with_txn_id(CommitVersion(100), TxnId(1000));
 
     let id = manager.next_txn_id().unwrap();
     assert!(
-        id > 1000,
+        id > TxnId(1000),
         "After recovery, txn_id should be > max (1000), got {}",
         id
     );
@@ -202,23 +203,23 @@ fn manager_with_txn_id_continues_from_max() {
 
 #[test]
 fn manager_initial_version_respected() {
-    let manager = TransactionManager::new(5000);
+    let manager = TransactionManager::new(CommitVersion(5000));
 
     let v = manager.allocate_version().unwrap();
-    assert!(v >= 5000, "Initial version should be respected");
+    assert!(v >= CommitVersion(5000), "Initial version should be respected");
 }
 
 #[test]
 fn manager_recovery_scenario() {
     // Simulate: had transactions up to version 10000 and txn_id 500
-    let manager = TransactionManager::with_txn_id(10000, 500);
+    let manager = TransactionManager::with_txn_id(CommitVersion(10000), TxnId(500));
 
     // New allocations should continue from those points
     let v1 = manager.allocate_version().unwrap();
     let id1 = manager.next_txn_id().unwrap();
 
-    assert!(v1 >= 10000, "Version should continue from 10000");
-    assert!(id1 > 500, "Txn ID should continue from 500");
+    assert!(v1 >= CommitVersion(10000), "Version should continue from 10000");
+    assert!(id1 > TxnId(500), "Txn ID should continue from 500");
 
     // Subsequent allocations should still be monotonic
     let v2 = manager.allocate_version().unwrap();
@@ -235,7 +236,7 @@ fn manager_recovery_scenario() {
 #[test]
 fn version_allocation_thread_safe() {
     // This test verifies the AtomicU64 is working correctly
-    let manager = Arc::new(TransactionManager::new(0));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(0)));
 
     let handles: Vec<_> = (0..4)
         .map(|_| {
@@ -244,7 +245,7 @@ fn version_allocation_thread_safe() {
                 for _ in 0..1000 {
                     let v = manager.allocate_version().unwrap();
                     // Each version should be valid (non-zero after first allocation)
-                    assert!(v > 0 || v == 1);
+                    assert!(v > CommitVersion::ZERO || v == CommitVersion(1));
                 }
             })
         })
@@ -257,7 +258,7 @@ fn version_allocation_thread_safe() {
 
 #[test]
 fn interleaved_version_and_txn_id_allocation() {
-    let manager = TransactionManager::new(100);
+    let manager = TransactionManager::new(CommitVersion(100));
 
     let mut versions = Vec::new();
     let mut txn_ids = Vec::new();
@@ -284,7 +285,7 @@ fn interleaved_version_and_txn_id_allocation() {
 
 #[test]
 fn rapid_allocation_performance() {
-    let manager = TransactionManager::new(1);
+    let manager = TransactionManager::new(CommitVersion(1));
 
     let start = std::time::Instant::now();
     for _ in 0..100_000 {
@@ -306,7 +307,7 @@ fn rapid_allocation_performance() {
 fn manager_creation_cost() {
     let start = std::time::Instant::now();
     for _ in 0..1000 {
-        let _ = TransactionManager::new(1);
+        let _ = TransactionManager::new(CommitVersion(1));
     }
     let elapsed = start.elapsed();
 

@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
+use strata_core::id::CommitVersion;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -31,7 +32,7 @@ fn stress_concurrent_writers_readers() {
     // Pre-populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
             .unwrap();
@@ -48,7 +49,7 @@ fn stress_concurrent_writers_readers() {
                 while !stop.load(Ordering::Relaxed) {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key_{}", i));
-                        let version = store.next_version();
+                        let version = CommitVersion(store.next_version());
                         let _ = store.put_with_version_mode(
                             key,
                             Value::Int(t * 10000 + counter),
@@ -77,7 +78,7 @@ fn stress_concurrent_writers_readers() {
                 while !stop.load(Ordering::Relaxed) {
                     for i in 0..100 {
                         let key = create_test_key(branch_id, &format!("key_{}", i));
-                        let _ = store.get_versioned(&key, u64::MAX);
+                        let _ = store.get_versioned(&key, CommitVersion::MAX);
                         reads.fetch_add(1, Ordering::Relaxed);
                     }
                     if reads.load(Ordering::Relaxed) > 500_000 {
@@ -117,7 +118,7 @@ fn stress_rapid_snapshot_creation() {
     // Populate
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
             .unwrap();
@@ -140,7 +141,7 @@ fn stress_rapid_snapshot_creation() {
     // Verify versioned reads work
     for version in versions.iter().take(100) {
         let key = create_test_key(branch_id, "key_0");
-        let result = store.get_versioned(&key, *version).unwrap();
+        let result = store.get_versioned(&key, CommitVersion(*version)).unwrap();
         assert_eq!(result.unwrap().value, Value::Int(0));
     }
 }
@@ -161,7 +162,7 @@ fn stress_version_chain_growth() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                (i + 1) as u64,
+                CommitVersion((i + 1) as u64),
                 None,
                 WriteMode::Append,
             )
@@ -173,7 +174,7 @@ fn stress_version_chain_growth() {
     // Read latest
     let read_start = Instant::now();
     for _ in 0..10_000 {
-        let _ = store.get_versioned(&key, u64::MAX);
+        let _ = store.get_versioned(&key, CommitVersion::MAX);
     }
     let read_elapsed = read_start.elapsed();
 
@@ -199,7 +200,7 @@ fn stress_ttl_expiration_cleanup() {
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, ttl, WriteMode::Append)
+            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), ttl, WriteMode::Append)
             .unwrap();
     }
 
@@ -210,7 +211,7 @@ fn stress_ttl_expiration_cleanup() {
     let mut expired_count = 0;
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
-        if store.get_versioned(&key, u64::MAX).unwrap().is_none() {
+        if store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none() {
             expired_count += 1;
         }
     }
@@ -236,7 +237,7 @@ fn stress_many_branches_concurrent() {
                 let branch_id = BranchId::new();
                 for i in 0..keys_per_branch {
                     let key = create_test_key(branch_id, &format!("key_{}", i));
-                    let version = store.next_version();
+                    let version = CommitVersion(store.next_version());
                     store
                         .put_with_version_mode(key, Value::Int(i), version, None, WriteMode::Append)
                         .unwrap();
@@ -255,7 +256,7 @@ fn stress_many_branches_concurrent() {
     for branch_id in branch_ids {
         for i in 0..keys_per_branch {
             let key = create_test_key(branch_id, &format!("key_{}", i));
-            let val = store.get_versioned(&key, u64::MAX).unwrap();
+            let val = store.get_versioned(&key, CommitVersion::MAX).unwrap();
             assert_eq!(val.unwrap().value, Value::Int(i));
         }
     }
@@ -277,7 +278,7 @@ fn stress_sustained_throughput() {
     let duration = Duration::from_secs(5);
     let start = Instant::now();
     let mut ops = 0u64;
-    let mut version = 1u64;
+    let mut version = CommitVersion(1);
 
     while start.elapsed() < duration {
         let key = create_test_key(branch_id, &format!("key_{}", ops % 1000));
@@ -290,8 +291,8 @@ fn stress_sustained_throughput() {
                 WriteMode::Append,
             )
             .unwrap();
-        version += 1;
-        let _ = store.get_versioned(&key, u64::MAX);
+        version = CommitVersion(version.0 + 1);
+        let _ = store.get_versioned(&key, CommitVersion::MAX);
         ops += 2; // put + get
     }
 

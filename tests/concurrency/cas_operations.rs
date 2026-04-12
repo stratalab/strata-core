@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use strata_concurrency::transaction::{CASOperation, TransactionContext};
 use strata_concurrency::validation::{validate_cas_set, validate_transaction, ConflictType};
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -32,10 +33,10 @@ fn cas_succeeds_when_version_matches() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -86,15 +87,15 @@ fn cas_fails_when_version_stale() {
 
     // Create at version 1
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Update to version 2
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     let current_version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -131,7 +132,7 @@ fn cas_create_fails_when_key_exists() {
 
     // Key exists
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // CAS with expected_version=0 (expects key doesn't exist)
@@ -153,15 +154,15 @@ fn cas_fails_when_key_deleted() {
 
     // Create and delete
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
-    store.delete_with_version(&key, 2).unwrap();
+    store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
     // CAS with old version (before delete)
     let cas_set = vec![CASOperation {
@@ -183,7 +184,7 @@ fn cas_not_added_to_read_set() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "cas_no_read");
 
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Add CAS operation
     txn.cas_set.push(CASOperation {
@@ -206,26 +207,26 @@ fn cas_validated_separately_from_reads() {
 
     // Setup
     store
-        .put_with_version_mode(read_key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(read_key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let read_version = store
-        .get_versioned(&read_key, u64::MAX)
+        .get_versioned(&read_key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
     store
-        .put_with_version_mode(cas_key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(cas_key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     let cas_version = store
-        .get_versioned(&cas_key, u64::MAX)
+        .get_versioned(&cas_key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction reads one key, CAS on another
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(read_key.clone(), read_version);
     txn.cas_set.push(CASOperation {
         key: cas_key.clone(),
@@ -235,7 +236,7 @@ fn cas_validated_separately_from_reads() {
 
     // Modify read_key only
     store
-        .put_with_version_mode(read_key.clone(), Value::Int(10), 3, None, WriteMode::Append)
+        .put_with_version_mode(read_key.clone(), Value::Int(10), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
 
     // Validation should fail on read_key (ReadWriteConflict), not on CAS
@@ -270,13 +271,13 @@ fn multiple_cas_all_succeed() {
                 .put_with_version_mode(
                     key.clone(),
                     Value::Int(i),
-                    (i + 1) as u64,
+                    CommitVersion((i + 1) as u64),
                     None,
                     WriteMode::Append,
                 )
                 .unwrap();
             let v = store
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .version
@@ -311,28 +312,28 @@ fn multiple_cas_one_fails() {
     let key3 = create_test_key(branch_id, "cas_3");
 
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key1, u64::MAX)
+        .get_versioned(&key1, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     // Update key2 to make its version stale
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
 
     store
-        .put_with_version_mode(key3.clone(), Value::Int(3), 4, None, WriteMode::Append)
+        .put_with_version_mode(key3.clone(), Value::Int(3), CommitVersion(4), None, WriteMode::Append)
         .unwrap();
     let v3 = store
-        .get_versioned(&key3, u64::MAX)
+        .get_versioned(&key3, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -374,17 +375,17 @@ fn cas_in_full_transaction() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction with CAS
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.cas_set.push(CASOperation {
         key: key.clone(),
         expected_version: version,
@@ -404,17 +405,17 @@ fn cas_with_read_of_same_key() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction reads and CAS same key
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(key.clone(), version);
     txn.cas_set.push(CASOperation {
         key: key.clone(),
@@ -463,10 +464,10 @@ fn cas_conflict_reports_correct_key() {
     let key = create_test_key(branch_id, "conflict_key");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     let cas_set = vec![CASOperation {

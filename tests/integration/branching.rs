@@ -6952,10 +6952,10 @@ fn dag_records_revert() {
 
     // Write a few versions so we have a non-trivial range to revert.
     kv.put(&branch_id, "default", "k1", Value::Int(1)).unwrap();
-    let v_before = test_db.db.current_version();
+    let v_before = test_db.db.current_version().as_u64();
     kv.put(&branch_id, "default", "k2", Value::Int(2)).unwrap();
     kv.put(&branch_id, "default", "k1", Value::Int(99)).unwrap();
-    let v_after = test_db.db.current_version();
+    let v_after = test_db.db.current_version().as_u64();
 
     let revert_info =
         branch_ops::revert_version_range(&test_db.db, "dag_revert_branch", v_before + 1, v_after)

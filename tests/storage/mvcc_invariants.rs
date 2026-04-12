@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+use strata_core::id::CommitVersion;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -32,13 +33,13 @@ fn version_chain_stores_newest_first() {
 
     // Put multiple versions
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(3), 3, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(3), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
 
     // Get history - should be newest first
@@ -57,23 +58,23 @@ fn get_at_version_returns_value_lte_version() {
 
     // Put values at versions 1, 2, 3
     store
-        .put_with_version_mode(key.clone(), Value::Int(10), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(10), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(20), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(20), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(30), 3, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(30), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
 
     // Get at version 2 - should return value 20
-    let result = Storage::get_versioned(&store, &key, 2).unwrap();
+    let result = Storage::get_versioned(&store, &key, CommitVersion(2)).unwrap();
     assert!(result.is_some());
     assert_eq!(result.unwrap().value, Value::Int(20));
 
     // Get at version 2.5 (between 2 and 3) - should return value at version 2
     // Since we can't have fractional versions, test with version 2
-    let result = Storage::get_versioned(&store, &key, 2).unwrap();
+    let result = Storage::get_versioned(&store, &key, CommitVersion(2)).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(20));
 }
 
@@ -85,11 +86,11 @@ fn get_at_version_before_first_returns_none() {
 
     // Put value at version 5
     store
-        .put_with_version_mode(key.clone(), Value::Int(50), 5, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(50), CommitVersion(5), None, WriteMode::Append)
         .unwrap();
 
     // Get at version 1 (before first) - should return None
-    let result = Storage::get_versioned(&store, &key, 1).unwrap();
+    let result = Storage::get_versioned(&store, &key, CommitVersion(1)).unwrap();
     assert!(
         result.is_none(),
         "Should not find value before first version"
@@ -108,7 +109,7 @@ fn version_chain_preserves_all_versions() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                i as u64,
+                CommitVersion(i as u64),
                 None,
                 WriteMode::Append,
             )
@@ -121,7 +122,7 @@ fn version_chain_preserves_all_versions() {
 
     // Verify each version is accessible
     for i in 1..=10 {
-        let result = Storage::get_versioned(&store, &key, i as u64).unwrap();
+        let result = Storage::get_versioned(&store, &key, CommitVersion(i as u64)).unwrap();
         assert!(result.is_some(), "Version {} should exist", i);
         assert_eq!(result.unwrap().value, Value::Int(i));
     }
@@ -140,14 +141,14 @@ fn expired_values_filtered_at_read_time() {
     // Put value with very short TTL
     let ttl = Some(Duration::from_millis(1));
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), ttl, WriteMode::Append)
         .unwrap();
 
     // Wait for expiration
     thread::sleep(Duration::from_millis(10));
 
     // Should not be returned (expired)
-    let result = store.get_versioned(&key, u64::MAX).unwrap();
+    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(result.is_none(), "Expired value should not be returned");
 }
 
@@ -160,11 +161,11 @@ fn non_expired_values_returned() {
     // Put value with long TTL
     let ttl = Some(Duration::from_secs(3600)); // 1 hour
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, ttl, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), ttl, WriteMode::Append)
         .unwrap();
 
     // Should be returned (not expired)
-    let result = store.get_versioned(&key, u64::MAX).unwrap();
+    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(result.is_some(), "Non-expired value should be returned");
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
@@ -177,11 +178,11 @@ fn no_ttl_never_expires() {
 
     // Put value without TTL
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Should always be returned
-    let result = store.get_versioned(&key, u64::MAX).unwrap();
+    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert_eq!(
         result.unwrap().value,
         Value::Int(42),
@@ -201,14 +202,14 @@ fn tombstone_preserves_snapshot_isolation() {
 
     // Put a value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Capture version BEFORE delete
-    let version = store.version();
+    let version = CommitVersion(store.version());
 
     // Delete the key (creates tombstone)
-    store.delete_with_version(&key, 2).unwrap();
+    store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
     // Reading at captured version should still see the value
     let result = store.get_versioned(&key, version).unwrap();
@@ -219,7 +220,7 @@ fn tombstone_preserves_snapshot_isolation() {
     assert_eq!(result.unwrap().value, Value::Int(100));
 
     // Current store should not see the value
-    let current = store.get_versioned(&key, u64::MAX).unwrap();
+    let current = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(current.is_none(), "Current should not see deleted value");
 }
 
@@ -231,12 +232,12 @@ fn tombstone_not_returned_to_user() {
 
     // Put and delete
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
-    store.delete_with_version(&key, 2).unwrap();
+    store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
     // Get should return None, not the tombstone
-    let result = store.get_versioned(&key, u64::MAX).unwrap();
+    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(result.is_none(), "Tombstone should not be returned");
 }
 
@@ -247,7 +248,7 @@ fn delete_nonexistent_key_succeeds() {
     let key = create_test_key(branch_id, "never_existed");
 
     // Delete should succeed even for nonexistent key
-    let result = store.delete_with_version(&key, 1);
+    let result = store.delete_with_version(&key, CommitVersion(1));
     assert!(result.is_ok(), "Delete of nonexistent key should succeed");
 }
 
@@ -340,7 +341,7 @@ fn history_pagination_works() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                i as u64,
+                CommitVersion(i as u64),
                 None,
                 WriteMode::Append,
             )
@@ -354,13 +355,13 @@ fn history_pagination_works() {
     assert_eq!(page1[1].version.as_u64(), 4);
 
     // Page 2: next 2 (before version 4)
-    let page2 = Storage::get_history(&store, &key, Some(2), Some(4)).unwrap();
+    let page2 = Storage::get_history(&store, &key, Some(2), Some(CommitVersion(4))).unwrap();
     assert_eq!(page2.len(), 2);
     assert_eq!(page2[0].version.as_u64(), 3);
     assert_eq!(page2[1].version.as_u64(), 2);
 
     // Page 3: remaining
-    let page3 = Storage::get_history(&store, &key, Some(2), Some(2)).unwrap();
+    let page3 = Storage::get_history(&store, &key, Some(2), Some(CommitVersion(2))).unwrap();
     assert_eq!(page3.len(), 1);
     assert_eq!(page3[0].version.as_u64(), 1);
 }

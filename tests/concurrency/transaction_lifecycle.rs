@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use strata_concurrency::transaction::TransactionContext;
 use strata_concurrency::validation::validate_transaction;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -30,7 +31,7 @@ fn begin_commit_makes_writes_permanent() {
     let key = create_test_key(branch_id, "committed");
 
     // Begin transaction
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     assert!(txn.is_active());
 
     // Write
@@ -47,11 +48,11 @@ fn begin_commit_makes_writes_permanent() {
 
     // Apply write (simulating what manager does)
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Value should be visible
-    let stored = store.get_versioned(&key, u64::MAX).unwrap();
+    let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(stored.is_some());
     assert_eq!(stored.unwrap().value, Value::Int(42));
 }
@@ -59,7 +60,7 @@ fn begin_commit_makes_writes_permanent() {
 #[test]
 fn committed_status_is_committed() {
     let branch_id = BranchId::new();
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     txn.mark_validating().unwrap();
     txn.mark_committed().unwrap();
@@ -82,7 +83,7 @@ fn begin_abort_discards_writes() {
     let key = create_test_key(branch_id, "aborted");
 
     // Begin transaction
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Write (not yet applied to store)
     txn.write_set.insert(key.clone(), Value::Int(42));
@@ -92,7 +93,7 @@ fn begin_abort_discards_writes() {
     assert!(txn.is_aborted());
 
     // Write should NOT be in store
-    let stored = store.get_versioned(&key, u64::MAX).unwrap();
+    let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(
         stored.is_none(),
         "Aborted transaction writes should not be visible"
@@ -102,7 +103,7 @@ fn begin_abort_discards_writes() {
 #[test]
 fn abort_reason_recorded_in_status() {
     let branch_id = BranchId::new();
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     txn.mark_aborted("validation failed: conflict".to_string())
         .unwrap();
@@ -123,23 +124,23 @@ fn validation_failure_leads_to_abort() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction reads key
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(key.clone(), version);
     txn.write_set.insert(key.clone(), Value::Int(10));
 
     // Concurrent modification
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Validate - should fail
@@ -162,7 +163,7 @@ fn reset_clears_all_sets() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "reset");
 
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Add some data
     txn.read_set.insert(key.clone(), 1);
@@ -174,7 +175,7 @@ fn reset_clears_all_sets() {
     assert!(!txn.delete_set.is_empty());
 
     // Reset
-    txn.reset(2, branch_id, None);
+    txn.reset(TxnId(2), branch_id, None);
 
     // All sets should be empty
     assert!(txn.read_set.is_empty());
@@ -183,15 +184,15 @@ fn reset_clears_all_sets() {
     assert!(txn.cas_set.is_empty());
 
     // New values
-    assert_eq!(txn.txn_id, 2);
-    assert_eq!(txn.start_version, 0); // 0 when no snapshot provided
+    assert_eq!(txn.txn_id, TxnId(2));
+    assert_eq!(txn.start_version, CommitVersion(0)); // 0 when no snapshot provided
     assert!(txn.is_active());
 }
 
 #[test]
 fn reset_preserves_capacity() {
     let branch_id = BranchId::new();
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Add many items to force allocation
     for i in 0..100 {
@@ -204,7 +205,7 @@ fn reset_preserves_capacity() {
     let write_capacity_before = txn.write_set.capacity();
 
     // Reset
-    txn.reset(2, branch_id, None);
+    txn.reset(TxnId(2), branch_id, None);
 
     // Capacity should be preserved (no reallocation needed for next use)
     assert!(txn.read_set.capacity() >= read_capacity_before);
@@ -214,14 +215,14 @@ fn reset_preserves_capacity() {
 #[test]
 fn reset_after_abort_allows_reuse() {
     let branch_id = BranchId::new();
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Abort
     txn.mark_aborted("test".to_string()).unwrap();
     assert!(txn.is_aborted());
 
     // Reset
-    txn.reset(2, branch_id, None);
+    txn.reset(TxnId(2), branch_id, None);
 
     // Should be active again
     assert!(txn.is_active());
@@ -230,7 +231,7 @@ fn reset_after_abort_allows_reuse() {
 #[test]
 fn reset_after_commit_allows_reuse() {
     let branch_id = BranchId::new();
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Commit
     txn.mark_validating().unwrap();
@@ -238,7 +239,7 @@ fn reset_after_commit_allows_reuse() {
     assert!(txn.is_committed());
 
     // Reset
-    txn.reset(2, branch_id, None);
+    txn.reset(TxnId(2), branch_id, None);
 
     // Should be active again
     assert!(txn.is_active());
@@ -256,20 +257,20 @@ fn read_modify_write_workflow() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Read-modify-write
-    let mut txn = TransactionContext::new(1, branch_id, version);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(version));
 
     // Read (track in read_set)
-    let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     txn.read_set.insert(key.clone(), current.version.as_u64());
 
     // Modify
@@ -286,11 +287,11 @@ fn read_modify_write_workflow() {
 
     // Apply
     store
-        .put_with_version_mode(key.clone(), Value::Int(110), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(110), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Verify
-    let final_value = store.get_versioned(&key, u64::MAX).unwrap().unwrap().value;
+    let final_value = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap().value;
     assert_eq!(final_value, Value::Int(110));
 }
 
@@ -305,28 +306,28 @@ fn multi_key_transaction_workflow() {
 
     // Initial values
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     // key3 doesn't exist
 
     let v1 = store
-        .get_versioned(&key1, u64::MAX)
+        .get_versioned(&key1, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
     let v2 = store
-        .get_versioned(&key2, u64::MAX)
+        .get_versioned(&key2, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction: read k1, write k2, create k3
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(key1.clone(), v1);
     txn.read_set.insert(key2.clone(), v2);
     txn.write_set.insert(key2.clone(), Value::Int(20));
@@ -341,19 +342,19 @@ fn multi_key_transaction_workflow() {
 
     // Apply all writes
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key3.clone(), Value::Int(3), 4, None, WriteMode::Append)
+        .put_with_version_mode(key3.clone(), Value::Int(3), CommitVersion(4), None, WriteMode::Append)
         .unwrap();
 
     // Verify
     assert_eq!(
-        store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value,
+        store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value,
         Value::Int(20)
     );
     assert_eq!(
-        store.get_versioned(&key3, u64::MAX).unwrap().unwrap().value,
+        store.get_versioned(&key3, CommitVersion::MAX).unwrap().unwrap().value,
         Value::Int(3)
     );
 }
@@ -366,17 +367,17 @@ fn delete_workflow() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Transaction: read then delete
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(key.clone(), version);
     txn.delete_set.insert(key.clone());
 
@@ -388,10 +389,10 @@ fn delete_workflow() {
     txn.mark_committed().unwrap();
 
     // Apply delete
-    store.delete_with_version(&key, 2).unwrap();
+    store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
     // Verify deleted
-    assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
+    assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
 }
 
 // ============================================================================
@@ -403,7 +404,7 @@ fn empty_transaction_commits() {
     let store = Arc::new(SegmentedStore::new());
     let branch_id = BranchId::new();
 
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     txn.mark_validating().unwrap();
     let result = validate_transaction(&txn, &*store);
@@ -420,18 +421,18 @@ fn many_sequential_transactions() {
     let key = create_test_key(branch_id, "sequential");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     for i in 1..=10 {
         let version = store
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .version
             .as_u64();
 
-        let mut txn = TransactionContext::new(i as u64, branch_id, version);
+        let mut txn = TransactionContext::new(TxnId(i as u64), branch_id, CommitVersion(version));
         txn.read_set.insert(key.clone(), version);
         txn.write_set.insert(key.clone(), Value::Int(i));
 
@@ -448,7 +449,7 @@ fn many_sequential_transactions() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                (i + 1) as u64,
+                CommitVersion((i + 1) as u64),
                 None,
                 WriteMode::Append,
             )
@@ -456,6 +457,6 @@ fn many_sequential_transactions() {
     }
 
     // Final value should be 10
-    let final_value = store.get_versioned(&key, u64::MAX).unwrap().unwrap().value;
+    let final_value = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap().value;
     assert_eq!(final_value, Value::Int(10));
 }

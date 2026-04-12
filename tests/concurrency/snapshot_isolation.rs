@@ -7,6 +7,7 @@
 
 use std::sync::Arc;
 use strata_concurrency::transaction::TransactionContext;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -29,10 +30,10 @@ fn snapshot_captures_state_at_creation() {
     let key = create_test_key(branch_id, "captured");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
-    let result = store.get_versioned(&key, 1).unwrap();
+    let result = store.get_versioned(&key, CommitVersion(1)).unwrap();
     assert!(result.is_some());
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
@@ -44,7 +45,7 @@ fn snapshot_is_immutable() {
     let key = create_test_key(branch_id, "immutable");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Capture current version as our "snapshot"
@@ -52,11 +53,11 @@ fn snapshot_is_immutable() {
 
     // Write a new version (simulating concurrent write)
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Reading at snapshot version should still see original value
-    let result = store.get_versioned(&key, snapshot_version).unwrap();
+    let result = store.get_versioned(&key, CommitVersion(snapshot_version)).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(100));
 }
 
@@ -78,15 +79,15 @@ fn repeated_reads_return_same_value() {
     let key = create_test_key(branch_id, "repeat");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     let version = store.version();
 
     // Read multiple times at the same version
-    let read1 = store.get_versioned(&key, version).unwrap();
-    let read2 = store.get_versioned(&key, version).unwrap();
-    let read3 = store.get_versioned(&key, version).unwrap();
+    let read1 = store.get_versioned(&key, CommitVersion(version)).unwrap();
+    let read2 = store.get_versioned(&key, CommitVersion(version)).unwrap();
+    let read3 = store.get_versioned(&key, CommitVersion(version)).unwrap();
 
     assert_eq!(read1, read2);
     assert_eq!(read2, read3);
@@ -98,8 +99,8 @@ fn missing_key_consistently_returns_none() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "missing");
 
-    let read1 = store.get_versioned(&key, 1).unwrap();
-    let read2 = store.get_versioned(&key, 1).unwrap();
+    let read1 = store.get_versioned(&key, CommitVersion(1)).unwrap();
+    let read2 = store.get_versioned(&key, CommitVersion(1)).unwrap();
 
     assert!(read1.is_none());
     assert!(read2.is_none());
@@ -115,7 +116,7 @@ fn transaction_sees_own_uncommitted_writes() {
     let key = create_test_key(branch_id, "ryw");
 
     // Transaction without snapshot (for testing)
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Write a value
     txn.write_set.insert(key.clone(), Value::Int(42));
@@ -133,7 +134,7 @@ fn transaction_sees_own_deletes() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "deleted");
 
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Delete a key
     txn.delete_set.insert(key.clone());
@@ -147,7 +148,7 @@ fn write_then_delete_sees_delete() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "write_del");
 
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Write then delete
     txn.write_set.insert(key.clone(), Value::Int(42));
@@ -170,17 +171,17 @@ fn snapshot_scan_prefix_returns_matching_keys() {
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), format!("prefix_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
             .unwrap();
     }
 
     // Add some non-matching keys
     let other_key = Key::new_kv(ns.clone(), "other_key");
     store
-        .put_with_version_mode(other_key, Value::Int(999), 11, None, WriteMode::Append)
+        .put_with_version_mode(other_key, Value::Int(999), CommitVersion(11), None, WriteMode::Append)
         .unwrap();
 
-    let version = store.version();
+    let version = CommitVersion(store.version());
     let prefix = Key::new_kv(ns.clone(), "prefix_");
     let results = Storage::scan_prefix(&*store, &prefix, version).unwrap();
 
@@ -194,7 +195,7 @@ fn snapshot_scan_empty_prefix() {
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
     let prefix = Key::new_kv(ns.clone(), "anything");
-    let results = Storage::scan_prefix(&*store, &prefix, 1).unwrap();
+    let results = Storage::scan_prefix(&*store, &prefix, CommitVersion(1)).unwrap();
 
     assert!(results.is_empty());
 }
@@ -210,14 +211,14 @@ fn store_can_be_shared_via_arc() {
     let key = create_test_key(branch_id, "shared");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     let version = store.version();
 
     // Share via Arc clone
     let store2 = Arc::clone(&store);
-    let result = store2.get_versioned(&key, version).unwrap();
+    let result = store2.get_versioned(&key, CommitVersion(version)).unwrap();
     assert_eq!(result.unwrap().value, Value::Int(42));
 }
 
@@ -228,23 +229,23 @@ fn versioned_reads_are_independent() {
     let key = create_test_key(branch_id, "independent");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let version1 = store.version();
 
     // Write a new version
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     let version2 = store.version();
 
     // Both versions retain their values
     assert_eq!(
-        store.get_versioned(&key, version1).unwrap().unwrap().value,
+        store.get_versioned(&key, CommitVersion(version1)).unwrap().unwrap().value,
         Value::Int(42)
     );
     assert_eq!(
-        store.get_versioned(&key, version2).unwrap().unwrap().value,
+        store.get_versioned(&key, CommitVersion(version2)).unwrap().unwrap().value,
         Value::Int(100)
     );
 }
@@ -271,7 +272,7 @@ fn snapshot_concurrent_reads() {
     let key = create_test_key(branch_id, "concurrent");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     let version = store.version();
@@ -282,7 +283,7 @@ fn snapshot_concurrent_reads() {
             let key = key.clone();
             thread::spawn(move || {
                 for _ in 0..1000 {
-                    let result = store.get_versioned(&key, version).unwrap();
+                    let result = store.get_versioned(&key, CommitVersion(version)).unwrap();
                     assert_eq!(result.unwrap().value, Value::Int(42));
                 }
             })
@@ -310,7 +311,7 @@ fn empty_store_get_returns_none() {
     let branch_id = BranchId::new();
     let key = create_test_key(branch_id, "any");
 
-    let result = store.get_versioned(&key, 0).unwrap();
+    let result = store.get_versioned(&key, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -321,7 +322,7 @@ fn empty_store_scan_returns_empty() {
     let ns = Arc::new(Namespace::for_branch(branch_id));
     let prefix = Key::new_kv(ns, "any");
 
-    let results = Storage::scan_prefix(&store, &prefix, 0).unwrap();
+    let results = Storage::scan_prefix(&store, &prefix, CommitVersion(0)).unwrap();
     assert!(results.is_empty());
 }
 
@@ -340,12 +341,12 @@ fn transaction_context_ignores_concurrent_store_writes() {
 
     // Write initial value at version 1
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Begin transaction — captures start_version
-    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
-    assert_eq!(txn.start_version, 1);
+    let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
+    assert_eq!(txn.start_version, CommitVersion(1));
 
     // First read through transaction sees initial value
     let read1 = txn.get(&key).unwrap();
@@ -353,7 +354,7 @@ fn transaction_context_ignores_concurrent_store_writes() {
 
     // Concurrent write to the SAME key at a higher version
     store
-        .put_with_version_mode(key.clone(), Value::Int(999), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(999), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Second read through transaction MUST still see the old value
@@ -377,19 +378,19 @@ fn transaction_context_scan_ignores_concurrent_writes() {
     let key_a = Key::new_kv(ns.clone(), "scan_a");
     let key_b = Key::new_kv(ns.clone(), "scan_b");
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key_a.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(2), 1, None, WriteMode::Append)
+        .put_with_version_mode(key_b.clone(), Value::Int(2), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Begin transaction
-    let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+    let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
 
     // Concurrent write: add a third key at version 2
     let key_c = Key::new_kv(ns.clone(), "scan_c");
     store
-        .put_with_version_mode(key_c, Value::Int(3), 2, None, WriteMode::Append)
+        .put_with_version_mode(key_c, Value::Int(3), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Scan through transaction should only see keys at version <= 1

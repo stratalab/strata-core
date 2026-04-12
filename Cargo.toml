@@ -11,6 +11,7 @@ workspace = true
 [workspace]
 resolver = "2"
 default-members = ["crates/executor", "crates/cli", "crates/engine"]
+exclude = ["benchmarks"]
 members = [
     "crates/core",
     "crates/storage",
