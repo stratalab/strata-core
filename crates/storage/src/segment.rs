@@ -2653,7 +2653,12 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("k_{:06}", i));
-            mt.put(&k, CommitVersion(i as u64 + 1), Value::String("x".repeat(50)), false);
+            mt.put(
+                &k,
+                CommitVersion(i as u64 + 1),
+                Value::String("x".repeat(50)),
+                false,
+            );
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3048,7 +3053,12 @@ mod tests {
         }
         // 5 versions of key "b_0000" — entries 30-34 span restart boundary at 32
         for v in 1..=5u64 {
-            mt.put(&kv_key("b_0000"), CommitVersion(v), Value::Int(v as i64 * 10), false);
+            mt.put(
+                &kv_key("b_0000"),
+                CommitVersion(v),
+                Value::Int(v as i64 * 10),
+                false,
+            );
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3562,7 +3572,12 @@ mod tests {
         let k = kv_key("versioned");
         // 50 versions → spans restart intervals 0..3 (at 16 entries per restart)
         for commit in 1..=50u64 {
-            mt.put(&k, CommitVersion(commit), Value::Int(commit as i64 * 10), false);
+            mt.put(
+                &k,
+                CommitVersion(commit),
+                Value::Int(commit as i64 * 10),
+                false,
+            );
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3822,7 +3837,12 @@ mod tests {
         }
         for i in 0..500u32 {
             let k = kv_key(&format!("bb_{:06}", i));
-            mt.put(&k, CommitVersion(i as u64 + 1001), Value::Int(i as i64 + 1000), false);
+            mt.put(
+                &k,
+                CommitVersion(i as u64 + 1001),
+                Value::Int(i as i64 + 1000),
+                false,
+            );
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);

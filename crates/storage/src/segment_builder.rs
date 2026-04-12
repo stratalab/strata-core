@@ -2581,7 +2581,12 @@ mod tests {
         for i in 0..200u64 {
             // Long values to ensure data spans multiple 512B blocks
             let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
-            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
+            mt.put(
+                &key(&format!("k_{:04}", i)),
+                CommitVersion(i + 1),
+                val,
+                false,
+            );
         }
         mt.freeze();
 
@@ -2652,7 +2657,12 @@ mod tests {
             let mt = Memtable::new(0);
             for i in 0..200u64 {
                 let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
-                mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
+                mt.put(
+                    &key(&format!("k_{:04}", i)),
+                    CommitVersion(i + 1),
+                    val,
+                    false,
+                );
             }
             mt.freeze();
 
@@ -2696,7 +2706,12 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u64 {
             let val = Value::String(format!("value_{:08}_repeated_data_for_compression", i));
-            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
+            mt.put(
+                &key(&format!("k_{:04}", i)),
+                CommitVersion(i + 1),
+                val,
+                false,
+            );
         }
         mt.freeze();
 
@@ -2738,7 +2753,12 @@ mod tests {
         }
         // Tombstone every other key at a higher commit
         for i in (0..20u64).step_by(2) {
-            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(100 + i), Value::Null, true);
+            mt.put(
+                &key(&format!("k_{:04}", i)),
+                CommitVersion(100 + i),
+                Value::Null,
+                true,
+            );
         }
         mt.freeze();
 
