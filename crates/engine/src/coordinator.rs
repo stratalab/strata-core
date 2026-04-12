@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
 use strata_core::StrataError;
@@ -78,7 +79,7 @@ impl TransactionCoordinator {
     ///
     /// # Arguments
     /// * `initial_version` - Starting version (typically from storage or recovery)
-    pub fn new(initial_version: u64) -> Self {
+    pub fn new(initial_version: CommitVersion) -> Self {
         Self {
             manager: TransactionManager::new(initial_version),
             active_count: AtomicU64::new(0),
@@ -176,7 +177,7 @@ impl TransactionCoordinator {
         // Track per-transaction snapshot for incremental GC advancement (#1923).
         self.active_snapshots
             .lock()
-            .insert(txn.txn_id, txn.start_version);
+            .insert(txn.txn_id.as_u64(), txn.start_version.as_u64());
 
         Ok(txn)
     }
@@ -207,7 +208,7 @@ impl TransactionCoordinator {
             }
             warn!(
                 target: "strata::txn",
-                txn_id = txn.txn_id,
+                txn_id = txn.txn_id.as_u64(),
                 elapsed_ms = elapsed.as_millis() as u64,
                 timeout_ms = self.transaction_timeout.as_millis() as u64,
                 "Transaction expired — rejecting commit"
@@ -244,7 +245,7 @@ impl TransactionCoordinator {
         txn: &mut TransactionContext,
         store: &S,
         wal: Option<&mut WalWriter>,
-    ) -> StrataResult<u64> {
+    ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(txn_id, self.manager.commit(txn, store, wal))
@@ -259,7 +260,7 @@ impl TransactionCoordinator {
         txn: &mut TransactionContext,
         store: &S,
         wal_arc: Option<&Arc<ParkingMutex<WalWriter>>>,
-    ) -> StrataResult<u64> {
+    ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(
@@ -271,13 +272,13 @@ impl TransactionCoordinator {
     /// Handle the result of a commit attempt: record metrics and convert errors.
     fn handle_commit_result(
         &self,
-        txn_id: u64,
-        result: Result<u64, strata_concurrency::CommitError>,
-    ) -> StrataResult<u64> {
+        txn_id: TxnId,
+        result: Result<CommitVersion, strata_concurrency::CommitError>,
+    ) -> StrataResult<CommitVersion> {
         match result {
             Ok(version) => {
                 self.record_commit(txn_id);
-                info!(target: "strata::txn", version, "Transaction committed");
+                info!(target: "strata::txn", version = version.as_u64(), "Transaction committed");
                 Ok(version)
             }
             Err(e) => {
@@ -296,11 +297,11 @@ impl TransactionCoordinator {
     /// # Arguments
     /// * `txn_id` - Unique transaction ID
     /// * `start_version` - Snapshot version at transaction start
-    pub fn record_start(&self, txn_id: u64, start_version: u64) {
+    pub fn record_start(&self, txn_id: TxnId, start_version: CommitVersion) {
         // Relaxed: observational counters only (see struct-level doc).
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_snapshots.lock().insert(txn_id, start_version);
+        self.active_snapshots.lock().insert(txn_id.as_u64(), start_version.as_u64());
     }
 
     /// Record transaction commit
@@ -314,7 +315,7 @@ impl TransactionCoordinator {
     ///
     /// # Arguments
     /// * `txn_id` - Transaction ID (used for snapshot tracking)
-    pub fn record_commit(&self, txn_id: u64) {
+    pub fn record_commit(&self, txn_id: TxnId) {
         self.total_committed.fetch_add(1, Ordering::Relaxed);
         self.finish_transaction(txn_id);
     }
@@ -330,7 +331,7 @@ impl TransactionCoordinator {
     ///
     /// # Arguments
     /// * `txn_id` - Transaction ID (used for snapshot tracking)
-    pub fn record_abort(&self, txn_id: u64) {
+    pub fn record_abort(&self, txn_id: TxnId) {
         self.total_aborted.fetch_add(1, Ordering::Relaxed);
         self.finish_transaction(txn_id);
     }
@@ -346,17 +347,17 @@ impl TransactionCoordinator {
     /// The Mutex on active_snapshots is held only for the brief
     /// insert/remove + min() computation. The lock is released before the
     /// atomic `fetch_max` to minimize contention.
-    fn finish_transaction(&self, txn_id: u64) {
+    fn finish_transaction(&self, txn_id: TxnId) {
         // Capture version BEFORE the decrement so gc_safe_version is always
         // ≤ the snapshot version of any concurrently-starting transaction.
-        let drain_version = self.manager.current_version();
+        let drain_version = self.manager.current_version().as_u64();
 
         let prev = self.active_count.fetch_sub(1, Ordering::AcqRel);
         debug_assert!(prev > 0, "active_count underflow in finish_transaction");
 
         let new_gc_safe = {
             let mut snapshots = self.active_snapshots.lock();
-            snapshots.remove(&txn_id);
+            snapshots.remove(&txn_id.as_u64());
 
             if snapshots.is_empty() {
                 // All transactions drained — advance to current version
@@ -388,17 +389,17 @@ impl TransactionCoordinator {
     // ========================================================================
 
     /// Get current global version.
-    pub fn current_version(&self) -> u64 {
+    pub fn current_version(&self) -> CommitVersion {
         self.manager.current_version()
     }
 
     /// Get the highest version where all data ≤ V is fully applied (#1913).
-    pub fn visible_version(&self) -> u64 {
+    pub fn visible_version(&self) -> CommitVersion {
         self.manager.visible_version()
     }
 
     /// Ensure the version counter is at least `floor` (#1726).
-    pub fn bump_version_floor(&self, floor: u64) {
+    pub fn bump_version_floor(&self, floor: CommitVersion) {
         self.manager.bump_version_floor(floor);
     }
 
@@ -417,7 +418,7 @@ impl TransactionCoordinator {
     }
 
     /// Get next transaction ID (for internal use).
-    pub fn next_txn_id(&self) -> StrataResult<u64> {
+    pub fn next_txn_id(&self) -> StrataResult<TxnId> {
         self.manager.next_txn_id().map_err(StrataError::from)
     }
 
@@ -485,8 +486,8 @@ impl TransactionCoordinator {
         txn: &mut TransactionContext,
         store: &S,
         wal: Option<&mut WalWriter>,
-        version: u64,
-    ) -> StrataResult<u64> {
+        version: CommitVersion,
+    ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
         self.handle_commit_result(
@@ -609,7 +610,7 @@ impl TransactionMetrics {
 #[cfg(test)]
 impl TransactionCoordinator {
     /// Allocate commit version (test-only)
-    pub fn allocate_commit_version(&self) -> StrataResult<u64> {
+    pub fn allocate_commit_version(&self) -> StrataResult<CommitVersion> {
         self.manager.allocate_version().map_err(StrataError::from)
     }
 
@@ -629,8 +630,8 @@ mod tests {
 
     #[test]
     fn test_coordinator_new() {
-        let coordinator = TransactionCoordinator::new(0);
-        assert_eq!(coordinator.current_version(), 0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
+        assert_eq!(coordinator.current_version(), CommitVersion::ZERO);
 
         let metrics = coordinator.metrics();
         assert_eq!(metrics.active_count, 0);
@@ -649,24 +650,24 @@ mod tests {
             aborted_txns: 0,
             writes_applied: 10,
             deletes_applied: 2,
-            final_version: 100,
-            max_txn_id: 6,
+            final_version: CommitVersion(100),
+            max_txn_id: TxnId(6),
             from_checkpoint: false,
         };
 
         let result = RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(100),
+            txn_manager: TransactionManager::new(CommitVersion(100)),
             stats,
         };
 
         let coordinator = TransactionCoordinator::from_recovery(&result);
-        assert_eq!(coordinator.current_version(), 100);
+        assert_eq!(coordinator.current_version(), CommitVersion(100));
     }
 
     #[test]
     fn test_start_transaction_updates_metrics() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -680,7 +681,7 @@ mod tests {
 
     #[test]
     fn test_record_commit_updates_metrics() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -696,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_record_abort_updates_metrics() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -712,7 +713,7 @@ mod tests {
 
     #[test]
     fn test_version_monotonic() {
-        let coordinator = TransactionCoordinator::new(100);
+        let coordinator = TransactionCoordinator::new(CommitVersion(100));
 
         let v1 = coordinator.allocate_commit_version().unwrap();
         let v2 = coordinator.allocate_commit_version().unwrap();
@@ -720,14 +721,14 @@ mod tests {
 
         assert!(v1 < v2);
         assert!(v2 < v3);
-        assert_eq!(v1, 101);
-        assert_eq!(v2, 102);
-        assert_eq!(v3, 103);
+        assert_eq!(v1, CommitVersion(101));
+        assert_eq!(v2, CommitVersion(102));
+        assert_eq!(v3, CommitVersion(103));
     }
 
     #[test]
     fn test_metrics_helpers() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -752,7 +753,7 @@ mod tests {
 
     #[test]
     fn test_mixed_transactions() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -786,7 +787,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_idle_no_active_transactions() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
 
         // No transactions active, should return immediately
         let result = coordinator.wait_for_idle(std::time::Duration::from_millis(100));
@@ -798,7 +799,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_idle_timeout_with_active_transaction() {
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -828,7 +829,7 @@ mod tests {
     fn test_wait_for_idle_transaction_completes_before_timeout() {
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -866,7 +867,7 @@ mod tests {
         use std::sync::Barrier;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -912,7 +913,7 @@ mod tests {
 
     #[test]
     fn test_wait_for_idle_zero_timeout() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -941,7 +942,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let stop_flag = Arc::new(AtomicBool::new(false));
@@ -988,7 +989,7 @@ mod tests {
         use std::sync::Barrier;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let barrier = Arc::new(Barrier::new(10));
@@ -1053,27 +1054,27 @@ mod tests {
             aborted_txns: 1,
             writes_applied: 50,
             deletes_applied: 5,
-            final_version: 500,
-            max_txn_id: 15,
+            final_version: CommitVersion(500),
+            max_txn_id: TxnId(15),
             from_checkpoint: false,
         };
 
         let result = RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(500),
+            txn_manager: TransactionManager::new(CommitVersion(500)),
             stats,
         };
 
         let coordinator = TransactionCoordinator::from_recovery(&result);
 
         // Version should be restored
-        assert_eq!(coordinator.current_version(), 500);
+        assert_eq!(coordinator.current_version(), CommitVersion(500));
 
         // Next txn_id should be > max_txn_id from recovery
         let next_id = coordinator.next_txn_id().unwrap();
         assert!(
-            next_id > 15,
-            "Next txn_id ({}) should be > max_txn_id from recovery (15)",
+            next_id > TxnId(15),
+            "Next txn_id ({:?}) should be > max_txn_id from recovery (15)",
             next_id
         );
     }
@@ -1086,32 +1087,32 @@ mod tests {
     /// cycles and that GC safe point advances on drain.
     #[test]
     fn test_active_count_balanced_start_commit() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
 
         // Start one transaction, commit it
-        coordinator.record_start(100, 0);
+        coordinator.record_start(TxnId(100), CommitVersion::ZERO);
         assert_eq!(coordinator.active_count(), 1);
-        coordinator.record_commit(100);
+        coordinator.record_commit(TxnId(100));
         assert_eq!(coordinator.active_count(), 0);
 
         // Start and abort
-        coordinator.record_start(101, 0);
+        coordinator.record_start(TxnId(101), CommitVersion::ZERO);
         assert_eq!(coordinator.active_count(), 1);
-        coordinator.record_abort(101);
+        coordinator.record_abort(TxnId(101));
         assert_eq!(coordinator.active_count(), 0);
 
         // Interleaved: 3 starts, then 2 commits + 1 abort
-        coordinator.record_start(200, 0);
-        coordinator.record_start(201, 0);
-        coordinator.record_start(202, 0);
+        coordinator.record_start(TxnId(200), CommitVersion::ZERO);
+        coordinator.record_start(TxnId(201), CommitVersion::ZERO);
+        coordinator.record_start(TxnId(202), CommitVersion::ZERO);
         assert_eq!(coordinator.active_count(), 3);
 
-        coordinator.record_commit(200);
+        coordinator.record_commit(TxnId(200));
         assert_eq!(coordinator.active_count(), 2);
-        coordinator.record_abort(201);
+        coordinator.record_abort(TxnId(201));
         assert_eq!(coordinator.active_count(), 1);
         // Last one drains — should be 0 after
-        coordinator.record_commit(202);
+        coordinator.record_commit(TxnId(202));
         assert_eq!(coordinator.active_count(), 0);
     }
 
@@ -1119,14 +1120,14 @@ mod tests {
     /// via fetch_sub (prev == 1 triggers drain detection).
     #[test]
     fn test_gc_safe_point_advances_after_fetch_sub_drain() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
 
         // Bump version so gc_safe_version can advance
         let _ = coordinator.allocate_commit_version().unwrap(); // version → 1
 
         // Start and commit a single transaction — drains active_count
-        coordinator.record_start(1, 0);
-        coordinator.record_commit(1);
+        coordinator.record_start(TxnId(1), CommitVersion::ZERO);
+        coordinator.record_commit(TxnId(1));
 
         // GC safe point should have advanced (drain_version = 1)
         assert!(
@@ -1137,14 +1138,14 @@ mod tests {
 
         // Now with multiple transactions: only the LAST drain advances
         let _ = coordinator.allocate_commit_version().unwrap(); // version → 2
-        coordinator.record_start(2, 0);
-        coordinator.record_start(3, 0);
+        coordinator.record_start(TxnId(2), CommitVersion::ZERO);
+        coordinator.record_start(TxnId(3), CommitVersion::ZERO);
         // Commit first — active_count goes from 2 → 1, prev=2, no drain
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         // GC safe point should still be at 1 (no drain yet)
         assert_eq!(coordinator.min_active_version().unwrap(), 1);
         // Commit second — active_count goes from 1 → 0, prev=1, drain!
-        coordinator.record_commit(3);
+        coordinator.record_commit(TxnId(3));
         assert_eq!(coordinator.min_active_version().unwrap(), 2);
     }
 
@@ -1155,7 +1156,7 @@ mod tests {
         use std::sync::Arc;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let num_threads = 8;
         let iterations = 500;
 
@@ -1164,10 +1165,10 @@ mod tests {
                 let coord = Arc::clone(&coordinator);
                 thread::spawn(move || {
                     for i in 0..iterations {
-                        let id = (t * iterations + i) as u64;
-                        coord.record_start(id, 0);
+                        let id = TxnId((t * iterations + i) as u64);
+                        coord.record_start(id, CommitVersion::ZERO);
                         // Small amount of "work"
-                        std::hint::black_box(id);
+                        std::hint::black_box(id.as_u64());
                         if i % 3 == 0 {
                             coord.record_abort(id);
                         } else {
@@ -1194,18 +1195,18 @@ mod tests {
     #[cfg(debug_assertions)]
     #[should_panic(expected = "active_count underflow in finish_transaction")]
     fn test_active_count_underflow_panics_in_debug_commit() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         // Commit without a preceding start — should panic in debug builds
-        coordinator.record_commit(999);
+        coordinator.record_commit(TxnId(999));
     }
 
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic(expected = "active_count underflow in finish_transaction")]
     fn test_active_count_underflow_panics_in_debug_abort() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         // Abort without a preceding start — should panic in debug builds
-        coordinator.record_abort(999);
+        coordinator.record_abort(TxnId(999));
     }
 
     /// Verify metrics reach consistent state after concurrent operations.
@@ -1217,7 +1218,7 @@ mod tests {
         use std::sync::atomic::AtomicUsize;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
@@ -1280,7 +1281,7 @@ mod tests {
         use std::collections::HashSet;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let versions = Arc::new(Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..8)
@@ -1316,7 +1317,7 @@ mod tests {
 
         // Verify all versions are > 0 (initial version)
         for v in all_versions.iter() {
-            assert!(*v > 0, "Version should be > initial version 0");
+            assert!(*v > CommitVersion::ZERO, "Version should be > initial version 0");
         }
     }
 
@@ -1329,7 +1330,7 @@ mod tests {
         use std::collections::HashSet;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let txn_ids = Arc::new(Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..8)
@@ -1370,7 +1371,7 @@ mod tests {
     /// Verify it handles zero gracefully.
     #[test]
     fn test_commit_rate_with_zero_started() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
 
         let metrics = coordinator.metrics();
 
@@ -1389,7 +1390,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let should_stop = Arc::new(AtomicBool::new(false));
@@ -1442,7 +1443,7 @@ mod tests {
         use parking_lot::Mutex;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(0));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion::ZERO));
         let results = Arc::new(Mutex::new(Vec::new()));
 
         let handles: Vec<_> = (0..4)
@@ -1487,33 +1488,33 @@ mod tests {
 
     #[test]
     fn test_min_active_version_empty() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         // No transactions ever started → gc_safe_version is 0 (sentinel) → returns None
         assert_eq!(coordinator.min_active_version(), None);
     }
 
     #[test]
     fn test_min_active_version_tracks_correctly() {
-        let coordinator = TransactionCoordinator::new(10);
+        let coordinator = TransactionCoordinator::new(CommitVersion(10));
 
         // Register 3 transactions at version 10
-        coordinator.record_start(1, 10);
-        coordinator.record_start(2, 10);
-        coordinator.record_start(3, 10);
+        coordinator.record_start(TxnId(1), CommitVersion(10));
+        coordinator.record_start(TxnId(2), CommitVersion(10));
+        coordinator.record_start(TxnId(3), CommitVersion(10));
 
         // While transactions are active but none have finished,
         // gc_safe_version is still 0 (initial)
         assert_eq!(coordinator.min_active_version(), None);
 
         // Partial commit: gc_safe advances to min(remaining) - 1 = 9 (#1923)
-        coordinator.record_commit(1);
+        coordinator.record_commit(TxnId(1));
         assert_eq!(
             coordinator.min_active_version(),
             Some(9),
             "partial drain should advance gc_safe to min(snapshots) - 1"
         );
 
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         assert_eq!(
             coordinator.min_active_version(),
             Some(9),
@@ -1521,7 +1522,7 @@ mod tests {
         );
 
         // Full drain → gc_safe_version advances to current_version (10)
-        coordinator.record_commit(3);
+        coordinator.record_commit(TxnId(3));
         assert_eq!(
             coordinator.min_active_version(),
             Some(10),
@@ -1531,11 +1532,11 @@ mod tests {
 
     #[test]
     fn test_min_active_version_after_commit() {
-        let coordinator = TransactionCoordinator::new(5);
+        let coordinator = TransactionCoordinator::new(CommitVersion(5));
 
         // Start and fully drain a transaction → gc_safe_version advances
-        coordinator.record_start(1, 5);
-        coordinator.record_commit(1);
+        coordinator.record_start(TxnId(1), CommitVersion(5));
+        coordinator.record_commit(TxnId(1));
 
         // gc_safe_version should be exactly 5 (current_version at drain time)
         assert_eq!(
@@ -1556,8 +1557,8 @@ mod tests {
         );
 
         // Start and drain again → gc_safe_version advances to 7
-        coordinator.record_start(2, 7);
-        coordinator.record_commit(2);
+        coordinator.record_start(TxnId(2), CommitVersion(7));
+        coordinator.record_commit(TxnId(2));
 
         assert_eq!(
             coordinator.min_active_version(),
@@ -1569,13 +1570,13 @@ mod tests {
     #[test]
     fn test_active_versions_cleaned_on_abort() {
         // Use non-zero initial version so drain produces a non-sentinel gc_safe_version
-        let coordinator = TransactionCoordinator::new(5);
+        let coordinator = TransactionCoordinator::new(CommitVersion(5));
 
         // Start a transaction then abort it — triggers drain
-        coordinator.record_start(1, 5);
+        coordinator.record_start(TxnId(1), CommitVersion(5));
         assert_eq!(coordinator.active_count(), 1);
 
-        coordinator.record_abort(1);
+        coordinator.record_abort(TxnId(1));
         assert_eq!(coordinator.active_count(), 0);
 
         // After abort with full drain, gc_safe_version should be exactly 5
@@ -1588,22 +1589,22 @@ mod tests {
 
     #[test]
     fn test_gc_safe_version_advances_incrementally() {
-        let coordinator = TransactionCoordinator::new(10);
+        let coordinator = TransactionCoordinator::new(CommitVersion(10));
 
         // Start 3 transactions at version 10
-        coordinator.record_start(1, 10);
-        coordinator.record_start(2, 10);
-        coordinator.record_start(3, 10);
+        coordinator.record_start(TxnId(1), CommitVersion(10));
+        coordinator.record_start(TxnId(2), CommitVersion(10));
+        coordinator.record_start(TxnId(3), CommitVersion(10));
 
         // Partial commit: gc_safe = min(10, 10) - 1 = 9 (#1923)
-        coordinator.record_commit(1);
+        coordinator.record_commit(TxnId(1));
         assert_eq!(
             coordinator.min_active_version(),
             Some(9),
             "gc_safe should be min(remaining_snapshots) - 1 = 9"
         );
 
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         assert_eq!(
             coordinator.min_active_version(),
             Some(9),
@@ -1611,7 +1612,7 @@ mod tests {
         );
 
         // Final commit → full drain → gc_safe_version = current_version = 10
-        coordinator.record_commit(3);
+        coordinator.record_commit(TxnId(3));
         assert_eq!(
             coordinator.min_active_version(),
             Some(10),
@@ -1621,18 +1622,18 @@ mod tests {
 
     #[test]
     fn test_gc_safe_version_conservative_while_active() {
-        let coordinator = TransactionCoordinator::new(5);
+        let coordinator = TransactionCoordinator::new(CommitVersion(5));
 
         // Drain once to establish a gc_safe_version
-        coordinator.record_start(1, 5);
-        coordinator.record_commit(1);
+        coordinator.record_start(TxnId(1), CommitVersion(5));
+        coordinator.record_commit(TxnId(1));
         assert_eq!(coordinator.min_active_version(), Some(5));
 
         // Advance version and start new transaction
         let _ = coordinator.allocate_commit_version(); // 6
         let _ = coordinator.allocate_commit_version(); // 7
 
-        coordinator.record_start(2, 7);
+        coordinator.record_start(TxnId(2), CommitVersion(7));
 
         // While txn 2 is active, gc_safe_version stays at the old value
         // (no new drain has occurred)
@@ -1643,7 +1644,7 @@ mod tests {
         );
 
         // Commit txn 2 → drain → gc_safe_version advances to 7
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         assert_eq!(
             coordinator.min_active_version(),
             Some(7),
@@ -1655,15 +1656,15 @@ mod tests {
     /// increasing versions should produce monotonically increasing safe points.
     #[test]
     fn test_gc_safe_version_monotonically_increases() {
-        let coordinator = TransactionCoordinator::new(1);
+        let coordinator = TransactionCoordinator::new(CommitVersion(1));
 
         let mut last_safe = 0u64;
 
         for round in 0..5 {
             // Start and drain a transaction
-            coordinator.record_start(round + 1, 0);
+            coordinator.record_start(TxnId(round + 1), CommitVersion::ZERO);
             let _ = coordinator.allocate_commit_version();
-            coordinator.record_commit(round + 1);
+            coordinator.record_commit(TxnId(round + 1));
 
             if let Some(v) = coordinator.min_active_version() {
                 assert!(
@@ -1687,7 +1688,7 @@ mod tests {
         use std::sync::Barrier;
         use std::thread;
 
-        let coordinator = Arc::new(TransactionCoordinator::new(100));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion(100)));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
@@ -1737,10 +1738,10 @@ mod tests {
         // 3. gc_safe_version should be ≤ current_version (never overshoots)
         let current = coordinator.current_version();
         assert!(
-            v.unwrap() <= current,
+            v.unwrap() <= current.as_u64(),
             "gc_safe_version ({}) must not exceed current_version ({})",
             v.unwrap(),
-            current
+            current.as_u64()
         );
         // 4. Metrics should be consistent
         let metrics = coordinator.metrics();
@@ -1755,7 +1756,7 @@ mod tests {
     fn test_issue_1728_expired_transaction_rejected_at_commit() {
         use std::time::Duration;
 
-        let mut coordinator = TransactionCoordinator::new(0);
+        let mut coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -1789,7 +1790,7 @@ mod tests {
     /// Issue #1728: A non-expired transaction must still commit successfully.
     #[test]
     fn test_issue_1728_non_expired_transaction_commits() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         let storage = create_test_storage();
         let branch_id = BranchId::new();
 
@@ -1809,7 +1810,7 @@ mod tests {
     /// that is always ≤ current_version.
     #[test]
     fn test_gc_safe_version_with_interleaved_version_bumps() {
-        let coordinator = Arc::new(TransactionCoordinator::new(1));
+        let coordinator = Arc::new(TransactionCoordinator::new(CommitVersion(1)));
         let storage = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
 
@@ -1836,10 +1837,10 @@ mod tests {
         let v = coordinator.min_active_version().unwrap();
         let current = coordinator.current_version();
         assert!(
-            v <= current,
+            v <= current.as_u64(),
             "gc_safe_version ({}) must be ≤ current_version ({})",
             v,
-            current
+            current.as_u64()
         );
         assert_eq!(
             v, 3,
@@ -1853,19 +1854,19 @@ mod tests {
 
     #[test]
     fn test_issue_1923_overlapping_txns_dont_pin_gc() {
-        let coordinator = TransactionCoordinator::new(100);
+        let coordinator = TransactionCoordinator::new(CommitVersion(100));
 
         // Simulate the scenario from #1923: overlapping transactions
         // where a new txn starts before the previous one completes.
         // Use record_start with explicit versions to control snapshot points.
-        coordinator.record_start(1, 100); // txn1 at v100
-        coordinator.record_start(2, 200); // txn2 at v200
-        coordinator.record_start(3, 300); // txn3 at v300
+        coordinator.record_start(TxnId(1), CommitVersion(100)); // txn1 at v100
+        coordinator.record_start(TxnId(2), CommitVersion(200)); // txn2 at v200
+        coordinator.record_start(TxnId(3), CommitVersion(300)); // txn3 at v300
         assert_eq!(coordinator.active_count(), 3);
 
         // Complete oldest (txn1). Before #1923, gc_safe would stay at 0
         // because active_count > 0. Now it advances to min(200,300)-1 = 199.
-        coordinator.record_commit(1);
+        coordinator.record_commit(TxnId(1));
         let v1 = coordinator.min_active_version();
         assert!(
             v1.is_some(),
@@ -1874,21 +1875,21 @@ mod tests {
         assert_eq!(v1, Some(199));
 
         // Start another txn — the overlapping pattern
-        coordinator.record_start(4, 400);
+        coordinator.record_start(TxnId(4), CommitVersion(400));
 
         // Complete txn2 — gc_safe should advance: min(300,400)-1 = 299
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         let v2 = coordinator.min_active_version().unwrap();
         assert_eq!(v2, 299);
         assert!(v2 > v1.unwrap(), "gc_safe must monotonically increase");
 
         // Complete txn3 — gc_safe = min(400)-1 = 399
-        coordinator.record_commit(3);
+        coordinator.record_commit(TxnId(3));
         let v3 = coordinator.min_active_version().unwrap();
         assert_eq!(v3, 399);
 
         // Complete final txn — full drain → gc_safe = current_version
-        coordinator.record_commit(4);
+        coordinator.record_commit(TxnId(4));
         let v4 = coordinator.min_active_version().unwrap();
         assert!(v4 >= v3, "full drain should advance gc_safe");
         assert_eq!(coordinator.active_count(), 0);
@@ -1896,27 +1897,27 @@ mod tests {
 
     #[test]
     fn test_issue_1923_gc_advances_to_min_snapshot_minus_one() {
-        let coordinator = TransactionCoordinator::new(0);
+        let coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
 
         // Use record_start with explicit, distinct versions
-        coordinator.record_start(1, 10); // txn1 at v10
-        coordinator.record_start(2, 20); // txn2 at v20
-        coordinator.record_start(3, 30); // txn3 at v30
+        coordinator.record_start(TxnId(1), CommitVersion(10)); // txn1 at v10
+        coordinator.record_start(TxnId(2), CommitVersion(20)); // txn2 at v20
+        coordinator.record_start(TxnId(3), CommitVersion(30)); // txn3 at v30
 
         // Complete txn1 (oldest). Remaining: txn2@20, txn3@30.
         // gc_safe = min(20, 30) - 1 = 19
-        coordinator.record_commit(1);
+        coordinator.record_commit(TxnId(1));
         let gc = coordinator.min_active_version().unwrap();
         assert_eq!(gc, 19, "gc_safe should be min(remaining) - 1 = 20 - 1");
 
         // Complete txn2. Remaining: txn3@30.
         // gc_safe = 30 - 1 = 29
-        coordinator.record_commit(2);
+        coordinator.record_commit(TxnId(2));
         let gc = coordinator.min_active_version().unwrap();
         assert_eq!(gc, 29, "gc_safe should be min(remaining) - 1 = 30 - 1");
 
         // Complete txn3 → full drain → gc_safe = current_version
-        coordinator.record_commit(3);
+        coordinator.record_commit(TxnId(3));
         let gc = coordinator.min_active_version().unwrap();
         assert!(
             gc > 0,
@@ -1930,7 +1931,7 @@ mod tests {
 
     #[test]
     fn test_issue_1922_expired_commit_no_double_decrement() {
-        let mut coordinator = TransactionCoordinator::new(0);
+        let mut coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         coordinator.set_transaction_timeout(Duration::from_millis(1));
         let storage = create_test_storage();
         let branch_id = BranchId::new();
@@ -1957,7 +1958,7 @@ mod tests {
 
     #[test]
     fn test_issue_1922_timeout_marks_transaction_aborted() {
-        let mut coordinator = TransactionCoordinator::new(0);
+        let mut coordinator = TransactionCoordinator::new(CommitVersion::ZERO);
         coordinator.set_transaction_timeout(Duration::from_millis(1));
         let storage = create_test_storage();
         let branch_id = BranchId::new();

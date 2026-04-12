@@ -267,7 +267,7 @@ impl VectorStore {
         let prefix = Key::new_vector_config_prefix(namespace);
 
         // Read at current version for consistency
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let entries = self
             .db
             .storage()
@@ -322,7 +322,7 @@ impl VectorStore {
         use strata_core::traits::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
 
         Ok(self
             .db
@@ -342,7 +342,7 @@ impl VectorStore {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
 
         use strata_core::traits::Storage;
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
 
         let Some(versioned_value) = self
             .db

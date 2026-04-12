@@ -2,6 +2,7 @@ use super::*;
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::TransactionPayload;
+use strata_core::id::CommitVersion;
 use strata_core::types::{Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::{Storage, Timestamp};
@@ -115,7 +116,7 @@ fn test_wal_recovery() {
     let key1 = Key::new_kv(ns, "key1");
     let val = db
         .storage()
-        .get_versioned(&key1, u64::MAX)
+        .get_versioned(&key1, CommitVersion::MAX)
         .unwrap()
         .unwrap();
 
@@ -156,7 +157,7 @@ fn test_open_close_reopen() {
 
         // Data should be restored from WAL
         let key = Key::new_kv(ns, "persistent");
-        let val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
 
         if let Value::Bytes(bytes) = val.value {
             assert_eq!(bytes, b"data");
@@ -205,7 +206,7 @@ fn test_partial_record_discarded() {
 
     // Valid transaction should be present
     let key = Key::new_kv(ns.clone(), "valid");
-    let val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(val.value, Value::Int(42));
 }
 
@@ -227,7 +228,7 @@ fn test_corrupted_wal_handled_gracefully() {
     let db = result.unwrap();
     // Storage has only system branch init transactions (no user data recovered)
     // init_system_branch writes 3 transactions: branch, graph, node
-    assert!(db.storage().current_version() <= 3);
+    assert!(db.storage().current_version() <= CommitVersion(3));
 }
 
 #[test]
@@ -301,7 +302,7 @@ fn test_transaction_closure_api() {
     assert!(result.is_ok());
 
     // Verify data was committed
-    let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(stored.value, Value::Int(42));
 }
 
@@ -375,7 +376,7 @@ fn test_transaction_aborts_on_closure_error() {
     // Data should NOT be committed
     assert!(db
         .storage()
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -397,7 +398,7 @@ fn test_begin_and_commit_manual() {
     db.commit_transaction(&mut txn).unwrap();
 
     // Verify committed
-    let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(stored.value, Value::Int(123));
 }
 
@@ -710,10 +711,10 @@ fn test_gc_safe_point_with_active_txn() {
     // The active txn pins the safe point at its start version
     let sp = db.gc_safe_point();
     assert!(
-        sp <= txn_start_version,
+        sp <= txn_start_version.as_u64(),
         "safe point {} should be <= active txn start version {}",
         sp,
-        txn_start_version
+        txn_start_version.as_u64()
     );
 
     // Abort the active transaction
@@ -764,7 +765,7 @@ fn test_run_gc_prunes_old_versions() {
     assert!(safe_point > 0, "safe point should be non-zero");
 
     // Latest value should still be readable
-    let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(stored.value, Value::Int(3));
 }
 
@@ -812,7 +813,7 @@ fn test_run_maintenance_end_to_end() {
     assert_eq!(expired, 0, "no TTL entries to expire");
 
     // Data should still be readable
-    let stored = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(stored.value, Value::Int(2));
 
     let _ = pruned; // suppress unused warning
@@ -885,7 +886,7 @@ fn test_open_corrupted_wal_succeeds_with_lossy_flag() {
     let db = result.unwrap();
     // Only system branch init transactions present (no user data recovered)
     assert!(
-        db.storage().current_version() <= 3,
+        db.storage().current_version() <= CommitVersion(3),
         "Should have at most system init transactions, got {}",
         db.storage().current_version()
     );
@@ -933,13 +934,13 @@ fn test_lossy_recovery_discards_valid_data_before_corruption() {
     let key = Key::new_kv(ns, "important_data");
     assert!(
         db.storage()
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .is_none(),
         "Valid data before corruption should be lost in lossy mode"
     );
     // Only system branch init transactions present (user data was discarded)
-    assert!(db.storage().current_version() <= 3);
+    assert!(db.storage().current_version() <= CommitVersion(3));
 }
 
 // ========================================================================
@@ -989,7 +990,7 @@ fn test_flush_thread_performs_final_sync() {
 
     // Re-open and verify data was persisted
     let db = Database::open(&db_path).unwrap();
-    let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(
         val.is_some(),
         "Data should be recoverable after shutdown (flush thread final sync + explicit flush)"
@@ -1063,7 +1064,7 @@ fn test_shutdown_blocks_until_in_flight_transactions_drain() {
     // Re-open and verify committed data was persisted
     drop(db);
     let db = Database::open(&db_path).unwrap();
-    let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(
         val.is_some(),
         "Transaction committed during shutdown drain should be persisted"
@@ -1111,7 +1112,7 @@ fn test_shutdown_proceeds_after_draining_with_no_transactions() {
     // Re-open and verify persistence
     drop(db);
     let db = Database::open(&db_path).unwrap();
-    let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(val.is_some(), "Data committed before shutdown must persist");
 }
 
@@ -1181,14 +1182,14 @@ fn test_shutdown_multiple_in_flight_transactions() {
     let db = Database::open(&db_path).unwrap();
     assert!(
         db.storage()
-            .get_versioned(&key1, u64::MAX)
+            .get_versioned(&key1, CommitVersion::MAX)
             .unwrap()
             .is_some(),
         "txn1 data lost"
     );
     assert!(
         db.storage()
-            .get_versioned(&key2, u64::MAX)
+            .get_versioned(&key2, CommitVersion::MAX)
             .unwrap()
             .is_some(),
         "txn2 data lost"
@@ -1266,7 +1267,7 @@ fn test_put_direct_contention_scaling() {
         // Spot-check first, middle, and last keys
         for &i in &[0, OPS_PER_THREAD / 2, OPS_PER_THREAD - 1] {
             let key = Key::new_kv(ns.clone(), format!("k{i}"));
-            let stored = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
             assert!(
                 stored.is_some(),
                 "blind write data missing: thread={t}, key=k{i}"
@@ -1309,8 +1310,9 @@ fn test_put_direct_gc_safety_with_concurrent_reader() {
     // GC safe point must not advance past the reader's pinned version
     let safe_point = db.gc_safe_point();
     assert!(
-        safe_point <= pinned_version,
-        "gc_safe_point ({safe_point}) advanced past pinned reader version ({pinned_version})"
+        safe_point <= pinned_version.as_u64(),
+        "gc_safe_point ({safe_point}) advanced past pinned reader version ({})",
+        pinned_version.as_u64()
     );
 
     // GC should not prune versions the reader can still see
@@ -1319,7 +1321,7 @@ fn test_put_direct_gc_safety_with_concurrent_reader() {
     let _ = pruned;
 
     // Reader should still see the value at its snapshot version
-    let reader_val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let reader_val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(reader_val.is_some(), "key disappeared during concurrent GC");
     // Latest version should be 10
     assert_eq!(reader_val.unwrap().value, Value::Int(10));
@@ -1337,7 +1339,7 @@ fn test_put_direct_gc_safety_with_concurrent_reader() {
     let (_, _pruned_after) = db.run_gc();
 
     // Latest value must still be readable after GC
-    let final_val = db.storage().get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let final_val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(final_val.value, Value::Int(10));
 }
 
@@ -1386,7 +1388,7 @@ fn test_put_direct_concurrent_gc_no_data_loss() {
     for t in 0..NUM_WRITERS {
         for &i in &[0, WRITES_PER_THREAD / 2, WRITES_PER_THREAD - 1] {
             let key = Key::new_kv(ns.clone(), format!("w{t}_k{i}"));
-            let stored = db.storage().get_versioned(&key, u64::MAX).unwrap();
+            let stored = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
             assert!(
                 stored.is_some(),
                 "data lost after concurrent GC: thread={t}, key=w{t}_k{i}"
@@ -1451,7 +1453,7 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
     );
 
     // Latest version must also be intact
-    let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let latest = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(latest.is_some(), "latest version missing after compaction");
     assert_eq!(latest.unwrap().value, Value::Int(2));
 
@@ -1508,7 +1510,7 @@ fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
         let key = Key::new_kv(ns, "critical_data");
 
         // Step 5: Data MUST still be present
-        let result = db.storage().get_versioned(&key, u64::MAX).unwrap();
+        let result = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(
             result.is_some(),
             "CRITICAL: Data lost after checkpoint+compact+recovery! \
@@ -1565,7 +1567,7 @@ fn test_issue_1730_standard_durability() {
         let ns = create_test_namespace(branch_id);
         let key = Key::new_kv(ns, "standard_data");
 
-        let result = db.storage().get_versioned(&key, u64::MAX).unwrap();
+        let result = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(
             result.is_some(),
             "Data must survive checkpoint+failed-compact+recovery under Standard durability"
@@ -1628,7 +1630,7 @@ fn test_issue_1699_refresh_preserves_wal_timestamp() {
     //    commit time), NOT from Timestamp::now() during refresh.
     let a_entry = follower
         .storage()
-        .get_versioned(&key_a, u64::MAX)
+        .get_versioned(&key_a, CommitVersion::MAX)
         .unwrap()
         .expect("key A should exist after refresh");
     let a_ts = a_entry.timestamp.as_micros();
@@ -1715,7 +1717,7 @@ fn test_issue_1736_compaction_runs_in_background() {
         let key = Key::new_kv(ns.clone(), format!("key_{:04}", i));
         let entry = db
             .storage
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key_{:04} should exist after compaction", i));
         assert_eq!(entry.value, Value::String(format!("value_{}", i)),);
@@ -1913,7 +1915,7 @@ fn test_issue_1733_history_no_duplicates_after_recovery() {
         assert_eq!(history[2].value, Value::Int(1));
 
         // Also verify point read returns the correct latest value (no regression)
-        let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+        let latest = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(latest.is_some(), "point read should find the key");
         assert_eq!(latest.unwrap().value, Value::Int(3));
     }
@@ -2007,7 +2009,7 @@ fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
         );
 
         // Point read should return None (key is deleted)
-        let latest = db.storage().get_versioned(&key, u64::MAX).unwrap();
+        let latest = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(
             latest.is_none(),
             "deleted key should not be found via point read"
@@ -2065,7 +2067,7 @@ fn test_shutdown_full_lifecycle() {
     // Re-open and verify data persisted through shutdown
     drop(db);
     let db = Database::open(&db_path).unwrap();
-    let val = db.storage().get_versioned(&key, u64::MAX).unwrap();
+    let val = db.storage().get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(
         val.is_some(),
         "Data committed before shutdown must survive re-open"

@@ -44,6 +44,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use strata_core::id::CommitVersion;
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
@@ -87,7 +88,7 @@ fn vector_precheck_fn(db: &Arc<Database>, source: BranchId, target: BranchId) ->
         .collect();
 
     let storage = db.storage();
-    let version = storage.version();
+    let version = CommitVersion(storage.version());
 
     for space in shared_spaces {
         let source_ns = Arc::new(Namespace::for_branch_space(source, space));
@@ -155,7 +156,7 @@ fn vector_precheck_fn(db: &Arc<Database>, source: BranchId, target: BranchId) ->
 fn decode_configs_for_space(
     db: &Arc<Database>,
     prefix: &Key,
-    version: u64,
+    version: CommitVersion,
 ) -> std::collections::BTreeMap<String, CollectionRecord> {
     let mut out = std::collections::BTreeMap::new();
     let entries = match db.storage().scan_prefix(prefix, version) {

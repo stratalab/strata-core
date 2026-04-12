@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use crate::contract::VersionedValue;
 use crate::error::StrataResult;
+use crate::id::CommitVersion;
 use crate::types::Key;
 use crate::value::Value;
 
@@ -83,7 +84,7 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn get_versioned(&self, key: &Key, max_version: u64) -> StrataResult<Option<VersionedValue>>;
+    fn get_versioned(&self, key: &Key, max_version: CommitVersion) -> StrataResult<Option<VersionedValue>>;
 
     /// Get version history for a key
     ///
@@ -106,7 +107,7 @@ pub trait Storage: Send + Sync {
         &self,
         key: &Key,
         limit: Option<usize>,
-        before_version: Option<u64>,
+        before_version: Option<CommitVersion>,
     ) -> StrataResult<Vec<VersionedValue>>;
 
     /// Scan keys with given prefix at or before max_version
@@ -120,14 +121,14 @@ pub trait Storage: Send + Sync {
     fn scan_prefix(
         &self,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<Vec<(Key, VersionedValue)>>;
 
     /// Get current global version
     ///
     /// Returns the highest version assigned so far.
     /// Used for creating snapshots at current version.
-    fn current_version(&self) -> u64;
+    fn current_version(&self) -> CommitVersion;
 
     /// Put a value with a specific version and write mode.
     ///
@@ -155,7 +156,7 @@ pub trait Storage: Send + Sync {
         &self,
         key: Key,
         value: Value,
-        version: u64,
+        version: CommitVersion,
         ttl: Option<Duration>,
         mode: WriteMode,
     ) -> StrataResult<()>;
@@ -172,7 +173,7 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()>;
+    fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StrataResult<()>;
 
     /// Apply a batch of writes in a single operation.
     ///
@@ -181,7 +182,7 @@ pub trait Storage: Send + Sync {
     /// branch guards once per branch instead of per entry).
     ///
     /// All writes share the same `version` (same transaction commit version).
-    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: u64) -> StrataResult<()> {
+    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: CommitVersion) -> StrataResult<()> {
         for (key, value, mode) in writes {
             self.put_with_version_mode(key, value, version, None, mode)?;
         }
@@ -191,7 +192,7 @@ pub trait Storage: Send + Sync {
     /// Apply a batch of deletes in a single operation.
     ///
     /// Default implementation iterates and calls `delete_with_version()` per entry.
-    fn delete_batch(&self, deletes: Vec<Key>, version: u64) -> StrataResult<()> {
+    fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StrataResult<()> {
         for key in &deletes {
             self.delete_with_version(key, version)?;
         }
@@ -211,7 +212,7 @@ pub trait Storage: Send + Sync {
         &self,
         writes: Vec<(Key, Value, WriteMode)>,
         deletes: Vec<Key>,
-        version: u64,
+        version: CommitVersion,
         put_ttls: &[u64],
     ) -> StrataResult<()> {
         // Default: ignore put_ttls — implementations that support TTL
@@ -238,7 +239,7 @@ pub trait Storage: Send + Sync {
     /// Returns an error if the storage operation fails.
     fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
         Ok(self
-            .get_versioned(key, u64::MAX)?
+            .get_versioned(key, CommitVersion::MAX)?
             .map(|vv| vv.version.as_u64()))
     }
 }
@@ -279,14 +280,14 @@ mod tests {
         fn get_versioned(
             &self,
             key: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> StrataResult<Option<VersionedValue>> {
             let data = self.data.read().unwrap();
             Ok(data.get(key).and_then(|versions| {
                 versions
                     .iter()
                     .rev()
-                    .find(|v| v.version().as_u64() <= max_version)
+                    .find(|v| v.version().as_u64() <= max_version.as_u64())
                     .cloned()
             }))
         }
@@ -295,7 +296,7 @@ mod tests {
             &self,
             key: &Key,
             limit: Option<usize>,
-            before_version: Option<u64>,
+            before_version: Option<CommitVersion>,
         ) -> StrataResult<Vec<VersionedValue>> {
             let data = self.data.read().unwrap();
             let Some(versions) = data.get(key) else {
@@ -304,7 +305,7 @@ mod tests {
             let mut result: Vec<_> = versions
                 .iter()
                 .rev()
-                .filter(|v| before_version.map_or(true, |bv| v.version().as_u64() < bv))
+                .filter(|v| before_version.map_or(true, |bv| v.version().as_u64() < bv.as_u64()))
                 .cloned()
                 .collect();
             if let Some(limit) = limit {
@@ -316,7 +317,7 @@ mod tests {
         fn scan_prefix(
             &self,
             prefix: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> StrataResult<Vec<(Key, VersionedValue)>> {
             let data = self.data.read().unwrap();
             let mut result = vec![];
@@ -325,7 +326,7 @@ mod tests {
                     if let Some(v) = versions
                         .iter()
                         .rev()
-                        .find(|v| v.version().as_u64() <= max_version)
+                        .find(|v| v.version().as_u64() <= max_version.as_u64())
                     {
                         result.push((k.clone(), v.clone()));
                     }
@@ -334,27 +335,27 @@ mod tests {
             Ok(result)
         }
 
-        fn current_version(&self) -> u64 {
-            self.version.load(Ordering::SeqCst)
+        fn current_version(&self) -> CommitVersion {
+            CommitVersion(self.version.load(Ordering::SeqCst))
         }
 
         fn put_with_version_mode(
             &self,
             key: Key,
             value: Value,
-            version: u64,
+            version: CommitVersion,
             _ttl: Option<Duration>,
             _mode: WriteMode,
         ) -> StrataResult<()> {
             let versioned =
-                Versioned::with_timestamp(value, Version::txn(version), Timestamp::now());
+                Versioned::with_timestamp(value, Version::txn(version.as_u64()), Timestamp::now());
             let mut data = self.data.write().unwrap();
             data.entry(key).or_default().push(versioned);
-            self.version.fetch_max(version, Ordering::SeqCst);
+            self.version.fetch_max(version.as_u64(), Ordering::SeqCst);
             Ok(())
         }
 
-        fn delete_with_version(&self, key: &Key, _version: u64) -> StrataResult<()> {
+        fn delete_with_version(&self, key: &Key, _version: CommitVersion) -> StrataResult<()> {
             let mut data = self.data.write().unwrap();
             data.remove(key);
             Ok(())
@@ -390,7 +391,7 @@ mod tests {
     /// Helper: seed a value via put_with_version_mode (the only write method)
     fn seed(store: &MockStorage, key: Key, value: Value, version: u64) {
         store
-            .put_with_version_mode(key, value, version, None, WriteMode::Append)
+            .put_with_version_mode(key, value, CommitVersion(version), None, WriteMode::Append)
             .unwrap();
     }
 
@@ -399,7 +400,7 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "missing");
-        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
+        assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
     }
 
     #[test]
@@ -409,7 +410,7 @@ mod tests {
         let key = test_key(&ns, "hello");
         seed(&store, key.clone(), Value::Int(42), 1);
 
-        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(42));
     }
 
@@ -423,11 +424,11 @@ mod tests {
         seed(&store, key.clone(), Value::Int(2), 2);
 
         // Reading at v1 should see the first write
-        let result = store.get_versioned(&key, 1).unwrap().unwrap();
+        let result = store.get_versioned(&key, CommitVersion(1)).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(1));
 
-        // Reading at u64::MAX should see the latest write
-        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        // Reading at CommitVersion::MAX should see the latest write
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(2));
     }
 
@@ -439,7 +440,7 @@ mod tests {
         seed(&store, key.clone(), Value::Int(1), 1);
 
         // Version 0 is before any write
-        assert!(store.get_versioned(&key, 0).unwrap().is_none());
+        assert!(store.get_versioned(&key, CommitVersion::ZERO).unwrap().is_none());
     }
 
     #[test]
@@ -493,12 +494,12 @@ mod tests {
         seed(&store, key.clone(), Value::Int(3), 3);
 
         // Get history before v3 (should return v2 and v1)
-        let history = store.get_history(&key, None, Some(3)).unwrap();
+        let history = store.get_history(&key, None, Some(CommitVersion(3))).unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].value, Value::Int(2));
 
         // Get history before v2 (should return only v1)
-        let history = store.get_history(&key, None, Some(2)).unwrap();
+        let history = store.get_history(&key, None, Some(CommitVersion(2))).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].value, Value::Int(1));
     }
@@ -506,7 +507,7 @@ mod tests {
     #[test]
     fn storage_current_version_starts_at_zero() {
         let store = MockStorage::new();
-        assert_eq!(store.current_version(), 0);
+        assert_eq!(store.current_version(), CommitVersion::ZERO);
     }
 
     #[test]
@@ -514,7 +515,7 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         seed(&store, test_key(&ns, "a"), Value::Int(1), 5);
-        assert!(store.current_version() >= 5);
+        assert!(store.current_version() >= CommitVersion(5));
     }
 
     #[test]
@@ -524,7 +525,7 @@ mod tests {
         let key = test_key(&ns, "explicit");
         seed(&store, key.clone(), Value::Int(99), 42);
 
-        let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(result.value, Value::Int(99));
         assert_eq!(result.version().as_u64(), 42);
     }
@@ -553,7 +554,7 @@ mod tests {
             3,
         );
 
-        let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+        let results = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap();
         assert_eq!(results.len(), 2);
     }
 
@@ -564,8 +565,8 @@ mod tests {
         let key = test_key(&ns, "deleteme");
         seed(&store, key.clone(), Value::Int(1), 1);
 
-        store.delete_with_version(&key, 2).unwrap();
-        assert!(store.get_versioned(&key, u64::MAX).unwrap().is_none());
+        store.delete_with_version(&key, CommitVersion(2)).unwrap();
+        assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
     }
 
     // ====================================================================
@@ -576,34 +577,34 @@ mod tests {
     struct FailingStorage;
 
     impl Storage for FailingStorage {
-        fn get_versioned(&self, _: &Key, _: u64) -> StrataResult<Option<VersionedValue>> {
+        fn get_versioned(&self, _: &Key, _: CommitVersion) -> StrataResult<Option<VersionedValue>> {
             Err(StrataError::storage("disk read failed"))
         }
         fn get_history(
             &self,
             _: &Key,
             _: Option<usize>,
-            _: Option<u64>,
+            _: Option<CommitVersion>,
         ) -> StrataResult<Vec<VersionedValue>> {
             Err(StrataError::storage("disk read failed"))
         }
-        fn scan_prefix(&self, _: &Key, _: u64) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        fn scan_prefix(&self, _: &Key, _: CommitVersion) -> StrataResult<Vec<(Key, VersionedValue)>> {
             Err(StrataError::storage("disk read failed"))
         }
-        fn current_version(&self) -> u64 {
-            0
+        fn current_version(&self) -> CommitVersion {
+            CommitVersion::ZERO
         }
         fn put_with_version_mode(
             &self,
             _: Key,
             _: Value,
-            _: u64,
+            _: CommitVersion,
             _: Option<Duration>,
             _: WriteMode,
         ) -> StrataResult<()> {
             Err(StrataError::storage("disk write failed"))
         }
-        fn delete_with_version(&self, _: &Key, _: u64) -> StrataResult<()> {
+        fn delete_with_version(&self, _: &Key, _: CommitVersion) -> StrataResult<()> {
             Err(StrataError::storage("disk write failed"))
         }
     }
@@ -614,13 +615,13 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "k");
 
-        assert!(store.get_versioned(&key, u64::MAX).is_err());
+        assert!(store.get_versioned(&key, CommitVersion::MAX).is_err());
         assert!(store.get_history(&key, None, None).is_err());
-        assert!(store.scan_prefix(&key, 0).is_err());
+        assert!(store.scan_prefix(&key, CommitVersion::ZERO).is_err());
         assert!(store
-            .put_with_version_mode(key.clone(), Value::Null, 1, None, WriteMode::Append)
+            .put_with_version_mode(key.clone(), Value::Null, CommitVersion(1), None, WriteMode::Append)
             .is_err());
-        assert!(store.delete_with_version(&key, 1).is_err());
+        assert!(store.delete_with_version(&key, CommitVersion(1)).is_err());
     }
 
     #[test]
@@ -629,11 +630,11 @@ mod tests {
         let ns = test_ns();
         let key = test_key(&ns, "k");
 
-        let err = store.get_versioned(&key, u64::MAX).unwrap_err();
+        let err = store.get_versioned(&key, CommitVersion::MAX).unwrap_err();
         assert!(err.is_storage_error());
 
         let err = store
-            .put_with_version_mode(key, Value::Null, 1, None, WriteMode::Append)
+            .put_with_version_mode(key, Value::Null, CommitVersion(1), None, WriteMode::Append)
             .unwrap_err();
         assert!(err.is_storage_error());
     }

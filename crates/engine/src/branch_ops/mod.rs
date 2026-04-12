@@ -39,6 +39,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
@@ -863,7 +864,7 @@ pub fn fork_branch_with_metadata(
         target: "strata::branch_ops",
         source,
         destination,
-        fork_version,
+        fork_version = fork_version.as_u64(),
         "Branch forked (COW)"
     );
 
@@ -872,7 +873,7 @@ pub fn fork_branch_with_metadata(
         destination: destination.to_string(),
         keys_copied: 0,
         spaces_copied,
-        fork_version: Some(fork_version),
+        fork_version: Some(fork_version.as_u64()),
     };
 
     // Fire the branch DAG hook. Best-effort: the hook implementation
@@ -933,7 +934,7 @@ pub fn diff_branches_with_options(
     let storage = db.storage();
 
     // Capture snapshot version for consistent reads (#1920)
-    let snapshot_version = db.current_version();
+    let snapshot_version = db.current_version().as_u64();
 
     // COW fast path: if one branch is a direct child of the other and no
     // as_of timestamp, use O(W) diff instead of O(N) full scan.
@@ -1145,7 +1146,7 @@ fn cow_diff_branches(
             .clone();
         let key_a = Key::new(ns_a, *type_tag, user_key.clone());
         let val_a = storage
-            .get_versioned(&key_a, snapshot_version)?
+            .get_versioned(&key_a, CommitVersion(snapshot_version))?
             .map(|vv| vv.value);
 
         let ns_b = ns_cache
@@ -1154,7 +1155,7 @@ fn cow_diff_branches(
             .clone();
         let key_b = Key::new(ns_b, *type_tag, user_key.clone());
         let val_b = storage
-            .get_versioned(&key_b, snapshot_version)?
+            .get_versioned(&key_b, CommitVersion(snapshot_version))?
             .map(|vv| vv.value);
 
         let diff_entry = match (&val_a, &val_b) {
@@ -1919,7 +1920,7 @@ pub fn merge_branches_with_metadata(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot version for consistent reads during diff (#1917)
-    let snapshot_version = db.current_version();
+    let snapshot_version = db.current_version().as_u64();
 
     // Gather typed entries once, then route through the
     // PrimitiveMergeHandler registry. The registry's `precheck` step is
@@ -2439,7 +2440,7 @@ pub fn create_tag(
         )));
     }
 
-    let version = version.unwrap_or_else(|| db.current_version());
+    let version = version.unwrap_or_else(|| db.current_version().as_u64());
     let timestamp = strata_core::contract::Timestamp::now().as_micros();
 
     let tag_info = TagInfo {
@@ -2727,7 +2728,7 @@ pub fn revert_version_range_with_metadata(
             from_version, to_version
         )));
     }
-    let current_version = db.current_version();
+    let current_version = db.current_version().as_u64();
     if to_version > current_version {
         return Err(StrataError::invalid_input(format!(
             "to_version ({}) exceeds current database version ({})",
@@ -3075,7 +3076,7 @@ pub fn cherry_pick_from_diff(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot for consistent reads (#1917)
-    let snapshot_version = db.current_version();
+    let snapshot_version = db.current_version().as_u64();
 
     // Cherry-pick uses the same per-handler `precheck` + `plan` dispatch
     // as `merge_branches`, so it inherits the semantic graph merge and
@@ -5119,7 +5120,7 @@ mod tests {
         write_kv(&db, "main", "default", "b", Value::Int(10)); // v3
 
         // Get current version
-        let current = db.current_version();
+        let current = db.current_version().as_u64();
 
         // Revert the last write (v3 = b:10)
         let info = revert_version_range(&db, "main", current, current).unwrap();
@@ -5136,9 +5137,9 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
 
         write_kv(&db, "main", "default", "a", Value::Int(1)); // v_start
-        let v_start = db.current_version();
+        let v_start = db.current_version().as_u64();
         write_kv(&db, "main", "default", "a", Value::Int(2)); // v_change
-        let v_change = db.current_version();
+        let v_change = db.current_version().as_u64();
         write_kv(&db, "main", "default", "a", Value::Int(3)); // v_after (after range)
 
         // Revert [v_start+1, v_change] — but "a" was modified after the range
@@ -5169,11 +5170,11 @@ mod tests {
     fn test_revert_restores_deleted_key() {
         let (_temp, db) = setup_with_branch("main");
         write_kv(&db, "main", "default", "a", Value::Int(1));
-        let v_before = db.current_version();
+        let v_before = db.current_version().as_u64();
 
         // Delete "a" in the revert range
         delete_kv(&db, "main", "default", "a");
-        let v_delete = db.current_version();
+        let v_delete = db.current_version().as_u64();
 
         // Verify it's gone
         assert_eq!(read_kv(&db, "main", "default", "a"), None);

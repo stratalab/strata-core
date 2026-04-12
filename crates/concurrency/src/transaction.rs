@@ -10,6 +10,7 @@ use crate::validation::{validate_transaction, ValidationResult};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key};
@@ -128,7 +129,7 @@ impl From<CommitError> for StrataError {
 #[derive(Debug, Clone)]
 pub struct ApplyResult {
     /// Version assigned to all writes in this transaction
-    pub commit_version: u64,
+    pub commit_version: CommitVersion,
     /// Number of puts applied
     pub puts_applied: usize,
     /// Number of deletes applied
@@ -403,7 +404,7 @@ pub trait JsonStoreExt {
 pub struct TransactionContext {
     // Identity
     /// Unique transaction ID
-    pub txn_id: u64,
+    pub txn_id: TxnId,
     /// Branch this transaction belongs to
     pub branch_id: BranchId,
 
@@ -411,7 +412,7 @@ pub struct TransactionContext {
     /// Version at transaction start (snapshot version)
     ///
     /// All reads see data as of this version. Used for conflict detection.
-    pub start_version: u64,
+    pub start_version: CommitVersion,
 
     /// Backing store for snapshot reads
     ///
@@ -529,12 +530,13 @@ impl TransactionContext {
     /// ```
     /// use strata_concurrency::TransactionContext;
     /// use strata_core::types::BranchId;
+    /// use strata_core::id::{TxnId, CommitVersion};
     ///
     /// let branch_id = BranchId::new();
-    /// let txn = TransactionContext::new(1, branch_id, 100);
+    /// let txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     /// assert!(txn.is_active());
     /// ```
-    pub fn new(txn_id: u64, branch_id: BranchId, start_version: u64) -> Self {
+    pub fn new(txn_id: TxnId, branch_id: BranchId, start_version: CommitVersion) -> Self {
         TransactionContext {
             txn_id,
             branch_id,
@@ -574,16 +576,17 @@ impl TransactionContext {
     /// ```
     /// use strata_concurrency::TransactionContext;
     /// use strata_core::types::BranchId;
+    /// use strata_core::id::TxnId;
     /// use strata_storage::SegmentedStore;
     /// use std::sync::Arc;
     ///
     /// let branch_id = BranchId::new();
     /// let store = Arc::new(SegmentedStore::new());
-    /// let txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+    /// let txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
     /// assert!(txn.is_active());
     /// ```
-    pub fn with_store(txn_id: u64, branch_id: BranchId, store: Arc<SegmentedStore>) -> Self {
-        let start_version = store.version();
+    pub fn with_store(txn_id: TxnId, branch_id: BranchId, store: Arc<SegmentedStore>) -> Self {
+        let start_version = store.current_version();
         TransactionContext {
             txn_id,
             branch_id,
@@ -1316,11 +1319,12 @@ impl TransactionContext {
     /// # Example
     /// ```
     /// use strata_concurrency::TransactionContext;
+    /// use strata_core::id::{TxnId, CommitVersion};
     /// use strata_core::types::BranchId;
     /// use std::time::Duration;
     ///
     /// let branch_id = BranchId::new();
-    /// let txn = TransactionContext::new(1, branch_id, 100);
+    /// let txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     ///
     /// // Should not be expired immediately
     /// assert!(!txn.is_expired(Duration::from_secs(1)));
@@ -1336,11 +1340,12 @@ impl TransactionContext {
     /// # Example
     /// ```
     /// use strata_concurrency::TransactionContext;
+    /// use strata_core::id::{TxnId, CommitVersion};
     /// use strata_core::types::BranchId;
     /// use std::time::Duration;
     ///
     /// let branch_id = BranchId::new();
-    /// let txn = TransactionContext::new(1, branch_id, 100);
+    /// let txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     ///
     /// // Elapsed should be very small initially
     /// assert!(txn.elapsed() < Duration::from_secs(1));
@@ -1588,7 +1593,7 @@ impl TransactionContext {
     pub fn apply_writes<S: Storage>(
         &mut self,
         store: &S,
-        commit_version: u64,
+        commit_version: CommitVersion,
     ) -> StrataResult<ApplyResult> {
         if !self.is_committed() {
             return Err(StrataError::invalid_input(format!(
@@ -1781,24 +1786,25 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::BranchId;
+    /// # use strata_core::id::{TxnId, CommitVersion};
     /// # use strata_storage::SegmentedStore;
     /// # use std::sync::Arc;
     /// let branch_id = BranchId::default();
-    /// let mut ctx = TransactionContext::new(1, branch_id, 100);
+    /// let mut ctx = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     /// // ... use the context ...
     ///
     /// // Reset for reuse - capacity is preserved!
     /// let new_branch_id = BranchId::default();
     /// let store = Arc::new(SegmentedStore::new());
-    /// ctx.reset(2, new_branch_id, Some(store));
+    /// ctx.reset(TxnId(2), new_branch_id, Some(store));
     /// ```
-    pub fn reset(&mut self, txn_id: u64, branch_id: BranchId, store: Option<Arc<SegmentedStore>>) {
+    pub fn reset(&mut self, txn_id: TxnId, branch_id: BranchId, store: Option<Arc<SegmentedStore>>) {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
 
         // Update store and version
-        self.start_version = store.as_ref().map(|s| s.version()).unwrap_or(0);
+        self.start_version = store.as_ref().map(|s| s.current_version()).unwrap_or(CommitVersion::ZERO);
         self.store = store;
 
         // Clear collections but preserve capacity - this is the key optimization!
@@ -1857,9 +1863,10 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
+    /// # use strata_core::id::{TxnId, CommitVersion};
     /// # use strata_core::types::BranchId;
     /// let branch_id = BranchId::default();
-    /// let ctx = TransactionContext::new(1, branch_id, 100);
+    /// let ctx = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     /// let (read_cap, write_cap, delete_cap, cas_cap) = ctx.capacity();
     /// ```
     pub fn capacity(&self) -> (usize, usize, usize, usize) {
@@ -2028,6 +2035,7 @@ impl JsonStoreExt for TransactionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_core::types::{BranchId, Namespace, TypeTag};
     use strata_core::value::Value;
 
@@ -2043,7 +2051,7 @@ mod tests {
     fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<SegmentedStore> {
         let store = Arc::new(SegmentedStore::new());
         store
-            .put_with_version_mode(key.clone(), value, version, None, WriteMode::Append)
+            .put_with_version_mode(key.clone(), value, CommitVersion(version), None, WriteMode::Append)
             .unwrap();
         store
     }
@@ -2059,7 +2067,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 5);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         let result = txn.get_versioned(&key).unwrap();
         let vv = result.unwrap();
@@ -2073,7 +2081,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = empty_store();
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         txn.put(key.clone(), Value::String("written".into()))
             .unwrap();
@@ -2090,7 +2098,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 5);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         txn.delete(key.clone()).unwrap();
 
@@ -2104,7 +2112,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "missing");
         let store = empty_store();
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         let result = txn.get_versioned(&key).unwrap();
         assert!(result.is_none());
@@ -2118,7 +2126,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(7), 15);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         let _ = txn.get_versioned(&key).unwrap();
         // Verify version tracked for conflict detection
@@ -2133,7 +2141,7 @@ mod tests {
     fn test_write_buffer_limit_rejects_at_max() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         txn.set_max_write_entries(3);
 
         // Put 3 entries — should succeed
@@ -2156,7 +2164,7 @@ mod tests {
     fn test_write_buffer_limit_counts_deletes() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         txn.set_max_write_entries(2);
 
         txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
@@ -2170,7 +2178,7 @@ mod tests {
     fn test_write_buffer_limit_zero_unlimited() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         // max_write_entries = 0 (default, unlimited)
 
         for i in 0..1000 {
@@ -2188,7 +2196,7 @@ mod tests {
     fn test_reset_shrinks_large_capacity() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
         // Inflate capacity well beyond the 4096 threshold
         for i in 0..5000 {
@@ -2197,7 +2205,7 @@ mod tests {
         }
         assert!(txn.write_set.capacity() >= 5000);
 
-        txn.reset(2, branch_id, Some(empty_store()));
+        txn.reset(TxnId(2), branch_id, Some(empty_store()));
 
         // After reset, capacity should be shrunk below threshold
         assert!(
@@ -2211,7 +2219,7 @@ mod tests {
     fn test_write_buffer_limit_counts_cas() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         txn.set_max_write_entries(2);
 
         // 1 put + 1 CAS = 2
@@ -2227,7 +2235,7 @@ mod tests {
     fn test_write_buffer_overwrite_at_limit() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         txn.set_max_write_entries(2);
 
         // Fill to limit
@@ -2247,7 +2255,7 @@ mod tests {
     fn test_write_buffer_delete_existing_at_limit() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
         txn.set_max_write_entries(2);
 
         // Fill: 1 put + 1 delete = 2
@@ -2268,7 +2276,7 @@ mod tests {
     fn test_reset_preserves_normal_capacity() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
         // Insert a modest number of entries (below threshold)
         for i in 0..100 {
@@ -2277,7 +2285,7 @@ mod tests {
         }
         let cap_before = txn.write_set.capacity();
 
-        txn.reset(2, branch_id, Some(empty_store()));
+        txn.reset(TxnId(2), branch_id, Some(empty_store()));
 
         // Capacity should be preserved (not shrunk)
         assert_eq!(txn.write_set.capacity(), cap_before);
@@ -2292,7 +2300,7 @@ mod tests {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
         let store = empty_store();
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
         // Mark some keys for replace
         txn.put_replace(test_key(&ns, "adj1"), Value::Int(1))
@@ -2302,7 +2310,7 @@ mod tests {
         assert_eq!(txn.key_write_modes.len(), 2);
 
         // Reset should clear key_write_modes
-        txn.reset(2, branch_id, Some(store.clone()));
+        txn.reset(TxnId(2), branch_id, Some(store.clone()));
         assert!(txn.key_write_modes.is_empty());
 
         // After reset, a normal put should NOT use KeepLast — verify no stale leak
@@ -2318,7 +2326,7 @@ mod tests {
     fn test_put_replace_uses_keep_last() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
         let key = test_key(&ns, "graph_adj");
         txn.put_replace(key.clone(), Value::Int(42)).unwrap();
@@ -2332,7 +2340,7 @@ mod tests {
     fn test_delete_cleans_up_key_write_modes() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
         let key = test_key(&ns, "adj_to_delete");
         txn.put_replace(key.clone(), Value::Int(1)).unwrap();
@@ -2363,7 +2371,7 @@ mod tests {
                 .put_with_version_mode(
                     key.clone(),
                     Value::Int(v as i64),
-                    v,
+                    CommitVersion(v),
                     None,
                     WriteMode::Append,
                 )
@@ -2376,17 +2384,17 @@ mod tests {
         assert_eq!(history.len(), 3);
 
         // Now create a transaction that uses put_replace
-        let mut txn = TransactionContext::with_store(1, branch_id, store.clone());
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store.clone());
         txn.put_replace(key.clone(), Value::Int(99)).unwrap();
 
         // Force status to Committed for apply_writes
         txn.status = TransactionStatus::Committed;
 
-        let result = txn.apply_writes(&*store, 4).unwrap();
+        let result = txn.apply_writes(&*store, CommitVersion(4)).unwrap();
         assert_eq!(result.puts_applied, 1);
 
         // KeepLast(1) is a retention hint — write still appends (issue #1700)
-        let latest = Storage::get_versioned(&*store, &key, u64::MAX)
+        let latest = Storage::get_versioned(&*store, &key, CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(latest.value, Value::Int(99));
@@ -2415,7 +2423,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 1);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         txn.set_read_only(true);
 
         // Read should succeed
@@ -2433,7 +2441,7 @@ mod tests {
     fn test_read_only_rejects_put() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
@@ -2445,7 +2453,7 @@ mod tests {
     fn test_read_only_rejects_delete() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
@@ -2457,7 +2465,7 @@ mod tests {
     fn test_read_only_rejects_cas() {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
@@ -2468,11 +2476,11 @@ mod tests {
     #[test]
     fn test_read_only_reset_clears_flag() {
         let branch_id = BranchId::new();
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.set_read_only(true);
         assert!(txn.is_read_only_mode());
 
-        txn.reset(2, branch_id, Some(empty_store()));
+        txn.reset(TxnId(2), branch_id, Some(empty_store()));
         assert!(
             !txn.is_read_only_mode(),
             "read_only should be cleared after reset"
@@ -2489,7 +2497,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(10), 5);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         txn.cas_with_read(key.clone(), 5, Value::Int(20)).unwrap();
 
@@ -2506,7 +2514,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "missing");
         let store = empty_store();
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
         txn.cas_with_read(key.clone(), 0, Value::Int(1)).unwrap();
 
@@ -2520,7 +2528,7 @@ mod tests {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
         let store = empty_store();
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
@@ -2538,7 +2546,7 @@ mod tests {
         let ns = test_namespace_for(branch_id);
         let key = test_key(&ns, "k1");
         let store = store_with_key(&key, Value::Int(42), 7);
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         txn.set_read_only(true);
 
         // get_versioned should return the value
@@ -2558,7 +2566,7 @@ mod tests {
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
         let store = empty_store();
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         txn.set_read_only(true);
 
         let key = test_key(&ns, "missing");
@@ -2580,10 +2588,10 @@ mod tests {
         for i in 0..3 {
             let key = test_key(&ns, &format!("pfx:{}", i));
             store
-                .put_with_version_mode(key, Value::Int(i as i64), 1, None, WriteMode::Append)
+                .put_with_version_mode(key, Value::Int(i as i64), CommitVersion(1), None, WriteMode::Append)
                 .unwrap();
         }
-        let mut txn = TransactionContext::with_store(1, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         txn.set_read_only(true);
 
         let prefix = test_key(&ns, "pfx:");
@@ -2609,7 +2617,7 @@ mod tests {
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
         let store = Arc::new(SegmentedStore::new());
-        let mut txn = TransactionContext::with_store(1, branch_a, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
 
         // Reading a key from branch B inside a branch A transaction must fail
         let err = txn.get(&cross_key).unwrap_err();
@@ -2627,7 +2635,7 @@ mod tests {
         let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
-        let mut txn = TransactionContext::new(1, branch_a, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_a, CommitVersion(100));
 
         // Writing a key from branch B inside a branch A transaction must fail
         let err = txn.put(cross_key, Value::Int(1)).unwrap_err();
@@ -2645,7 +2653,7 @@ mod tests {
         let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
-        let mut txn = TransactionContext::new(1, branch_a, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_a, CommitVersion(100));
 
         // Deleting a key from branch B inside a branch A transaction must fail
         let err = txn.delete(cross_key).unwrap_err();
@@ -2663,7 +2671,7 @@ mod tests {
         let ns_b = Arc::new(Namespace::new(branch_b, "default".to_string()));
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
-        let mut txn = TransactionContext::new(1, branch_a, 100);
+        let mut txn = TransactionContext::new(TxnId(1), branch_a, CommitVersion(100));
 
         // CAS on a key from branch B inside a branch A transaction must fail
         let err = txn.cas(cross_key, 1, Value::Int(2)).unwrap_err();
@@ -2682,7 +2690,7 @@ mod tests {
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
         let store = Arc::new(SegmentedStore::new());
-        let mut txn = TransactionContext::with_store(1, branch_a, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
 
         // cas_with_read on a key from branch B must fail
         let err = txn.cas_with_read(cross_key, 0, Value::Int(2)).unwrap_err();
@@ -2701,7 +2709,7 @@ mod tests {
         let cross_prefix = Key::new(ns_b, TypeTag::KV, b"pfx:".to_vec());
 
         let store = Arc::new(SegmentedStore::new());
-        let mut txn = TransactionContext::with_store(1, branch_a, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
 
         let err = txn.scan_prefix(&cross_prefix).unwrap_err();
         assert!(
@@ -2719,7 +2727,7 @@ mod tests {
         let cross_key = Key::new(ns_b, TypeTag::KV, b"flag".to_vec());
 
         let store = Arc::new(SegmentedStore::new());
-        let mut txn = TransactionContext::with_store(1, branch_a, store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
         txn.set_allow_cross_branch(true);
 
         // With allow_cross_branch, cross-branch get should succeed (returns None, no data)
@@ -2740,14 +2748,14 @@ mod tests {
                 .put_with_version_mode(
                     test_key(&ns, name),
                     Value::Int(val),
-                    10,
+                    CommitVersion(10),
                     None,
                     WriteMode::Append,
                 )
                 .unwrap();
         }
 
-        let mut txn = TransactionContext::with_store(100, branch_id, store);
+        let mut txn = TransactionContext::with_store(TxnId(100), branch_id, store);
 
         // Buffer writes that interleave (b, d) and override (c, e)
         txn.put(test_key(&ns, "b"), Value::Int(20)).unwrap();

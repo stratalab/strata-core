@@ -143,7 +143,7 @@ fn clear_branch_cleans_up_inherited_and_own_segments() {
 
     // Parent can still read its data
     let result = store
-        .get_versioned(&parent_kv("a"), u64::MAX)
+        .get_versioned(&parent_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(1));
@@ -218,7 +218,7 @@ fn concurrent_fork_and_compaction_no_data_loss() {
     // without ENOENT errors on deleted segment files.
     for i in 0..100 {
         let key = child_kv(&format!("key{:04}", i));
-        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(
             result.is_some(),
             "child should see inherited key {:04} — segment file must not be deleted",
@@ -290,7 +290,7 @@ fn concurrent_fork_and_compaction_stress() {
         // Verify all data readable from child
         for i in 0..40 {
             let key = child_kv(&format!("r{}k{:04}", round, i));
-            let result = store.get_versioned(&key, u64::MAX).unwrap();
+            let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
             assert!(
                 result.is_some(),
                 "round {}: child missing key {:04}",
@@ -431,7 +431,7 @@ fn bench_100_branch_fanout() {
                 strata_core::types::TypeTag::KV,
                 format!("k{:06}", i).into_bytes(),
             );
-            let val = store.get_versioned(&key, u64::MAX).unwrap();
+            let val = store.get_versioned(&key, CommitVersion::MAX).unwrap();
             assert!(val.is_some(), "child {} missing key {}", c, i);
         }
     }
@@ -501,7 +501,7 @@ fn bench_fork_chain_depth() {
             strata_core::types::TypeTag::KV,
             format!("k{:04}", i).into_bytes(),
         );
-        let val = store.get_versioned(&key, u64::MAX).unwrap();
+        let val = store.get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(val.is_some(), "E missing key {}", i);
     }
 
@@ -582,7 +582,7 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
     // Data from the real segment should be readable
     drop(parent_state);
     let result = store2
-        .get_versioned(&parent_kv("a"), u64::MAX)
+        .get_versioned(&parent_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(1));
@@ -618,7 +618,7 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 
     // Verify child can read inherited data before compaction
     let val_a = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_a.value, Value::Int(1));
@@ -640,7 +640,7 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 
     // Verify child still reads correctly (in-memory Arcs are alive)
     let val_b = store
-        .get_versioned(&child_kv("b"), u64::MAX)
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_b.value, Value::Int(2));
@@ -654,14 +654,14 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
     // 5. Child must still see inherited data after recovery
     //    This is the bug: without the fix, inherited layer resolution can't
     //    find the orphan segments because they're not in the parent's version.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), u64::MAX).unwrap();
+    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery (orphan segment)"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), u64::MAX).unwrap();
+    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery (orphan segment)"
@@ -670,7 +670,7 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 
     // Parent should still read the compacted data
     let parent_a = store2
-        .get_versioned(&parent_kv("a"), u64::MAX)
+        .get_versioned(&parent_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(parent_a.value, Value::Int(1));
@@ -710,7 +710,7 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
 
     // Verify child can read inherited data before crash
     let val_a = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_a.value, Value::Int(1));
@@ -736,14 +736,14 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
     let info = store2.recover_segments().unwrap();
 
     // 6. Child must still see inherited data after recovery.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), u64::MAX).unwrap();
+    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), u64::MAX).unwrap();
+    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery"
@@ -760,7 +760,7 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
     // Parent branch must not have its own segments loaded.
     assert!(
         store2
-            .get_versioned(&parent_kv("a"), u64::MAX)
+            .get_versioned(&parent_kv("a"), CommitVersion::MAX)
             .unwrap()
             .is_none(),
         "parent branch own segments must not be loaded (corrupt manifest)"
@@ -839,7 +839,7 @@ fn concurrent_materialize_serialized() {
 
     // Data should be accessible
     let result = store
-        .get_versioned(&child_kv("k0050"), u64::MAX)
+        .get_versioned(&child_kv("k0050"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(50));
@@ -896,7 +896,7 @@ fn clear_branch_preserves_referenced_own_segments() {
 
     // Child should still be able to read inherited data
     let result = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(1));
@@ -1079,7 +1079,7 @@ fn test_issue_1705_materialize_layer_gc_orphan_segments() {
 
     // Child should still read materialized data from its own segments
     let val = store
-        .get_versioned(&child_kv("k0000"), u64::MAX)
+        .get_versioned(&child_kv("k0000"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(0));
@@ -1137,7 +1137,7 @@ fn test_issue_1677_corruption_does_not_resurrect_stale_data() {
     // 5. Read must return a corruption error, NEVER the stale value (100).
     //    Before this fix, corruption returned None which fell through to the
     //    older segment and returned Value::Int(100) — a data-correctness violation.
-    let result = store.get_versioned(&kv_key("k"), u64::MAX);
+    let result = store.get_versioned(&kv_key("k"), CommitVersion::MAX);
     match result {
         Err(e) => {
             assert!(

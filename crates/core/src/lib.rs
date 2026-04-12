@@ -16,6 +16,7 @@ pub mod branch_dag; // Branch DAG types and constants
 pub mod branch_types; // Branch lifecycle types
 pub mod contract; // contract types
 pub mod error;
+pub mod id;
 pub mod instrumentation; // Performance tracing (feature-gated)
 pub mod limits; // Size limits for keys, values, and vectors
 pub mod primitives; // primitive types (Event, Vector, JSON types)
@@ -28,6 +29,7 @@ pub use branch_types::{BranchEventOffsets, BranchMetadata, BranchStatus};
 pub use error::{
     ConstraintReason, DetailValue, ErrorCode, ErrorDetails, StrataError, StrataResult,
 };
+pub use id::{CommitVersion, TxnId};
 pub use limits::{LimitError, Limits};
 pub use traits::{Storage, WriteMode};
 pub use types::{validate_space_name, BranchId, Key, Namespace, TypeTag};

@@ -49,7 +49,7 @@ impl VectorStore {
     ) -> VectorResult<()> {
         use strata_core::traits::Storage;
 
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
 
         // Get all spaces for this branch (SpaceIndex.list always includes "default")
         let space_index = strata_engine::SpaceIndex::new(self.db.clone());
@@ -154,7 +154,7 @@ impl VectorStore {
         use strata_core::traits::Storage;
 
         let state = self.state()?;
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let ns = self.namespace_for(branch_id, space);
 
         // ----------------------------------------------------------------

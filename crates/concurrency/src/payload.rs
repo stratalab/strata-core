@@ -157,6 +157,7 @@ pub enum PayloadError {
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
 
@@ -279,7 +280,7 @@ mod tests {
         let branch_id = ns.branch_id;
 
         // Build a transaction with writes, deletes, and TTLs
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.write_set.insert(
             Key::new_kv(ns.clone(), "key1"),
             Value::Bytes(vec![0x42u8; 1024]),

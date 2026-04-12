@@ -148,7 +148,7 @@ fn scan_branch_data(
     let storage = db.storage();
 
     // Capture snapshot version for consistent reads (#1920)
-    let snapshot_version = db.current_version();
+    let snapshot_version = db.current_version().as_u64();
 
     // Discover all current keys across all type tags
     let type_tags = [

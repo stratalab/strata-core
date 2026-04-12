@@ -30,6 +30,7 @@
 //! mismatch, recovery falls back transparently to full KV-based rebuild
 //! with no data loss.
 
+use strata_core::id::CommitVersion;
 use strata_core::StrataResult;
 use strata_engine::Database;
 use tracing::info;
@@ -122,7 +123,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     // Get access to the shared backend state
     let state = db.extension::<VectorBackendState>()?;
 
-    let snapshot_version = db.storage().version();
+    let snapshot_version = CommitVersion(db.storage().version());
     let mut stats = super::RecoveryStats::default();
     let data_dir = db.data_dir();
     let use_mmap = !data_dir.as_os_str().is_empty();
@@ -524,7 +525,7 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
         let mut pre_reads = Vec::new();
         for key in deletes {
             if key.type_tag == TypeTag::Vector {
-                if let Ok(Some(vv)) = db.storage().get_versioned(key, u64::MAX) {
+                if let Ok(Some(vv)) = db.storage().get_versioned(key, CommitVersion::MAX) {
                     if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
                         pre_reads.push((key.clone(), bytes.clone()));
                     }

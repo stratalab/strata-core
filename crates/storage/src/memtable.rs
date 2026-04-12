@@ -12,6 +12,7 @@
 //! efficient ordered iteration.
 
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
+use strata_core::id::CommitVersion;
 use strata_core::types::Key;
 use strata_core::value::Value;
 use strata_core::{Timestamp, Version, VersionedValue};
@@ -183,7 +184,7 @@ impl Memtable {
     /// Point read: get the newest visible version of a key at or before `snapshot_commit`.
     ///
     /// Returns `None` if the key doesn't exist or has no version ≤ `snapshot_commit`.
-    pub fn get_versioned(&self, key: &Key, snapshot_commit: u64) -> Option<MemtableEntry> {
+    pub fn get_versioned(&self, key: &Key, snapshot_commit: CommitVersion) -> Option<MemtableEntry> {
         // Seek to (key, u64::MAX) — the theoretical newest possible version
         let seek_key = InternalKey::encode(key, u64::MAX);
         let typed_prefix = encode_typed_key(key);
@@ -196,7 +197,7 @@ impl Memtable {
                 break;
             }
             // Check MVCC visibility
-            if ik.commit_id() <= snapshot_commit {
+            if ik.commit_id() <= snapshot_commit.as_u64() {
                 return Some(entry.value().clone());
             }
         }
@@ -459,14 +460,14 @@ mod tests {
     fn put_then_get_returns_value() {
         let mt = Memtable::new(0);
         mt.put(&key("k1"), 1, Value::Int(42), false);
-        let result = mt.get_versioned(&key("k1"), u64::MAX);
+        let result = mt.get_versioned(&key("k1"), CommitVersion::MAX);
         assert_eq!(result.unwrap().value, Value::Int(42));
     }
 
     #[test]
     fn get_nonexistent_returns_none() {
         let mt = Memtable::new(0);
-        assert!(mt.get_versioned(&key("k1"), u64::MAX).is_none());
+        assert!(mt.get_versioned(&key("k1"), CommitVersion::MAX).is_none());
     }
 
     #[test]
@@ -474,7 +475,7 @@ mod tests {
         let mt = Memtable::new(0);
         mt.put(&key("k1"), 1, Value::Null, false);
         mt.put(&key("k1"), 2, Value::Null, true);
-        let result = mt.get_versioned(&key("k1"), u64::MAX);
+        let result = mt.get_versioned(&key("k1"), CommitVersion::MAX);
         assert!(result.unwrap().is_tombstone);
     }
 
@@ -488,18 +489,18 @@ mod tests {
         mt.put(&key("k1"), 3, Value::Int(30), false);
 
         assert_eq!(
-            mt.get_versioned(&key("k1"), 3).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), 2).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().value,
             Value::Int(20)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), 1).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
             Value::Int(10)
         );
-        assert!(mt.get_versioned(&key("k1"), 0).is_none());
+        assert!(mt.get_versioned(&key("k1"), CommitVersion(0)).is_none());
     }
 
     #[test]
@@ -523,13 +524,13 @@ mod tests {
         mt.put(&key("k1"), 2, Value::Null, true);
         mt.put(&key("k1"), 3, Value::Int(30), false);
 
-        assert!(mt.get_versioned(&key("k1"), 2).unwrap().is_tombstone);
+        assert!(mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().is_tombstone);
         assert_eq!(
-            mt.get_versioned(&key("k1"), 3).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), 1).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
             Value::Int(10)
         );
     }
@@ -651,7 +652,7 @@ mod tests {
         mt.freeze();
         assert!(mt.is_frozen());
         assert_eq!(
-            mt.get_versioned(&key("k1"), u64::MAX).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion::MAX).unwrap().value,
             Value::Int(42)
         );
     }
@@ -847,7 +848,7 @@ mod tests {
                 let mt = Arc::clone(&mt);
                 std::thread::spawn(move || {
                     for i in 0..100u64 {
-                        let result = mt.get_versioned(&key(&format!("k{}", i)), u64::MAX);
+                        let result = mt.get_versioned(&key(&format!("k{}", i)), CommitVersion::MAX);
                         assert!(result.is_some());
                     }
                 })

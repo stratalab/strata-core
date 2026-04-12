@@ -56,7 +56,7 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
                     .put_with_version_mode(
                         parent_kv(&key_name),
                         Value::Int(v as i64),
-                        v,
+                        CommitVersion(v),
                         None,
                         WriteMode::Append,
                     )
@@ -110,7 +110,7 @@ fn test_issue_1679_fork_concurrent_write_visibility() {
                         TypeTag::KV,
                         key_name.as_bytes().to_vec(),
                     );
-                    match store.get_versioned(&child_key, u64::MAX) {
+                    match store.get_versioned(&child_key, CommitVersion::MAX) {
                         Ok(Some(child_entry)) => {
                             if child_entry.value != parent_entry.value {
                                 failures.push(format!(
@@ -215,13 +215,13 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
         "corrupt manifest must be reported, not silently load as L0"
     );
     // The orphan SST must NOT be accessible (no L0 fallback).
-    let orphan_val = store2.get_versioned(&kv_key("orphan"), u64::MAX).unwrap();
+    let orphan_val = store2.get_versioned(&kv_key("orphan"), CommitVersion::MAX).unwrap();
     assert!(
         orphan_val.is_none(),
         "orphan segment must not be loaded when manifest is corrupt"
     );
     // The real segment must also not be accessible (branch skipped entirely).
-    let real_val = store2.get_versioned(&kv_key("real"), u64::MAX).unwrap();
+    let real_val = store2.get_versioned(&kv_key("real"), CommitVersion::MAX).unwrap();
     assert!(
         real_val.is_none(),
         "no segments should be loaded for corrupt-manifest branch"
@@ -331,7 +331,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount() {
             TypeTag::KV,
             format!("k{:04}", i).as_bytes().to_vec(),
         );
-        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(
             result.is_some(),
             "child2 should see inherited key {:04} — segment file must not be deleted by race",
@@ -423,7 +423,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
                 TypeTag::KV,
                 format!("r{}k{:04}", round, i).as_bytes().to_vec(),
             );
-            let result = store.get_versioned(&key, u64::MAX).unwrap();
+            let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
             assert!(
                 result.is_some(),
                 "round {}: child2 missing key {:04} — segment file may have been deleted by race",
@@ -1032,12 +1032,12 @@ fn test_issue_1740_put_recovery_entry_preserves_ttl() {
         .unwrap();
 
     // Read the entry via store (filters expired) — should still be alive
-    let result = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(result.value, Value::Int(42));
 
     // Verify TTL was preserved by checking via the memtable directly
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "put_recovery_entry must preserve TTL, got ttl_ms={}",
@@ -1064,7 +1064,7 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
 
     // Verify TTL was preserved
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, u64::MAX).unwrap();
+    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "apply_recovery_atomic must preserve TTL, got ttl_ms={}",
@@ -1152,7 +1152,7 @@ fn test_issue_1721_fork_resets_materializing_status() {
     // 7. Verify data is still readable through the child.
     let child_ns = Arc::new(Namespace::new(child, "default".to_string()));
     let child_key = Key::new(Arc::clone(&child_ns), TypeTag::KV, b"k0".to_vec());
-    let val = store.get_versioned(&child_key, u64::MAX).unwrap().unwrap();
+    let val = store.get_versioned(&child_key, CommitVersion::MAX).unwrap().unwrap();
     assert_eq!(val.value, Value::Int(0));
 }
 
@@ -1170,7 +1170,7 @@ fn test_issue_1718_concurrent_flush_no_duplicate_segments() {
             .put_with_version_mode(
                 kv_key(&format!("k{:04}", i)),
                 Value::Int(i as i64),
-                i + 1,
+                CommitVersion(i + 1),
                 None,
                 WriteMode::Append,
             )
@@ -1210,7 +1210,7 @@ fn test_issue_1718_concurrent_flush_no_duplicate_segments() {
     // All data is readable.
     for i in 0..10u64 {
         let result = store
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -1232,7 +1232,7 @@ fn test_issue_1718_concurrent_flush_no_duplicate_segments_stress() {
                 .put_with_version_mode(
                     kv_key(&format!("k{:04}", key_idx)),
                     Value::Int(key_idx as i64),
-                    key_idx + 1,
+                    CommitVersion(key_idx + 1),
                     None,
                     WriteMode::Append,
                 )
@@ -1271,7 +1271,7 @@ fn test_issue_1718_concurrent_flush_no_duplicate_segments_stress() {
     // All data readable.
     for i in 0..15u64 {
         let result = store
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -1317,13 +1317,13 @@ fn test_issue_1694_materialize_shadow_detection_ignores_memtable() {
 
     // Verify reads return the child's value for "a" and the materialized value for "b"
     let val_a = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_a.value, Value::Int(999), "child's memtable write wins");
 
     let val_b = store
-        .get_versioned(&child_kv("b"), u64::MAX)
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_b.value, Value::Int(2), "inherited 'b' is materialized");
@@ -1357,7 +1357,7 @@ fn test_issue_1694_materialize_shadow_detection_ignores_frozen_memtable() {
     );
 
     let val_x = store
-        .get_versioned(&child_kv("x"), u64::MAX)
+        .get_versioned(&child_kv("x"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val_x.value, Value::Int(777), "child's frozen write wins");
@@ -1398,7 +1398,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
 
     // The entry IS in the memtable but should be invisible at the current version (1)
     let invisible = store
-        .get_versioned(&kv_key("new_key"), store.version())
+        .get_versioned(&kv_key("new_key"), CommitVersion(store.version()))
         .unwrap();
     assert!(
         invisible.is_none(),
@@ -1410,7 +1410,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     assert_eq!(store.version(), 5);
 
     let visible = store
-        .get_versioned(&kv_key("new_key"), store.version())
+        .get_versioned(&kv_key("new_key"), CommitVersion(store.version()))
         .unwrap();
     assert!(
         visible.is_some(),
@@ -1480,7 +1480,7 @@ fn test_issue_2110_fork_version_gap_deterministic() {
             .put_with_version_mode(
                 parent_kv("gap_key"),
                 Value::Int(999),
-                v,
+                CommitVersion(v),
                 None,
                 WriteMode::Append,
             )
@@ -1517,16 +1517,16 @@ fn test_issue_2110_fork_version_gap_deterministic() {
     // The writer allocated a version via next_version() but hadn't applied
     // it yet, so fork_version correctly excludes it.
     assert!(
-        fork_version < allocated_version,
+        fork_version.as_u64() < allocated_version,
         "fork_version ({}) should be < allocated version ({}) — \
          fork_branch now uses per-branch max_version, not the global counter",
-        fork_version,
+        fork_version.as_u64(),
         allocated_version,
     );
 
     // Parent has the data (writer wrote it after fork)
     let parent_val = store
-        .get_versioned(&parent_kv("gap_key"), u64::MAX)
+        .get_versioned(&parent_kv("gap_key"), CommitVersion::MAX)
         .unwrap();
     assert_eq!(
         parent_val.map(|e| e.value),
@@ -1538,7 +1538,7 @@ fn test_issue_2110_fork_version_gap_deterministic() {
     // so the fork doesn't claim to include data it doesn't have.
     let child_ns = Arc::new(Namespace::new(fork_branch_id, "default".to_string()));
     let child_key = Key::new(child_ns, TypeTag::KV, b"gap_key".to_vec());
-    let child_val = store.get_versioned(&child_key, u64::MAX).unwrap();
+    let child_val = store.get_versioned(&child_key, CommitVersion::MAX).unwrap();
     assert!(
         child_val.is_none(),
         "child should not have gap_key (fork_version={} < allocated_version={})",

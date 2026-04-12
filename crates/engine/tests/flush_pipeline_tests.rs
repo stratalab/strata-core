@@ -8,6 +8,7 @@ use std::sync::Arc;
 use strata_engine::background::{BackgroundScheduler, TaskPriority};
 use strata_storage::segmented::SegmentedStore;
 
+use strata_core::id::CommitVersion;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
@@ -26,7 +27,7 @@ fn kv_key(name: &str) -> Key {
 
 fn seed(store: &SegmentedStore, key: Key, value: Value, version: u64) {
     store
-        .put_with_version_mode(key, value, version, None, WriteMode::Append)
+        .put_with_version_mode(key, value, CommitVersion(version), None, WriteMode::Append)
         .unwrap();
 }
 
@@ -40,7 +41,7 @@ fn scheduler_flushes_after_rotation() {
             .put_with_version_mode(
                 kv_key(&format!("k{:04}", i)),
                 Value::Int(i as i64),
-                i,
+                CommitVersion(i),
                 None,
                 WriteMode::Append,
             )
@@ -68,7 +69,7 @@ fn scheduler_flushes_after_rotation() {
 
     for i in 1..=50u64 {
         let result = store
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -155,7 +156,7 @@ fn lifecycle_write_flush_recover_all_data_correct() {
 
     for i in 1..=100u64 {
         let result = store2
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -210,7 +211,7 @@ fn lifecycle_crash_before_flush() {
 
     for i in 1..=50u64 {
         let result = store2
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -270,7 +271,7 @@ fn lifecycle_crash_after_segment_before_manifest() {
     // Data readable via segment + memtable (MVCC dedup handles overlap)
     for i in 1..=50u64 {
         let result = store2
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -326,7 +327,7 @@ fn lifecycle_multiple_flush_cycles() {
 
     for i in 1..=90u64 {
         let result = store2
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -397,7 +398,7 @@ fn lifecycle_wal_truncation_after_flush() {
 
     for i in 1..=50u64 {
         let result = store2
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(result.value, Value::Int(i as i64));
@@ -447,7 +448,7 @@ fn multi_level_compaction_cascades() {
     // All data still readable after cascading through levels
     for i in 1..=5u64 {
         let result = store
-            .get_versioned(&kv_key(&format!("k{:04}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{:04}", i)), CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key k{:04} missing after cascade", i));
         assert_eq!(result.value, Value::Int(i as i64));
@@ -489,7 +490,8 @@ fn test_issue_1726_version_counter_from_segments() {
     let recovery = RecoveryCoordinator::new(wal_dir).with_segments(segments_dir, 0);
     let result = recovery.recover().unwrap();
     assert_eq!(
-        result.stats.final_version, 0,
+        result.stats.final_version,
+        CommitVersion::ZERO,
         "WAL is empty so WAL max_version must be 0"
     );
 
@@ -503,10 +505,10 @@ fn test_issue_1726_version_counter_from_segments() {
 
     // Phase 4: The version counter must be bumped to at least segment max.
     let coordinator = TransactionCoordinator::from_recovery_with_limits(&result, 0);
-    coordinator.bump_version_floor(seg_info.max_commit_id);
+    coordinator.bump_version_floor(CommitVersion(seg_info.max_commit_id));
     assert_eq!(
         coordinator.current_version(),
-        100,
+        CommitVersion(100),
         "version counter must equal segment max_commit_id after bump",
     );
 }

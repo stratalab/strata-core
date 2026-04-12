@@ -148,20 +148,20 @@ fn inherited_layer_point_lookup() {
 
     // Child should see parent's data
     let result = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(1));
 
     let result = store
-        .get_versioned(&child_kv("c"), u64::MAX)
+        .get_versioned(&child_kv("c"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(3));
 
     // Non-existent key still returns None
     assert!(store
-        .get_versioned(&child_kv("z"), u64::MAX)
+        .get_versioned(&child_kv("z"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -174,7 +174,7 @@ fn inherited_layer_version_filter() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 5);
 
     let result = store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(
@@ -191,17 +191,17 @@ fn inherited_layer_write_shadows() {
 
     // Write to child — this should shadow the inherited value
     store
-        .put_with_version_mode(child_kv("k"), Value::Int(999), 11, None, WriteMode::Append)
+        .put_with_version_mode(child_kv("k"), Value::Int(999), CommitVersion(11), None, WriteMode::Append)
         .unwrap();
 
     let result = store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(999));
 
     // But at snapshot before the child write, we see the inherited value
-    let result = store.get_versioned(&child_kv("k"), 10).unwrap().unwrap();
+    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
     assert_eq!(result.value, Value::Int(100));
 }
 
@@ -211,15 +211,15 @@ fn inherited_layer_delete_shadows() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Delete on child hides inherited entry
-    store.delete_with_version(&child_kv("k"), 11).unwrap();
+    store.delete_with_version(&child_kv("k"), CommitVersion(11)).unwrap();
 
     assert!(store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 
     // Snapshot before the delete still sees inherited data
-    let result = store.get_versioned(&child_kv("k"), 10).unwrap().unwrap();
+    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
     assert_eq!(result.value, Value::Int(42));
 }
 
@@ -238,7 +238,7 @@ fn inherited_layer_range_scan() {
         .put_with_version_mode(
             child_kv("user:bob"),
             Value::Int(200),
-            11,
+            CommitVersion(11),
             None,
             WriteMode::Append,
         )
@@ -247,13 +247,13 @@ fn inherited_layer_range_scan() {
         .put_with_version_mode(
             child_kv("user:dave"),
             Value::Int(4),
-            12,
+            CommitVersion(12),
             None,
             WriteMode::Append,
         )
         .unwrap();
 
-    let results = store.scan_prefix(&child_kv("user:"), u64::MAX).unwrap();
+    let results = store.scan_prefix(&child_kv("user:"), CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 4); // alice, bob(200), carol, dave
 
     let values: Vec<i64> = results
@@ -273,7 +273,7 @@ fn inherited_layer_list_branch() {
 
     // Write one more on child
     store
-        .put_with_version_mode(child_kv("c"), Value::Int(3), 11, None, WriteMode::Append)
+        .put_with_version_mode(child_kv("c"), Value::Int(3), CommitVersion(11), None, WriteMode::Append)
         .unwrap();
 
     let entries = store.list_branch(&child_branch());
@@ -294,7 +294,7 @@ fn inherited_layer_bloom_correct() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     let result = store
-        .get_versioned(&child_kv("bloom_key"), u64::MAX)
+        .get_versioned(&child_kv("bloom_key"), CommitVersion::MAX)
         .unwrap();
     assert!(
         result.is_some(),
@@ -324,7 +324,7 @@ fn inherited_layer_two_levels() {
         .put_with_version_mode(
             Key::new(gp_ns.clone(), TypeTag::KV, b"from_gp".to_vec()),
             Value::Int(1),
-            1,
+            CommitVersion(1),
             None,
             WriteMode::Append,
         )
@@ -333,7 +333,7 @@ fn inherited_layer_two_levels() {
         .put_with_version_mode(
             Key::new(gp_ns.clone(), TypeTag::KV, b"shared".to_vec()),
             Value::Int(10),
-            2,
+            CommitVersion(2),
             None,
             WriteMode::Append,
         )
@@ -346,7 +346,7 @@ fn inherited_layer_two_levels() {
         .put_with_version_mode(
             Key::new(p_ns.clone(), TypeTag::KV, b"from_parent".to_vec()),
             Value::Int(2),
-            3,
+            CommitVersion(3),
             None,
             WriteMode::Append,
         )
@@ -355,7 +355,7 @@ fn inherited_layer_two_levels() {
         .put_with_version_mode(
             Key::new(p_ns.clone(), TypeTag::KV, b"shared".to_vec()),
             Value::Int(20),
-            4,
+            CommitVersion(4),
             None,
             WriteMode::Append,
         )
@@ -383,7 +383,7 @@ fn inherited_layer_two_levels() {
     let r = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::KV, b"from_parent".to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -393,7 +393,7 @@ fn inherited_layer_two_levels() {
     let r = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::KV, b"shared".to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -403,7 +403,7 @@ fn inherited_layer_two_levels() {
     let r = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::KV, b"from_gp".to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -418,11 +418,11 @@ fn inherited_layer_version_clamping() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Snapshot at version 3: should see version 1
-    let result = store.get_versioned(&child_kv("k"), 3).unwrap().unwrap();
+    let result = store.get_versioned(&child_kv("k"), CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.value, Value::Int(10));
 
     // Snapshot at version 7: should see version 5
-    let result = store.get_versioned(&child_kv("k"), 7).unwrap().unwrap();
+    let result = store.get_versioned(&child_kv("k"), CommitVersion(7)).unwrap().unwrap();
     assert_eq!(result.value, Value::Int(50));
 }
 
@@ -525,7 +525,7 @@ fn inherited_layer_materialized_skipped() {
 
     // Point lookup should return None — materialized layer is skipped
     assert!(store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 
@@ -534,7 +534,7 @@ fn inherited_layer_materialized_skipped() {
 
     // Scan should be empty
     assert!(store
-        .scan_prefix(&child_kv(""), u64::MAX)
+        .scan_prefix(&child_kv(""), CommitVersion::MAX)
         .unwrap()
         .is_empty());
 }
@@ -554,12 +554,12 @@ fn inherited_layer_empty_parent() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     assert!(store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .is_none());
     assert!(store.list_branch(&child_branch()).is_empty());
     assert!(store
-        .scan_prefix(&child_kv(""), u64::MAX)
+        .scan_prefix(&child_kv(""), CommitVersion::MAX)
         .unwrap()
         .is_empty());
     assert!(store
@@ -576,7 +576,7 @@ fn inherited_layer_fork_version_zero() {
 
     // Point lookup: nothing visible
     assert!(store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 
@@ -585,7 +585,7 @@ fn inherited_layer_fork_version_zero() {
 
     // Scan: empty
     assert!(store
-        .scan_prefix(&child_kv(""), u64::MAX)
+        .scan_prefix(&child_kv(""), CommitVersion::MAX)
         .unwrap()
         .is_empty());
 }
@@ -606,7 +606,7 @@ fn inherited_layer_custom_space() {
         .put_with_version_mode(
             Key::new(p_ns.clone(), TypeTag::KV, b"key1".to_vec()),
             Value::Int(42),
-            1,
+            CommitVersion(1),
             None,
             WriteMode::Append,
         )
@@ -620,7 +620,7 @@ fn inherited_layer_custom_space() {
     let result = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::KV, b"key1".to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -628,7 +628,7 @@ fn inherited_layer_custom_space() {
 
     // Query with child's namespace in the DEFAULT space should NOT find it
     assert!(store
-        .get_versioned(&child_kv("key1"), u64::MAX)
+        .get_versioned(&child_kv("key1"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -649,7 +649,7 @@ fn inherited_layer_non_kv_type_tags() {
         .put_with_version_mode(
             Key::new(p_ns.clone(), TypeTag::Json, b"doc1".to_vec()),
             Value::Int(100),
-            1,
+            CommitVersion(1),
             None,
             WriteMode::Append,
         )
@@ -658,7 +658,7 @@ fn inherited_layer_non_kv_type_tags() {
         .put_with_version_mode(
             Key::new(p_ns.clone(), TypeTag::Event, 42u64.to_be_bytes().to_vec()),
             Value::Int(200),
-            2,
+            CommitVersion(2),
             None,
             WriteMode::Append,
         )
@@ -672,7 +672,7 @@ fn inherited_layer_non_kv_type_tags() {
     let result = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::Json, b"doc1".to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -682,7 +682,7 @@ fn inherited_layer_non_kv_type_tags() {
     let result = store
         .get_versioned(
             &Key::new(c_ns.clone(), TypeTag::Event, 42u64.to_be_bytes().to_vec()),
-            u64::MAX,
+            CommitVersion::MAX,
         )
         .unwrap()
         .unwrap();
@@ -690,7 +690,7 @@ fn inherited_layer_non_kv_type_tags() {
 
     // KV lookup should NOT find Json/Event entries
     assert!(store
-        .get_versioned(&child_kv("doc1"), u64::MAX)
+        .get_versioned(&child_kv("doc1"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -736,7 +736,7 @@ fn fork_creates_inherited_layer() {
     let child = store.branches.get(&child_branch()).unwrap();
     assert_eq!(child.inherited_layers.len(), 1);
     assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
-    assert_eq!(child.inherited_layers[0].fork_version, fork_version);
+    assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
     assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
     assert!(segments_shared > 0);
 }
@@ -790,20 +790,20 @@ fn fork_read_through() {
 
     // Point lookups on child return parent's data
     let r = store
-        .get_versioned(&child_kv("x"), u64::MAX)
+        .get_versioned(&child_kv("x"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(42));
 
     let r = store
-        .get_versioned(&child_kv("y"), u64::MAX)
+        .get_versioned(&child_kv("y"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::String("hello".into()));
 
     // Non-existent key
     assert!(store
-        .get_versioned(&child_kv("z"), u64::MAX)
+        .get_versioned(&child_kv("z"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -831,21 +831,21 @@ fn fork_write_shadows() {
         .put_with_version_mode(
             child_kv("k"),
             Value::Int(99),
-            child_version,
+            CommitVersion(child_version),
             None,
             WriteMode::Append,
         )
         .unwrap();
 
     let r = store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(99));
 
     // Parent is unchanged
     let r = store
-        .get_versioned(&parent_kv("k"), u64::MAX)
+        .get_versioned(&parent_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(1));
@@ -874,7 +874,7 @@ fn fork_parent_write_invisible() {
         .put_with_version_mode(
             parent_kv("new_key"),
             Value::Int(999),
-            v,
+            CommitVersion(v),
             None,
             WriteMode::Append,
         )
@@ -884,14 +884,14 @@ fn fork_parent_write_invisible() {
 
     // Child should NOT see the new parent key
     assert!(store
-        .get_versioned(&child_kv("new_key"), u64::MAX)
+        .get_versioned(&child_kv("new_key"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 
     // But parent sees it
     assert_eq!(
         store
-            .get_versioned(&parent_kv("new_key"), u64::MAX)
+            .get_versioned(&parent_kv("new_key"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -920,7 +920,7 @@ fn fork_scan() {
 
     // Prefix scan on child finds inherited data
     let prefix = Key::new(child_ns(), TypeTag::KV, "user/".as_bytes().to_vec());
-    let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+    let results = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 2);
 }
 
@@ -949,7 +949,7 @@ fn fork_chain_3_levels() {
         .put_with_version_mode(
             child_kv("child_key"),
             Value::Int(200),
-            v,
+            CommitVersion(v),
             None,
             WriteMode::Append,
         )
@@ -976,14 +976,14 @@ fn fork_chain_3_levels() {
 
     // Grandchild sees child's own data
     let r = store
-        .get_versioned(&grandchild_kv("child_key"), u64::MAX)
+        .get_versioned(&grandchild_kv("child_key"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(200));
 
     // Grandchild sees grandparent's data (through child's inherited layer)
     let r = store
-        .get_versioned(&grandchild_kv("gp_key"), u64::MAX)
+        .get_versioned(&grandchild_kv("gp_key"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(100));
@@ -1101,7 +1101,7 @@ fn fork_manifest_roundtrip() {
     {
         let child = store.branches.get(&child_branch()).unwrap();
         assert_eq!(child.inherited_layers.len(), 1);
-        assert_eq!(child.inherited_layers[0].fork_version, fork_version);
+        assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
     }
 
     // Create a new store and recover from the same directory
@@ -1120,11 +1120,11 @@ fn fork_manifest_roundtrip() {
         1,
         "Inherited layers should survive recovery"
     );
-    assert_eq!(child2.inherited_layers[0].fork_version, fork_version);
+    assert_eq!(child2.inherited_layers[0].fork_version, fork_version.as_u64());
 
     // Verify data is readable through inherited layers after recovery
     let r = store2
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(r.value, Value::Int(1));
@@ -1170,7 +1170,7 @@ fn fork_ephemeral_succeeds_at_storage_level() {
     // layers (memtable data is not captured in the segment snapshot).
     // The engine layer prevents this by checking has_segments_dir() first.
     assert!(store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -1201,7 +1201,7 @@ fn fork_empty_source_succeeds() {
     let child = store.branches.get(&child_branch()).unwrap();
     assert_eq!(child.inherited_layers.len(), 1);
     assert!(store
-        .get_versioned(&child_kv("anything"), u64::MAX)
+        .get_versioned(&child_kv("anything"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -1308,7 +1308,7 @@ fn list_own_entries_includes_tombstones() {
     attach_inherited_layer(&store, pid, cid, 1);
 
     // Child deletes "alpha" (writes tombstone)
-    store.delete_with_version(&child_kv("alpha"), 2).unwrap();
+    store.delete_with_version(&child_kv("alpha"), CommitVersion(2)).unwrap();
 
     // list_own_entries should include the tombstone
     let own = store.list_own_entries(&cid, None);

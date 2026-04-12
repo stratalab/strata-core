@@ -35,6 +35,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::EntityRef;
@@ -276,7 +277,7 @@ impl VectorStore {
 
         // Scan KV for vector entries
         let ns = self.namespace_for(id.branch_id, space);
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let vector_prefix = Key::new_vector(ns, &id.name, "");
         let vector_entries = self
             .db
@@ -372,7 +373,7 @@ impl VectorStore {
     fn get_vector_record_by_key(&self, key: &Key) -> VectorResult<Option<VectorRecord>> {
         use strata_core::traits::Storage;
 
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let Some(versioned) = self
             .db
             .storage()
@@ -408,7 +409,7 @@ impl VectorStore {
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let entries = self
             .db
             .storage()
@@ -467,7 +468,7 @@ impl VectorStore {
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let entries = self
             .db
             .storage()
@@ -488,7 +489,7 @@ impl VectorStore {
         let prefix = Key::vector_collection_prefix(namespace, name);
 
         // Scan all vector keys in this collection
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let entries = self
             .db
             .storage()
@@ -533,7 +534,7 @@ impl VectorStore {
         use strata_core::traits::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
 
         let Some(versioned_value) = self
             .db
