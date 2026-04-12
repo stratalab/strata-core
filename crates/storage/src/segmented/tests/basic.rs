@@ -429,7 +429,7 @@ fn ttl_expiration_at_read_time() {
         ttl_ms: 1,                            // 1ms TTL — definitely expired
         raw_value: None,
     };
-    branch.active.put_entry(&key, 1, entry);
+    branch.active.put_entry(&key, CommitVersion(1), entry);
     drop(branch);
 
     // Should be expired

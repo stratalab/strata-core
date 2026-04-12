@@ -461,7 +461,7 @@ fn seed_with_timestamp_and_ttl(
         ttl_ms,
         raw_value: None,
     };
-    branch.active.put_entry(&key, version, entry);
+    branch.active.put_entry(&key, CommitVersion(version), entry);
 }
 
 #[test]

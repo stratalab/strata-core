@@ -550,7 +550,7 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
     let orphan_path = branch_dir.join("999999.sst");
     // Write a valid segment file using the correct builder API
     let typed_key = crate::key_encoding::encode_typed_key(&parent_kv("orphan"));
-    let ik = crate::key_encoding::InternalKey::from_typed_key_bytes(&typed_key, 1);
+    let ik = crate::key_encoding::InternalKey::from_typed_key_bytes(&typed_key, CommitVersion(1));
     let me = crate::memtable::MemtableEntry {
         value: Value::Int(999),
         is_tombstone: false,

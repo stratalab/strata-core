@@ -1701,7 +1701,7 @@ mod tests {
         for i in 0..2000u32 {
             let k = key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "x".repeat(100)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -1777,7 +1777,7 @@ mod tests {
         for i in 0..100u32 {
             let k = key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "abcdefgh".repeat(20)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -1809,7 +1809,7 @@ mod tests {
         for i in 0..500u32 {
             let k = key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "abcdefgh".repeat(20)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -1853,7 +1853,7 @@ mod tests {
         for i in 0..10u32 {
             mt.put(
                 &key(&format!("k{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -1881,7 +1881,7 @@ mod tests {
         for i in 0..1000u32 {
             mt.put(
                 &key(&format!("k{:06}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::String("x".repeat(500)),
                 false,
             );
@@ -1919,8 +1919,8 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..100u32 {
             let k = key(&format!("k{:04}", i));
-            mt.put(&k, i as u64 * 2 + 1, Value::Int(1), false);
-            mt.put(&k, i as u64 * 2 + 2, Value::Int(2), false);
+            mt.put(&k, CommitVersion(i as u64 * 2 + 1), Value::Int(1), false);
+            mt.put(&k, CommitVersion(i as u64 * 2 + 2), Value::Int(2), false);
         }
         mt.freeze();
 
@@ -2225,7 +2225,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..100u32 {
             let k = key(&format!("key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -2441,7 +2441,7 @@ mod tests {
         for i in 0..200 {
             mt.put(
                 &key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2478,7 +2478,7 @@ mod tests {
         let k = key("hotkey");
         // Write 200 versions of the same key → will span many 512-byte blocks
         for commit in 1..=200_u64 {
-            mt.put(&k, commit, Value::Int(commit as i64), false);
+            mt.put(&k, CommitVersion(commit), Value::Int(commit as i64), false);
         }
         mt.freeze();
 
@@ -2526,13 +2526,13 @@ mod tests {
         // 100 versions of one key
         let hot = key("beta_hot");
         for c in 1..=100_u64 {
-            mt.put(&hot, c, Value::Int(c as i64), false);
+            mt.put(&hot, CommitVersion(c), Value::Int(c as i64), false);
         }
         // 50 more unique keys
         for i in 0..50 {
             mt.put(
                 &key(&format!("gamma_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2581,7 +2581,7 @@ mod tests {
         for i in 0..200u64 {
             // Long values to ensure data spans multiple 512B blocks
             let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
-            mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
         }
         mt.freeze();
 
@@ -2652,7 +2652,7 @@ mod tests {
             let mt = Memtable::new(0);
             for i in 0..200u64 {
                 let val = Value::String(format!("value_{:06}_padding_to_inflate_size", i));
-                mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+                mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
             }
             mt.freeze();
 
@@ -2696,7 +2696,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u64 {
             let val = Value::String(format!("value_{:08}_repeated_data_for_compression", i));
-            mt.put(&key(&format!("k_{:04}", i)), i + 1, val, false);
+            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(i + 1), val, false);
         }
         mt.freeze();
 
@@ -2731,14 +2731,14 @@ mod tests {
         for i in 0..20u64 {
             mt.put(
                 &key(&format!("k_{:04}", i)),
-                i + 1,
+                CommitVersion(i + 1),
                 Value::Int(i as i64),
                 false,
             );
         }
         // Tombstone every other key at a higher commit
         for i in (0..20u64).step_by(2) {
-            mt.put(&key(&format!("k_{:04}", i)), 100 + i, Value::Null, true);
+            mt.put(&key(&format!("k_{:04}", i)), CommitVersion(100 + i), Value::Null, true);
         }
         mt.freeze();
 
@@ -2815,7 +2815,7 @@ mod tests {
         for i in 0..500u32 {
             let k = key(&format!("key_{:06}", i));
             let val = Value::Int(i as i64);
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -2888,7 +2888,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = key(&format!("key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -2930,7 +2930,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..100u32 {
             let k = key(&format!("key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -3003,7 +3003,7 @@ mod tests {
             let k = key(&format!("key_{:08}", i));
             // Repetitive data that compresses well — exercises the compressor hash tables
             let val = Value::String(format!("val_{:08}_{}", i, "x".repeat(100)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 

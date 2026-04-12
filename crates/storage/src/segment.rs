@@ -2337,7 +2337,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2523,7 +2523,7 @@ mod tests {
         let n = 10_000u32;
         for i in 0..n {
             let k = kv_key(&format!("k_{:08}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -2653,7 +2653,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("k_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::String("x".repeat(50)), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::String("x".repeat(50)), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2685,7 +2685,7 @@ mod tests {
             let k = kv_key(&format!("key_{:06}", i));
             // Highly repetitive data that compresses well
             let val = Value::String("A".repeat(500));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -2780,7 +2780,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2828,7 +2828,7 @@ mod tests {
         for i in 0..50u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2868,7 +2868,7 @@ mod tests {
         for i in 0..50u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2908,7 +2908,7 @@ mod tests {
         for i in 0..20u32 {
             mt.put(
                 &kv_key(&format!("aaa:{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2916,7 +2916,7 @@ mod tests {
         for i in 0..20u32 {
             mt.put(
                 &kv_key(&format!("bbb:{:04}", i)),
-                i as u64 + 21,
+                CommitVersion(i as u64 + 21),
                 Value::Int(i as i64 + 100),
                 false,
             );
@@ -2956,7 +2956,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2985,7 +2985,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3012,7 +3012,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3048,7 +3048,7 @@ mod tests {
         }
         // 5 versions of key "b_0000" — entries 30-34 span restart boundary at 32
         for v in 1..=5u64 {
-            mt.put(&kv_key("b_0000"), v, Value::Int(v as i64 * 10), false);
+            mt.put(&kv_key("b_0000"), CommitVersion(v), Value::Int(v as i64 * 10), false);
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3079,7 +3079,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3108,7 +3108,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3136,7 +3136,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3186,7 +3186,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3237,7 +3237,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("val_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3449,7 +3449,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("hk_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3562,7 +3562,7 @@ mod tests {
         let k = kv_key("versioned");
         // 50 versions → spans restart intervals 0..3 (at 16 entries per restart)
         for commit in 1..=50u64 {
-            mt.put(&k, commit, Value::Int(commit as i64 * 10), false);
+            mt.put(&k, CommitVersion(commit), Value::Int(commit as i64 * 10), false);
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3775,7 +3775,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..1000u32 {
             let k = kv_key(&format!("pk_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3818,11 +3818,11 @@ mod tests {
         // Insert entries with two prefixes to test prefix scan across partitions
         for i in 0..500u32 {
             let k = kv_key(&format!("aa_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         for i in 0..500u32 {
             let k = kv_key(&format!("bb_{:06}", i));
-            mt.put(&k, i as u64 + 1001, Value::Int(i as i64 + 1000), false);
+            mt.put(&k, CommitVersion(i as u64 + 1001), Value::Int(i as i64 + 1000), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3869,7 +3869,7 @@ mod tests {
         let n = 800u32;
         for i in 0..n {
             let k = kv_key(&format!("fi_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3914,7 +3914,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..10u32 {
             let k = kv_key(&format!("sm_{:04}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3947,7 +3947,7 @@ mod tests {
         let n = 800u32;
         for i in 0..n {
             let k = kv_key(&format!("oi_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -4103,7 +4103,7 @@ mod tests {
         let n = 1500u32;
         for i in 0..n {
             let k = kv_key(&format!("bd_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -4153,7 +4153,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..1000u32 {
             let k = kv_key(&format!("ft_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path_part);
@@ -4186,7 +4186,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("b129_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -4291,7 +4291,7 @@ mod tests {
         // These will have similar xxh3 hashes and tend to collide in the hash index.
         for i in 0..500u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -4338,7 +4338,7 @@ mod tests {
         for commit in 2..=10u64 {
             mt.put(
                 &multi_ver_key,
-                commit,
+                CommitVersion(commit),
                 Value::Int(commit as i64 * 100),
                 false,
             );
