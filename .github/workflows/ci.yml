@@ -6,39 +6,79 @@ on:
   push:
     branches: [develop, main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
+  check:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+        with: { submodules: true }
       - uses: dtolnay/rust-toolchain@stable
-      - name: Check formatting
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-deny
+      - name: Format check
         run: cargo fmt --all -- --check
-      - name: Run clippy
-        run: cargo clippy --workspace -- -D warnings
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features
+        # No -- -D warnings: workspace.lints is the authority. clippy::all = deny
+        # handles clippy warnings; warn-level rust lints (missing_docs, unreachable_pub)
+        # are allowed until their owning scopes clear them.
+      - name: Lockfile consistency
+        run: cargo metadata --locked --format-version 1 > /dev/null
+      - name: Advisory + license check
+        run: cargo deny check
+      - name: DAG guard (normal deps only - manifest guard added in E4)
+        run: |
+          if cargo tree --package strata-engine --edges=normal --format="{p}" | grep -q strata-vector; then
+            echo "ERROR: strata-engine has normal dep on strata-vector" && exit 1
+          fi
+
+  test:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - name: Run tests
         run: cargo test --workspace
+      - name: Doc tests
+        run: cargo test --workspace --doc --all-features --exclude strata-inference
+
+  feature-matrix:
+    needs: check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { submodules: true }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@cargo-hack
+      - name: Feature powerset check
+        run: cargo hack --feature-powerset --depth 2 check --workspace --exclude strata-inference
+      - name: Per-feature test
+        run: cargo hack --each-feature test --workspace --exclude strata-inference
 
   build:
+    needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
+        with: { submodules: true }
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
+      - uses: Swatinem/rust-cache@v2
+      - name: Release build
         run: cargo build --release --all
 
-  security:
+  msrv:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Run cargo audit
-        run: cargo audit
+        with: { submodules: true }
+      - uses: dtolnay/rust-toolchain@1.74
+      - uses: Swatinem/rust-cache@v2
+      - name: MSRV check
+        run: cargo check --workspace --all-targets --all-features

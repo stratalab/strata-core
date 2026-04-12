@@ -3,6 +3,7 @@ name = "strata-cli"
 version = "0.6.1"
 edition = "2021"
 description = "Redis-inspired CLI for the Strata database"
+license = "Apache-2.0"
 publish = false
 
 [[bin]]
