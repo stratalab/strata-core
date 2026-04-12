@@ -1287,7 +1287,7 @@ impl StrataError {
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]
             _ => {
-                tracing::warn!("Unknown error variant in code()");
+                tracing::warn!(target: "strata::error::exhaustive", "Unknown error variant in code()");
                 ErrorCode::InternalError
             }
         }
@@ -1402,7 +1402,7 @@ impl StrataError {
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]
             _ => {
-                tracing::warn!("Unknown error variant in details()");
+                tracing::warn!(target: "strata::error::exhaustive", "Unknown error variant in details()");
                 ErrorDetails::new()
             }
         }

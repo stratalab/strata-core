@@ -260,6 +260,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for RewritingIte
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use strata_core::id::CommitVersion;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
     use strata_core::Timestamp;
@@ -298,12 +299,12 @@ mod tests {
     #[test]
     fn merge_non_overlapping() {
         let s1 = vec![
-            (InternalKey::encode(&key("a"), 1), entry(1)),
-            (InternalKey::encode(&key("c"), 1), entry(3)),
+            (InternalKey::encode(&key("a"), CommitVersion(1)), entry(1)),
+            (InternalKey::encode(&key("c"), CommitVersion(1)), entry(3)),
         ];
         let s2 = vec![
-            (InternalKey::encode(&key("b"), 1), entry(2)),
-            (InternalKey::encode(&key("d"), 1), entry(4)),
+            (InternalKey::encode(&key("b"), CommitVersion(1)), entry(2)),
+            (InternalKey::encode(&key("d"), CommitVersion(1)), entry(4)),
         ];
 
         let merged: Vec<_> = MergeIterator::new(vec![s1.into_iter(), s2.into_iter()]).collect();
@@ -317,7 +318,7 @@ mod tests {
     #[test]
     fn merge_overlapping_keys_same_commit() {
         // Same key+commit from two sources — source 0 (newer) wins on tie
-        let ik = InternalKey::encode(&key("k"), 5);
+        let ik = InternalKey::encode(&key("k"), CommitVersion(5));
         let s1 = vec![(ik.clone(), entry(100))];
         let s2 = vec![(ik.clone(), entry(200))];
 
@@ -339,8 +340,8 @@ mod tests {
     #[test]
     fn merge_single_source() {
         let s1 = vec![
-            (InternalKey::encode(&key("a"), 1), entry(1)),
-            (InternalKey::encode(&key("b"), 1), entry(2)),
+            (InternalKey::encode(&key("a"), CommitVersion(1)), entry(1)),
+            (InternalKey::encode(&key("b"), CommitVersion(1)), entry(2)),
         ];
         let merged: Vec<_> = MergeIterator::new(vec![s1.into_iter()]).collect();
         assert_eq!(merged.len(), 2);
@@ -352,9 +353,9 @@ mod tests {
     fn mvcc_dedup_picks_newest_visible() {
         // key "k" has versions 3, 2, 1 — snapshot at 2 should pick version 2
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 2), entry(20)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let results: Vec<_> = MvccIterator::new(merge, 2).collect();
@@ -365,10 +366,10 @@ mod tests {
     #[test]
     fn mvcc_dedup_multiple_keys() {
         let items = vec![
-            (InternalKey::encode(&key("a"), 2), entry(20)),
-            (InternalKey::encode(&key("a"), 1), entry(10)),
-            (InternalKey::encode(&key("b"), 3), entry(30)),
-            (InternalKey::encode(&key("b"), 1), entry(10)),
+            (InternalKey::encode(&key("a"), CommitVersion(2)), entry(20)),
+            (InternalKey::encode(&key("a"), CommitVersion(1)), entry(10)),
+            (InternalKey::encode(&key("b"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("b"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let results: Vec<_> = MvccIterator::new(merge, u64::MAX).collect();
@@ -381,8 +382,11 @@ mod tests {
     fn mvcc_tombstone_is_emitted() {
         // Tombstone at version 2 should be emitted (caller decides filtering)
         let items = vec![
-            (InternalKey::encode(&key("k"), 2), tombstone()),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(2)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let results: Vec<_> = MvccIterator::new(merge, u64::MAX).collect();
@@ -397,12 +401,12 @@ mod tests {
         // 8 sources — each has one unique key plus a shared key "m" at commit_id=10.
         // The shared key tests tie-breaking: source 0 (newest) must win.
         let shared_key = key("m");
-        let shared_ik = InternalKey::encode(&shared_key, 10);
+        let shared_ik = InternalKey::encode(&shared_key, CommitVersion(10));
 
         let keys = ["a", "b", "c", "d", "e", "f", "g", "h"];
         let mut sources: Vec<Vec<(InternalKey, MemtableEntry)>> = Vec::new();
         for (i, k) in keys.iter().enumerate() {
-            let unique_ik = InternalKey::encode(&key(k), 1);
+            let unique_ik = InternalKey::encode(&key(k), CommitVersion(1));
             let mut items = vec![(unique_ik, entry(i as i64))];
             // All 8 sources contain the shared key "m"
             items.push((shared_ik.clone(), entry(100 + i as i64)));
@@ -466,8 +470,8 @@ mod tests {
     #[test]
     fn mvcc_all_versions_above_snapshot() {
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let results: Vec<_> = MvccIterator::new(merge, 2).collect();

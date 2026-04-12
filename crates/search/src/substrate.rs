@@ -25,6 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use rayon::prelude::*;
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::StrataResult;
 use strata_engine::search::recipe::FusionConfig;
@@ -85,7 +86,7 @@ pub struct RetrievalResponse {
 /// Per-retrieval execution statistics.
 pub struct RetrievalStats {
     /// MVCC snapshot version used for this retrieval.
-    pub snapshot_version: u64,
+    pub snapshot_version: CommitVersion,
     /// Which recipe was used (e.g., "builtin", "branch:default", "inline").
     pub recipe_used: String,
     /// Total wall-clock time in milliseconds.
@@ -499,7 +500,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         aggregations: None,
         groups: None,
         stats: RetrievalStats {
-            snapshot_version: snapshot,
+            snapshot_version: CommitVersion(snapshot),
             recipe_used: "resolved".into(),
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             stages,

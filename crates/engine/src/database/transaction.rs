@@ -490,7 +490,7 @@ impl Database {
             }
         };
 
-        if let Err(e) = mgr.set_flush_watermark(watermark) {
+        if let Err(e) = mgr.set_flush_watermark(CommitVersion(watermark)) {
             tracing::warn!(
                 target: "strata::flush",
                 error = %e,

@@ -133,7 +133,9 @@ fn lifecycle_write_flush_recover_all_data_correct() {
     store.flush_oldest_frozen(&branch()).unwrap();
 
     let max_commit = store.max_flushed_commit(&branch()).unwrap();
-    manifest_mgr.set_flush_watermark(max_commit).unwrap();
+    manifest_mgr
+        .set_flush_watermark(CommitVersion(max_commit))
+        .unwrap();
 
     drop(store);
     drop(writer);
@@ -308,7 +310,9 @@ fn lifecycle_multiple_flush_cycles() {
         store.flush_oldest_frozen(&branch()).unwrap();
 
         let max_commit = store.max_flushed_commit(&branch()).unwrap();
-        manifest_mgr.set_flush_watermark(max_commit).unwrap();
+        manifest_mgr
+            .set_flush_watermark(CommitVersion(max_commit))
+            .unwrap();
     }
 
     drop(store);
@@ -368,7 +372,7 @@ fn lifecycle_wal_truncation_after_flush() {
 
     {
         let mut m = manifest.lock();
-        m.set_flush_watermark(max_commit).unwrap();
+        m.set_flush_watermark(CommitVersion(max_commit)).unwrap();
         m.set_active_segment(999).unwrap();
     }
 

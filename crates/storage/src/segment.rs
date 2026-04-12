@@ -29,6 +29,7 @@ use crate::segment_builder::{
     HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::error::StrataError;
+use strata_core::id::CommitVersion;
 use strata_core::types::Key;
 use strata_core::value::Value;
 
@@ -532,7 +533,7 @@ impl KVSegment {
         snapshot_commit: u64,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let typed_key = encode_typed_key(key);
-        let seek_ik = InternalKey::encode(key, u64::MAX);
+        let seek_ik = InternalKey::encode(key, CommitVersion::MAX);
         self.point_lookup_preencoded(&typed_key, seek_ik.as_bytes(), snapshot_commit)
     }
 
@@ -772,7 +773,7 @@ impl KVSegment {
         let (partition_idx, block_within_partition) = if done {
             (0, 0)
         } else {
-            let seek_ik = InternalKey::encode(prefix, u64::MAX);
+            let seek_ik = InternalKey::encode(prefix, CommitVersion::MAX);
             self.index.seek_position(seek_ik.as_bytes())
         };
 
@@ -1527,7 +1528,7 @@ impl OwnedSegmentIter {
         let (partition_idx, block_within_partition) = if done {
             (0, 0)
         } else {
-            let seek_ik = InternalKey::encode(start_key, u64::MAX);
+            let seek_ik = InternalKey::encode(start_key, CommitVersion::MAX);
             segment.index.seek_position(seek_ik.as_bytes())
         };
         Self {
@@ -1586,7 +1587,7 @@ impl OwnedSegmentIter {
             self.done = true;
             return;
         }
-        let seek_ik = InternalKey::encode(start_key, u64::MAX);
+        let seek_ik = InternalKey::encode(start_key, CommitVersion::MAX);
         let (partition_idx, block_within_partition) =
             self.segment.index_seek_position(seek_ik.as_bytes());
         self.partition_idx = partition_idx;
@@ -2019,7 +2020,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k1"), 1, Value::Int(42), false);
+        mt.put(&kv_key("k1"), CommitVersion(1), Value::Int(42), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2042,7 +2043,7 @@ mod tests {
         let path = dir.path().join("good.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k1"), 1, Value::Int(1), false);
+        mt.put(&kv_key("k1"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2063,9 +2064,14 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(10), false);
-        mt.put(&kv_key("b"), 2, Value::Int(20), false);
-        mt.put(&kv_key("c"), 3, Value::String("hello".into()), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("b"), CommitVersion(2), Value::Int(20), false);
+        mt.put(
+            &kv_key("c"),
+            CommitVersion(3),
+            Value::String("hello".into()),
+            false,
+        );
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2088,7 +2094,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2102,9 +2108,9 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 5, Value::Int(50), false);
-        mt.put(&kv_key("k"), 10, Value::Int(100), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(5), Value::Int(50), false);
+        mt.put(&kv_key("k"), CommitVersion(10), Value::Int(100), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2135,8 +2141,8 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 2, Value::Null, true);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(2), Value::Null, true);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2163,7 +2169,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("key_{}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2189,10 +2195,10 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("user:1"), 1, Value::Int(1), false);
-        mt.put(&kv_key("user:2"), 1, Value::Int(2), false);
-        mt.put(&kv_key("user:3"), 1, Value::Int(3), false);
-        mt.put(&kv_key("order:1"), 1, Value::Int(100), false);
+        mt.put(&kv_key("user:1"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("user:2"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&kv_key("user:3"), CommitVersion(1), Value::Int(3), false);
+        mt.put(&kv_key("order:1"), CommitVersion(1), Value::Int(100), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2214,8 +2220,8 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 5, Value::Int(50), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(5), Value::Int(50), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2233,7 +2239,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2250,14 +2256,24 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("null"), 1, Value::Null, false);
-        mt.put(&kv_key("bool"), 1, Value::Bool(true), false);
-        mt.put(&kv_key("int"), 1, Value::Int(42), false);
-        mt.put(&kv_key("float"), 1, Value::Float(2.78), false);
-        mt.put(&kv_key("string"), 1, Value::String("hello".into()), false);
+        mt.put(&kv_key("null"), CommitVersion(1), Value::Null, false);
+        mt.put(&kv_key("bool"), CommitVersion(1), Value::Bool(true), false);
+        mt.put(&kv_key("int"), CommitVersion(1), Value::Int(42), false);
+        mt.put(
+            &kv_key("float"),
+            CommitVersion(1),
+            Value::Float(2.78),
+            false,
+        );
+        mt.put(
+            &kv_key("string"),
+            CommitVersion(1),
+            Value::String("hello".into()),
+            false,
+        );
         mt.put(
             &kv_key("bytes"),
-            1,
+            CommitVersion(1),
             Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             false,
         );
@@ -2363,7 +2379,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2388,7 +2404,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(1), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2427,9 +2443,9 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 5, Value::Int(1), false);
-        mt.put(&kv_key("b"), 10, Value::Int(2), false);
-        mt.put(&kv_key("c"), 3, Value::Int(3), false);
+        mt.put(&kv_key("a"), CommitVersion(5), Value::Int(1), false);
+        mt.put(&kv_key("b"), CommitVersion(10), Value::Int(2), false);
+        mt.put(&kv_key("c"), CommitVersion(3), Value::Int(3), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2473,8 +2489,8 @@ mod tests {
         let object_val = Value::object(map);
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("arr"), 1, array_val.clone(), false);
-        mt.put(&kv_key("obj"), 1, object_val.clone(), false);
+        mt.put(&kv_key("arr"), CommitVersion(1), array_val.clone(), false);
+        mt.put(&kv_key("obj"), CommitVersion(1), object_val.clone(), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2547,7 +2563,7 @@ mod tests {
         let ts = strata_core::Timestamp::from_micros(1_700_000_000_000_000);
         mt.put_entry(
             &kv_key("k1"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(42),
                 is_tombstone: false,
@@ -2558,7 +2574,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k2"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: true,
@@ -2593,7 +2609,7 @@ mod tests {
         let mt = Memtable::new(0);
         mt.put_entry(
             &kv_key("item:1"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(1),
                 is_tombstone: false,
@@ -2604,7 +2620,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("item:2"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::Int(2),
                 is_tombstone: false,
@@ -2708,7 +2724,7 @@ mod tests {
         let path = dir.path().join("kr.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("only"), 1, Value::Int(1), false);
+        mt.put(&kv_key("only"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2724,8 +2740,8 @@ mod tests {
         let path = dir.path().join("kr_multi.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("aaa"), 1, Value::Int(1), false);
-        mt.put(&kv_key("zzz"), 2, Value::Int(2), false);
+        mt.put(&kv_key("aaa"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("zzz"), CommitVersion(2), Value::Int(2), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -3025,7 +3041,7 @@ mod tests {
         for i in 0..30u32 {
             mt.put(
                 &kv_key(&format!("a_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3255,7 +3271,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3280,7 +3296,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3305,7 +3321,7 @@ mod tests {
         for i in 0..10_000u32 {
             mt.put(
                 &kv_key(&format!("key_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3334,7 +3350,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("item_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3381,7 +3397,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("item_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3465,7 +3481,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..100u32 {
             let k = kv_key(&format!("exist_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3506,7 +3522,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("col_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3576,7 +3592,7 @@ mod tests {
         let path = dir.path().join("hash_single.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("only"), 1, Value::Int(42), false);
+        mt.put(&kv_key("only"), CommitVersion(1), Value::Int(42), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -3603,7 +3619,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("it_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3646,12 +3662,12 @@ mod tests {
         let path = dir.path().join("hash_tomb.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("alive"), 1, Value::Int(1), false);
-        mt.put(&kv_key("dead"), 1, Value::Int(10), false);
-        mt.put(&kv_key("dead"), 2, Value::Null, true); // tombstone
-        mt.put(&kv_key("revived"), 1, Value::Int(20), false);
-        mt.put(&kv_key("revived"), 2, Value::Null, true);
-        mt.put(&kv_key("revived"), 3, Value::Int(30), false); // re-put after delete
+        mt.put(&kv_key("alive"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("dead"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("dead"), CommitVersion(2), Value::Null, true); // tombstone
+        mt.put(&kv_key("revived"), CommitVersion(1), Value::Int(20), false);
+        mt.put(&kv_key("revived"), CommitVersion(2), Value::Null, true);
+        mt.put(&kv_key("revived"), CommitVersion(3), Value::Int(30), false); // re-put after delete
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -3700,7 +3716,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("alpha_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3708,7 +3724,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("beta_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(1000 + i as i64),
                 false,
             );
@@ -3964,7 +3980,7 @@ mod tests {
         let path = dir.path().join("v7.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -3982,8 +3998,8 @@ mod tests {
         // Write enough entries to force partitioning, with multiple versions
         for i in 0..500u32 {
             let k = kv_key(&format!("mv_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false); // version 1
-            mt.put(&k, 5, Value::Int(i as i64 + 1000), false); // version 5
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false); // version 1
+            mt.put(&k, CommitVersion(5), Value::Int(i as i64 + 1000), false); // version 5
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -4037,10 +4053,10 @@ mod tests {
         // Write enough entries to force partitioning, with some tombstones
         for i in 0..500u32 {
             let k = kv_key(&format!("tb_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
             // Delete even-numbered keys at commit 2
             if i % 2 == 0 {
-                mt.put(&k, 2, Value::Null, true);
+                mt.put(&k, CommitVersion(2), Value::Null, true);
             }
         }
         mt.freeze();
@@ -4148,7 +4164,7 @@ mod tests {
         // Monolithic segment
         let path_mono = dir.path().join("ft_mono.sst");
         let mt2 = Memtable::new(0);
-        mt2.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt2.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt2.freeze();
         build_segment(&mt2, &path_mono);
 
@@ -4220,7 +4236,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("present_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -4315,7 +4331,7 @@ mod tests {
                 "very_long_shared_prefix_that_exercises_shortening_{:04}",
                 i
             ));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         // Same key, multiple commit versions (differ only in commit_id)
         let multi_ver_key = kv_key("very_long_shared_prefix_that_exercises_shortening_0150");
@@ -4370,7 +4386,7 @@ mod tests {
         for i in 0..5000u32 {
             mt.put(
                 &kv_key(&format!("fpr_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -4418,7 +4434,7 @@ mod tests {
         let ts = strata_core::Timestamp::from_micros(1_000_000);
         mt.put_entry(
             &kv_key("k_int"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(42),
                 is_tombstone: false,
@@ -4429,7 +4445,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_str"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::String("hello world".to_string()),
                 is_tombstone: false,
@@ -4440,7 +4456,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_bytes"),
-            3,
+            CommitVersion(3),
             MemtableEntry {
                 value: Value::Bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xFF].repeat(50)),
                 is_tombstone: false,
@@ -4451,7 +4467,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_tomb"),
-            4,
+            CommitVersion(4),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: true,
@@ -4462,7 +4478,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_obj"),
-            5,
+            CommitVersion(5),
             MemtableEntry {
                 value: Value::object({
                     let mut m = HashMap::new();
@@ -4478,7 +4494,7 @@ mod tests {
         // Edge case: non-tombstone Value::Null (user stored null)
         mt.put_entry(
             &kv_key("k_null"),
-            6,
+            CommitVersion(6),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: false,
@@ -4490,7 +4506,7 @@ mod tests {
         // Edge case: empty Bytes
         mt.put_entry(
             &kv_key("k_empty_bytes"),
-            7,
+            CommitVersion(7),
             MemtableEntry {
                 value: Value::Bytes(vec![]),
                 is_tombstone: false,
@@ -4502,7 +4518,7 @@ mod tests {
         // Edge case: entry with TTL (must be preserved through raw path)
         mt.put_entry(
             &kv_key("k_ttl"),
-            8,
+            CommitVersion(8),
             MemtableEntry {
                 value: Value::Int(99),
                 is_tombstone: false,

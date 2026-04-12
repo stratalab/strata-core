@@ -23,6 +23,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use strata_core::id::{CommitVersion, TxnId};
 
 /// MANIFEST magic bytes: "STRM" (0x5354524D)
 pub const MANIFEST_MAGIC: [u8; 4] = *b"STRM";
@@ -296,16 +297,16 @@ impl ManifestManager {
     pub fn set_snapshot_watermark(
         &mut self,
         snapshot_id: u64,
-        watermark_txn: u64,
+        watermark_txn: TxnId,
     ) -> Result<(), ManifestError> {
         self.manifest.snapshot_id = Some(snapshot_id);
-        self.manifest.snapshot_watermark = Some(watermark_txn);
+        self.manifest.snapshot_watermark = Some(watermark_txn.as_u64());
         self.persist()
     }
 
     /// Update the flush watermark (highest commit_id flushed to segments) and persist.
-    pub fn set_flush_watermark(&mut self, commit_id: u64) -> Result<(), ManifestError> {
-        self.manifest.flushed_through_commit_id = Some(commit_id);
+    pub fn set_flush_watermark(&mut self, commit_id: CommitVersion) -> Result<(), ManifestError> {
+        self.manifest.flushed_through_commit_id = Some(commit_id.as_u64());
         self.persist()
     }
 
@@ -526,7 +527,7 @@ mod tests {
             ManifestManager::create(manifest_path.clone(), test_uuid(), "identity".to_string())
                 .unwrap();
 
-        manager.set_snapshot_watermark(3, 1000).unwrap();
+        manager.set_snapshot_watermark(3, TxnId(1000)).unwrap();
 
         assert_eq!(manager.manifest().snapshot_id, Some(3));
         assert_eq!(manager.manifest().snapshot_watermark, Some(1000));
@@ -616,7 +617,7 @@ mod tests {
             ManifestManager::create(manifest_path.clone(), test_uuid(), "identity".to_string())
                 .unwrap();
 
-        manager.set_flush_watermark(500).unwrap();
+        manager.set_flush_watermark(CommitVersion(500)).unwrap();
         assert_eq!(manager.manifest().flushed_through_commit_id, Some(500));
 
         // Reload and verify persistence
@@ -640,7 +641,7 @@ mod tests {
                 .unwrap();
 
         // Set snapshot
-        manager.set_snapshot_watermark(5, 2000).unwrap();
+        manager.set_snapshot_watermark(5, TxnId(2000)).unwrap();
         assert_eq!(manager.manifest().snapshot_id, Some(5));
 
         // Clear snapshot

@@ -444,7 +444,7 @@ impl StorageIterator {
     /// segment iterators are repositioned via in-memory index (O(log B)),
     /// memtable entries are re-collected from the seek position.
     pub fn seek(&mut self, target: &Key) -> StrataResult<()> {
-        let target_ik = InternalKey::encode(target, u64::MAX);
+        let target_ik = InternalKey::encode(target, CommitVersion::MAX);
 
         if let Some(ref mut pipeline) = self.pipeline {
             // Re-seek existing pipeline — children persist
@@ -1416,7 +1416,7 @@ impl SegmentedStore {
 
     /// Check if a key exists in the child's own segments.
     fn key_exists_in_own_segments(own_version: &SegmentVersion, typed_key: &[u8]) -> bool {
-        let seek_ik = InternalKey::from_typed_key_bytes(typed_key, u64::MAX);
+        let seek_ik = InternalKey::from_typed_key_bytes(typed_key, CommitVersion::MAX);
         let seek_bytes = seek_ik.as_bytes();
 
         // L0 segments (linear scan)
@@ -1463,7 +1463,7 @@ impl SegmentedStore {
         else {
             return false; // Corrupt key can't exist
         };
-        let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
+        let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, CommitVersion::MAX);
         let src_seek_bytes = src_seek_ik.as_bytes();
 
         // L0 segments
@@ -2321,7 +2321,7 @@ impl SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(&key, version, entry);
+        branch.active.put_entry(&key, CommitVersion(version), entry);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
@@ -2353,7 +2353,7 @@ impl SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(key, version, entry);
+        branch.active.put_entry(key, CommitVersion(version), entry);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
@@ -2416,7 +2416,7 @@ impl SegmentedStore {
                     ttl_ms,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, CommitVersion(version), entry);
             }
             branch.track_timestamp(ts);
             branch.track_version(version);
@@ -2437,7 +2437,7 @@ impl SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, CommitVersion(version), entry);
             }
             branch.track_timestamp(ts);
             branch.track_version(version);
@@ -3172,7 +3172,7 @@ impl SegmentedStore {
     ) -> StrataResult<Option<(u64, MemtableEntry)>> {
         // Encode once, reuse everywhere.
         let typed_key = encode_typed_key(key);
-        let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
+        let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
         let seek_bytes = seek_ik.as_bytes();
 
         // 1. Active memtable
@@ -3226,7 +3226,7 @@ impl SegmentedStore {
             else {
                 continue; // Skip layer if key is corrupt
             };
-            let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
+            let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, CommitVersion::MAX);
             let src_seek_bytes = src_seek_ik.as_bytes();
 
             // L0 segments (linear scan)
@@ -3350,7 +3350,7 @@ impl SegmentedStore {
             None
         };
         let typed_key = encode_typed_key(key);
-        let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
+        let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
         let seek_bytes = seek_ik.as_bytes();
         let key_encode_ns = t0.map(|t| t.elapsed().as_nanos() as u64).unwrap_or(0);
 
@@ -3491,7 +3491,7 @@ impl SegmentedStore {
             else {
                 continue;
             };
-            let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, u64::MAX);
+            let src_seek_ik = InternalKey::from_typed_key_bytes(&src_typed_key, CommitVersion::MAX);
             let src_seek_bytes = src_seek_ik.as_bytes();
 
             for seg in layer.segments.l0_segments() {
@@ -4318,7 +4318,7 @@ impl Storage for SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(&key, version.as_u64(), entry);
+        branch.active.put_entry(&key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
         branch.track_version(version.as_u64());
@@ -4351,7 +4351,7 @@ impl Storage for SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(key, version.as_u64(), entry);
+        branch.active.put_entry(key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
         branch.track_version(version.as_u64());
@@ -4401,7 +4401,7 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version.as_u64(), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
@@ -4442,7 +4442,7 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version.as_u64(), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
@@ -4503,7 +4503,7 @@ impl Storage for SegmentedStore {
                     ttl_ms,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version.as_u64(), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             branch.num_entries.fetch_add(put_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
@@ -4526,7 +4526,7 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version.as_u64(), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             branch.num_deletions.fetch_add(del_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
@@ -4599,7 +4599,7 @@ fn point_lookup_level(
     max_version: u64,
 ) -> StrataResult<Option<SegmentEntry>> {
     let typed_key = encode_typed_key(key);
-    let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, u64::MAX);
+    let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
     point_lookup_level_preencoded(l1_segments, &typed_key, seek_ik.as_bytes(), max_version)
 }
 

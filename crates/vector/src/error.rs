@@ -260,6 +260,13 @@ impl From<VectorError> for StrataError {
                 message: format!("Database error: {}", msg),
                 source: None,
             },
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(target: "strata::error::exhaustive", "Unknown vector error variant: {:?}", e);
+                StrataError::internal(format!("Unknown vector error: {:?}", e))
+            }
         }
     }
 }

@@ -25,6 +25,7 @@
 //! break lexicographic byte ordering.
 
 use std::sync::Arc;
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
 /// Size in bytes of the trailing `!commit_id` suffix in an `InternalKey`.
@@ -139,20 +140,20 @@ pub struct InternalKey(Vec<u8>);
 
 impl InternalKey {
     /// Encode a `(Key, commit_id)` pair into an `InternalKey`.
-    pub fn encode(key: &Key, commit_id: u64) -> Self {
+    pub fn encode(key: &Key, commit_id: CommitVersion) -> Self {
         let mut buf = encode_typed_key(key);
         // Append commit_id in descending order
-        buf.extend_from_slice(&(!commit_id).to_be_bytes());
+        buf.extend_from_slice(&(!commit_id.as_u64()).to_be_bytes());
         InternalKey(buf)
     }
 
     /// Build an `InternalKey` from pre-encoded typed key bytes and a commit_id.
     ///
     /// Avoids re-encoding the key when the typed key bytes are already available.
-    pub fn from_typed_key_bytes(typed_key: &[u8], commit_id: u64) -> Self {
+    pub fn from_typed_key_bytes(typed_key: &[u8], commit_id: CommitVersion) -> Self {
         let mut buf = Vec::with_capacity(typed_key.len() + 8);
         buf.extend_from_slice(typed_key);
-        buf.extend_from_slice(&(!commit_id).to_be_bytes());
+        buf.extend_from_slice(&(!commit_id.as_u64()).to_be_bytes());
         InternalKey(buf)
     }
 
@@ -330,6 +331,7 @@ impl std::fmt::Debug for InternalKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::CommitVersion;
     use strata_core::types::BranchId;
 
     fn make_key(space: &str, type_tag: TypeTag, user_key: &str) -> Key {
@@ -410,7 +412,7 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik = InternalKey::encode(&key, 42);
+        let ik = InternalKey::encode(&key, CommitVersion(42));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_commit, 42);
@@ -419,7 +421,7 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_max_commit() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik = InternalKey::encode(&key, u64::MAX);
+        let ik = InternalKey::encode(&key, CommitVersion::MAX);
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_commit, u64::MAX);
@@ -428,7 +430,7 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_zero_commit() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik = InternalKey::encode(&key, 0);
+        let ik = InternalKey::encode(&key, CommitVersion(0));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_commit, 0);
@@ -437,7 +439,7 @@ mod tests {
     #[test]
     fn encode_decode_roundtrip_empty_user_key() {
         let key = make_key("default", TypeTag::KV, "");
-        let ik = InternalKey::encode(&key, 5);
+        let ik = InternalKey::encode(&key, CommitVersion(5));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_commit, 5);
@@ -447,7 +449,7 @@ mod tests {
     fn encode_decode_roundtrip_binary_user_key() {
         let ns = Arc::new(Namespace::new(BranchId::new(), "default".to_string()));
         let key = Key::new(ns, TypeTag::Vector, vec![0x00, 0xFF, 0x80, 0x01]);
-        let ik = InternalKey::encode(&key, 99);
+        let ik = InternalKey::encode(&key, CommitVersion(99));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
         assert_eq!(decoded_commit, 99);
@@ -465,7 +467,7 @@ mod tests {
             TypeTag::Graph,
         ] {
             let key = make_key("test", tag, "k");
-            let ik = InternalKey::encode(&key, 1);
+            let ik = InternalKey::encode(&key, CommitVersion(1));
             let (decoded_key, _) = ik.decode().unwrap();
             assert_eq!(decoded_key.type_tag, tag);
         }
@@ -476,8 +478,8 @@ mod tests {
     #[test]
     fn same_key_higher_commit_sorts_first() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik_high = InternalKey::encode(&key, 100);
-        let ik_low = InternalKey::encode(&key, 1);
+        let ik_high = InternalKey::encode(&key, CommitVersion(100));
+        let ik_low = InternalKey::encode(&key, CommitVersion(1));
         assert!(
             ik_high < ik_low,
             "commit_id=100 should sort before commit_id=1 (descending)"
@@ -487,8 +489,8 @@ mod tests {
     #[test]
     fn max_commit_id_sorts_first() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik_max = InternalKey::encode(&key, u64::MAX);
-        let ik_zero = InternalKey::encode(&key, 0);
+        let ik_max = InternalKey::encode(&key, CommitVersion::MAX);
+        let ik_zero = InternalKey::encode(&key, CommitVersion(0));
         assert!(ik_max < ik_zero);
     }
 
@@ -497,8 +499,8 @@ mod tests {
         let branch = BranchId::new();
         let k_a = make_key_with_branch(branch, "default", TypeTag::KV, "aaa");
         let k_b = make_key_with_branch(branch, "default", TypeTag::KV, "bbb");
-        let ik_a = InternalKey::encode(&k_a, 1);
-        let ik_b = InternalKey::encode(&k_b, 1);
+        let ik_a = InternalKey::encode(&k_a, CommitVersion(1));
+        let ik_b = InternalKey::encode(&k_b, CommitVersion(1));
         assert!(ik_a < ik_b, "key 'aaa' should sort before 'bbb'");
     }
 
@@ -508,9 +510,9 @@ mod tests {
         let k_kv = make_key_with_branch(branch, "default", TypeTag::KV, "k");
         let k_event = make_key_with_branch(branch, "default", TypeTag::Event, "k");
         let k_vector = make_key_with_branch(branch, "default", TypeTag::Vector, "k");
-        let ik_kv = InternalKey::encode(&k_kv, 1);
-        let ik_event = InternalKey::encode(&k_event, 1);
-        let ik_vector = InternalKey::encode(&k_vector, 1);
+        let ik_kv = InternalKey::encode(&k_kv, CommitVersion(1));
+        let ik_event = InternalKey::encode(&k_event, CommitVersion(1));
+        let ik_vector = InternalKey::encode(&k_vector, CommitVersion(1));
         assert!(ik_kv < ik_event);
         assert!(ik_event < ik_vector);
     }
@@ -520,15 +522,15 @@ mod tests {
         let branch = BranchId::new();
         let k_a = make_key_with_branch(branch, "alpha", TypeTag::KV, "k");
         let k_b = make_key_with_branch(branch, "beta", TypeTag::KV, "k");
-        let ik_a = InternalKey::encode(&k_a, 1);
-        let ik_b = InternalKey::encode(&k_b, 1);
+        let ik_a = InternalKey::encode(&k_a, CommitVersion(1));
+        let ik_b = InternalKey::encode(&k_b, CommitVersion(1));
         assert!(ik_a < ik_b, "space 'alpha' should sort before 'beta'");
     }
 
     #[test]
     fn typed_key_prefix_extraction() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik = InternalKey::encode(&key, 42);
+        let ik = InternalKey::encode(&key, CommitVersion(42));
         let prefix = ik.typed_key_prefix();
         let expected = encode_typed_key(&key);
         assert_eq!(prefix, &expected[..]);
@@ -537,8 +539,8 @@ mod tests {
     #[test]
     fn commit_id_extraction() {
         let key = make_key("default", TypeTag::KV, "hello");
-        for commit_id in [0, 1, 42, 1000, u64::MAX / 2, u64::MAX] {
-            let ik = InternalKey::encode(&key, commit_id);
+        for commit_id in [0u64, 1, 42, 1000, u64::MAX / 2, u64::MAX] {
+            let ik = InternalKey::encode(&key, CommitVersion(commit_id));
             assert_eq!(ik.commit_id(), commit_id);
         }
     }
@@ -548,8 +550,8 @@ mod tests {
         let branch = BranchId::new();
         let k_prefix = make_key_with_branch(branch, "default", TypeTag::KV, "user:");
         let k_full = make_key_with_branch(branch, "default", TypeTag::KV, "user:alice");
-        let ik_prefix = InternalKey::encode(&k_prefix, 1);
-        let ik_full = InternalKey::encode(&k_full, 1);
+        let ik_prefix = InternalKey::encode(&k_prefix, CommitVersion(1));
+        let ik_full = InternalKey::encode(&k_full, CommitVersion(1));
         assert!(
             ik_prefix < ik_full,
             "prefix 'user:' should sort before 'user:alice'"
@@ -561,8 +563,8 @@ mod tests {
         let branch = BranchId::new();
         let k_empty = make_key_with_branch(branch, "default", TypeTag::KV, "");
         let k_a = make_key_with_branch(branch, "default", TypeTag::KV, "a");
-        let ik_empty = InternalKey::encode(&k_empty, 1);
-        let ik_a = InternalKey::encode(&k_a, 1);
+        let ik_empty = InternalKey::encode(&k_empty, CommitVersion(1));
+        let ik_a = InternalKey::encode(&k_a, CommitVersion(1));
         assert!(ik_empty < ik_a);
     }
 
@@ -607,7 +609,7 @@ mod tests {
     #[test]
     fn try_from_bytes_accepts_valid_input() {
         let key = make_key("default", TypeTag::KV, "hello");
-        let ik = InternalKey::encode(&key, 42);
+        let ik = InternalKey::encode(&key, CommitVersion(42));
         let bytes = ik.into_bytes();
         let recovered = InternalKey::try_from_bytes(bytes).unwrap();
         assert_eq!(recovered.commit_id(), 42);
@@ -619,8 +621,8 @@ mod tests {
         let ns = Arc::new(Namespace::new(branch, "default".to_string()));
         let k_null = Key::new(ns.clone(), TypeTag::KV, vec![0x00]);
         let k_one = Key::new(ns, TypeTag::KV, vec![0x01]);
-        let ik_null = InternalKey::encode(&k_null, 1);
-        let ik_one = InternalKey::encode(&k_one, 1);
+        let ik_null = InternalKey::encode(&k_null, CommitVersion(1));
+        let ik_one = InternalKey::encode(&k_one, CommitVersion(1));
         assert!(ik_null < ik_one, "\\x00 should sort before \\x01");
     }
 
@@ -682,7 +684,7 @@ mod tests {
             ) {
                 let ns = Arc::new(Namespace::new(BranchId::new(), space));
                 let key = Key::new(ns, tag, user_key);
-                let ik = InternalKey::encode(&key, commit_id);
+                let ik = InternalKey::encode(&key, CommitVersion(commit_id));
                 let (decoded_key, decoded_commit) = ik.decode().unwrap();
                 prop_assert_eq!(&decoded_key, &key);
                 prop_assert_eq!(decoded_commit, commit_id);
@@ -697,8 +699,8 @@ mod tests {
             ) {
                 let branch = BranchId::new();
                 let key = make_key_with_branch(branch, &space, TypeTag::KV, &user_key);
-                let ik1 = InternalKey::encode(&key, c1);
-                let ik2 = InternalKey::encode(&key, c2);
+                let ik1 = InternalKey::encode(&key, CommitVersion(c1));
+                let ik2 = InternalKey::encode(&key, CommitVersion(c2));
                 if c1 > c2 {
                     prop_assert!(ik1 < ik2, "higher commit_id must sort first");
                 } else if c1 < c2 {
@@ -717,8 +719,8 @@ mod tests {
                 let ns = Arc::new(Namespace::new(branch, "default".to_string()));
                 let k1 = Key::new(ns.clone(), TypeTag::KV, user_key1.clone());
                 let k2 = Key::new(ns, TypeTag::KV, user_key2.clone());
-                let ik1 = InternalKey::encode(&k1, 1);
-                let ik2 = InternalKey::encode(&k2, 1);
+                let ik1 = InternalKey::encode(&k1, CommitVersion(1));
+                let ik2 = InternalKey::encode(&k2, CommitVersion(1));
                 let key_order = user_key1.cmp(&user_key2);
                 let ik_order = ik1.cmp(&ik2);
                 prop_assert_eq!(key_order, ik_order,

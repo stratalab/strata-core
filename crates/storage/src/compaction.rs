@@ -274,6 +274,7 @@ mod tests {
     use super::*;
     use crate::merge_iter::MergeIterator;
     use std::sync::Arc;
+    use strata_core::id::CommitVersion;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
     use strata_core::Timestamp;
@@ -320,9 +321,9 @@ mod tests {
     fn compaction_keeps_all_above_floor() {
         // versions 5, 3, 1 with floor=2 → keeps 5, 3 (above floor) + 1 (floor entry)
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 2);
         assert_eq!(result.len(), 3);
@@ -335,9 +336,9 @@ mod tests {
     fn compaction_keeps_one_below_floor() {
         // versions 5, 3, 1 with floor=4 → keeps 5 (above), 3 (newest below floor)
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 4);
         assert_eq!(result.len(), 2);
@@ -348,9 +349,9 @@ mod tests {
     #[test]
     fn compaction_prune_floor_zero_keeps_all() {
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 0);
         assert_eq!(result.len(), 3);
@@ -360,8 +361,11 @@ mod tests {
     fn compaction_drops_dead_tombstone() {
         // tombstone at 3, value at 1, floor=5 → entire key dropped
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), tombstone()),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 5);
         assert!(result.is_empty());
@@ -372,8 +376,11 @@ mod tests {
         // tombstone at 3, value at 1, floor=2
         // → tombstone at 3 kept (above floor), value at 1 kept (newest below floor)
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), tombstone()),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 2);
         assert_eq!(result.len(), 2);
@@ -386,11 +393,11 @@ mod tests {
     fn compaction_multiple_keys() {
         // Two keys pruned independently
         let items = vec![
-            (InternalKey::encode(&key("a"), 5), entry(50)),
-            (InternalKey::encode(&key("a"), 3), entry(30)),
-            (InternalKey::encode(&key("a"), 1), entry(10)),
-            (InternalKey::encode(&key("b"), 4), entry(40)),
-            (InternalKey::encode(&key("b"), 2), entry(20)),
+            (InternalKey::encode(&key("a"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("a"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("a"), CommitVersion(1)), entry(10)),
+            (InternalKey::encode(&key("b"), CommitVersion(4)), entry(40)),
+            (InternalKey::encode(&key("b"), CommitVersion(2)), entry(20)),
         ];
         let result = compact(items, 4);
         // key "a": 5 (above), 3 (newest below) → 2 entries
@@ -412,8 +419,8 @@ mod tests {
     fn compaction_only_below_floor_keeps_one() {
         // Key with only below-floor versions — newest survives as floor entry
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let result = compact(items, 10);
         assert_eq!(result.len(), 1);
@@ -424,7 +431,10 @@ mod tests {
     #[test]
     fn compaction_only_below_floor_tombstone_drops_all() {
         // Key with only a tombstone below floor — fully cleaned up
-        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(3)),
+            tombstone(),
+        )];
         let result = compact(items, 10);
         assert!(result.is_empty());
     }
@@ -438,11 +448,14 @@ mod tests {
         // versions 10, 8, 6, 4, 2 with floor=0, max_versions=3
         // → keeps only 10, 8, 6 (first 3 above floor)
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), entry(100)),
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 4), entry(40)),
-            (InternalKey::encode(&key("k"), 2), entry(20)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                entry(100),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(4)), entry(40)),
+            (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -457,9 +470,9 @@ mod tests {
     #[test]
     fn compaction_max_versions_zero_keeps_all() {
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -474,11 +487,14 @@ mod tests {
         // Above floor: 10, 8 (limited to 2)
         // Floor entry: 4 would be floor entry, but max_versions already reached → skip
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), entry(100)),
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 4), entry(40)),
-            (InternalKey::encode(&key("k"), 2), entry(20)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                entry(100),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(4)), entry(40)),
+            (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
@@ -493,12 +509,12 @@ mod tests {
     fn compaction_max_versions_per_key_independent() {
         // Two keys with max_versions=2
         let items = vec![
-            (InternalKey::encode(&key("a"), 5), entry(50)),
-            (InternalKey::encode(&key("a"), 3), entry(30)),
-            (InternalKey::encode(&key("a"), 1), entry(10)),
-            (InternalKey::encode(&key("b"), 4), entry(40)),
-            (InternalKey::encode(&key("b"), 2), entry(20)),
-            (InternalKey::encode(&key("b"), 1), entry(10)),
+            (InternalKey::encode(&key("a"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("a"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("a"), CommitVersion(1)), entry(10)),
+            (InternalKey::encode(&key("b"), CommitVersion(4)), entry(40)),
+            (InternalKey::encode(&key("b"), CommitVersion(2)), entry(20)),
+            (InternalKey::encode(&key("b"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -517,9 +533,9 @@ mod tests {
     fn compaction_max_versions_one_keeps_only_newest() {
         // max_versions=1 should keep exactly one version per key
         let items = vec![
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -535,10 +551,13 @@ mod tests {
         // versions: tomb@10, value@8, value@6 with floor=3, max_versions=2
         // → keeps tomb@10 (above, count=1), value@8 (above, count=2), skips rest
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), tombstone()),
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 2), entry(20)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 3)
@@ -555,8 +574,11 @@ mod tests {
         // Dead tombstone cleanup should work regardless of max_versions
         // All versions below floor, newest is tombstone → entire key dropped
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), tombstone()),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
@@ -581,7 +603,10 @@ mod tests {
         //      removing the shadow that hides v1 in L2 → data resurrection.
         //
         // The tombstone MUST be preserved when is_bottommost=false.
-        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(3)),
+            tombstone(),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
             .with_is_bottommost(false)
@@ -600,7 +625,10 @@ mod tests {
     fn test_issue_1678_bottommost_drops_below_floor_tombstone() {
         // Same scenario but bottommost — safe to drop the tombstone since
         // no lower levels exist.
-        let items = vec![(InternalKey::encode(&key("k"), 3), tombstone())];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(3)),
+            tombstone(),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
             .with_is_bottommost(true)
@@ -618,8 +646,11 @@ mod tests {
         // Both below floor: tombstone is floor entry but must be kept.
         // The value at 1 should be pruned (tombstone is the floor entry).
         let items = vec![
-            (InternalKey::encode(&key("k"), 3), tombstone()),
-            (InternalKey::encode(&key("k"), 1), entry(10)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
@@ -638,9 +669,15 @@ mod tests {
         // versions: value@10, value@8 (above floor), tombstone@2 (below floor)
         // floor=5, max_versions=2, non-bottommost
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), entry(100)),
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 2), tombstone()),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                entry(100),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(2)),
+                tombstone(),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 5)
@@ -676,8 +713,11 @@ mod tests {
         // Fix: above-floor tombstones in non-bottommost compaction must
         // always be emitted regardless of max_versions.
         let items = vec![
-            (InternalKey::encode(&key("k"), 7), entry(70)),
-            (InternalKey::encode(&key("k"), 3), tombstone()),
+            (InternalKey::encode(&key("k"), CommitVersion(7)), entry(70)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 2) // floor=2, both above
@@ -702,9 +742,15 @@ mod tests {
         // max_versions — otherwise value@v5 gets displaced.
         // A reader at max_version=6 should still see value@v5.
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), entry(100)),
-            (InternalKey::encode(&key("k"), 7), tombstone()),
-            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                entry(100),
+            ),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(7)),
+                tombstone(),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 2)
@@ -727,8 +773,11 @@ mod tests {
         // In bottommost compaction, above-floor tombstones CAN be dropped
         // by max_versions — there are no lower levels to shadow.
         let items = vec![
-            (InternalKey::encode(&key("k"), 7), entry(70)),
-            (InternalKey::encode(&key("k"), 3), tombstone()),
+            (InternalKey::encode(&key("k"), CommitVersion(7)), entry(70)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                tombstone(),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 2)
@@ -753,8 +802,8 @@ mod tests {
         // snapshot_floor=5 (gc_safe_point returned min_active_version=5).
         // Version 5 has commit_id >= snapshot_floor → protected from pruning.
         let items = vec![
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -772,8 +821,8 @@ mod tests {
         // snapshot_floor=6: version 5 (commit_id 5 < 6) is NOT protected.
         // max_versions=1 drops it normally.
         let items2 = vec![
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge2 = MergeIterator::new(vec![items2.into_iter()]);
         let result2: Vec<_> = CompactionIterator::new(merge2, 0)
@@ -795,10 +844,13 @@ mod tests {
         // Versions < 6: 5, 3 can be dropped by max_versions since they're
         // below the snapshot floor (no active snapshot needs them).
         let items = vec![
-            (InternalKey::encode(&key("k"), 10), entry(100)),
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 5), entry(50)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(10)),
+                entry(100),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -816,8 +868,8 @@ mod tests {
     fn test_issue_1697_snapshot_floor_zero_no_protection() {
         // snapshot_floor=0 means no active snapshots — max_versions applies normally.
         let items = vec![
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 5), entry(50)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -839,8 +891,8 @@ mod tests {
         // Without snapshot_floor, max_versions=1 keeps version 6, drops floor entry 3.
         // With snapshot_floor=3, floor entry 3 has commit_id >= snapshot_floor → protected.
         let items = vec![
-            (InternalKey::encode(&key("k"), 6), entry(60)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (InternalKey::encode(&key("k"), CommitVersion(6)), entry(60)),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 4)
@@ -858,8 +910,11 @@ mod tests {
         // version for this key. Without protection, max_versions drops it.
         // With snapshot_floor=5, commit_id 5 >= 5 → protected.
         let items = vec![
-            (InternalKey::encode(&key("k"), 8), entry(80)),
-            (InternalKey::encode(&key("k"), 5), tombstone()),
+            (InternalKey::encode(&key("k"), CommitVersion(8)), entry(80)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(5)),
+                tombstone(),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -894,7 +949,10 @@ mod tests {
         // - Entry K@v50 has expired TTL, but commit_id 50 >= prune_floor 10
         // - An active transaction at snapshot version 50 should still see it
         // - Compaction with drop_expired must NOT drop it
-        let items = vec![(InternalKey::encode(&key("k"), 50), expired_entry(500))];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(50)),
+            expired_entry(500),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10)
             .with_drop_expired(true)
@@ -911,7 +969,10 @@ mod tests {
     #[test]
     fn test_issue_1727_drop_expired_below_prune_floor() {
         // Entry K@v5 is expired AND below prune_floor 10 → safe to drop
-        let items = vec![(InternalKey::encode(&key("k"), 5), expired_entry(50))];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(5)),
+            expired_entry(50),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10)
             .with_drop_expired(true)
@@ -932,9 +993,15 @@ mod tests {
         //           v3 would be floor entry but v8 was the first below-floor seen
         //           (v8 is dropped by expired, so v3 becomes floor entry → kept)
         let items = vec![
-            (InternalKey::encode(&key("k"), 50), expired_entry(500)),
-            (InternalKey::encode(&key("k"), 8), expired_entry(80)),
-            (InternalKey::encode(&key("k"), 3), entry(30)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(50)),
+                expired_entry(500),
+            ),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(8)),
+                expired_entry(80),
+            ),
+            (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10)
@@ -950,7 +1017,10 @@ mod tests {
     fn test_issue_1727_prune_floor_zero_preserves_expired() {
         // prune_floor=0 means "don't prune". Even with drop_expired=true,
         // no entry should be dropped because commit_id < 0 is always false for u64.
-        let items = vec![(InternalKey::encode(&key("k"), 5), expired_entry(50))];
+        let items = vec![(
+            InternalKey::encode(&key("k"), CommitVersion(5)),
+            expired_entry(50),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
             .with_drop_expired(true)
@@ -967,9 +1037,18 @@ mod tests {
         // Above-floor entry + multiple expired below-floor entries.
         // All below-floor entries are expired → no floor entry survives.
         let items = vec![
-            (InternalKey::encode(&key("k"), 50), entry(500)),
-            (InternalKey::encode(&key("k"), 8), expired_entry(80)),
-            (InternalKey::encode(&key("k"), 3), expired_entry(30)),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(50)),
+                entry(500),
+            ),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(8)),
+                expired_entry(80),
+            ),
+            (
+                InternalKey::encode(&key("k"), CommitVersion(3)),
+                expired_entry(30),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10)
@@ -1076,9 +1155,18 @@ mod tests {
         // newest floor entry. But Event entries must ALL survive because
         // dropping any event breaks the hash chain.
         let items = vec![
-            (InternalKey::encode(&event_key(0), 1), entry(100)),
-            (InternalKey::encode(&event_key(1), 2), entry(200)),
-            (InternalKey::encode(&event_key(2), 3), entry(300)),
+            (
+                InternalKey::encode(&event_key(0), CommitVersion(1)),
+                entry(100),
+            ),
+            (
+                InternalKey::encode(&event_key(1), CommitVersion(2)),
+                entry(200),
+            ),
+            (
+                InternalKey::encode(&event_key(2), CommitVersion(3)),
+                entry(300),
+            ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10).collect();
@@ -1099,9 +1187,12 @@ mod tests {
             Key::new(ns, TypeTag::Event, b"__meta__".to_vec())
         };
         let items = vec![
-            (InternalKey::encode(&meta_key, 10), entry(100)),
-            (InternalKey::encode(&meta_key, 8), entry(80)),
-            (InternalKey::encode(&meta_key, 5), entry(50)),
+            (
+                InternalKey::encode(&meta_key, CommitVersion(10)),
+                entry(100),
+            ),
+            (InternalKey::encode(&meta_key, CommitVersion(8)), entry(80)),
+            (InternalKey::encode(&meta_key, CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 0)
@@ -1118,7 +1209,10 @@ mod tests {
     fn test_issue_1729_event_entries_exempt_from_ttl_expiration() {
         // An expired Event entry below prune_floor — normally dropped by
         // drop_expired. But Event entries must never be dropped by TTL.
-        let items = vec![(InternalKey::encode(&event_key(0), 5), expired_entry(100))];
+        let items = vec![(
+            InternalKey::encode(&event_key(0), CommitVersion(5)),
+            expired_entry(100),
+        )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10)
             .with_drop_expired(true)
@@ -1138,10 +1232,10 @@ mod tests {
         let ev = event_key(0);
         let items = vec![
             // KV entry below floor — should be kept as floor entry
-            (InternalKey::encode(&kv, 3), entry(30)),
-            (InternalKey::encode(&kv, 1), entry(10)),
+            (InternalKey::encode(&kv, CommitVersion(3)), entry(30)),
+            (InternalKey::encode(&kv, CommitVersion(1)), entry(10)),
             // Event entry below floor — must be kept (exempt)
-            (InternalKey::encode(&ev, 2), entry(200)),
+            (InternalKey::encode(&ev, CommitVersion(2)), entry(200)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
         let result: Vec<_> = CompactionIterator::new(merge, 10).collect();

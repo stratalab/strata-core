@@ -1581,6 +1581,7 @@ mod tests {
     use crate::memtable::Memtable;
     use crate::segment::KVSegment;
     use std::sync::Arc;
+    use strata_core::id::CommitVersion;
     use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 
     fn branch() -> BranchId {
@@ -1598,9 +1599,14 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 2, Value::Int(2), false);
-        mt.put(&key("c"), 3, Value::String("hello".into()), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(2), Value::Int(2), false);
+        mt.put(
+            &key("c"),
+            CommitVersion(3),
+            Value::String("hello".into()),
+            false,
+        );
         mt.freeze();
 
         let builder = SegmentBuilder::default();
@@ -1631,8 +1637,8 @@ mod tests {
         let path = dir.path().join("tomb.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&key("x"), 1, Value::Int(10), false);
-        mt.put(&key("x"), 2, Value::Null, true);
+        mt.put(&key("x"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&key("x"), CommitVersion(2), Value::Null, true);
         mt.freeze();
 
         let builder = SegmentBuilder::default();
@@ -1721,7 +1727,7 @@ mod tests {
         let ts = strata_core::Timestamp::from_micros(1_600_000_000_000_000);
         mt.put_entry(
             &key("a"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(10),
                 is_tombstone: false,
@@ -1732,7 +1738,7 @@ mod tests {
         );
         mt.put_entry(
             &key("b"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: true,
@@ -1961,7 +1967,7 @@ mod tests {
                 offsets.push(buf.len() as u32);
             }
             let k = key(&format!("k{:04}", i));
-            let ik = InternalKey::encode(&k, i as u64 + 1);
+            let ik = InternalKey::encode(&k, CommitVersion(i as u64 + 1));
             let entry = MemtableEntry {
                 value: Value::Int(i as i64),
                 is_tombstone: false,
@@ -2000,7 +2006,7 @@ mod tests {
                     offsets.push(buf.len() as u32);
                 }
                 let k = key(&format!("k{:04}", i));
-                let ik = InternalKey::encode(&k, i as u64 + 1);
+                let ik = InternalKey::encode(&k, CommitVersion(i as u64 + 1));
                 let entry = MemtableEntry {
                     value: Value::Int(i as i64),
                     is_tombstone: false,
@@ -2076,7 +2082,7 @@ mod tests {
 
     #[test]
     fn v4_entry_encode_decode_roundtrip() {
-        let ik = InternalKey::encode(&key("hello"), 42);
+        let ik = InternalKey::encode(&key("hello"), CommitVersion(42));
         let entry = MemtableEntry {
             value: Value::String("world".into()),
             is_tombstone: false,
@@ -2101,7 +2107,7 @@ mod tests {
 
     #[test]
     fn v4_tombstone_entry_roundtrip() {
-        let ik = InternalKey::encode(&key("gone"), 99);
+        let ik = InternalKey::encode(&key("gone"), CommitVersion(99));
         let entry = MemtableEntry {
             value: Value::Null,
             is_tombstone: true,
@@ -2127,8 +2133,8 @@ mod tests {
     fn v4_prefix_shared_bytes_correct() {
         let k1 = key("user:alice");
         let k2 = key("user:alice_data");
-        let ik1 = InternalKey::encode(&k1, 1);
-        let ik2 = InternalKey::encode(&k2, 2);
+        let ik1 = InternalKey::encode(&k1, CommitVersion(1));
+        let ik2 = InternalKey::encode(&k2, CommitVersion(2));
 
         let entry = MemtableEntry {
             value: Value::Int(1),
@@ -2173,7 +2179,7 @@ mod tests {
         // Write 32 entries to get at least 2 restart points
         for i in 0..32u32 {
             let k = key(&format!("k{:04}", i));
-            let ik = InternalKey::encode(&k, i as u64 + 1);
+            let ik = InternalKey::encode(&k, CommitVersion(i as u64 + 1));
             let entry = MemtableEntry {
                 value: Value::Int(i as i64),
                 is_tombstone: false,
@@ -2250,9 +2256,9 @@ mod tests {
 
         let mt = Memtable::new(0);
         let k = key("k");
-        mt.put(&k, 1, Value::Int(10), false);
-        mt.put(&k, 5, Value::Int(50), false);
-        mt.put(&k, 10, Value::Int(100), false);
+        mt.put(&k, CommitVersion(1), Value::Int(10), false);
+        mt.put(&k, CommitVersion(5), Value::Int(50), false);
+        mt.put(&k, CommitVersion(10), Value::Int(100), false);
         mt.freeze();
 
         let builder = SegmentBuilder::default();
@@ -2512,7 +2518,7 @@ mod tests {
         for i in 0..50 {
             mt.put(
                 &key(&format!("alpha_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2770,8 +2776,8 @@ mod tests {
         let tmp_path = path.with_extension("tmp");
 
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 2, Value::Int(2), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(2), Value::Int(2), false);
         mt.freeze();
 
         let builder = SegmentBuilder::default();
