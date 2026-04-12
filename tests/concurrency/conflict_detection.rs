@@ -12,6 +12,7 @@ use strata_concurrency::transaction::{CASOperation, TransactionContext};
 use strata_concurrency::validation::{
     validate_cas_set, validate_read_set, validate_transaction, ConflictType,
 };
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -35,10 +36,10 @@ fn read_write_conflict_version_increased() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -50,7 +51,7 @@ fn read_write_conflict_version_increased() {
 
     // Update key
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Validate
@@ -70,10 +71,10 @@ fn read_write_conflict_key_deleted() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -84,7 +85,7 @@ fn read_write_conflict_key_deleted() {
     read_set.insert(key.clone(), v1);
 
     // Delete key
-    store.delete_with_version(&key, 2).unwrap();
+    store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
     // Validate - should conflict (version changed to 0)
     let result = validate_read_set(&read_set, &*store).unwrap();
@@ -103,7 +104,7 @@ fn read_write_conflict_key_created() {
 
     // Create key
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Validate - should conflict (version changed from 0)
@@ -119,10 +120,10 @@ fn no_read_write_conflict_version_same() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -151,15 +152,15 @@ fn cas_conflict_version_mismatch() {
 
     // Initial value at version 1
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // Update to version 2
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), 2, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
     let v2 = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -195,7 +196,7 @@ fn cas_create_conflict_key_exists() {
 
     // Key already exists
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     // CAS with expected_version=0 (key must not exist)
@@ -225,10 +226,10 @@ fn cas_success_version_matches() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
@@ -273,21 +274,21 @@ fn multiple_cas_operations() {
 
     // Setup
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key1, u64::MAX)
+        .get_versioned(&key1, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Update key2
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), 3, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
 
     // CAS on both - key1 should succeed, key2 should fail
@@ -322,20 +323,20 @@ fn transaction_validation_combines_all_checks() {
 
     // Setup
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), 1, None, WriteMode::Append)
+        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let v1 = store
-        .get_versioned(&key1, u64::MAX)
+        .get_versioned(&key1, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), 2, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
         .unwrap();
 
     // Transaction with read and CAS
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.read_set.insert(key1.clone(), v1);
     txn.cas_set.push(CASOperation {
         key: key2.clone(),
@@ -345,10 +346,10 @@ fn transaction_validation_combines_all_checks() {
 
     // Modify both keys
     store
-        .put_with_version_mode(key1.clone(), Value::Int(10), 3, None, WriteMode::Append)
+        .put_with_version_mode(key1.clone(), Value::Int(10), CommitVersion(3), None, WriteMode::Append)
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), 4, None, WriteMode::Append)
+        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(4), None, WriteMode::Append)
         .unwrap();
 
     // Validate - should have both conflicts
@@ -409,13 +410,13 @@ fn large_read_set_validation() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                (i + 1) as u64,
+                CommitVersion((i + 1) as u64),
                 None,
                 WriteMode::Append,
             )
             .unwrap();
         let v = store
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .version
@@ -441,13 +442,13 @@ fn large_read_set_with_one_conflict() {
             .put_with_version_mode(
                 key.clone(),
                 Value::Int(i),
-                (i + 1) as u64,
+                CommitVersion((i + 1) as u64),
                 None,
                 WriteMode::Append,
             )
             .unwrap();
         let v = store
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .version
@@ -458,7 +459,7 @@ fn large_read_set_with_one_conflict() {
     // Modify one key
     let modified_key = create_test_key(branch_id, "key_50");
     store
-        .put_with_version_mode(modified_key, Value::Int(500), 101, None, WriteMode::Append)
+        .put_with_version_mode(modified_key, Value::Int(500), CommitVersion(101), None, WriteMode::Append)
         .unwrap();
 
     // Should have exactly one conflict

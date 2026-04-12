@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use strata_concurrency::manager::TransactionManager;
 use strata_concurrency::transaction::TransactionContext;
 use strata_concurrency::validation::validate_transaction;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
@@ -26,14 +27,14 @@ fn create_test_key(branch_id: BranchId, name: &str) -> Key {
 #[ignore]
 fn stress_concurrent_read_write() {
     let store = Arc::new(SegmentedStore::new());
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let branch_id = BranchId::new();
 
     // Pre-populate
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
             .unwrap();
     }
 
@@ -58,11 +59,11 @@ fn stress_concurrent_read_write() {
 
                     loop {
                         // Read-modify-write with retry
-                        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+                        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn = TransactionContext::new(txn_id, branch_id, version);
+                        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set
                             .insert(key.clone(), Value::Int((thread_id * 1000 + iter) as i64));
@@ -112,12 +113,12 @@ fn stress_concurrent_read_write() {
 #[ignore]
 fn stress_transaction_throughput() {
     let store = Arc::new(SegmentedStore::new());
-    let manager = TransactionManager::new(1);
+    let manager = TransactionManager::new(CommitVersion(1));
     let branch_id = BranchId::new();
 
     let key = create_test_key(branch_id, "counter");
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
 
     let duration = Duration::from_secs(5);
@@ -127,11 +128,11 @@ fn stress_transaction_throughput() {
     let mut next_version = 2u64;
 
     while start.elapsed() < duration {
-        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         let version = current.version.as_u64();
 
         let txn_id = manager.next_txn_id().unwrap();
-        let mut txn = TransactionContext::new(txn_id, branch_id, version);
+        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
         txn.read_set.insert(key.clone(), version);
 
         if let Value::Int(v) = current.value {
@@ -145,7 +146,7 @@ fn stress_transaction_throughput() {
                     .put_with_version_mode(
                         key.clone(),
                         Value::Int(v + 1),
-                        next_version,
+                        CommitVersion(next_version),
                         None,
                         WriteMode::Append,
                     )
@@ -181,7 +182,7 @@ fn stress_large_transaction() {
     let branch_id = BranchId::new();
 
     // Create transaction with 10K operations
-    let mut txn = TransactionContext::new(1, branch_id, 1);
+    let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     let start = Instant::now();
 
@@ -214,7 +215,7 @@ fn stress_large_transaction() {
 #[ignore]
 fn stress_many_branches() {
     let store = Arc::new(SegmentedStore::new());
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let barrier = Arc::new(Barrier::new(100));
     let commits = Arc::new(AtomicU64::new(0));
 
@@ -233,7 +234,7 @@ fn stress_many_branches() {
 
                 for i in 0..100 {
                     let txn_id = manager.next_txn_id().unwrap();
-                    let mut txn = TransactionContext::new(txn_id, branch_id, 1);
+                    let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(1));
                     txn.write_set.insert(key.clone(), Value::Int(i));
 
                     let result = validate_transaction(&txn, &*store);
@@ -276,17 +277,17 @@ fn stress_long_running_transaction() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), 1, None, WriteMode::Append)
+        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
         .unwrap();
     let initial_version = store
-        .get_versioned(&key, u64::MAX)
+        .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
         .as_u64();
 
     // Start a long-running transaction
-    let mut long_txn = TransactionContext::new(1, branch_id, initial_version);
+    let mut long_txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(initial_version));
     long_txn.read_set.insert(key.clone(), initial_version);
 
     // Spawn concurrent writers
@@ -298,7 +299,7 @@ fn stress_long_running_transaction() {
                 .put_with_version_mode(
                     key_clone.clone(),
                     Value::Int(i),
-                    (i + 1) as u64,
+                    CommitVersion((i + 1) as u64),
                     None,
                     WriteMode::Append,
                 )
@@ -328,14 +329,14 @@ fn stress_long_running_transaction() {
 #[ignore]
 fn stress_sustained_workload() {
     let store = Arc::new(SegmentedStore::new());
-    let manager = Arc::new(TransactionManager::new(1));
+    let manager = Arc::new(TransactionManager::new(CommitVersion(1)));
     let branch_id = BranchId::new();
 
     // Pre-populate
     for i in 0..50 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), (i + 1) as u64, None, WriteMode::Append)
+            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
             .unwrap();
     }
 
@@ -362,11 +363,11 @@ fn stress_sustained_workload() {
 
                     if ops.load(Ordering::Relaxed).is_multiple_of(3) {
                         // Write
-                        let current = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+                        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn = TransactionContext::new(txn_id, branch_id, version);
+                        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set
                             .insert(key.clone(), Value::Int(thread_id as i64));
@@ -386,7 +387,7 @@ fn stress_sustained_workload() {
                         }
                     } else {
                         // Read
-                        let _ = store.get_versioned(&key, u64::MAX);
+                        let _ = store.get_versioned(&key, CommitVersion::MAX);
                     }
 
                     ops.fetch_add(1, Ordering::Relaxed);
