@@ -19,13 +19,13 @@ fn apply_batch_equivalent_to_individual() {
         (kv_key("a"), Value::Int(1), WriteMode::Append),
         (kv_key("b"), Value::Int(2), WriteMode::Append),
     ];
-    store2.apply_batch(writes, 1).unwrap();
+    store2.apply_batch(writes, CommitVersion(1)).unwrap();
 
     // Both stores should produce the same results
     for key_name in &["a", "b"] {
         let k = kv_key(key_name);
-        let v1 = store.get_versioned(&k, u64::MAX).unwrap().unwrap().value;
-        let v2 = store2.get_versioned(&k, u64::MAX).unwrap().unwrap().value;
+        let v1 = store.get_versioned(&k, CommitVersion::MAX).unwrap().unwrap().value;
+        let v2 = store2.get_versioned(&k, CommitVersion::MAX).unwrap().unwrap().value;
         assert_eq!(v1, v2);
     }
 }
@@ -45,14 +45,14 @@ fn apply_batch_cross_branch() {
         (k1.clone(), Value::Int(10), WriteMode::Append),
         (k2.clone(), Value::Int(20), WriteMode::Append),
     ];
-    store.apply_batch(writes, 5).unwrap();
+    store.apply_batch(writes, CommitVersion(5)).unwrap();
 
     assert_eq!(
-        store.get_versioned(&k1, u64::MAX).unwrap().unwrap().value,
+        store.get_versioned(&k1, CommitVersion::MAX).unwrap().unwrap().value,
         Value::Int(10)
     );
     assert_eq!(
-        store.get_versioned(&k2, u64::MAX).unwrap().unwrap().value,
+        store.get_versioned(&k2, CommitVersion::MAX).unwrap().unwrap().value,
         Value::Int(20)
     );
 }
@@ -68,15 +68,15 @@ fn apply_batch_with_deletes() {
 
     // Delete via batch
     let deletes = vec![kv_key("a")];
-    store.delete_batch(deletes, 2).unwrap();
+    store.delete_batch(deletes, CommitVersion(2)).unwrap();
 
     assert!(store
-        .get_versioned(&kv_key("a"), u64::MAX)
+        .get_versioned(&kv_key("a"), CommitVersion::MAX)
         .unwrap()
         .is_none());
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -87,9 +87,9 @@ fn apply_batch_with_deletes() {
 #[test]
 fn apply_batch_empty() {
     let store = SegmentedStore::new();
-    store.apply_batch(vec![], 1).unwrap();
-    store.delete_batch(vec![], 1).unwrap();
-    assert_eq!(store.current_version(), 0);
+    store.apply_batch(vec![], CommitVersion(1)).unwrap();
+    store.delete_batch(vec![], CommitVersion(1)).unwrap();
+    assert_eq!(store.current_version(), CommitVersion(0));
 }
 
 // ========================================================================
@@ -110,24 +110,24 @@ fn test_issue_1706_apply_writes_atomic_no_partial_visibility() {
     let deletes = vec![kv_key("K2")];
 
     // apply_writes_atomic should install everything BEFORE advancing version.
-    store.apply_writes_atomic(writes, deletes, 10, &[]).unwrap();
+    store.apply_writes_atomic(writes, deletes, CommitVersion(10), &[]).unwrap();
 
     // After the atomic call, version should be 10.
     assert_eq!(store.version(), 10);
 
     // A reader at version 10 must see BOTH the put AND the delete.
     // K1 should be "new" at version 10.
-    let k1 = store.get_versioned(&kv_key("K1"), 10).unwrap().unwrap();
+    let k1 = store.get_versioned(&kv_key("K1"), CommitVersion(10)).unwrap().unwrap();
     assert_eq!(k1.value, Value::from("new"));
 
     // K2 should be deleted (tombstone) at version 10 — returns None.
-    let k2 = store.get_versioned(&kv_key("K2"), 10).unwrap();
+    let k2 = store.get_versioned(&kv_key("K2"), CommitVersion(10)).unwrap();
     assert!(k2.is_none(), "K2 should be deleted at version 10");
 
     // A reader at version 9 (before the commit) must see old state.
-    let k1_old = store.get_versioned(&kv_key("K1"), 9).unwrap().unwrap();
+    let k1_old = store.get_versioned(&kv_key("K1"), CommitVersion(9)).unwrap().unwrap();
     assert_eq!(k1_old.value, Value::Int(1));
-    let k2_old = store.get_versioned(&kv_key("K2"), 9).unwrap().unwrap();
+    let k2_old = store.get_versioned(&kv_key("K2"), CommitVersion(9)).unwrap().unwrap();
     assert_eq!(k2_old.value, Value::Int(2));
 }
 
@@ -146,33 +146,33 @@ fn test_issue_1706_version_not_advanced_before_deletes_installed() {
     let writes = vec![(kv_key("B"), Value::Int(200), WriteMode::Append)];
     let deletes = vec![kv_key("A")];
 
-    store.apply_writes_atomic(writes, deletes, 5, &[]).unwrap();
+    store.apply_writes_atomic(writes, deletes, CommitVersion(5), &[]).unwrap();
 
     // Version advanced to 5 only after both writes and deletes are in.
     assert_eq!(store.version(), 5);
 
     // Reader at version 5: B exists, A is deleted.
-    assert!(store.get_versioned(&kv_key("B"), 5).unwrap().is_some());
-    assert!(store.get_versioned(&kv_key("A"), 5).unwrap().is_none());
+    assert!(store.get_versioned(&kv_key("B"), CommitVersion(5)).unwrap().is_some());
+    assert!(store.get_versioned(&kv_key("A"), CommitVersion(5)).unwrap().is_none());
 }
 
 #[test]
 fn test_issue_1706_apply_writes_atomic_empty() {
     let store = SegmentedStore::new();
     // Both empty — should not advance version.
-    store.apply_writes_atomic(vec![], vec![], 5, &[]).unwrap();
+    store.apply_writes_atomic(vec![], vec![], CommitVersion(5), &[]).unwrap();
     assert_eq!(store.version(), 0);
 
     // Only writes, no deletes.
     let writes = vec![(kv_key("X"), Value::Int(1), WriteMode::Append)];
-    store.apply_writes_atomic(writes, vec![], 3, &[]).unwrap();
+    store.apply_writes_atomic(writes, vec![], CommitVersion(3), &[]).unwrap();
     assert_eq!(store.version(), 3);
 
     // Only deletes, no writes.
     let deletes = vec![kv_key("X")];
-    store.apply_writes_atomic(vec![], deletes, 7, &[]).unwrap();
+    store.apply_writes_atomic(vec![], deletes, CommitVersion(7), &[]).unwrap();
     assert_eq!(store.version(), 7);
-    assert!(store.get_versioned(&kv_key("X"), 7).unwrap().is_none());
+    assert!(store.get_versioned(&kv_key("X"), CommitVersion(7)).unwrap().is_none());
 }
 
 // ========================================================================
@@ -191,7 +191,7 @@ fn bulk_load_data_readable() {
     // Data should be readable even during bulk load
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -202,7 +202,7 @@ fn bulk_load_data_readable() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -239,7 +239,7 @@ fn bulk_load_defers_rotation() {
     // After end_bulk_load, data is still readable
     for i in 0..100 {
         assert!(store
-            .get_versioned(&kv_key(&format!("k{}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{}", i)), CommitVersion::MAX)
             .unwrap()
             .is_some());
     }
@@ -259,7 +259,7 @@ fn bulk_load_normal_writes_after() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("bulk"), u64::MAX)
+            .get_versioned(&kv_key("bulk"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -267,7 +267,7 @@ fn bulk_load_normal_writes_after() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("normal"), u64::MAX)
+            .get_versioned(&kv_key("normal"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -292,7 +292,7 @@ fn get_value_direct_returns_latest() {
 fn get_value_direct_skips_tombstone() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
-    store.delete_with_version(&kv_key("k"), 2).unwrap();
+    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
     assert_eq!(store.get_value_direct(&kv_key("k")).unwrap(), None);
 }
 
@@ -316,7 +316,7 @@ fn get_versioned_direct_returns_latest() {
 fn get_versioned_direct_skips_tombstone() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
-    store.delete_with_version(&kv_key("k"), 2).unwrap();
+    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
     assert!(store.get_versioned_direct(&kv_key("k")).unwrap().is_none());
 }
 
@@ -353,11 +353,11 @@ mod estimate_num_keys {
     #[test]
     fn tracks_inserts() {
         let store = SegmentedStore::new();
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 0);
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 0);
         seed(&store, kv_key("a"), Value::Int(1), 1);
         seed(&store, kv_key("b"), Value::Int(2), 2);
         seed(&store, kv_key("c"), Value::Int(3), 3);
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 3);
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 3);
     }
 
     #[test]
@@ -365,18 +365,18 @@ mod estimate_num_keys {
         let store = SegmentedStore::new();
         seed(&store, kv_key("a"), Value::Int(1), 1);
         seed(&store, kv_key("b"), Value::Int(2), 2);
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 2);
-        store.delete_with_version(&kv_key("a"), 3).unwrap();
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 2);
+        store.delete_with_version(&kv_key("a"), CommitVersion(3)).unwrap();
         // estimate = 2 entries - 1 deletion = 1
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 1);
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 1);
     }
 
     #[test]
     fn does_not_underflow() {
         let store = SegmentedStore::new();
         // Delete without any prior insert
-        store.delete_with_version(&kv_key("ghost"), 1).unwrap();
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 0);
+        store.delete_with_version(&kv_key("ghost"), CommitVersion(1)).unwrap();
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 0);
     }
 
     #[test]
@@ -386,11 +386,11 @@ mod estimate_num_keys {
         seed(&store, kv_key("apricot"), Value::Int(2), 2);
         seed(&store, kv_key("banana"), Value::Int(3), 3);
         // Unprefixed: uses O(1) estimate
-        assert_eq!(store.count_prefix(&kv_key(""), u64::MAX).unwrap(), 3);
+        assert_eq!(store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(), 3);
         // Prefixed: uses exact O(N) iterator
-        assert_eq!(store.count_prefix(&kv_key("ap"), u64::MAX).unwrap(), 2);
-        assert_eq!(store.count_prefix(&kv_key("b"), u64::MAX).unwrap(), 1);
-        assert_eq!(store.count_prefix(&kv_key("z"), u64::MAX).unwrap(), 0);
+        assert_eq!(store.count_prefix(&kv_key("ap"), CommitVersion::MAX).unwrap(), 2);
+        assert_eq!(store.count_prefix(&kv_key("b"), CommitVersion::MAX).unwrap(), 1);
+        assert_eq!(store.count_prefix(&kv_key("z"), CommitVersion::MAX).unwrap(), 0);
     }
 }
 
@@ -448,7 +448,7 @@ fn get_at_timestamp_respects_tombstone() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
     std::thread::sleep(std::time::Duration::from_millis(5));
-    store.delete_with_version(&kv_key("k"), 2).unwrap();
+    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
 
     // Query at current time should return None (tombstone)
     let result = store
@@ -579,7 +579,7 @@ fn write_stalling_skips_rotation_when_frozen_limit_reached() {
 
     // Data should still be readable
     assert!(store
-        .get_versioned(&kv_key("round0_0"), u64::MAX)
+        .get_versioned(&kv_key("round0_0"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }

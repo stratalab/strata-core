@@ -16,6 +16,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
+use strata_core::id::TxnId;
 use strata_core::types::BranchId;
 use strata_storage::SegmentedStore;
 
@@ -63,7 +64,7 @@ impl TransactionPool {
     /// # Returns
     /// * `TransactionContext` - Active transaction ready for operations
     pub fn acquire(
-        txn_id: u64,
+        txn_id: TxnId,
         branch_id: BranchId,
         store: Option<Arc<SegmentedStore>>,
     ) -> TransactionContext {
@@ -78,7 +79,7 @@ impl TransactionPool {
                     // Pool empty - allocate new
                     match store {
                         Some(s) => TransactionContext::with_store(txn_id, branch_id, s),
-                        None => TransactionContext::new(txn_id, branch_id, 0),
+                        None => TransactionContext::new(txn_id, branch_id, strata_core::id::CommitVersion::ZERO),
                     }
                 }
             }
@@ -132,7 +133,7 @@ impl TransactionPool {
             let current = pool.len();
             for _ in current..count {
                 // Create minimal context for pool
-                let ctx = TransactionContext::new(0, BranchId::new(), 0);
+                let ctx = TransactionContext::new(TxnId::ZERO, BranchId::new(), strata_core::id::CommitVersion::ZERO);
                 pool.push(ctx);
             }
         });
@@ -162,6 +163,7 @@ impl TransactionPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_core::traits::{Storage, WriteMode};
     use strata_core::types::{Namespace, TypeTag};
     use strata_core::value::Value;
@@ -180,11 +182,11 @@ mod tests {
         assert_eq!(TransactionPool::pool_size(), 0);
 
         let branch_id = BranchId::new();
-        let ctx = TransactionPool::acquire(1, branch_id, None);
+        let ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
 
         // Pool still empty (we acquired, not released)
         assert_eq!(TransactionPool::pool_size(), 0);
-        assert_eq!(ctx.txn_id, 1);
+        assert_eq!(ctx.txn_id, TxnId(1));
         assert_eq!(ctx.branch_id, branch_id);
     }
 
@@ -193,7 +195,7 @@ mod tests {
         TransactionPool::clear();
 
         let branch_id = BranchId::new();
-        let ctx = TransactionPool::acquire(1, branch_id, None);
+        let ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
         TransactionPool::release(ctx);
 
         assert_eq!(TransactionPool::pool_size(), 1);
@@ -206,7 +208,7 @@ mod tests {
         let branch_id = ns.branch_id;
 
         // Create and release a context with capacity
-        let mut ctx = TransactionPool::acquire(1, branch_id, None);
+        let mut ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
 
         // Fill with data to grow capacity
         for i in 0..100 {
@@ -224,7 +226,7 @@ mod tests {
 
         // Acquire again - should reuse with preserved capacity
         let new_branch_id = BranchId::new();
-        let ctx2 = TransactionPool::acquire(2, new_branch_id, None);
+        let ctx2 = TransactionPool::acquire(TxnId(2), new_branch_id, None);
 
         // Capacity preserved
         assert_eq!(ctx2.capacity(), original_cap);
@@ -232,7 +234,7 @@ mod tests {
         // But data cleared
         assert!(ctx2.read_set.is_empty());
         assert!(ctx2.write_set.is_empty());
-        assert_eq!(ctx2.txn_id, 2);
+        assert_eq!(ctx2.txn_id, TxnId(2));
         assert_eq!(ctx2.branch_id, new_branch_id);
     }
 
@@ -245,7 +247,7 @@ mod tests {
         // This tests that pool caps at MAX_POOL_SIZE
         let mut contexts = Vec::new();
         for i in 0..(MAX_POOL_SIZE + 5) {
-            contexts.push(TransactionPool::acquire(i as u64, branch_id, None));
+            contexts.push(TransactionPool::acquire(TxnId(i as u64), branch_id, None));
         }
 
         // Now release them all
@@ -265,7 +267,7 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Add to this thread's pool
-        let ctx = TransactionPool::acquire(1, branch_id, None);
+        let ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
         TransactionPool::release(ctx);
         assert_eq!(TransactionPool::pool_size(), 1);
 
@@ -274,7 +276,7 @@ mod tests {
             assert_eq!(TransactionPool::pool_size(), 0);
 
             // Add to other thread's pool
-            let ctx = TransactionPool::acquire(2, BranchId::new(), None);
+            let ctx = TransactionPool::acquire(TxnId(2), BranchId::new(), None);
             TransactionPool::release(ctx);
             assert_eq!(TransactionPool::pool_size(), 1);
         });
@@ -293,14 +295,14 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         let ns = create_test_namespace();
         let key = create_test_key(&ns, b"test");
-        Storage::put_with_version_mode(&*store, key, Value::Int(1), 500, None, WriteMode::Append)
+        Storage::put_with_version_mode(&*store, key, Value::Int(1), CommitVersion(500), None, WriteMode::Append)
             .unwrap();
 
-        let ctx = TransactionPool::acquire(1, branch_id, Some(store));
+        let ctx = TransactionPool::acquire(TxnId(1), branch_id, Some(store));
 
-        assert_eq!(ctx.txn_id, 1);
+        assert_eq!(ctx.txn_id, TxnId(1));
         assert_eq!(ctx.branch_id, branch_id);
-        assert_eq!(ctx.start_version, 500);
+        assert_eq!(ctx.start_version, CommitVersion(500));
     }
 
     #[test]
@@ -339,8 +341,8 @@ mod tests {
 
         // Simulate typical usage pattern
         for cycle in 0..10 {
-            let ctx = TransactionPool::acquire(cycle as u64, branch_id, None);
-            assert_eq!(ctx.txn_id, cycle as u64);
+            let ctx = TransactionPool::acquire(TxnId(cycle as u64), branch_id, None);
+            assert_eq!(ctx.txn_id, TxnId(cycle as u64));
             TransactionPool::release(ctx);
         }
 
@@ -355,7 +357,7 @@ mod tests {
         let branch_id = ns.branch_id;
 
         // Create context with capacity and release
-        let mut ctx = TransactionPool::acquire(1, branch_id, None);
+        let mut ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
         for i in 0..50 {
             let key = create_test_key(&ns, format!("key{}", i).as_bytes());
             ctx.read_set.insert(key.clone(), i as u64);

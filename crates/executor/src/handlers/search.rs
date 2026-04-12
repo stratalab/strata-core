@@ -284,7 +284,7 @@ pub fn search(
         },
         embedding_pending,
         embedding_total,
-        snapshot_version: Some(p.db.current_version()),
+        snapshot_version: Some(p.db.current_version().as_u64()),
         rag_used: rag_used_flag,
         rag_model: rag_model_field,
         rag_elapsed_ms: rag_elapsed,

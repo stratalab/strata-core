@@ -42,6 +42,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::StrataError;
@@ -747,7 +748,7 @@ impl EventLog {
         use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
-        let meta: EventLogMeta = match self.db.storage().get_versioned(&meta_key, u64::MAX)? {
+        let meta: EventLogMeta = match self.db.storage().get_versioned(&meta_key, CommitVersion::MAX)? {
             Some(vv) => from_stored_value(&vv.value).map_err(|e| {
                 StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
             })?,

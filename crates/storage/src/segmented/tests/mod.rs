@@ -2,6 +2,7 @@
 
 pub(in crate::segmented) use super::compaction::*;
 pub(crate) use super::*;
+pub(crate) use strata_core::id::CommitVersion;
 pub(crate) use strata_core::types::{Namespace, TypeTag};
 
 pub fn branch() -> BranchId {
@@ -18,7 +19,7 @@ pub fn kv_key(name: &str) -> Key {
 
 pub fn seed(store: &SegmentedStore, key: Key, value: Value, version: u64) {
     store
-        .put_with_version_mode(key, value, version, None, WriteMode::Append)
+        .put_with_version_mode(key, value, CommitVersion(version), None, WriteMode::Append)
         .unwrap();
 }
 
@@ -83,7 +84,7 @@ pub fn setup_parent_with_segments(
             .put_with_version_mode(
                 parent_kv(key),
                 Value::Int(val),
-                ver,
+                CommitVersion(ver),
                 None,
                 WriteMode::Append,
             )

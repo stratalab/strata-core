@@ -1,6 +1,7 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
 use std::sync::atomic::Ordering;
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
 use tracing::warn;
@@ -23,7 +24,7 @@ impl Database {
     ///
     /// This is the highest version allocated so far and serves as
     /// a safe GC boundary when no active snapshots need older versions.
-    pub fn current_version(&self) -> u64 {
+    pub fn current_version(&self) -> CommitVersion {
         self.coordinator.current_version()
     }
 
@@ -34,7 +35,7 @@ impl Database {
     /// Versions strictly older than `safe_point` can be pruned from version
     /// chains. Returns 0 if no GC is safe (only one version or version 0).
     pub fn gc_safe_point(&self) -> u64 {
-        let current = self.current_version();
+        let current = self.current_version().as_u64();
         if current <= 1 {
             return 0;
         }

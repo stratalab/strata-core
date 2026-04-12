@@ -26,7 +26,7 @@ fn compact_merges_two_segments() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -34,7 +34,7 @@ fn compact_merges_two_segments() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -62,14 +62,14 @@ fn compact_merges_overlapping_versions() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("k"), u64::MAX)
+            .get_versioned(&kv_key("k"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(2)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), 1).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
         Value::Int(1)
     );
 }
@@ -96,18 +96,18 @@ fn compact_prunes_old_versions() {
     // Verify the correct versions survived
     assert_eq!(
         store
-            .get_versioned(&kv_key("k"), u64::MAX)
+            .get_versioned(&kv_key("k"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
         Value::Int(2)
     );
     // Version 1 was pruned — reading at snapshot 1 should return nothing
-    assert!(store.get_versioned(&kv_key("k"), 1).unwrap().is_none());
+    assert!(store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().is_none());
 }
 
 #[test]
@@ -120,7 +120,7 @@ fn compact_removes_dead_tombstones() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    store.delete_with_version(&kv_key("k"), 2).unwrap();
+    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
@@ -139,7 +139,7 @@ fn compact_preserves_tombstone_above_floor() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    store.delete_with_version(&kv_key("k"), 3).unwrap();
+    store.delete_with_version(&kv_key("k"), CommitVersion(3)).unwrap();
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
@@ -227,7 +227,7 @@ fn compact_reads_correct_after() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -235,7 +235,7 @@ fn compact_reads_correct_after() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -243,7 +243,7 @@ fn compact_reads_correct_after() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("c"), u64::MAX)
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -251,7 +251,7 @@ fn compact_reads_correct_after() {
     );
 
     let prefix_key = Key::new(ns(), TypeTag::KV, Vec::new());
-    let results = store.scan_prefix(&prefix_key, u64::MAX).unwrap();
+    let results = store.scan_prefix(&prefix_key, CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 3);
 
     let history = store.get_history(&kv_key("a"), None, None).unwrap();
@@ -288,19 +288,19 @@ fn compact_result_counts() {
     // Verify reads are correct
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("a"), 2).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("a"), CommitVersion(2)).unwrap().unwrap().value,
         Value::Int(2)
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -573,7 +573,7 @@ fn compact_after_flush_integration() {
     for commit in 1..=3u64 {
         assert_eq!(
             store
-                .get_versioned(&kv_key(&format!("k{}", commit)), u64::MAX)
+                .get_versioned(&kv_key(&format!("k{}", commit)), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -610,7 +610,7 @@ fn compact_with_active_memtable_data() {
     // Memtable data visible
     assert_eq!(
         store
-            .get_versioned(&kv_key("c"), u64::MAX)
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -619,7 +619,7 @@ fn compact_with_active_memtable_data() {
     // Memtable update shadows segment version
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -627,13 +627,13 @@ fn compact_with_active_memtable_data() {
     );
     // Old segment version still readable at old snapshot
     assert_eq!(
-        store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("a"), CommitVersion(1)).unwrap().unwrap().value,
         Value::Int(1)
     );
     // Segment-only data still readable
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -681,7 +681,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     // All data still readable
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -689,7 +689,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -697,7 +697,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("c"), u64::MAX)
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -705,7 +705,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("d"), u64::MAX)
+            .get_versioned(&kv_key("d"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,

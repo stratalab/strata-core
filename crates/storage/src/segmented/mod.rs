@@ -78,6 +78,7 @@ thread_local! {
     }) };
 }
 
+use strata_core::id::CommitVersion;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
@@ -1505,7 +1506,7 @@ impl SegmentedStore {
         &self,
         source_id: &BranchId,
         dest_id: &BranchId,
-    ) -> io::Result<(u64, usize)> {
+    ) -> io::Result<(CommitVersion, usize)> {
         if source_id == dest_id {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -1679,7 +1680,7 @@ impl SegmentedStore {
         // 7. Write manifest
         self.write_branch_manifest(dest_id);
 
-        Ok((fork_version, segments_shared))
+        Ok((CommitVersion(fork_version), segments_shared))
     }
 
     /// Count distinct live (non-tombstone, non-expired) logical keys in a branch.
@@ -3948,10 +3949,10 @@ impl SegmentedStore {
     fn count_prefix_from_snapshot(
         snapshot: &BranchSnapshot,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<u64> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, prefix)?;
-        let mvcc = MvccIterator::new(merge, max_version);
+        let mvcc = MvccIterator::new(merge, max_version.as_u64());
         let count = mvcc
             .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
             .filter(|(ik, _)| ik.decode().is_some())
@@ -3983,10 +3984,10 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         prefix: Key,
-        snapshot_version: u64,
+        snapshot_version: CommitVersion,
     ) -> Option<StorageIterator> {
         let snapshot = self.snapshot_branch(branch_id)?;
-        Some(StorageIterator::new(snapshot, prefix, snapshot_version))
+        Some(StorageIterator::new(snapshot, prefix, snapshot_version.as_u64()))
     }
 
     /// Scan entries starting from `start_key` within `prefix`, with optional limit.
@@ -4042,13 +4043,13 @@ impl SegmentedStore {
     /// Uses the same merge/MVCC pipeline as `scan_prefix` but only counts
     /// the live (non-tombstone, non-expired) entries, avoiding the O(N)
     /// `Vec<(Key, VersionedValue)>` allocation.
-    pub fn count_prefix(&self, prefix: &Key, max_version: u64) -> StrataResult<u64> {
+    pub fn count_prefix(&self, prefix: &Key, max_version: CommitVersion) -> StrataResult<u64> {
         let branch_id = prefix.namespace.branch_id;
 
         // O(1) fast path: unprefixed count at latest version uses
         // RocksDB-style EstimateNumKeys (entries - deletions).
         // This only needs a brief DashMap read for the atomic counters.
-        if prefix.user_key.is_empty() && max_version == u64::MAX {
+        if prefix.user_key.is_empty() && max_version == CommitVersion::MAX {
             if let Some(branch) = self.branches.get(&branch_id) {
                 return Ok(branch.estimate_live_keys());
             }
@@ -4067,10 +4068,10 @@ impl SegmentedStore {
     fn count_prefix_from_branch(
         branch: &BranchState,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<u64> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
-        let mvcc = MvccIterator::new(merge, max_version);
+        let mvcc = MvccIterator::new(merge, max_version.as_u64());
         let count = mvcc
             .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
             .filter(|(ik, _)| ik.decode().is_some())
@@ -4213,13 +4214,13 @@ impl std::fmt::Debug for SegmentedStore {
 // ============================================================================
 
 impl Storage for SegmentedStore {
-    fn get_versioned(&self, key: &Key, max_version: u64) -> StrataResult<Option<VersionedValue>> {
+    fn get_versioned(&self, key: &Key, max_version: CommitVersion) -> StrataResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
         };
 
-        match Self::get_versioned_from_snapshot(&snapshot, key, max_version)? {
+        match Self::get_versioned_from_snapshot(&snapshot, key, max_version.as_u64())? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
@@ -4235,7 +4236,7 @@ impl Storage for SegmentedStore {
         &self,
         key: &Key,
         limit: Option<usize>,
-        before_version: Option<u64>,
+        before_version: Option<CommitVersion>,
     ) -> StrataResult<Vec<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
@@ -4248,7 +4249,7 @@ impl Storage for SegmentedStore {
             .into_iter()
             .filter(|(commit_id, entry)| {
                 if let Some(bv) = before_version {
-                    if *commit_id >= bv {
+                    if *commit_id >= bv.as_u64() {
                         return false;
                     }
                 }
@@ -4266,25 +4267,25 @@ impl Storage for SegmentedStore {
     fn scan_prefix(
         &self,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let snapshot = match self.snapshot_branch(&prefix.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(Vec::new()),
         };
 
-        Self::scan_prefix_from_snapshot(&snapshot, prefix, max_version)
+        Self::scan_prefix_from_snapshot(&snapshot, prefix, max_version.as_u64())
     }
 
-    fn current_version(&self) -> u64 {
-        self.version.load(Ordering::Acquire)
+    fn current_version(&self) -> CommitVersion {
+        CommitVersion(self.version.load(Ordering::Acquire))
     }
 
     fn put_with_version_mode(
         &self,
         key: Key,
         value: Value,
-        version: u64,
+        version: CommitVersion,
         ttl: Option<Duration>,
         _mode: WriteMode,
     ) -> StrataResult<()> {
@@ -4309,21 +4310,21 @@ impl Storage for SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(&key, version, entry);
+        branch.active.put_entry(&key, version.as_u64(), entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
-        branch.track_version(version);
+        branch.track_version(version.as_u64());
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
 
         // Update global version
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
 
         Ok(())
     }
 
-    fn delete_with_version(&self, key: &Key, version: u64) -> StrataResult<()> {
+    fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
 
         let mut branch = self
@@ -4342,21 +4343,21 @@ impl Storage for SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(key, version, entry);
+        branch.active.put_entry(key, version.as_u64(), entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
-        branch.track_version(version);
+        branch.track_version(version.as_u64());
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
 
         // Update global version
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
 
         Ok(())
     }
 
-    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: u64) -> StrataResult<()> {
+    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: CommitVersion) -> StrataResult<()> {
         if writes.is_empty() {
             return Ok(());
         }
@@ -4388,19 +4389,19 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, version.as_u64(), entry);
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
-            branch.track_version(version);
+            branch.track_version(version.as_u64());
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
         Ok(())
     }
 
-    fn delete_batch(&self, deletes: Vec<Key>, version: u64) -> StrataResult<()> {
+    fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StrataResult<()> {
         if deletes.is_empty() {
             return Ok(());
         }
@@ -4429,15 +4430,15 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, version.as_u64(), entry);
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
-            branch.track_version(version);
+            branch.track_version(version.as_u64());
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
         Ok(())
     }
 
@@ -4445,7 +4446,7 @@ impl Storage for SegmentedStore {
         &self,
         writes: Vec<(Key, Value, WriteMode)>,
         deletes: Vec<Key>,
-        version: u64,
+        version: CommitVersion,
         put_ttls: &[u64],
     ) -> StrataResult<()> {
         if writes.is_empty() && deletes.is_empty() {
@@ -4490,11 +4491,11 @@ impl Storage for SegmentedStore {
                     ttl_ms,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, version.as_u64(), entry);
             }
             branch.num_entries.fetch_add(put_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
-            branch.track_version(version);
+            branch.track_version(version.as_u64());
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -4513,16 +4514,16 @@ impl Storage for SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, version, entry);
+                branch.active.put_entry(&key, version.as_u64(), entry);
             }
             branch.num_deletions.fetch_add(del_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
-            branch.track_version(version);
+            branch.track_version(version.as_u64());
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
         // Advance version only after ALL entries are installed.
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
         Ok(())
     }
 

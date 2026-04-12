@@ -28,6 +28,7 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::{StrataError, StrataResult};
@@ -363,7 +364,7 @@ impl KVStore {
     ) -> StrataResult<u64> {
         let ns = self.namespace_for(branch_id, space);
         let scan_prefix = Key::new_kv(ns, prefix.unwrap_or(""));
-        self.db.count_prefix(&scan_prefix, u64::MAX)
+        self.db.count_prefix(&scan_prefix, CommitVersion::MAX)
     }
 
     /// Sample key-value pairs with evenly-spaced selection from a single scan.

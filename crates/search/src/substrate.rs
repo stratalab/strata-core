@@ -128,7 +128,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         .map(|ms| start + std::time::Duration::from_millis(ms));
 
     // INV-3: Snapshot isolation — all primitives see the same version.
-    let snapshot = db.current_version();
+    let snapshot = db.current_version().as_u64();
 
     let has_bm25 = recipe
         .retrieve

@@ -32,6 +32,7 @@ fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
     }
 }
 
+use strata_core::id::CommitVersion;
 use strata_core::{StrataError, StrataResult};
 
 /// Restrict a directory to owner-only access (rwx------).
@@ -533,7 +534,7 @@ impl Database {
             writes_applied = result.stats.writes_applied,
             "Follower recovery complete");
 
-        let wal_watermark = AtomicU64::new(result.stats.max_txn_id);
+        let wal_watermark = AtomicU64::new(result.stats.max_txn_id.as_u64());
 
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
             &result,
@@ -728,7 +729,7 @@ impl Database {
                         "Recovered segments from disk");
                 }
                 if seg_info.max_commit_id > 0 {
-                    coordinator.bump_version_floor(seg_info.max_commit_id);
+                    coordinator.bump_version_floor(CommitVersion(seg_info.max_commit_id));
                 }
             }
             Err(e) => {
@@ -812,7 +813,7 @@ impl Database {
             txns_replayed = result.stats.txns_replayed,
             writes_applied = result.stats.writes_applied,
             deletes_applied = result.stats.deletes_applied,
-            final_version = result.stats.final_version,
+            final_version = result.stats.final_version.as_u64(),
             "Recovery complete"
         );
 
@@ -853,7 +854,7 @@ impl Database {
             codec,
         )?;
 
-        let wal_watermark = AtomicU64::new(result.stats.max_txn_id);
+        let wal_watermark = AtomicU64::new(result.stats.max_txn_id.as_u64());
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
@@ -997,7 +998,7 @@ impl Database {
         let bg_threads = cfg.storage.background_threads.max(1);
 
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
-        let coordinator = TransactionCoordinator::new(1);
+        let coordinator = TransactionCoordinator::new(CommitVersion(1));
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
 
         let db = Arc::new(Self {

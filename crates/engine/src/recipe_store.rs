@@ -116,13 +116,14 @@ pub fn get_default_recipe(db: &Database, branch_id: BranchId) -> StrataResult<Re
 /// List all recipe names available to a branch (user + system, deduplicated).
 pub fn list_recipes(db: &Database, branch_id: BranchId) -> StrataResult<Vec<String>> {
     use std::collections::BTreeSet;
+    use strata_core::id::CommitVersion;
     use strata_core::traits::Storage;
 
     let mut names = BTreeSet::new();
 
     // User branch recipes
     let prefix = system_kv_key(branch_id, "recipe:");
-    let version = db.storage().version();
+    let version = CommitVersion(db.storage().version());
     for (k, _) in db.storage().scan_prefix(&prefix, version)? {
         if let Some(n) = k
             .user_key_string()

@@ -1063,9 +1063,10 @@ fn test_session_default_space_skipped() {
 
     // The default-space metadata key must remain absent after a write
     // to the default space — the helper short-circuits before the put.
+    use strata_core::id::CommitVersion;
     let bid = BranchId::from_bytes([0u8; 16]);
     let key = Key::new_space(bid, "default");
-    let version = db.storage().version();
+    let version = CommitVersion(db.storage().version());
     let entry = db.storage().get_versioned(&key, version).unwrap();
     assert!(
         entry.is_none(),

@@ -144,7 +144,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 
         // Delegate to ctx.get() which checks write_set → delete_set → snapshot
         let result = self.ctx.get(&full_key)?;
-        Ok(result.map(|v| Versioned::new(v, Version::txn(self.ctx.txn_id))))
+        Ok(result.map(|v| Versioned::new(v, Version::txn(self.ctx.txn_id.as_u64()))))
     }
 
     fn kv_put(&mut self, key: &str, value: Value) -> Result<Version, StrataError> {
@@ -165,7 +165,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         // Use the ctx.put() method which handles all the bookkeeping
         self.ctx.put(full_key, value)?;
 
-        Ok(Version::txn(self.ctx.txn_id))
+        Ok(Version::txn(self.ctx.txn_id.as_u64()))
     }
 
     fn kv_delete(&mut self, key: &str) -> Result<bool, StrataError> {
@@ -392,7 +392,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         // Create the document by setting at root path
         self.ctx.json_set(&full_key, &JsonPath::root(), value)?;
 
-        Ok(Version::txn(self.ctx.txn_id))
+        Ok(Version::txn(self.ctx.txn_id.as_u64()))
     }
 
     fn json_get(&mut self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
@@ -400,7 +400,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 
         // Delegate to ctx which checks json_writes buffer → snapshot
         match self.ctx.json_get_document(&full_key)? {
-            Some(jv) => Ok(Some(Versioned::new(jv, Version::txn(self.ctx.txn_id)))),
+            Some(jv) => Ok(Some(Versioned::new(jv, Version::txn(self.ctx.txn_id.as_u64())))),
             None => Ok(None),
         }
     }
@@ -433,7 +433,7 @@ impl<'a> TransactionOps for Transaction<'a> {
         // Call ctx.json_set (same pattern as kv_put calling ctx.put)
         self.ctx.json_set(&full_key, path, value)?;
 
-        Ok(Version::txn(self.ctx.txn_id))
+        Ok(Version::txn(self.ctx.txn_id.as_u64()))
     }
 
     fn json_delete(&mut self, doc_id: &str) -> Result<bool, StrataError> {
@@ -459,6 +459,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_storage::SegmentedStore;
 
     fn create_test_namespace() -> Arc<Namespace> {
@@ -468,7 +469,7 @@ mod tests {
 
     fn create_test_context(ns: &Namespace) -> TransactionContext {
         let store = Arc::new(SegmentedStore::new());
-        TransactionContext::with_store(1, ns.branch_id, store)
+        TransactionContext::with_store(TxnId(1), ns.branch_id, store)
     }
 
     // =========================================================================
@@ -719,7 +720,7 @@ mod tests {
         };
         let meta_json = serde_json::to_string(&meta).unwrap();
         let meta_key = Key::new_event_meta(ns.clone());
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(
                 meta_key,
@@ -730,7 +731,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::with_base_sequence(&mut ctx, ns.clone(), 100, last_hash);
 
         // New events should continue from base
@@ -808,7 +809,7 @@ mod tests {
         };
         let meta_json = serde_json::to_string(&meta).unwrap();
         let meta_key = Key::new_event_meta(ns.clone());
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(
                 meta_key,
@@ -819,7 +820,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Before any append, event_len should reflect committed count
@@ -843,7 +844,7 @@ mod tests {
         };
         let meta_json = serde_json::to_string(&meta).unwrap();
         let meta_key = Key::new_event_meta(ns.clone());
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(
                 meta_key,
@@ -854,7 +855,7 @@ mod tests {
             )
             .unwrap();
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Before append: should read 10 from persisted meta
@@ -999,7 +1000,7 @@ mod tests {
         use strata_core::traits::Storage;
         use strata_core::WriteMode;
         let k = Key::new_kv(Arc::new(ns.clone()), key);
-        let version = store.next_version();
+        let version = CommitVersion(store.next_version());
         store
             .put_with_version_mode(k, value, version, None, WriteMode::Append)
             .unwrap();
@@ -1019,7 +1020,7 @@ mod tests {
         );
 
         // Create a new TransactionContext that sees the snapshot
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Read should see the committed data
@@ -1037,7 +1038,7 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "exists_key", Value::Int(42));
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         assert!(txn.kv_exists("exists_key").unwrap());
@@ -1051,7 +1052,7 @@ mod tests {
         commit_kv(&store, &ns, "user:1", Value::Int(1));
         commit_kv(&store, &ns, "user:2", Value::Int(2));
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         let keys = txn.kv_list(Some("user:")).unwrap();
@@ -1066,7 +1067,7 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "user:1", Value::Int(1));
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Add a new key in the transaction
@@ -1088,7 +1089,7 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "to_delete", Value::Int(1));
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Verify it exists in snapshot
@@ -1109,7 +1110,7 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         commit_kv(&store, &ns, "key", Value::String("old".into()));
 
-        let mut ctx = TransactionContext::with_store(2, ns.branch_id, store);
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
         let mut txn = Transaction::new(&mut ctx, ns.clone());
 
         // Override the snapshot value

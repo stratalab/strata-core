@@ -64,7 +64,7 @@ fn compact_tier_merges_subset() {
     // All data still readable
     for commit in 1..=6u64 {
         let val = store
-            .get_versioned(&kv_key(&format!("k{}", commit)), u64::MAX)
+            .get_versioned(&kv_key(&format!("k{}", commit)), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(val.value, Value::Int(commit as i64));
@@ -127,7 +127,7 @@ fn compact_tier_prunes_versions() {
     // Latest version still readable
     assert_eq!(
         store
-            .get_versioned(&kv_key("k"), u64::MAX)
+            .get_versioned(&kv_key("k"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -168,7 +168,7 @@ fn time_range_o1_includes_deletes() {
 
     // Short sleep to ensure delete timestamp is strictly later
     std::thread::sleep(std::time::Duration::from_millis(1));
-    store.delete_with_version(&kv_key("a"), 2).unwrap();
+    store.delete_with_version(&kv_key("a"), CommitVersion(2)).unwrap();
 
     let range_after = store.time_range(branch()).unwrap().unwrap();
     // max should have advanced to include the delete timestamp
@@ -285,7 +285,7 @@ fn diagnostic_segment_layout_at_scale() {
     // Verify data is intact
     for i in [0u64, 500, 999] {
         assert!(store
-            .get_versioned(&kv_key(&format!("key_{:06}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("key_{:06}", i)), CommitVersion::MAX)
             .unwrap()
             .is_some());
     }
@@ -405,7 +405,7 @@ fn compact_l0_to_l1_merges_overlapping_l1() {
     // All data correct
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -413,7 +413,7 @@ fn compact_l0_to_l1_merges_overlapping_l1() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -421,7 +421,7 @@ fn compact_l0_to_l1_merges_overlapping_l1() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("c"), u64::MAX)
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -457,7 +457,7 @@ fn compact_l0_to_l1_preserves_non_overlapping_l1() {
     for (key, val) in [("a", 10), ("b", 20), ("x", 1), ("y", 2), ("z", 3)] {
         assert_eq!(
             store
-                .get_versioned(&kv_key(key), u64::MAX)
+                .get_versioned(&kv_key(key), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -484,17 +484,17 @@ fn compact_l0_to_l1_prunes_versions() {
 
     assert_eq!(
         store
-            .get_versioned(&kv_key("k"), u64::MAX)
+            .get_versioned(&kv_key("k"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), 2).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
         Value::Int(2)
     );
-    assert!(store.get_versioned(&kv_key("k"), 1).unwrap().is_none());
+    assert!(store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().is_none());
 }
 
 #[test]
@@ -558,15 +558,15 @@ fn compact_l0_to_l1_concurrent_flush_preserves_new_l0() {
 
     // All data still readable
     assert!(store
-        .get_versioned(&kv_key("a"), u64::MAX)
+        .get_versioned(&kv_key("a"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("b"), u64::MAX)
+        .get_versioned(&kv_key("b"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("c"), u64::MAX)
+        .get_versioned(&kv_key("c"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }
@@ -585,19 +585,19 @@ fn compact_l0_to_l1_data_correct_after() {
     // Point lookups
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(2)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("a"), 1).unwrap().unwrap().value,
+        store.get_versioned(&kv_key("a"), CommitVersion(1)).unwrap().unwrap().value,
         Value::Int(1)
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("b"), u64::MAX)
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -605,7 +605,7 @@ fn compact_l0_to_l1_data_correct_after() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("c"), u64::MAX)
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -614,7 +614,7 @@ fn compact_l0_to_l1_data_correct_after() {
 
     // Prefix scan
     let prefix_key = Key::new(ns(), TypeTag::KV, Vec::new());
-    let results = store.scan_prefix(&prefix_key, u64::MAX).unwrap();
+    let results = store.scan_prefix(&prefix_key, CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 3);
 
     // History
@@ -676,7 +676,7 @@ fn compact_l0_to_l1_repeated() {
     // All data correct
     assert_eq!(
         store
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -684,7 +684,7 @@ fn compact_l0_to_l1_repeated() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("z"), u64::MAX)
+            .get_versioned(&kv_key("z"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -732,7 +732,7 @@ fn point_lookup_reads_l1_segments() {
     // Data in L1 only
     assert_eq!(
         store
-            .get_versioned(&kv_key("k1"), u64::MAX)
+            .get_versioned(&kv_key("k1"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
@@ -740,14 +740,14 @@ fn point_lookup_reads_l1_segments() {
     );
     assert_eq!(
         store
-            .get_versioned(&kv_key("k2"), u64::MAX)
+            .get_versioned(&kv_key("k2"), CommitVersion::MAX)
             .unwrap()
             .unwrap()
             .value,
         Value::Int(2)
     );
     assert!(store
-        .get_versioned(&kv_key("nonexistent"), u64::MAX)
+        .get_versioned(&kv_key("nonexistent"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -765,7 +765,7 @@ fn scan_prefix_includes_l1() {
     seed(&store, kv_key("item/c"), Value::Int(3), 2);
 
     let prefix = Key::new(ns(), TypeTag::KV, "item/".as_bytes().to_vec());
-    let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+    let results = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 3); // 2 from L1 + 1 from memtable
 }
 
@@ -804,7 +804,7 @@ fn l1_binary_search_correct_segment() {
     for (key, val) in [("a", 1), ("b", 2), ("m", 3), ("n", 4), ("x", 5), ("y", 6)] {
         assert_eq!(
             store
-                .get_versioned(&kv_key(key), u64::MAX)
+                .get_versioned(&kv_key(key), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -815,15 +815,15 @@ fn l1_binary_search_correct_segment() {
 
     // Keys not in any segment
     assert!(store
-        .get_versioned(&kv_key("c"), u64::MAX)
+        .get_versioned(&kv_key("c"), CommitVersion::MAX)
         .unwrap()
         .is_none());
     assert!(store
-        .get_versioned(&kv_key("p"), u64::MAX)
+        .get_versioned(&kv_key("p"), CommitVersion::MAX)
         .unwrap()
         .is_none());
     assert!(store
-        .get_versioned(&kv_key("zzz"), u64::MAX)
+        .get_versioned(&kv_key("zzz"), CommitVersion::MAX)
         .unwrap()
         .is_none());
 }
@@ -890,7 +890,7 @@ fn recover_with_manifest_restores_levels() {
     for (key, val) in [("a", 1), ("b", 2), ("c", 3), ("d", 4)] {
         assert_eq!(
             store2
-                .get_versioned(&kv_key(key), u64::MAX)
+                .get_versioned(&kv_key(key), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -925,11 +925,11 @@ fn recover_without_manifest_all_l0() {
 
     // Data still correct
     assert!(store2
-        .get_versioned(&kv_key("a"), u64::MAX)
+        .get_versioned(&kv_key("a"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store2
-        .get_versioned(&kv_key("b"), u64::MAX)
+        .get_versioned(&kv_key("b"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }
@@ -960,7 +960,7 @@ fn recover_manifest_corrupt_returns_error() {
     // The corrupt branch's data must NOT be accessible.
     assert!(
         store2
-            .get_versioned(&kv_key("a"), u64::MAX)
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
             .unwrap()
             .is_none(),
         "corrupt-manifest branch must not have segments loaded"
@@ -1001,14 +1001,14 @@ fn compact_l0_to_l1_streaming_correctness() {
     // All 250 entries should be readable
     for i in 0..250u64 {
         let result = store
-            .get_versioned(&kv_key(&format!("key_{:06}", i)), u64::MAX)
+            .get_versioned(&kv_key(&format!("key_{:06}", i)), CommitVersion::MAX)
             .unwrap();
         assert!(result.is_some(), "key_{:06} should be readable", i);
     }
 
     // Prefix scan should find all entries
     let prefix = Key::new(ns(), TypeTag::KV, "key_".as_bytes().to_vec());
-    let results = store.scan_prefix(&prefix, u64::MAX).unwrap();
+    let results = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 250);
 }
 
@@ -1047,7 +1047,7 @@ fn compact_l0_to_l1_with_splitting_builder() {
     for i in 0..400u64 {
         assert!(
             store
-                .get_versioned(&kv_key(&format!("k{:06}", i)), u64::MAX)
+                .get_versioned(&kv_key(&format!("k{:06}", i)), CommitVersion::MAX)
                 .unwrap()
                 .is_some(),
             "k{:06} missing",
@@ -1084,7 +1084,7 @@ fn compact_level_0_equivalent_to_compact_l0_to_l1() {
     let expected = [("a", 1i64), ("b", 2), ("c", 3), ("d", 4), ("e", 5)];
     for (key_name, expected_val) in &expected {
         let val = store
-            .get_versioned(&kv_key(key_name), u64::MAX)
+            .get_versioned(&kv_key(key_name), CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key {} missing after compact_level(0)", key_name));
         assert_eq!(val.value, Value::Int(*expected_val));
@@ -1116,7 +1116,7 @@ fn compact_level_1_moves_to_l2() {
     let expected = [("a", 1i64), ("b", 2), ("c", 3), ("d", 4)];
     for (key_name, expected_val) in &expected {
         let val = store
-            .get_versioned(&kv_key(key_name), u64::MAX)
+            .get_versioned(&kv_key(key_name), CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key {} missing after compact_level(1)", key_name));
         assert_eq!(val.value, Value::Int(*expected_val));
@@ -1165,7 +1165,7 @@ fn compact_level_picks_round_robin() {
     for key_name in &["aaa", "mmm", "zzz"] {
         assert!(
             store
-                .get_versioned(&kv_key(key_name), u64::MAX)
+                .get_versioned(&kv_key(key_name), CommitVersion::MAX)
                 .unwrap()
                 .is_some(),
             "key {} missing after round-robin compact",
@@ -1205,7 +1205,7 @@ fn compact_level_trivial_move() {
 
     // Data still findable with correct value
     let val = store
-        .get_versioned(&kv_key("x"), u64::MAX)
+        .get_versioned(&kv_key("x"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(1));
@@ -1254,7 +1254,7 @@ fn compact_level_finds_overlapping_next() {
 
     // Verify updated value for "b"
     let val = store
-        .get_versioned(&kv_key("b"), u64::MAX)
+        .get_versioned(&kv_key("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(20));
@@ -1263,7 +1263,7 @@ fn compact_level_finds_overlapping_next() {
     let expected = [("a", 1i64), ("c", 3), ("d", 4)];
     for (key_name, expected_val) in &expected {
         let val = store
-            .get_versioned(&kv_key(key_name), u64::MAX)
+            .get_versioned(&kv_key(key_name), CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key {} missing after overlap merge", key_name));
         assert_eq!(val.value, Value::Int(*expected_val));
@@ -1289,7 +1289,7 @@ fn point_lookup_finds_data_in_l3() {
 
     // Point lookup must find data at L3
     let val = store
-        .get_versioned(&kv_key("deep"), u64::MAX)
+        .get_versioned(&kv_key("deep"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(42));
@@ -1321,7 +1321,7 @@ fn scan_includes_all_levels() {
     seed(&store, kv_key("p/d"), Value::Int(4), 4);
 
     // Prefix scan should find all four
-    let results = store.scan_prefix(&kv_key("p/"), u64::MAX).unwrap();
+    let results = store.scan_prefix(&kv_key("p/"), CommitVersion::MAX).unwrap();
     assert_eq!(results.len(), 4, "scan should merge data across all levels");
 }
 
@@ -1359,7 +1359,7 @@ fn recover_restores_multi_level() {
     let expected = [("a", 1i64), ("b", 2), ("c", 3)];
     for (key_name, expected_val) in &expected {
         let val = store2
-            .get_versioned(&kv_key(key_name), u64::MAX)
+            .get_versioned(&kv_key(key_name), CommitVersion::MAX)
             .unwrap()
             .unwrap_or_else(|| panic!("key {} missing after recovery", key_name));
         assert_eq!(val.value, Value::Int(*expected_val));
@@ -1434,7 +1434,7 @@ fn compact_level_prunes_old_versions() {
 
     // Latest version should be visible
     let val = store
-        .get_versioned(&kv_key("k"), u64::MAX)
+        .get_versioned(&kv_key("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(4));
@@ -1985,19 +1985,19 @@ fn compaction_with_rate_limiter_multi_block() {
 
     // Verify data integrity: spot-check first, last, and middle keys
     assert!(store
-        .get_versioned(&kv_key("a000000"), u64::MAX)
+        .get_versioned(&kv_key("a000000"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("a000199"), u64::MAX)
+        .get_versioned(&kv_key("a000199"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("b000100"), u64::MAX)
+        .get_versioned(&kv_key("b000100"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("b000199"), u64::MAX)
+        .get_versioned(&kv_key("b000199"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }
@@ -2022,11 +2022,11 @@ fn rate_limiter_disabled_by_default() {
     assert_eq!(result.output_entries, 200);
 
     assert!(store
-        .get_versioned(&kv_key("x000000"), u64::MAX)
+        .get_versioned(&kv_key("x000000"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("y000099"), u64::MAX)
+        .get_versioned(&kv_key("y000099"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }
@@ -2076,11 +2076,11 @@ fn rate_limiter_l0_to_l1_compaction() {
 
     // Spot-check data after L0→L1 compaction
     assert!(store
-        .get_versioned(&kv_key("l0seg0000000"), u64::MAX)
+        .get_versioned(&kv_key("l0seg0000000"), CommitVersion::MAX)
         .unwrap()
         .is_some());
     assert!(store
-        .get_versioned(&kv_key("l0seg3000049"), u64::MAX)
+        .get_versioned(&kv_key("l0seg3000049"), CommitVersion::MAX)
         .unwrap()
         .is_some());
 }
@@ -2112,14 +2112,14 @@ fn rate_limited_compaction_preserves_prune_semantics() {
 
     // Version 5 still readable
     let val = store
-        .get_versioned(&kv_key("k000050"), u64::MAX)
+        .get_versioned(&kv_key("k000050"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.version.as_u64(), 5);
 
     // Version 1 was pruned
     assert!(store
-        .get_versioned(&kv_key("k000050"), 1)
+        .get_versioned(&kv_key("k000050"), CommitVersion(1))
         .unwrap()
         .is_none());
 }

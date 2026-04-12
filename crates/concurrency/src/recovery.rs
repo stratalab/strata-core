@@ -17,6 +17,7 @@
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use std::path::PathBuf;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::StrataResult;
 use strata_durability::format::WalSegment;
 use strata_durability::wal::WalReader;
@@ -162,7 +163,7 @@ impl RecoveryCoordinator {
         if !self.wal_dir.exists() {
             return Ok(RecoveryResult {
                 storage,
-                txn_manager: TransactionManager::new(0),
+                txn_manager: TransactionManager::new(CommitVersion::ZERO),
                 stats,
             });
         }
@@ -220,10 +221,10 @@ impl RecoveryCoordinator {
         // WalWriter::new() reopens at a clean record boundary (#1741).
         self.truncate_partial_tail(&reader);
 
-        stats.final_version = max_version;
-        stats.max_txn_id = max_txn_id;
+        stats.final_version = CommitVersion(max_version);
+        stats.max_txn_id = TxnId(max_txn_id);
 
-        let txn_manager = TransactionManager::with_txn_id(max_version, max_txn_id);
+        let txn_manager = TransactionManager::with_txn_id(CommitVersion(max_version), TxnId(max_txn_id));
 
         Ok(RecoveryResult {
             storage,
@@ -256,7 +257,7 @@ impl RecoveryResult {
     pub fn empty() -> Self {
         RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(0),
+            txn_manager: TransactionManager::new(CommitVersion::ZERO),
             stats: RecoveryStats::default(),
         }
     }
@@ -296,14 +297,14 @@ pub struct RecoveryStats {
     ///
     /// This is the highest version seen in the WAL, used to initialize
     /// the TransactionManager's version counter.
-    pub final_version: u64,
+    pub final_version: CommitVersion,
 
     /// Maximum transaction ID seen in WAL
     ///
     /// This is used to initialize the TransactionManager's next_txn_id counter
     /// to ensure new transactions get unique IDs that don't conflict with
     /// transactions already in the WAL.
-    pub max_txn_id: u64,
+    pub max_txn_id: TxnId,
 
     /// Whether recovery was from checkpoint
     ///
@@ -328,6 +329,7 @@ mod tests {
     use super::*;
     use crate::payload::TransactionPayload;
     use std::sync::Arc;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_core::traits::Storage;
     use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
@@ -390,8 +392,8 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
-        assert_eq!(result.stats.final_version, 0);
-        assert_eq!(result.txn_manager.current_version(), 0);
+        assert_eq!(result.stats.final_version, CommitVersion(0));
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(0));
     }
 
     #[test]
@@ -403,7 +405,7 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
-        assert_eq!(result.stats.final_version, 0);
+        assert_eq!(result.stats.final_version, CommitVersion(0));
     }
 
     #[test]
@@ -432,12 +434,12 @@ mod tests {
 
         assert_eq!(result.stats.txns_replayed, 1);
         assert_eq!(result.stats.writes_applied, 1);
-        assert_eq!(result.stats.final_version, 100);
-        assert_eq!(result.txn_manager.current_version(), 100);
+        assert_eq!(result.stats.final_version, CommitVersion(100));
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
 
         let stored = result
             .storage
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(stored.value, Value::Int(42));
@@ -482,14 +484,14 @@ mod tests {
         let coordinator = RecoveryCoordinator::new(wal_dir);
         let result = coordinator.recover().unwrap();
 
-        assert_eq!(result.stats.final_version, 200);
-        assert_eq!(result.txn_manager.current_version(), 200);
+        assert_eq!(result.stats.final_version, CommitVersion(200));
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(200));
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         assert_eq!(
             result
                 .storage
-                .get_versioned(&key1, u64::MAX)
+                .get_versioned(&key1, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .version
@@ -501,7 +503,7 @@ mod tests {
         assert_eq!(
             result
                 .storage
-                .get_versioned(&key2, u64::MAX)
+                .get_versioned(&key2, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .version
@@ -513,7 +515,7 @@ mod tests {
         assert_eq!(
             result
                 .storage
-                .get_versioned(&key3, u64::MAX)
+                .get_versioned(&key3, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .version
@@ -561,12 +563,12 @@ mod tests {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
             let v1 = result1
                 .storage
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap();
             let v2 = result2
                 .storage
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap();
             assert_eq!(v1.value, v2.value);
@@ -607,7 +609,7 @@ mod tests {
         // Key should be deleted
         assert!(result
             .storage
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -620,8 +622,8 @@ mod tests {
             aborted_txns: 0,
             writes_applied: 10,
             deletes_applied: 3,
-            final_version: 100,
-            max_txn_id: 8,
+            final_version: CommitVersion(100),
+            max_txn_id: TxnId(8),
             from_checkpoint: false,
         };
 
@@ -665,9 +667,9 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
-        assert_eq!(result.stats.final_version, 0);
+        assert_eq!(result.stats.final_version, CommitVersion(0));
         assert_eq!(result.stats.incomplete_txns, 0);
-        assert_eq!(result.txn_manager.current_version(), 0);
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(0));
     }
 
     #[test]
@@ -702,7 +704,7 @@ mod tests {
 
         let stored = result
             .storage
-            .get_versioned(&Key::new_kv(ns, "durable_key"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns, "durable_key"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(stored.value, Value::String("must_exist".to_string()));
@@ -746,7 +748,7 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 1);
         let stored = result
             .storage
-            .get_versioned(&Key::new_kv(ns, "valid"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns, "valid"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(stored.value, Value::Int(42));
@@ -784,12 +786,12 @@ mod tests {
 
         let v1 = result1
             .storage
-            .get_versioned(&Key::new_kv(ns.clone(), "key"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns.clone(), "key"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         let v2 = result2
             .storage
-            .get_versioned(&Key::new_kv(ns, "key"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns, "key"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(v1.value, v2.value);
@@ -819,8 +821,8 @@ mod tests {
         let coordinator = RecoveryCoordinator::new(wal_dir);
         let result = coordinator.recover().unwrap();
 
-        assert_eq!(result.txn_manager.current_version(), 999);
-        assert_eq!(result.stats.final_version, 999);
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(999));
+        assert_eq!(result.stats.final_version, CommitVersion(999));
     }
 
     #[test]
@@ -852,14 +854,14 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 10);
-        assert_eq!(result.stats.final_version, 10);
-        assert_eq!(result.txn_manager.current_version(), 10);
+        assert_eq!(result.stats.final_version, CommitVersion(10));
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(10));
 
         for i in 1..=10u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
             let stored = result
                 .storage
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
@@ -934,12 +936,12 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 4);
         assert_eq!(result.stats.writes_applied, 4);
         assert_eq!(result.stats.deletes_applied, 1);
-        assert_eq!(result.stats.final_version, 5);
+        assert_eq!(result.stats.final_version, CommitVersion(5));
 
         // key1 should be "updated" at version 2
         let key1 = result
             .storage
-            .get_versioned(&Key::new_kv(ns.clone(), "key1"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns.clone(), "key1"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(key1.value, Value::String("updated".to_string()));
@@ -948,14 +950,14 @@ mod tests {
         // key2 should be deleted
         assert!(result
             .storage
-            .get_versioned(&Key::new_kv(ns.clone(), "key2"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns.clone(), "key2"), CommitVersion::MAX)
             .unwrap()
             .is_none());
 
         // key3 should exist
         let key3 = result
             .storage
-            .get_versioned(&Key::new_kv(ns.clone(), "key3"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns.clone(), "key3"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(key3.value, Value::Int(42));
@@ -989,7 +991,7 @@ mod tests {
 
         let counter = result
             .storage
-            .get_versioned(&Key::new_kv(ns, "counter"), u64::MAX)
+            .get_versioned(&Key::new_kv(ns, "counter"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(counter.value, Value::Int(300));
@@ -1019,9 +1021,9 @@ mod tests {
         let coordinator = RecoveryCoordinator::new(wal_dir);
         let result = coordinator.recover().unwrap();
 
-        assert_eq!(result.txn_manager.current_version(), 100);
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
         let new_txn_id = result.txn_manager.next_txn_id().unwrap();
-        assert!(new_txn_id > 0);
+        assert!(new_txn_id > TxnId::ZERO);
     }
 
     #[test]
@@ -1054,13 +1056,13 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, num_txns as usize);
-        assert_eq!(result.stats.final_version, num_txns);
+        assert_eq!(result.stats.final_version, CommitVersion(num_txns));
 
         for i in [1, 50, 100] {
             let key = Key::new_kv(ns.clone(), format!("key_{}", i));
             let stored = result
                 .storage
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64));
@@ -1100,9 +1102,9 @@ mod tests {
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 20);
-        assert_eq!(result.stats.final_version, 20);
+        assert_eq!(result.stats.final_version, CommitVersion(20));
         assert_eq!(result.stats.writes_applied, 20);
-        assert_eq!(result.txn_manager.current_version(), 20);
+        assert_eq!(result.txn_manager.current_version(), CommitVersion(20));
 
         // Cross-check: read_all should yield the same records
         let reader = WalReader::new();
@@ -1114,7 +1116,7 @@ mod tests {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
             let stored = result
                 .storage
-                .get_versioned(&key, u64::MAX)
+                .get_versioned(&key, CommitVersion::MAX)
                 .unwrap()
                 .unwrap();
             assert_eq!(stored.value, Value::Int(i as i64 * 10));
@@ -1214,13 +1216,13 @@ mod tests {
                 result.stats.txns_replayed, 3,
                 "Second recovery must see the record written after crash recovery"
             );
-            assert_eq!(result.stats.final_version, 3);
+            assert_eq!(result.stats.final_version, CommitVersion(3));
 
             // Verify the post-crash record is accessible
             let key_after = Key::new_kv(ns.clone(), "key_after");
             let stored = result
                 .storage
-                .get_versioned(&key_after, u64::MAX)
+                .get_versioned(&key_after, CommitVersion::MAX)
                 .unwrap()
                 .expect("key_after must be visible after second recovery");
             assert_eq!(stored.value, Value::String("after_crash".into()));

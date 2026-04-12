@@ -114,7 +114,7 @@ impl VectorStore {
 
         // Get record from KV with version info
         use strata_core::traits::Storage;
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let Some(versioned_value) = self
             .db
             .storage()
@@ -475,7 +475,7 @@ impl VectorStore {
         let collection_id = CollectionId::new(branch_id, space, collection);
 
         use strata_core::traits::Storage;
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
 
         let state = self.state()?;
         let backend =
@@ -632,7 +632,7 @@ impl VectorStore {
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
-        let version = self.db.storage().version();
+        let version = CommitVersion(self.db.storage().version());
         let entries = self
             .db
             .storage()

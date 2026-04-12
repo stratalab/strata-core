@@ -39,6 +39,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Version, Versioned};
+use strata_core::id::CommitVersion;
 use strata_core::primitives::json::{
     delete_at_path, get_at_path, set_at_path, JsonLimitError, JsonPath, JsonValue,
 };
@@ -380,7 +381,7 @@ impl JsonStore {
 
         let key = self.key_for(branch_id, space, doc_id);
         use strata_core::Storage;
-        match self.db.storage().get_versioned(&key, u64::MAX)? {
+        match self.db.storage().get_versioned(&key, CommitVersion::MAX)? {
             Some(vv) => {
                 let doc = Self::deserialize_doc(&vv.value)?;
                 match get_at_path(&doc.value, path).cloned() {

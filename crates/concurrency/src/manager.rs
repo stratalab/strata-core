@@ -35,6 +35,7 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
@@ -191,8 +192,8 @@ impl TransactionManager {
     ///
     /// # Arguments
     /// * `initial_version` - Starting version (typically from recovery's final_version)
-    pub fn new(initial_version: u64) -> Self {
-        Self::with_txn_id(initial_version, 0)
+    pub fn new(initial_version: CommitVersion) -> Self {
+        Self::with_txn_id(initial_version, TxnId::ZERO)
     }
 
     /// Create a new transaction manager with specific starting txn_id
@@ -203,22 +204,22 @@ impl TransactionManager {
     /// # Arguments
     /// * `initial_version` - Starting version (from recovery's final_version)
     /// * `max_txn_id` - Maximum txn_id seen in WAL (new transactions start at max_txn_id + 1)
-    pub fn with_txn_id(initial_version: u64, max_txn_id: u64) -> Self {
+    pub fn with_txn_id(initial_version: CommitVersion, max_txn_id: TxnId) -> Self {
         TransactionManager {
-            version: AtomicU64::new(initial_version),
+            version: AtomicU64::new(initial_version.as_u64()),
             // Start next_txn_id at max_txn_id + 1 to avoid conflicts
-            next_txn_id: AtomicU64::new(max_txn_id + 1),
+            next_txn_id: AtomicU64::new(max_txn_id.as_u64() + 1),
             commit_locks: DashMap::new(),
             commit_quiesce: RwLock::new(()),
-            visible_version: AtomicU64::new(initial_version),
+            visible_version: AtomicU64::new(initial_version.as_u64()),
             pending_versions: Mutex::new(BTreeSet::new()),
             deleting_branches: DashSet::new(),
         }
     }
 
     /// Get current global version
-    pub fn current_version(&self) -> u64 {
-        self.version.load(Ordering::Acquire)
+    pub fn current_version(&self) -> CommitVersion {
+        CommitVersion(self.version.load(Ordering::Acquire))
     }
 
     /// Get the highest version where all data at versions ≤ V is fully applied.
@@ -232,8 +233,8 @@ impl TransactionManager {
     /// finish apply before A. A reader using `current_version()` (= N+1)
     /// would miss A's writes. `visible_version()` only advances to N+1
     /// once both A and B have completed their applies.
-    pub fn visible_version(&self) -> u64 {
-        self.visible_version.load(Ordering::Acquire)
+    pub fn visible_version(&self) -> CommitVersion {
+        CommitVersion(self.visible_version.load(Ordering::Acquire))
     }
 
     /// Mark a version as fully applied to storage.
@@ -242,9 +243,9 @@ impl TransactionManager {
     /// allocated but the commit fails, creating a version gap). Removes the
     /// version from the in-flight set and advances `visible_version` if the
     /// contiguous applied prefix has grown.
-    pub fn mark_version_applied(&self, version: u64) {
+    pub fn mark_version_applied(&self, version: CommitVersion) {
         let mut pending = self.pending_versions.lock();
-        pending.remove(&version);
+        pending.remove(&version.as_u64());
         let new_visible = match pending.iter().next() {
             // Some versions still in-flight: safe up to (lowest_pending - 1)
             Some(&min_pending) => min_pending.saturating_sub(1),
@@ -263,11 +264,11 @@ impl TransactionManager {
     /// has been fully compacted and contains no records.  Segments may hold
     /// data at versions higher than what the WAL reports; this method bumps
     /// the counter so that new transactions start above all existing data.
-    pub fn bump_version_floor(&self, floor: u64) {
-        self.version.fetch_max(floor, Ordering::AcqRel);
+    pub fn bump_version_floor(&self, floor: CommitVersion) {
+        self.version.fetch_max(floor.as_u64(), Ordering::AcqRel);
         // Recovery data at versions ≤ floor is already in storage,
         // so visible_version must reflect this (#1913).
-        self.visible_version.fetch_max(floor, Ordering::AcqRel);
+        self.visible_version.fetch_max(floor.as_u64(), Ordering::AcqRel);
     }
 
     /// Get the current version after draining all in-flight commits (#1710).
@@ -307,7 +308,7 @@ impl TransactionManager {
     /// Since reaching `u64::MAX` is physically impossible at any realistic
     /// throughput, we accept this theoretical race in exchange for
     /// contention-free allocation.
-    pub fn next_txn_id(&self) -> std::result::Result<u64, CommitError> {
+    pub fn next_txn_id(&self) -> std::result::Result<TxnId, CommitError> {
         let prev = self.next_txn_id.fetch_add(1, Ordering::AcqRel);
         if prev == u64::MAX {
             // Undo the wrapping increment: restore counter to u64::MAX
@@ -316,7 +317,7 @@ impl TransactionManager {
                 "transaction ID counter at u64::MAX".into(),
             ));
         }
-        Ok(prev)
+        Ok(TxnId(prev))
     }
 
     /// Allocate next commit version (increment global version)
@@ -338,7 +339,7 @@ impl TransactionManager {
     /// Overflow at `u64::MAX` is detected and repaired — practically unreachable
     /// (584 years at 1 billion txn/sec). See `next_txn_id` for the overflow
     /// race tradeoff rationale.
-    pub fn allocate_version(&self) -> std::result::Result<u64, CommitError> {
+    pub fn allocate_version(&self) -> std::result::Result<CommitVersion, CommitError> {
         let mut pending = self.pending_versions.lock();
         let prev = self.version.fetch_add(1, Ordering::AcqRel);
         if prev == u64::MAX {
@@ -350,7 +351,7 @@ impl TransactionManager {
         }
         let version = prev + 1;
         pending.insert(version);
-        Ok(version)
+        Ok(CommitVersion(version))
     }
 
     /// Core commit implementation shared by all public commit methods.
@@ -370,8 +371,8 @@ impl TransactionManager {
         txn: &mut TransactionContext,
         store: &S,
         wal_mode: WalMode<'_>,
-        external_version: Option<u64>,
-    ) -> std::result::Result<u64, CommitError> {
+        external_version: Option<CommitVersion>,
+    ) -> std::result::Result<CommitVersion, CommitError> {
         // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
         if txn.is_read_only() && txn.json_writes().is_empty() {
             if !txn.is_active() {
@@ -381,7 +382,7 @@ impl TransactionManager {
                 )));
             }
             txn.status = TransactionStatus::Committed;
-            return Ok(external_version.unwrap_or_else(|| self.version.load(Ordering::Acquire)));
+            return Ok(external_version.unwrap_or_else(|| CommitVersion(self.version.load(Ordering::Acquire))));
         }
 
         let profiling = commit_profile_enabled();
@@ -434,7 +435,7 @@ impl TransactionManager {
             perf_time!(trace, read_set_validate_ns, {
                 txn.commit(store)?;
             });
-            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, "Validation passed");
+            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), "Validation passed");
         }
         let validation_ns = t0.elapsed().as_nanos() as u64;
 
@@ -448,8 +449,8 @@ impl TransactionManager {
                 // the higher counter with an empty pending set and advance
                 // visible_version to include this not-yet-applied version (#1913).
                 let mut pending = self.pending_versions.lock();
-                self.version.fetch_max(v, Ordering::AcqRel);
-                pending.insert(v);
+                self.version.fetch_max(v.as_u64(), Ordering::AcqRel);
+                pending.insert(v.as_u64());
                 v
             }
         };
@@ -488,8 +489,8 @@ impl TransactionManager {
                                     &mut rec_buf,
                                     &mut msg_buf,
                                     txn,
-                                    commit_version,
-                                    commit_version,
+                                    commit_version.as_u64(),
+                                    commit_version.as_u64(),
                                     *txn.branch_id.as_bytes(),
                                     timestamp,
                                 );
@@ -497,7 +498,7 @@ impl TransactionManager {
                                 // Direct mode: no separate mutex
                                 let tw = Instant::now();
                                 let r =
-                                    wal.append_pre_serialized(&rec_buf, commit_version, timestamp);
+                                    wal.append_pre_serialized(&rec_buf, commit_version.as_u64(), timestamp);
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -509,7 +510,7 @@ impl TransactionManager {
                             self.mark_version_applied(commit_version);
                             return Err(CommitError::WALError(e.to_string()));
                         }
-                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
+                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                     }
                     WalMode::Shared(wal_arc) => {
                         let timestamp = now_micros();
@@ -522,8 +523,8 @@ impl TransactionManager {
                                     &mut rec_buf,
                                     &mut msg_buf,
                                     txn,
-                                    commit_version,
-                                    commit_version,
+                                    commit_version.as_u64(),
+                                    commit_version.as_u64(),
                                     *txn.branch_id.as_bytes(),
                                     timestamp,
                                 );
@@ -533,7 +534,7 @@ impl TransactionManager {
                                 wal_mutex_ns = tm.elapsed().as_nanos() as u64;
                                 let tw = Instant::now();
                                 let r =
-                                    wal.append_pre_serialized(&rec_buf, commit_version, timestamp);
+                                    wal.append_pre_serialized(&rec_buf, commit_version.as_u64(), timestamp);
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -545,7 +546,7 @@ impl TransactionManager {
                             self.mark_version_applied(commit_version);
                             return Err(CommitError::WALError(e.to_string()));
                         }
-                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id, commit_version, "WAL durable");
+                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                     }
                     WalMode::None => {}
                 }
@@ -560,8 +561,8 @@ impl TransactionManager {
                 if has_wal {
                     tracing::error!(
                         target: "strata::txn",
-                        txn_id = txn.txn_id,
-                        commit_version = commit_version,
+                        txn_id = txn.txn_id.as_u64(),
+                        commit_version = commit_version.as_u64(),
                         error = %e,
                         "Storage application failed after WAL commit - will be recovered on restart"
                     );
@@ -644,8 +645,8 @@ impl TransactionManager {
             trace.keys_written = txn.write_set.len();
             tracing::info!(
                 target: "strata::perf",
-                txn_id = txn.txn_id,
-                commit_version,
+                txn_id = txn.txn_id.as_u64(),
+                commit_version = commit_version.as_u64(),
                 total_us = trace.commit_total_ns / 1000,
                 validate_us = trace.read_set_validate_ns / 1000,
                 wal_us = trace.wal_append_ns / 1000,
@@ -677,7 +678,7 @@ impl TransactionManager {
         txn: &mut TransactionContext,
         store: &S,
         wal: Option<&mut WalWriter>,
-    ) -> std::result::Result<u64, CommitError> {
+    ) -> std::result::Result<CommitVersion, CommitError> {
         let wal_mode = match wal {
             Some(w) => WalMode::Direct(w),
             None => WalMode::None,
@@ -707,7 +708,7 @@ impl TransactionManager {
         txn: &mut TransactionContext,
         store: &S,
         wal_arc: Option<&Arc<Mutex<WalWriter>>>,
-    ) -> std::result::Result<u64, CommitError> {
+    ) -> std::result::Result<CommitVersion, CommitError> {
         let wal_mode = match wal_arc {
             Some(arc) => WalMode::Shared(arc),
             None => WalMode::None,
@@ -798,8 +799,8 @@ impl TransactionManager {
         txn: &mut TransactionContext,
         store: &S,
         wal: Option<&mut WalWriter>,
-        version: u64,
-    ) -> std::result::Result<u64, CommitError> {
+        version: CommitVersion,
+    ) -> std::result::Result<CommitVersion, CommitError> {
         let wal_mode = match wal {
             Some(w) => WalMode::Direct(w),
             None => WalMode::None,
@@ -810,7 +811,7 @@ impl TransactionManager {
 
 impl Default for TransactionManager {
     fn default() -> Self {
-        Self::new(0)
+        Self::new(CommitVersion::ZERO)
     }
 }
 
@@ -821,6 +822,7 @@ mod tests {
     use crate::{JsonStoreExt, TransactionContext};
     use parking_lot::Mutex as ParkingMutex;
     use std::sync::Arc;
+    use strata_core::id::{CommitVersion, TxnId};
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::codec::IdentityCodec;
@@ -849,40 +851,40 @@ mod tests {
 
     #[test]
     fn test_new_manager_has_correct_initial_version() {
-        let manager = TransactionManager::new(100);
-        assert_eq!(manager.current_version(), 100);
+        let manager = TransactionManager::new(CommitVersion(100));
+        assert_eq!(manager.current_version(), CommitVersion(100));
     }
 
     #[test]
     fn test_allocate_version_increments() {
-        let manager = TransactionManager::new(0);
-        assert_eq!(manager.allocate_version().unwrap(), 1);
-        assert_eq!(manager.allocate_version().unwrap(), 2);
-        assert_eq!(manager.allocate_version().unwrap(), 3);
-        assert_eq!(manager.current_version(), 3);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
+        assert_eq!(manager.allocate_version().unwrap(), CommitVersion(1));
+        assert_eq!(manager.allocate_version().unwrap(), CommitVersion(2));
+        assert_eq!(manager.allocate_version().unwrap(), CommitVersion(3));
+        assert_eq!(manager.current_version(), CommitVersion(3));
     }
 
     #[test]
     fn test_next_txn_id_increments() {
-        // TransactionManager::new(0) calls with_txn_id(0, 0), which sets next_txn_id = 0 + 1 = 1
-        let manager = TransactionManager::new(0);
-        assert_eq!(manager.next_txn_id().unwrap(), 1);
-        assert_eq!(manager.next_txn_id().unwrap(), 2);
-        assert_eq!(manager.next_txn_id().unwrap(), 3);
+        // TransactionManager::new(CommitVersion::ZERO) calls with_txn_id(0, 0), which sets next_txn_id = 0 + 1 = 1
+        let manager = TransactionManager::new(CommitVersion::ZERO);
+        assert_eq!(manager.next_txn_id().unwrap(), TxnId(1));
+        assert_eq!(manager.next_txn_id().unwrap(), TxnId(2));
+        assert_eq!(manager.next_txn_id().unwrap(), TxnId(3));
     }
 
     #[test]
     fn test_with_txn_id_starts_from_max_plus_one() {
-        let manager = TransactionManager::with_txn_id(50, 100);
-        assert_eq!(manager.current_version(), 50);
-        assert_eq!(manager.next_txn_id().unwrap(), 101); // max_txn_id + 1
+        let manager = TransactionManager::with_txn_id(CommitVersion(50), TxnId(100));
+        assert_eq!(manager.current_version(), CommitVersion(50));
+        assert_eq!(manager.next_txn_id().unwrap(), TxnId(101)); // max_txn_id + 1
     }
 
     #[test]
     fn test_next_txn_id_overflow_returns_error() {
         // with_txn_id(0, max_txn_id) sets next_txn_id = max_txn_id + 1
         // So with_txn_id(0, u64::MAX - 2) → next_txn_id starts at u64::MAX - 1
-        let manager = TransactionManager::with_txn_id(0, u64::MAX - 2);
+        let manager = TransactionManager::with_txn_id(CommitVersion::ZERO, TxnId(u64::MAX - 2));
         // First call: returns u64::MAX - 1, counter advances to u64::MAX
         assert!(manager.next_txn_id().is_ok());
         // Second call fails: counter is at u64::MAX, cannot increment
@@ -892,7 +894,7 @@ mod tests {
     #[test]
     fn test_allocate_version_overflow_returns_error() {
         // Version starts at u64::MAX - 1
-        let manager = TransactionManager::with_txn_id(u64::MAX - 1, 0);
+        let manager = TransactionManager::with_txn_id(CommitVersion(u64::MAX - 1), TxnId::ZERO);
         // First call: version advances from MAX-1 to MAX, returns MAX
         assert!(manager.allocate_version().is_ok());
         // Second call fails: version is at u64::MAX, cannot increment
@@ -908,7 +910,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let branch_id1 = BranchId::new();
         let branch_id2 = BranchId::new();
@@ -918,10 +920,10 @@ mod tests {
         let key2 = create_test_key(&ns2, "key2");
 
         // Prepare transactions
-        let mut txn1 = TransactionContext::with_store(1, branch_id1, Arc::clone(&store));
+        let mut txn1 = TransactionContext::with_store(TxnId(1), branch_id1, Arc::clone(&store));
         txn1.put(key1.clone(), Value::Int(1)).unwrap();
 
-        let mut txn2 = TransactionContext::with_store(2, branch_id2, Arc::clone(&store));
+        let mut txn2 = TransactionContext::with_store(TxnId(2), branch_id2, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
 
         // Commit both in parallel threads
@@ -947,13 +949,13 @@ mod tests {
         let v2 = handle2.join().unwrap().unwrap();
 
         // Both commits should succeed with unique versions
-        assert!((1..=2).contains(&v1));
-        assert!((1..=2).contains(&v2));
+        assert!((CommitVersion(1)..=CommitVersion(2)).contains(&v1));
+        assert!((CommitVersion(1)..=CommitVersion(2)).contains(&v2));
         assert_ne!(v1, v2); // Versions must be unique
 
         // Both keys should be in storage
-        assert!(store.get_versioned(&key1, u64::MAX).unwrap().is_some());
-        assert!(store.get_versioned(&key2, u64::MAX).unwrap().is_some());
+        assert!(store.get_versioned(&key1, CommitVersion::MAX).unwrap().is_some());
+        assert!(store.get_versioned(&key2, CommitVersion::MAX).unwrap().is_some());
     }
 
     #[test]
@@ -964,7 +966,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -973,30 +975,30 @@ mod tests {
 
         // Commit first transaction
         {
-            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             txn.put(key1.clone(), Value::Int(100)).unwrap();
             let v = manager
                 .commit(&mut txn, store.as_ref(), Some(&mut wal))
                 .unwrap();
-            assert_eq!(v, 1);
+            assert_eq!(v, CommitVersion(1));
         }
 
         // Commit second transaction on same branch
         {
-            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
             txn.put(key2.clone(), Value::Int(200)).unwrap();
             let v = manager
                 .commit(&mut txn, store.as_ref(), Some(&mut wal))
                 .unwrap();
-            assert_eq!(v, 2);
+            assert_eq!(v, CommitVersion(2));
         }
 
         // Both values should be present with correct versions
-        let v1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap();
+        let v1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap();
+        let v2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }
@@ -1008,7 +1010,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let num_threads = 10;
         let mut handles = Vec::new();
@@ -1024,7 +1026,7 @@ mod tests {
                 let key = create_test_key(&ns, &format!("key_{}", i));
 
                 let mut txn = TransactionContext::with_store(
-                    i as u64 + 1,
+                    TxnId(i as u64 + 1),
                     branch_id,
                     Arc::clone(&store_clone),
                 );
@@ -1036,7 +1038,7 @@ mod tests {
         }
 
         // All commits should succeed
-        let versions: Vec<u64> = handles
+        let versions: Vec<CommitVersion> = handles
             .into_iter()
             .map(|h| h.join().unwrap().unwrap())
             .collect();
@@ -1046,8 +1048,8 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), num_threads);
-        assert_eq!(sorted[0], 1);
-        assert_eq!(sorted[num_threads - 1], num_threads as u64);
+        assert_eq!(sorted[0], CommitVersion(1));
+        assert_eq!(sorted[num_threads - 1], CommitVersion(num_threads as u64));
     }
 
     /// Test that scan_prefix tracks deleted keys in read_set for conflict detection.
@@ -1057,7 +1059,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1067,7 +1069,7 @@ mod tests {
 
         // Setup: Create initial data with alice and bob
         {
-            let mut setup_txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut setup_txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             setup_txn.put(key_bob.clone(), Value::Int(200)).unwrap();
             manager
@@ -1076,7 +1078,7 @@ mod tests {
         }
 
         // T1: Delete alice (blind), then scan
-        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn1 = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         txn1.delete(key_alice.clone()).unwrap(); // Blind delete
         let scan_result = txn1.scan_prefix(&prefix).unwrap();
 
@@ -1086,7 +1088,7 @@ mod tests {
 
         // T2: Update alice and commit first
         {
-            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
+            let mut txn2 = TransactionContext::with_store(TxnId(3), branch_id, Arc::clone(&store));
             // T2 reads alice first (creates read_set entry)
             let _ = txn2.get(&key_alice).unwrap();
             txn2.put(key_alice.clone(), Value::Int(999)).unwrap();
@@ -1105,7 +1107,7 @@ mod tests {
         );
 
         // T2's update should be preserved
-        let final_value = store.get_versioned(&key_alice, u64::MAX).unwrap().unwrap();
+        let final_value = store.get_versioned(&key_alice, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(
             final_value.value,
             Value::Int(999),
@@ -1120,7 +1122,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1128,7 +1130,7 @@ mod tests {
 
         // Setup: Create alice
         {
-            let mut setup_txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut setup_txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             manager
                 .commit(&mut setup_txn, store.as_ref(), Some(&mut wal))
@@ -1136,12 +1138,12 @@ mod tests {
         }
 
         // T1: Blind delete alice (no read, no scan)
-        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn1 = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         txn1.delete(key_alice.clone()).unwrap(); // Blind delete - no read_set entry
 
         // T2: Update alice and commit first
         {
-            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
+            let mut txn2 = TransactionContext::with_store(TxnId(3), branch_id, Arc::clone(&store));
             let _ = txn2.get(&key_alice).unwrap();
             txn2.put(key_alice.clone(), Value::Int(999)).unwrap();
             manager
@@ -1157,7 +1159,7 @@ mod tests {
         );
 
         // T1's delete overwrites T2's update - this is expected for blind writes
-        let final_value = store.get_versioned(&key_alice, u64::MAX).unwrap();
+        let final_value = store.get_versioned(&key_alice, CommitVersion::MAX).unwrap();
         assert!(
             final_value.is_none(),
             "Blind delete should succeed, removing alice"
@@ -1171,13 +1173,13 @@ mod tests {
     #[test]
     fn test_read_only_no_version_increment() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
         let v_before = manager.current_version();
 
         // Read-only transaction (just reads, no writes)
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         // No operations — pure read-only
         let result = manager.commit(&mut txn, store.as_ref(), None);
         assert!(result.is_ok());
@@ -1190,7 +1192,7 @@ mod tests {
     fn test_read_only_no_lock_contention() {
         // Two concurrent read-only transactions on the same branch shouldn't block
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
         let branch_id = BranchId::new();
 
         let manager1 = Arc::clone(&manager);
@@ -1199,11 +1201,11 @@ mod tests {
         let store2 = Arc::clone(&store);
 
         let h1 = std::thread::spawn(move || {
-            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store1));
+            let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store1));
             manager1.commit(&mut txn, store1.as_ref(), None)
         });
         let h2 = std::thread::spawn(move || {
-            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store2));
+            let mut txn = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store2));
             manager2.commit(&mut txn, store2.as_ref(), None)
         });
 
@@ -1217,12 +1219,12 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
         let v_before = manager.current_version();
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         // No KV writes, but has json_writes → not fast-pathed
         use strata_core::primitives::json::{JsonPatch, JsonPath};
         txn.record_json_write(
@@ -1241,10 +1243,10 @@ mod tests {
     #[test]
     fn test_read_only_rejects_non_active() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.mark_aborted("test".to_string()).unwrap();
 
         let result = manager.commit(&mut txn, store.as_ref(), None);
@@ -1265,20 +1267,20 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "blind");
 
         // Blind write: put with no prior read
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
         assert!(txn.read_set.is_empty()); // Confirms it's a blind write
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
 
-        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
     }
 
@@ -1288,14 +1290,14 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "readwrite");
 
         // Setup: store initial value
         {
-            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut setup = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup.put(key.clone(), Value::Int(1)).unwrap();
             manager
                 .commit(&mut setup, store.as_ref(), Some(&mut wal))
@@ -1303,14 +1305,14 @@ mod tests {
         }
 
         // T1: read then write (not a blind write)
-        let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         let _ = txn.get(&key).unwrap();
         txn.put(key.clone(), Value::Int(2)).unwrap();
         assert!(!txn.read_set.is_empty()); // Has reads → goes through validation
 
         // Concurrent update
         {
-            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
+            let mut txn2 = TransactionContext::with_store(TxnId(3), branch_id, Arc::clone(&store));
             txn2.put(key.clone(), Value::Int(99)).unwrap();
             manager
                 .commit(&mut txn2, store.as_ref(), Some(&mut wal))
@@ -1328,13 +1330,13 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "cas_key");
 
         // CAS operation → not a blind write, should validate
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
         assert!(!txn.cas_set.is_empty());
 
@@ -1348,21 +1350,21 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "json_doc");
 
         // Has json_snapshot_versions → should go through full validation path
         // Use version 0 (key doesn't exist) so validation passes
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
         txn.record_json_snapshot_version(key.clone(), 0);
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
         // Verify it went through the normal path (version incremented)
-        assert!(manager.current_version() > 0);
+        assert!(manager.current_version() > CommitVersion::ZERO);
     }
 
     // ========================================================================
@@ -1377,21 +1379,21 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "arc_basic");
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
 
         let v = manager
             .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, CommitVersion(1));
 
         // Verify in-memory storage
-        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(42));
         assert_eq!(stored.version.as_u64(), 1);
 
@@ -1402,13 +1404,13 @@ mod tests {
 
         // Recovery should find exactly 1 transaction
         assert_eq!(result.stats.txns_replayed, 1);
-        assert_eq!(result.stats.final_version, 1);
+        assert_eq!(result.stats.final_version, CommitVersion(1));
         assert_eq!(result.stats.writes_applied, 1);
 
         // Recovered storage should contain the committed value
         let recovered = result
             .storage
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(recovered.value, Value::Int(42));
@@ -1418,20 +1420,20 @@ mod tests {
     #[test]
     fn test_commit_with_wal_arc_no_wal() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "no_wal");
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(7)).unwrap();
 
         let v = manager
             .commit_with_wal_arc(&mut txn, store.as_ref(), None)
             .unwrap();
-        assert_eq!(v, 1);
+        assert_eq!(v, CommitVersion(1));
 
-        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(7));
     }
 
@@ -1442,7 +1444,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let num_threads = 10;
         let mut handles = Vec::new();
@@ -1458,14 +1460,14 @@ mod tests {
                 let key = create_test_key(&ns, &format!("key_{}", i));
 
                 let mut txn =
-                    TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&s));
+                    TransactionContext::with_store(TxnId(i as u64 + 1), branch_id, Arc::clone(&s));
                 txn.put(key, Value::Int(i as i64)).unwrap();
 
                 m.commit_with_wal_arc(&mut txn, s.as_ref(), Some(&w))
             }));
         }
 
-        let versions: Vec<u64> = handles
+        let versions: Vec<CommitVersion> = handles
             .into_iter()
             .map(|h| h.join().unwrap().unwrap())
             .collect();
@@ -1475,15 +1477,15 @@ mod tests {
         sorted.sort();
         sorted.dedup();
         assert_eq!(sorted.len(), num_threads);
-        assert_eq!(sorted[0], 1);
-        assert_eq!(sorted[num_threads - 1], num_threads as u64);
+        assert_eq!(sorted[0], CommitVersion(1));
+        assert_eq!(sorted[num_threads - 1], CommitVersion(num_threads as u64));
 
         // Recover from WAL to verify all 10 records are well-formed
         drop(wal);
         let recovery = crate::RecoveryCoordinator::new(wal_dir);
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.txns_replayed, num_threads);
-        assert_eq!(result.stats.final_version, num_threads as u64);
+        assert_eq!(result.stats.final_version, CommitVersion(num_threads as u64));
     }
 
     #[test]
@@ -1494,14 +1496,14 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "conflict");
 
         // Setup: store initial value (WAL record #1)
         {
-            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut setup = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup.put(key.clone(), Value::Int(1)).unwrap();
             manager
                 .commit_with_wal_arc(&mut setup, store.as_ref(), Some(&wal))
@@ -1509,13 +1511,13 @@ mod tests {
         }
 
         // T1: read-modify-write (will conflict)
-        let mut txn1 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn1 = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         let _ = txn1.get(&key).unwrap(); // Creates read_set entry
         txn1.put(key.clone(), Value::Int(10)).unwrap();
 
         // T2: concurrent blind write, commits first (WAL record #2)
         {
-            let mut txn2 = TransactionContext::with_store(3, branch_id, Arc::clone(&store));
+            let mut txn2 = TransactionContext::with_store(TxnId(3), branch_id, Arc::clone(&store));
             txn2.put(key.clone(), Value::Int(99)).unwrap();
             manager
                 .commit_with_wal_arc(&mut txn2, store.as_ref(), Some(&wal))
@@ -1527,7 +1529,7 @@ mod tests {
         assert!(result.is_err(), "Should detect read-write conflict");
 
         // T2's value should be preserved in storage
-        let stored = store.get_versioned(&key, u64::MAX).unwrap().unwrap();
+        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(stored.value, Value::Int(99));
 
         // KEY ASSERTION: WAL should contain exactly 2 records (setup + T2).
@@ -1543,7 +1545,7 @@ mod tests {
         // Recovered value should be T2's write
         let recovered = result
             .storage
-            .get_versioned(&key, u64::MAX)
+            .get_versioned(&key, CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(recovered.value, Value::Int(99));
@@ -1555,13 +1557,13 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
         let v_before = manager.current_version();
 
         // Read-only transaction: no writes
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));
         assert!(result.is_ok());
 
@@ -1583,13 +1585,13 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
 
         let v_before = manager.current_version();
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         // No KV writes, but has json_writes → not fast-pathed
         use strata_core::primitives::json::{JsonPatch, JsonPath};
         txn.record_json_write(
@@ -1618,7 +1620,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key_a = create_test_key(&ns, "multi_a");
@@ -1627,7 +1629,7 @@ mod tests {
 
         // Setup: write key_a and key_b
         {
-            let mut setup = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut setup = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup.put(key_a.clone(), Value::Int(10)).unwrap();
             setup.put(key_b.clone(), Value::Int(20)).unwrap();
             manager
@@ -1637,7 +1639,7 @@ mod tests {
 
         // Transaction: delete key_a, update key_b, insert key_c
         {
-            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
             txn.delete(key_a.clone()).unwrap();
             txn.put(key_b.clone(), Value::Int(200)).unwrap();
             txn.put(key_c.clone(), Value::Bytes(b"hello".to_vec()))
@@ -1648,10 +1650,10 @@ mod tests {
         }
 
         // Verify in-memory state
-        assert!(store.get_versioned(&key_a, u64::MAX).unwrap().is_none());
+        assert!(store.get_versioned(&key_a, CommitVersion::MAX).unwrap().is_none());
         assert_eq!(
             store
-                .get_versioned(&key_b, u64::MAX)
+                .get_versioned(&key_b, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -1659,7 +1661,7 @@ mod tests {
         );
         assert_eq!(
             store
-                .get_versioned(&key_c, u64::MAX)
+                .get_versioned(&key_c, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -1675,14 +1677,14 @@ mod tests {
         // key_a: was written in txn1 then deleted in txn2
         assert!(result
             .storage
-            .get_versioned(&key_a, u64::MAX)
+            .get_versioned(&key_a, CommitVersion::MAX)
             .unwrap()
             .is_none());
         // key_b: updated from 20 → 200
         assert_eq!(
             result
                 .storage
-                .get_versioned(&key_b, u64::MAX)
+                .get_versioned(&key_b, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -1692,7 +1694,7 @@ mod tests {
         assert_eq!(
             result
                 .storage
-                .get_versioned(&key_c, u64::MAX)
+                .get_versioned(&key_c, CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -1708,36 +1710,36 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key1 = create_test_key(&ns, "seq1");
         let key2 = create_test_key(&ns, "seq2");
 
         {
-            let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             txn.put(key1.clone(), Value::Int(100)).unwrap();
             let v = manager
                 .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
                 .unwrap();
-            assert_eq!(v, 1);
+            assert_eq!(v, CommitVersion(1));
         }
 
         {
-            let mut txn = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
             txn.put(key2.clone(), Value::Int(200)).unwrap();
             let v = manager
                 .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
                 .unwrap();
-            assert_eq!(v, 2);
+            assert_eq!(v, CommitVersion(2));
         }
 
         // Both values present with correct versions
-        let v1 = store.get_versioned(&key1, u64::MAX).unwrap().unwrap();
+        let v1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get_versioned(&key2, u64::MAX).unwrap().unwrap();
+        let v2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }
@@ -1748,7 +1750,7 @@ mod tests {
 
     #[test]
     fn test_remove_branch_lock_succeeds_when_not_held() {
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
         // Insert a lock entry by accessing it (simulates a prior commit)
@@ -1765,7 +1767,7 @@ mod tests {
 
     #[test]
     fn test_remove_branch_lock_nonexistent_succeeds() {
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
 
         // No lock entry exists — removal should return true
@@ -1776,7 +1778,7 @@ mod tests {
     fn test_remove_branch_lock_serializes_with_commit() {
         // Verify that remove_branch_lock removes the entry and that the
         // next commit recreates it via entry().or_insert_with().
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
         let branch_id = BranchId::new();
 
         // Insert a lock entry via the same path as commit()
@@ -1809,20 +1811,20 @@ mod tests {
 
     #[test]
     fn commit_no_wal_applies_writes() {
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "bulk_key");
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(42)).unwrap();
 
         let version = manager.commit(&mut txn, store.as_ref(), None).unwrap();
-        assert!(version > 0);
+        assert!(version > CommitVersion::ZERO);
 
         // Data should be readable
-        let result = store.get_versioned(&key, u64::MAX).unwrap();
+        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
         assert!(result.is_some());
         assert_eq!(result.unwrap().value, Value::Int(42));
     }
@@ -1831,7 +1833,7 @@ mod tests {
     fn commit_no_wal_skips_wal_records() {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1841,13 +1843,13 @@ mod tests {
 
         // No-WAL commit — should NOT write to WAL
         let key = create_test_key(&ns, "no_wal");
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
         manager.commit(&mut txn, store.as_ref(), None).unwrap();
 
         // Normal commit — writes to WAL
         let key2 = create_test_key(&ns, "with_wal");
-        let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn2 = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
         manager
             .commit(&mut txn2, store.as_ref(), Some(&mut wal))
@@ -1867,7 +1869,7 @@ mod tests {
     fn commit_no_wal_then_normal_commits() {
         let dir = TempDir::new().unwrap();
         let wal_dir = dir.path().join("wal");
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let store = Arc::new(SegmentedStore::new());
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1875,13 +1877,13 @@ mod tests {
 
         // No-WAL commit
         let key1 = create_test_key(&ns, "k1");
-        let mut txn1 = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn1 = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn1.put(key1.clone(), Value::Int(1)).unwrap();
         manager.commit(&mut txn1, store.as_ref(), None).unwrap();
 
         // Normal commit after no-WAL commit
         let key2 = create_test_key(&ns, "k2");
-        let mut txn2 = TransactionContext::with_store(2, branch_id, Arc::clone(&store));
+        let mut txn2 = TransactionContext::with_store(TxnId(2), branch_id, Arc::clone(&store));
         txn2.put(key2.clone(), Value::Int(2)).unwrap();
         manager
             .commit(&mut txn2, store.as_ref(), Some(&mut wal))
@@ -1889,11 +1891,11 @@ mod tests {
 
         // Both values readable
         assert_eq!(
-            store.get_versioned(&key1, u64::MAX).unwrap().unwrap().value,
+            store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap().value,
             Value::Int(1)
         );
         assert_eq!(
-            store.get_versioned(&key2, u64::MAX).unwrap().unwrap().value,
+            store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value,
             Value::Int(2)
         );
     }
@@ -1913,7 +1915,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
@@ -1925,7 +1927,7 @@ mod tests {
             Arc::clone(&store),
         );
         txn1.put(create_test_key(&ns, "k1"), Value::Int(1)).unwrap();
-        assert_eq!(txn1.txn_id, 1, "T1 should get txn_id=1");
+        assert_eq!(txn1.txn_id, TxnId(1), "T1 should get txn_id=1");
 
         // T2 starts → gets txn_id=2, and commits first → gets commit_version=1
         let mut txn2 = TransactionContext::with_store(
@@ -1937,13 +1939,13 @@ mod tests {
         let v2 = manager
             .commit(&mut txn2, store.as_ref(), Some(&mut wal))
             .unwrap();
-        assert_eq!(v2, 1, "T2 should get commit_version=1");
+        assert_eq!(v2, CommitVersion(1), "T2 should get commit_version=1");
 
         // T1 commits second → gets commit_version=2
         let v1 = manager
             .commit(&mut txn1, store.as_ref(), Some(&mut wal))
             .unwrap();
-        assert_eq!(v1, 2, "T1 should get commit_version=2");
+        assert_eq!(v1, CommitVersion(2), "T1 should get commit_version=2");
 
         // Read WAL records back and verify ordering keys
         wal.flush().unwrap();
@@ -1980,7 +1982,7 @@ mod tests {
         // This test verifies that commit_with_wal_arc() creates the commit_locks
         // entry for blind writes — proving the lock path is taken.
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "blind_key");
@@ -1989,7 +1991,7 @@ mod tests {
         assert!(!manager.commit_locks.contains_key(&branch_id));
 
         // Commit a blind write via commit_with_wal_arc
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key, Value::Int(42)).unwrap();
         assert!(txn.read_set.is_empty(), "Must be a blind write");
 
@@ -2014,14 +2016,14 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "blind_key");
 
         assert!(!manager.commit_locks.contains_key(&branch_id));
 
-        let mut txn = TransactionContext::with_store(1, branch_id, Arc::clone(&store));
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key, Value::Int(42)).unwrap();
         assert!(txn.read_set.is_empty(), "Must be a blind write");
 
@@ -2050,7 +2052,7 @@ mod tests {
         fn get_versioned(
             &self,
             key: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
         {
             self.inner.get_versioned(key, max_version)
@@ -2060,7 +2062,7 @@ mod tests {
             &self,
             key: &Key,
             limit: Option<usize>,
-            before_version: Option<u64>,
+            before_version: Option<CommitVersion>,
         ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
             self.inner.get_history(key, limit, before_version)
         }
@@ -2068,13 +2070,13 @@ mod tests {
         fn scan_prefix(
             &self,
             prefix: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
         {
             self.inner.scan_prefix(prefix, max_version)
         }
 
-        fn current_version(&self) -> u64 {
+        fn current_version(&self) -> CommitVersion {
             self.inner.current_version()
         }
 
@@ -2082,7 +2084,7 @@ mod tests {
             &self,
             key: Key,
             value: Value,
-            version: u64,
+            version: CommitVersion,
             ttl: Option<std::time::Duration>,
             mode: strata_core::traits::WriteMode,
         ) -> strata_core::error::StrataResult<()> {
@@ -2093,7 +2095,7 @@ mod tests {
         fn delete_with_version(
             &self,
             key: &Key,
-            version: u64,
+            version: CommitVersion,
         ) -> strata_core::error::StrataResult<()> {
             self.inner.delete_with_version(key, version)
         }
@@ -2102,7 +2104,7 @@ mod tests {
             &self,
             writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
             deletes: Vec<Key>,
-            version: u64,
+            version: CommitVersion,
             put_ttls: &[u64],
         ) -> strata_core::error::StrataResult<()> {
             // Signal that apply has started (version already allocated)
@@ -2131,14 +2133,14 @@ mod tests {
             apply_started: Arc::clone(&apply_started),
             delay: std::time::Duration::from_millis(200),
         });
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "test_key");
 
         // Prepare a blind-write transaction (skips validation, no store reads)
-        let mut txn = TransactionContext::new(1, branch_id, 0);
+        let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion::ZERO);
         txn.put(key, Value::Int(42)).unwrap();
 
         let manager_clone = Arc::clone(&manager);
@@ -2157,7 +2159,8 @@ mod tests {
         // current_version() returns the in-flight version — unsafe for watermark
         let current = manager.current_version();
         assert_eq!(
-            current, 1,
+            current,
+            CommitVersion(1),
             "current_version() reflects allocated-but-unapplied version"
         );
 
@@ -2168,7 +2171,8 @@ mod tests {
 
         // The commit should have completed (200ms delay)
         assert_eq!(
-            quiesced, 1,
+            quiesced,
+            1,
             "quiesced_version returns version after commit completes"
         );
         assert!(
@@ -2179,7 +2183,7 @@ mod tests {
         );
 
         let committed_version = commit_handle.join().unwrap();
-        assert_eq!(committed_version, 1);
+        assert_eq!(committed_version, CommitVersion(1));
     }
 
     /// Issue #1710 stress variant: concurrent commits on multiple branches
@@ -2193,7 +2197,7 @@ mod tests {
             apply_started: Arc::clone(&apply_started),
             delay: std::time::Duration::from_millis(100),
         });
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let num_writers = 4;
         let mut handles = Vec::new();
@@ -2206,7 +2210,7 @@ mod tests {
             let key = create_test_key(&ns, &format!("key_{}", i));
 
             handles.push(std::thread::spawn(move || {
-                let mut txn = TransactionContext::new(i as u64 + 1, branch_id, 0);
+                let mut txn = TransactionContext::new(TxnId(i as u64 + 1), branch_id, CommitVersion::ZERO);
                 txn.put(key, Value::Int(i as i64)).unwrap();
                 manager_clone
                     .commit(&mut txn, store_clone.as_ref(), None)
@@ -2241,7 +2245,7 @@ mod tests {
         fn get_versioned(
             &self,
             key: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
         {
             self.inner.get_versioned(key, max_version)
@@ -2251,7 +2255,7 @@ mod tests {
             &self,
             key: &Key,
             limit: Option<usize>,
-            before_version: Option<u64>,
+            before_version: Option<CommitVersion>,
         ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
             self.inner.get_history(key, limit, before_version)
         }
@@ -2259,13 +2263,13 @@ mod tests {
         fn scan_prefix(
             &self,
             prefix: &Key,
-            max_version: u64,
+            max_version: CommitVersion,
         ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
         {
             self.inner.scan_prefix(prefix, max_version)
         }
 
-        fn current_version(&self) -> u64 {
+        fn current_version(&self) -> CommitVersion {
             self.inner.current_version()
         }
 
@@ -2273,7 +2277,7 @@ mod tests {
             &self,
             key: Key,
             value: Value,
-            version: u64,
+            version: CommitVersion,
             ttl: Option<std::time::Duration>,
             mode: strata_core::traits::WriteMode,
         ) -> strata_core::error::StrataResult<()> {
@@ -2284,7 +2288,7 @@ mod tests {
         fn delete_with_version(
             &self,
             key: &Key,
-            version: u64,
+            version: CommitVersion,
         ) -> strata_core::error::StrataResult<()> {
             self.inner.delete_with_version(key, version)
         }
@@ -2293,7 +2297,7 @@ mod tests {
             &self,
             _writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
             _deletes: Vec<Key>,
-            _version: u64,
+            _version: CommitVersion,
             _put_ttls: &[u64],
         ) -> strata_core::error::StrataResult<()> {
             Err(strata_core::error::StrataError::storage(
@@ -2316,13 +2320,13 @@ mod tests {
         let failing_store = FailingApplyStorage {
             inner: SegmentedStore::new(),
         };
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "invisible_key");
 
         // Create a transaction with a write (blind write — skips validation)
-        let mut txn = TransactionContext::with_store(1, branch_id, real_store);
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, real_store);
         txn.put(key.clone(), Value::Int(42)).unwrap();
 
         // Commit should return an error because apply_writes fails,
@@ -2352,12 +2356,12 @@ mod tests {
         let failing_store = FailingApplyStorage {
             inner: SegmentedStore::new(),
         };
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "invisible_key");
 
-        let mut txn = TransactionContext::with_store(2, branch_id, real_store);
+        let mut txn = TransactionContext::with_store(TxnId(2), branch_id, real_store);
         txn.put(key.clone(), Value::Int(43)).unwrap();
 
         let result = manager.commit_with_wal_arc(&mut txn, &failing_store, Some(&wal));
@@ -2383,15 +2387,15 @@ mod tests {
         let failing_store = FailingApplyStorage {
             inner: SegmentedStore::new(),
         };
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "invisible_key");
 
-        let mut txn = TransactionContext::with_store(3, branch_id, real_store);
+        let mut txn = TransactionContext::with_store(TxnId(3), branch_id, real_store);
         txn.put(key.clone(), Value::Int(44)).unwrap();
 
-        let result = manager.commit_with_version(&mut txn, &failing_store, Some(&mut wal), 42);
+        let result = manager.commit_with_version(&mut txn, &failing_store, Some(&mut wal), CommitVersion(42));
         assert!(
             result.is_err(),
             "commit_with_version() must return Err when apply_writes fails after WAL write"
@@ -2415,7 +2419,7 @@ mod tests {
         use strata_core::primitives::json::JsonPath;
 
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let json_key = Key::new_json(ns.clone(), "doc1");
@@ -2475,7 +2479,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let mut wal = create_test_wal(&wal_dir);
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let json_key = Key::new_json(ns.clone(), "doc1");
@@ -2517,7 +2521,7 @@ mod tests {
         // Record[0] = base doc put, Record[1] = json_set commit
         assert!(records.len() >= 2, "Expected at least 2 WAL records");
         let payload = TransactionPayload::from_bytes(&records[1].writeset).unwrap();
-        assert_eq!(payload.version, commit_v);
+        assert_eq!(payload.version, commit_v.as_u64());
         assert!(
             !payload.puts.is_empty(),
             "WAL payload must contain the materialized JSON put"
@@ -2546,7 +2550,7 @@ mod tests {
     #[test]
     fn test_issue_1739_cas_rejects_key_already_in_write_set() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "k1");
@@ -2569,7 +2573,7 @@ mod tests {
     #[test]
     fn test_issue_1739_put_rejects_key_already_in_cas_set() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "k1");
@@ -2592,7 +2596,7 @@ mod tests {
     #[test]
     fn test_issue_1739_delete_rejects_key_already_in_cas_set() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "k1");
@@ -2615,7 +2619,7 @@ mod tests {
     #[test]
     fn test_issue_1739_cas_rejects_key_already_in_delete_set() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "k1");
@@ -2638,7 +2642,7 @@ mod tests {
     #[test]
     fn test_issue_1739_cas_with_read_rejects_key_already_in_write_set() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "k1");
@@ -2667,7 +2671,7 @@ mod tests {
     #[test]
     fn test_issue_1913_cross_branch_snapshot_ordering() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch_a = BranchId::new();
         let branch_b = BranchId::new();
@@ -2677,19 +2681,19 @@ mod tests {
         let key_b = create_test_key(&ns_b, "key_b");
 
         // Prepare two transactions on different branches
-        let mut txn_a = TransactionContext::with_store(1, branch_a, Arc::clone(&store));
+        let mut txn_a = TransactionContext::with_store(TxnId(1), branch_a, Arc::clone(&store));
         txn_a.put(key_a.clone(), Value::Int(100)).unwrap();
         txn_a.status = TransactionStatus::Committed; // skip validation
 
-        let mut txn_b = TransactionContext::with_store(2, branch_b, Arc::clone(&store));
+        let mut txn_b = TransactionContext::with_store(TxnId(2), branch_b, Arc::clone(&store));
         txn_b.put(key_b.clone(), Value::Int(200)).unwrap();
         txn_b.status = TransactionStatus::Committed;
 
         // Step 1: Both branches allocate versions (simulates parallel allocation)
         let version_a = manager.allocate_version().unwrap(); // 1
         let version_b = manager.allocate_version().unwrap(); // 2
-        assert_eq!(version_a, 1);
-        assert_eq!(version_b, 2);
+        assert_eq!(version_a, CommitVersion(1));
+        assert_eq!(version_b, CommitVersion(2));
 
         // Step 2: Branch B applies FIRST (out-of-order, the faster branch)
         txn_b.apply_writes(store.as_ref(), version_b).unwrap();
@@ -2745,7 +2749,7 @@ mod tests {
         use std::sync::Barrier;
 
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
         let num_threads = 8;
         let barrier = Arc::new(Barrier::new(num_threads));
 
@@ -2761,7 +2765,7 @@ mod tests {
                     let key = create_test_key(&ns, &format!("key_{}", i));
 
                     let mut txn =
-                        TransactionContext::with_store(i as u64 + 1, branch_id, Arc::clone(&store));
+                        TransactionContext::with_store(TxnId(i as u64 + 1), branch_id, Arc::clone(&store));
                     txn.put(key, Value::Int(i as i64)).unwrap();
                     txn.status = TransactionStatus::Committed;
 
@@ -2779,7 +2783,7 @@ mod tests {
             })
             .collect();
 
-        let versions: Vec<u64> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        let versions: Vec<CommitVersion> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
         let max_version = *versions.iter().max().unwrap();
 
@@ -2787,7 +2791,7 @@ mod tests {
         let vis = manager.visible_version();
         assert!(
             vis >= max_version,
-            "After all {} commits applied, visible_version ({}) must be >= max_version ({})",
+            "After all {} commits applied, visible_version ({:?}) must be >= max_version ({:?})",
             num_threads,
             vis,
             max_version,
@@ -2806,7 +2810,7 @@ mod tests {
     #[test]
     fn test_issue_1913_version_gap_does_not_block_visible() {
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
 
         let branch = BranchId::new();
         let ns = create_test_namespace(branch);
@@ -2815,7 +2819,7 @@ mod tests {
         // Version 1: allocated and applied normally
         let v1 = manager.allocate_version().unwrap();
         {
-            let mut txn = TransactionContext::with_store(1, branch, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(1), branch, Arc::clone(&store));
             txn.put(key.clone(), Value::Int(1)).unwrap();
             txn.status = TransactionStatus::Committed;
             txn.apply_writes(store.as_ref(), v1).unwrap();
@@ -2839,7 +2843,7 @@ mod tests {
         // Version 3: normal commit after the gap
         let v3 = manager.allocate_version().unwrap();
         {
-            let mut txn = TransactionContext::with_store(3, branch, Arc::clone(&store));
+            let mut txn = TransactionContext::with_store(TxnId(3), branch, Arc::clone(&store));
             txn.put(key.clone(), Value::Int(3)).unwrap();
             txn.status = TransactionStatus::Committed;
             txn.apply_writes(store.as_ref(), v3).unwrap();
@@ -2860,7 +2864,7 @@ mod tests {
         use strata_core::primitives::json::JsonPath;
 
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let json_key = Key::new_json(ns.clone(), "unique_doc");
@@ -2912,7 +2916,7 @@ mod tests {
         use strata_core::primitives::json::JsonPath;
 
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let json_key = Key::new_json(ns.clone(), "phantom_doc");
@@ -2963,7 +2967,7 @@ mod tests {
         use strata_core::primitives::json::JsonPath;
 
         let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(0);
+        let manager = TransactionManager::new(CommitVersion::ZERO);
         let branch_id = BranchId::new();
         let ns = create_test_namespace(branch_id);
         let json_key = Key::new_json(ns.clone(), "set_race_doc");
@@ -3020,7 +3024,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let num_committers = 8;
         let commits_per_thread = 50;
@@ -3058,7 +3062,7 @@ mod tests {
                 for j in 0..commits_per_thread {
                     let key = create_test_key(&ns, &format!("k_{}_{}", i, j));
                     let mut txn = TransactionContext::with_store(
-                        (i * commits_per_thread + j) as u64 + 1,
+                        TxnId((i * commits_per_thread + j) as u64 + 1),
                         branch_id,
                         Arc::clone(&st),
                     );
@@ -3085,7 +3089,7 @@ mod tests {
         let final_version = manager.current_version();
         assert_eq!(
             final_version,
-            (num_committers * commits_per_thread) as u64,
+            CommitVersion((num_committers * commits_per_thread) as u64),
             "All commits should have succeeded"
         );
         assert!(
@@ -3106,7 +3110,7 @@ mod tests {
         let wal_dir = temp_dir.path().join("wal");
         let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
         let store = Arc::new(SegmentedStore::new());
-        let manager = Arc::new(TransactionManager::new(0));
+        let manager = Arc::new(TransactionManager::new(CommitVersion::ZERO));
 
         let branch_id = BranchId::new();
         let num_committers = 4;
@@ -3140,7 +3144,7 @@ mod tests {
                 for j in 0..commits_per_thread {
                     let key = create_test_key(&ns, &format!("sb_{}_{}", i, j));
                     let mut txn = TransactionContext::with_store(
-                        (i * commits_per_thread + j) as u64 + 1,
+                        TxnId((i * commits_per_thread + j) as u64 + 1),
                         branch_id,
                         Arc::clone(&st),
                     );
@@ -3162,7 +3166,7 @@ mod tests {
         let final_version = manager.current_version();
         assert_eq!(
             final_version,
-            (num_committers * commits_per_thread) as u64,
+            CommitVersion((num_committers * commits_per_thread) as u64),
             "All same-branch commits should have succeeded"
         );
     }

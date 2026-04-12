@@ -5,6 +5,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
+use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult};
 use strata_durability::wal::DurabilityMode;
@@ -554,7 +555,7 @@ impl Database {
                 if had_writes {
                     self.schedule_flush_if_needed();
                 }
-                Ok((value, commit_version))
+                Ok((value, commit_version.as_u64()))
             }
             Err(e) => {
                 let _ = txn.mark_aborted(format!("Closure error: {}", e));
@@ -661,7 +662,7 @@ impl Database {
         // but wait for visible_version to catch up so all data at versions
         // ≤ snapshot is fully applied. This prevents the cross-branch snapshot
         // gap (#1913) without breaking same-thread sequential operations.
-        let snapshot_version = self.storage.version();
+        let snapshot_version = CommitVersion(self.storage.version());
         let mut spins = 0u32;
         while self.coordinator.visible_version() < snapshot_version {
             spins += 1;
@@ -772,7 +773,7 @@ impl Database {
         if had_writes {
             self.schedule_flush_if_needed();
         }
-        Ok(version)
+        Ok(version.as_u64())
     }
 
     /// Internal commit implementation shared by commit_transaction and transaction closures
@@ -792,7 +793,7 @@ impl Database {
         &self,
         txn: &mut TransactionContext,
         durability: DurabilityMode,
-    ) -> StrataResult<u64> {
+    ) -> StrataResult<CommitVersion> {
         if self.follower {
             return Err(StrataError::internal(
                 "cannot commit: database opened in follower mode (read-only)",

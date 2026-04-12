@@ -53,7 +53,7 @@ fn compaction_preserves_shared_segments() {
 
     // Child can still read inherited data
     let result = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(result.value, Value::Int(1));
@@ -82,13 +82,13 @@ fn materialize_collapses_layer() {
 
     // Data still accessible in own segments
     let val = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(1));
 
     let val = store
-        .get_versioned(&child_kv("b"), u64::MAX)
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(2));
@@ -109,7 +109,7 @@ fn materialize_preserves_commit_ids() {
     store.materialize_layer(&child_branch(), 0).unwrap();
 
     let val = store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(42));
@@ -151,7 +151,7 @@ fn materialize_skips_post_fork_entries() {
 
     // "early" (version 1 <= 50) should be materialized
     let val = store
-        .get_versioned(&child_kv("early"), u64::MAX)
+        .get_versioned(&child_kv("early"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(1));
@@ -159,7 +159,7 @@ fn materialize_skips_post_fork_entries() {
     // "late" (version 100 > 50) should NOT be materialized
     assert!(
         store
-            .get_versioned(&child_kv("late"), u64::MAX)
+            .get_versioned(&child_kv("late"), CommitVersion::MAX)
             .unwrap()
             .is_none(),
         "post-fork entry should not be materialized"
@@ -191,7 +191,7 @@ fn materialize_skips_shadowed_by_own() {
 
     // Value should be child's own
     let val = store
-        .get_versioned(&child_kv("k"), u64::MAX)
+        .get_versioned(&child_kv("k"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(999));
@@ -308,13 +308,13 @@ fn materialize_deepest_first() {
 
     // All data accessible
     let val = store
-        .get_versioned(&child_kv("a_key"), u64::MAX)
+        .get_versioned(&child_kv("a_key"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(1));
 
     let val = store
-        .get_versioned(&child_kv("b_key"), u64::MAX)
+        .get_versioned(&child_kv("b_key"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(val.value, Value::Int(2));
@@ -405,7 +405,7 @@ fn materialize_preserves_read_path() {
         .iter()
         .filter_map(|k| {
             store
-                .get_versioned(&child_kv(k), u64::MAX)
+                .get_versioned(&child_kv(k), CommitVersion::MAX)
                 .unwrap()
                 .map(|v| (k.to_string(), v.value))
         })
@@ -418,7 +418,7 @@ fn materialize_preserves_read_path() {
         .iter()
         .filter_map(|k| {
             store
-                .get_versioned(&child_kv(k), u64::MAX)
+                .get_versioned(&child_kv(k), CommitVersion::MAX)
                 .unwrap()
                 .map(|v| (k.to_string(), v.value))
         })
@@ -551,20 +551,20 @@ fn materialize_crash_recovery_with_partial_segment() {
 
         // Data should be readable through inherited layers
         let a = store
-            .get_versioned(&child_kv("a"), u64::MAX)
+            .get_versioned(&child_kv("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(a.value, Value::Int(1));
 
         let b = store
-            .get_versioned(&child_kv("b"), u64::MAX)
+            .get_versioned(&child_kv("b"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(b.value, Value::Int(2));
 
         // Parent data should also be intact
         let pa = store
-            .get_versioned(&parent_kv("a"), u64::MAX)
+            .get_versioned(&parent_kv("a"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(pa.value, Value::Int(1));
@@ -621,14 +621,14 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
 
         // Child's own data (from the valid segment) should be readable
         let y = store
-            .get_versioned(&child_kv("y"), u64::MAX)
+            .get_versioned(&child_kv("y"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(y.value, Value::Int(20));
 
         // Inherited data from parent should also be readable
         let x = store
-            .get_versioned(&child_kv("x"), u64::MAX)
+            .get_versioned(&child_kv("x"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(x.value, Value::Int(10));
@@ -836,19 +836,19 @@ fn materialize_multi_segment_inherited_layer() {
 
     // Verify ALL keys are readable via point lookup (would fail on corrupt segment)
     let a = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(a.value, Value::Int(1));
 
     let b = store
-        .get_versioned(&child_kv("b"), u64::MAX)
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(b.value, Value::Int(2));
 
     let c = store
-        .get_versioned(&child_kv("c"), u64::MAX)
+        .get_versioned(&child_kv("c"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(c.value, Value::Int(3));
@@ -901,19 +901,19 @@ fn materialize_multi_level_inherited_layer() {
 
     // All keys must be readable (verifies correct sort order in output segment)
     let a = store
-        .get_versioned(&child_kv("a"), u64::MAX)
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(a.value, Value::Int(1));
 
     let b = store
-        .get_versioned(&child_kv("b"), u64::MAX)
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(b.value, Value::Int(2));
 
     let c = store
-        .get_versioned(&child_kv("c"), u64::MAX)
+        .get_versioned(&child_kv("c"), CommitVersion::MAX)
         .unwrap()
         .unwrap();
     assert_eq!(c.value, Value::Int(3));
