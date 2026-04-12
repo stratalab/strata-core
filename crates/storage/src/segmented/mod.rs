@@ -606,7 +606,7 @@ impl StorageIterator {
 
             if let Some((key, commit_id)) = ik.decode() {
                 if &key >= target {
-                    self.current = Some((key, entry.to_versioned(commit_id)));
+                    self.current = Some((key, entry.to_versioned(commit_id.into())));
                     pipeline.advance();
                     return;
                 }
@@ -638,7 +638,7 @@ impl StorageIterator {
             }
 
             if let Some((key, commit_id)) = ik.decode() {
-                self.current = Some((key, entry.to_versioned(commit_id)));
+                self.current = Some((key, entry.to_versioned(commit_id.into())));
                 pipeline.advance();
                 break;
             }
@@ -844,8 +844,8 @@ impl SegmentedStore {
     }
 
     /// Set version (used during recovery).
-    pub fn set_version(&self, version: u64) {
-        self.version.store(version, Ordering::Release);
+    pub fn set_version(&self, version: CommitVersion) {
+        self.version.store(version.as_u64(), Ordering::Release);
     }
 
     /// Monotonically advance the visible storage version.
@@ -853,8 +853,8 @@ impl SegmentedStore {
     /// Used by the follower refresh path to bump version AFTER secondary
     /// indexes (BM25/HNSW) have been updated, ensuring readers never see
     /// KV data before the corresponding index entries exist (Issue #1734).
-    pub fn advance_version(&self, version: u64) {
-        self.version.fetch_max(version, Ordering::AcqRel);
+    pub fn advance_version(&self, version: CommitVersion) {
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
     }
 
     /// Set (or clear) the compaction I/O rate limit.
@@ -1762,7 +1762,7 @@ impl SegmentedStore {
                 return None;
             }
             let (key, commit_id) = ik.decode()?;
-            Some((key, entry.to_versioned(commit_id)))
+            Some((key, entry.to_versioned(commit_id.into())))
         })
         .collect()
     }
@@ -1819,7 +1819,7 @@ impl SegmentedStore {
                 return None;
             }
             let (key, commit_id) = ik.decode()?;
-            Some((key, entry.to_versioned(commit_id)))
+            Some((key, entry.to_versioned(commit_id.into())))
         })
         .collect()
     }
@@ -1902,7 +1902,7 @@ impl SegmentedStore {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
                 } else {
-                    Ok(Some(entry.into_versioned(commit_id)))
+                    Ok(Some(entry.into_versioned(commit_id.into())))
                 }
             }
             None => Ok(None),
@@ -2142,7 +2142,7 @@ impl SegmentedStore {
             }
             if let Some((key, commit_id)) = ik.decode() {
                 if key.type_tag == type_tag {
-                    results.push((key, entry.to_versioned(commit_id)));
+                    results.push((key, entry.to_versioned(commit_id.into())));
                 }
             }
         }
@@ -2173,7 +2173,7 @@ impl SegmentedStore {
                 if entry.is_tombstone {
                     return Ok(None);
                 }
-                return Ok(Some(entry.to_versioned(commit_id)));
+                return Ok(Some(entry.to_versioned(commit_id.into())));
             }
         }
         Ok(None)
@@ -2224,7 +2224,7 @@ impl SegmentedStore {
                 continue;
             }
             if let Some((key, commit_id)) = ik.decode() {
-                results.push((key, entry.to_versioned(commit_id)));
+                results.push((key, entry.to_versioned(commit_id.into())));
             }
         }
         check_corruption(&flags)?;
@@ -3890,7 +3890,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id)))
+                Some((key, entry.to_versioned(commit_id.into())))
             })
             .collect();
         check_corruption(&flags)?;
@@ -3911,7 +3911,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id)))
+                Some((key, entry.to_versioned(commit_id.into())))
             })
             .collect();
         check_corruption(&flags)?;
@@ -3934,7 +3934,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id)))
+                Some((key, entry.to_versioned(commit_id.into())))
             })
             .filter(|(key, _)| key >= start_key);
         let results: Vec<_> = match limit {
@@ -3987,7 +3987,11 @@ impl SegmentedStore {
         snapshot_version: CommitVersion,
     ) -> Option<StorageIterator> {
         let snapshot = self.snapshot_branch(branch_id)?;
-        Some(StorageIterator::new(snapshot, prefix, snapshot_version.as_u64()))
+        Some(StorageIterator::new(
+            snapshot,
+            prefix,
+            snapshot_version.as_u64(),
+        ))
     }
 
     /// Scan entries starting from `start_key` within `prefix`, with optional limit.
@@ -4027,7 +4031,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id)))
+                Some((key, entry.to_versioned(commit_id.into())))
             })
             .filter(|(key, _)| key >= start_key); // block seek imprecision
         let results: Vec<_> = match limit {
@@ -4214,7 +4218,11 @@ impl std::fmt::Debug for SegmentedStore {
 // ============================================================================
 
 impl Storage for SegmentedStore {
-    fn get_versioned(&self, key: &Key, max_version: CommitVersion) -> StrataResult<Option<VersionedValue>> {
+    fn get_versioned(
+        &self,
+        key: &Key,
+        max_version: CommitVersion,
+    ) -> StrataResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
@@ -4225,7 +4233,7 @@ impl Storage for SegmentedStore {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
                 } else {
-                    Ok(Some(entry.to_versioned(commit_id)))
+                    Ok(Some(entry.to_versioned(commit_id.into())))
                 }
             }
             None => Ok(None),
@@ -4255,7 +4263,7 @@ impl Storage for SegmentedStore {
                 }
                 !entry.is_expired()
             })
-            .map(|(commit_id, entry)| entry.to_versioned(commit_id))
+            .map(|(commit_id, entry)| entry.to_versioned(commit_id.into()))
             .collect();
 
         match limit {
@@ -4357,7 +4365,11 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: CommitVersion) -> StrataResult<()> {
+    fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: CommitVersion,
+    ) -> StrataResult<()> {
         if writes.is_empty() {
             return Ok(());
         }

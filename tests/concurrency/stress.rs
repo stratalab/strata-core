@@ -34,7 +34,13 @@ fn stress_concurrent_read_write() {
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -59,11 +65,15 @@ fn stress_concurrent_read_write() {
 
                     loop {
                         // Read-modify-write with retry
-                        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+                        let current = store
+                            .get_versioned(&key, CommitVersion::MAX)
+                            .unwrap()
+                            .unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
+                        let mut txn =
+                            TransactionContext::new(txn_id, branch_id, CommitVersion(version));
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set
                             .insert(key.clone(), Value::Int((thread_id * 1000 + iter) as i64));
@@ -118,7 +128,13 @@ fn stress_transaction_throughput() {
 
     let key = create_test_key(branch_id, "counter");
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(0),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let duration = Duration::from_secs(5);
@@ -128,7 +144,10 @@ fn stress_transaction_throughput() {
     let mut next_version = 2u64;
 
     while start.elapsed() < duration {
-        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let current = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         let version = current.version.as_u64();
 
         let txn_id = manager.next_txn_id().unwrap();
@@ -277,7 +296,13 @@ fn stress_long_running_transaction() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(0),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let initial_version = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -336,7 +361,13 @@ fn stress_sustained_workload() {
     for i in 0..50 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -363,11 +394,15 @@ fn stress_sustained_workload() {
 
                     if ops.load(Ordering::Relaxed).is_multiple_of(3) {
                         // Write
-                        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+                        let current = store
+                            .get_versioned(&key, CommitVersion::MAX)
+                            .unwrap()
+                            .unwrap();
                         let version = current.version.as_u64();
 
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
+                        let mut txn =
+                            TransactionContext::new(txn_id, branch_id, CommitVersion(version));
                         txn.read_set.insert(key.clone(), version);
                         txn.write_set
                             .insert(key.clone(), Value::Int(thread_id as i64));

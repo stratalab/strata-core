@@ -654,14 +654,18 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
     // 5. Child must still see inherited data after recovery
     //    This is the bug: without the fix, inherited layer resolution can't
     //    find the orphan segments because they're not in the parent's version.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
+    let val_a_recovered = store2
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery (orphan segment)"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
+    let val_b_recovered = store2
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery (orphan segment)"
@@ -736,14 +740,18 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
     let info = store2.recover_segments().unwrap();
 
     // 6. Child must still see inherited data after recovery.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
+    let val_a_recovered = store2
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
+    let val_b_recovered = store2
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery"

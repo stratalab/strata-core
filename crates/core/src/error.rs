@@ -1283,6 +1283,13 @@ impl StrataError {
 
             // Internal errors
             StrataError::Internal { .. } => ErrorCode::InternalError,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!("Unknown error variant in code()");
+                ErrorCode::InternalError
+            }
         }
     }
 
@@ -1390,6 +1397,13 @@ impl StrataError {
             }
             StrataError::Internal { message } => {
                 ErrorDetails::new().with_string("message", message)
+            }
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!("Unknown error variant in details()");
+                ErrorDetails::new()
             }
         }
     }

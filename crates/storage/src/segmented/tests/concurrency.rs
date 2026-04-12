@@ -215,13 +215,17 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
         "corrupt manifest must be reported, not silently load as L0"
     );
     // The orphan SST must NOT be accessible (no L0 fallback).
-    let orphan_val = store2.get_versioned(&kv_key("orphan"), CommitVersion::MAX).unwrap();
+    let orphan_val = store2
+        .get_versioned(&kv_key("orphan"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         orphan_val.is_none(),
         "orphan segment must not be loaded when manifest is corrupt"
     );
     // The real segment must also not be accessible (branch skipped entirely).
-    let real_val = store2.get_versioned(&kv_key("real"), CommitVersion::MAX).unwrap();
+    let real_val = store2
+        .get_versioned(&kv_key("real"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         real_val.is_none(),
         "no segments should be loaded for corrupt-manifest branch"
@@ -1032,12 +1036,18 @@ fn test_issue_1740_put_recovery_entry_preserves_ttl() {
         .unwrap();
 
     // Read the entry via store (filters expired) — should still be alive
-    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+    let result = store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(42));
 
     // Verify TTL was preserved by checking via the memtable directly
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "put_recovery_entry must preserve TTL, got ttl_ms={}",
@@ -1064,7 +1074,10 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
 
     // Verify TTL was preserved
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "apply_recovery_atomic must preserve TTL, got ttl_ms={}",
@@ -1152,7 +1165,10 @@ fn test_issue_1721_fork_resets_materializing_status() {
     // 7. Verify data is still readable through the child.
     let child_ns = Arc::new(Namespace::new(child, "default".to_string()));
     let child_key = Key::new(Arc::clone(&child_ns), TypeTag::KV, b"k0".to_vec());
-    let val = store.get_versioned(&child_key, CommitVersion::MAX).unwrap().unwrap();
+    let val = store
+        .get_versioned(&child_key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
     assert_eq!(val.value, Value::Int(0));
 }
 
@@ -1406,7 +1422,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     );
 
     // After the caller bumps the version, the entry becomes visible
-    store.advance_version(5);
+    store.advance_version(CommitVersion(5));
     assert_eq!(store.version(), 5);
 
     let visible = store

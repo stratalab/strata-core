@@ -1798,13 +1798,21 @@ impl TransactionContext {
     /// let store = Arc::new(SegmentedStore::new());
     /// ctx.reset(TxnId(2), new_branch_id, Some(store));
     /// ```
-    pub fn reset(&mut self, txn_id: TxnId, branch_id: BranchId, store: Option<Arc<SegmentedStore>>) {
+    pub fn reset(
+        &mut self,
+        txn_id: TxnId,
+        branch_id: BranchId,
+        store: Option<Arc<SegmentedStore>>,
+    ) {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
 
         // Update store and version
-        self.start_version = store.as_ref().map(|s| s.current_version()).unwrap_or(CommitVersion::ZERO);
+        self.start_version = store
+            .as_ref()
+            .map(|s| s.current_version())
+            .unwrap_or(CommitVersion::ZERO);
         self.store = store;
 
         // Clear collections but preserve capacity - this is the key optimization!
@@ -2051,7 +2059,13 @@ mod tests {
     fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<SegmentedStore> {
         let store = Arc::new(SegmentedStore::new());
         store
-            .put_with_version_mode(key.clone(), value, CommitVersion(version), None, WriteMode::Append)
+            .put_with_version_mode(
+                key.clone(),
+                value,
+                CommitVersion(version),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
         store
     }
@@ -2377,7 +2391,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        store.set_version(3);
+        store.set_version(CommitVersion(3));
 
         // Verify 3 versions exist
         let history = Storage::get_history(&*store, &key, None, None).unwrap();
@@ -2588,7 +2602,13 @@ mod tests {
         for i in 0..3 {
             let key = test_key(&ns, &format!("pfx:{}", i));
             store
-                .put_with_version_mode(key, Value::Int(i as i64), CommitVersion(1), None, WriteMode::Append)
+                .put_with_version_mode(
+                    key,
+                    Value::Int(i as i64),
+                    CommitVersion(1),
+                    None,
+                    WriteMode::Append,
+                )
                 .unwrap();
         }
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);

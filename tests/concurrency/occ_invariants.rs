@@ -33,7 +33,13 @@ fn first_committer_wins_read_write_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 reads the key
@@ -55,7 +61,13 @@ fn first_committer_wins_read_write_conflict() {
 
     // Apply T2's write
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 tries to commit - should fail with read-write conflict
@@ -87,7 +99,13 @@ fn blind_writes_dont_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 does a blind write (no read)
@@ -96,7 +114,13 @@ fn blind_writes_dont_conflict() {
 
     // T2 modifies the key
     store
-        .put_with_version_mode(key.clone(), Value::Int(300), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(300),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 should still commit - blind writes don't conflict
@@ -115,7 +139,13 @@ fn read_only_transaction_always_commits() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 only reads
@@ -126,7 +156,13 @@ fn read_only_transaction_always_commits() {
 
     // Another transaction modifies the key
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 should still commit - read-only transactions always succeed
@@ -154,16 +190,34 @@ fn write_skew_is_allowed() {
 
     // Initial balances
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(50), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_a.clone(),
+            Value::Int(50),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(50), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_b.clone(),
+            Value::Int(50),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 reads A and B, writes A
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    let val_a = store.get_versioned(&key_a, CommitVersion::MAX).unwrap().unwrap();
-    let val_b = store.get_versioned(&key_b, CommitVersion::MAX).unwrap().unwrap();
+    let val_a = store
+        .get_versioned(&key_a, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    let val_b = store
+        .get_versioned(&key_b, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
     t1.read_set.insert(key_a.clone(), val_a.version.as_u64());
     t1.read_set.insert(key_b.clone(), val_b.version.as_u64());
     t1.write_set.insert(key_a.clone(), Value::Int(-10));
@@ -200,7 +254,13 @@ fn conflict_reports_correct_versions() {
 
     // Initial value at version 1
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v1 = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -215,7 +275,13 @@ fn conflict_reports_correct_versions() {
 
     // Update to version 2
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v2 = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -252,10 +318,22 @@ fn multiple_conflicts_all_reported() {
 
     // Initial values
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let v1 = store
@@ -278,10 +356,22 @@ fn multiple_conflicts_all_reported() {
 
     // Both keys modified
     store
-        .put_with_version_mode(key1.clone(), Value::Int(10), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(10),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(4), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(20),
+            CommitVersion(4),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 writes
@@ -300,7 +390,13 @@ fn no_conflict_when_versions_match() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let version = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -355,7 +451,13 @@ fn read_nonexistent_key_tracks_version_zero() {
 
     // Key is created
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 writes - should conflict (version changed from 0 to non-zero)
@@ -376,7 +478,13 @@ fn delete_after_read_causes_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let version = store
         .get_versioned(&key, CommitVersion::MAX)

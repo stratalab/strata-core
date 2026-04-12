@@ -79,7 +79,11 @@ impl TransactionPool {
                     // Pool empty - allocate new
                     match store {
                         Some(s) => TransactionContext::with_store(txn_id, branch_id, s),
-                        None => TransactionContext::new(txn_id, branch_id, strata_core::id::CommitVersion::ZERO),
+                        None => TransactionContext::new(
+                            txn_id,
+                            branch_id,
+                            strata_core::id::CommitVersion::ZERO,
+                        ),
                     }
                 }
             }
@@ -133,7 +137,11 @@ impl TransactionPool {
             let current = pool.len();
             for _ in current..count {
                 // Create minimal context for pool
-                let ctx = TransactionContext::new(TxnId::ZERO, BranchId::new(), strata_core::id::CommitVersion::ZERO);
+                let ctx = TransactionContext::new(
+                    TxnId::ZERO,
+                    BranchId::new(),
+                    strata_core::id::CommitVersion::ZERO,
+                );
                 pool.push(ctx);
             }
         });
@@ -295,8 +303,15 @@ mod tests {
         let store = Arc::new(SegmentedStore::new());
         let ns = create_test_namespace();
         let key = create_test_key(&ns, b"test");
-        Storage::put_with_version_mode(&*store, key, Value::Int(1), CommitVersion(500), None, WriteMode::Append)
-            .unwrap();
+        Storage::put_with_version_mode(
+            &*store,
+            key,
+            Value::Int(1),
+            CommitVersion(500),
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
 
         let ctx = TransactionPool::acquire(TxnId(1), branch_id, Some(store));
 

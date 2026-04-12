@@ -191,7 +191,13 @@ fn inherited_layer_write_shadows() {
 
     // Write to child — this should shadow the inherited value
     store
-        .put_with_version_mode(child_kv("k"), Value::Int(999), CommitVersion(11), None, WriteMode::Append)
+        .put_with_version_mode(
+            child_kv("k"),
+            Value::Int(999),
+            CommitVersion(11),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let result = store
@@ -201,7 +207,10 @@ fn inherited_layer_write_shadows() {
     assert_eq!(result.value, Value::Int(999));
 
     // But at snapshot before the child write, we see the inherited value
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(10))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(100));
 }
 
@@ -211,7 +220,9 @@ fn inherited_layer_delete_shadows() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Delete on child hides inherited entry
-    store.delete_with_version(&child_kv("k"), CommitVersion(11)).unwrap();
+    store
+        .delete_with_version(&child_kv("k"), CommitVersion(11))
+        .unwrap();
 
     assert!(store
         .get_versioned(&child_kv("k"), CommitVersion::MAX)
@@ -219,7 +230,10 @@ fn inherited_layer_delete_shadows() {
         .is_none());
 
     // Snapshot before the delete still sees inherited data
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(10))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(42));
 }
 
@@ -253,7 +267,9 @@ fn inherited_layer_range_scan() {
         )
         .unwrap();
 
-    let results = store.scan_prefix(&child_kv("user:"), CommitVersion::MAX).unwrap();
+    let results = store
+        .scan_prefix(&child_kv("user:"), CommitVersion::MAX)
+        .unwrap();
     assert_eq!(results.len(), 4); // alice, bob(200), carol, dave
 
     let values: Vec<i64> = results
@@ -273,7 +289,13 @@ fn inherited_layer_list_branch() {
 
     // Write one more on child
     store
-        .put_with_version_mode(child_kv("c"), Value::Int(3), CommitVersion(11), None, WriteMode::Append)
+        .put_with_version_mode(
+            child_kv("c"),
+            Value::Int(3),
+            CommitVersion(11),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let entries = store.list_branch(&child_branch());
@@ -418,11 +440,17 @@ fn inherited_layer_version_clamping() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Snapshot at version 3: should see version 1
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(3)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(3))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(10));
 
     // Snapshot at version 7: should see version 5
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(7)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(7))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(50));
 }
 
@@ -736,7 +764,10 @@ fn fork_creates_inherited_layer() {
     let child = store.branches.get(&child_branch()).unwrap();
     assert_eq!(child.inherited_layers.len(), 1);
     assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
-    assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
+    assert_eq!(
+        child.inherited_layers[0].fork_version,
+        fork_version.as_u64()
+    );
     assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
     assert!(segments_shared > 0);
 }
@@ -1101,7 +1132,10 @@ fn fork_manifest_roundtrip() {
     {
         let child = store.branches.get(&child_branch()).unwrap();
         assert_eq!(child.inherited_layers.len(), 1);
-        assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
+        assert_eq!(
+            child.inherited_layers[0].fork_version,
+            fork_version.as_u64()
+        );
     }
 
     // Create a new store and recover from the same directory
@@ -1120,7 +1154,10 @@ fn fork_manifest_roundtrip() {
         1,
         "Inherited layers should survive recovery"
     );
-    assert_eq!(child2.inherited_layers[0].fork_version, fork_version.as_u64());
+    assert_eq!(
+        child2.inherited_layers[0].fork_version,
+        fork_version.as_u64()
+    );
 
     // Verify data is readable through inherited layers after recovery
     let r = store2
@@ -1308,7 +1345,9 @@ fn list_own_entries_includes_tombstones() {
     attach_inherited_layer(&store, pid, cid, 1);
 
     // Child deletes "alpha" (writes tombstone)
-    store.delete_with_version(&child_kv("alpha"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&child_kv("alpha"), CommitVersion(2))
+        .unwrap();
 
     // list_own_entries should include the tombstone
     let own = store.list_own_entries(&cid, None);

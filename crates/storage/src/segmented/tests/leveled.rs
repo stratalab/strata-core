@@ -168,7 +168,9 @@ fn time_range_o1_includes_deletes() {
 
     // Short sleep to ensure delete timestamp is strictly later
     std::thread::sleep(std::time::Duration::from_millis(1));
-    store.delete_with_version(&kv_key("a"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("a"), CommitVersion(2))
+        .unwrap();
 
     let range_after = store.time_range(branch()).unwrap().unwrap();
     // max should have advanced to include the delete timestamp
@@ -491,10 +493,17 @@ fn compact_l0_to_l1_prunes_versions() {
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2)
     );
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(1))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -592,7 +601,11 @@ fn compact_l0_to_l1_data_correct_after() {
         Value::Int(2)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("a"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("a"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1)
     );
     assert_eq!(
@@ -1321,7 +1334,9 @@ fn scan_includes_all_levels() {
     seed(&store, kv_key("p/d"), Value::Int(4), 4);
 
     // Prefix scan should find all four
-    let results = store.scan_prefix(&kv_key("p/"), CommitVersion::MAX).unwrap();
+    let results = store
+        .scan_prefix(&kv_key("p/"), CommitVersion::MAX)
+        .unwrap();
     assert_eq!(results.len(), 4, "scan should merge data across all levels");
 }
 

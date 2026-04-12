@@ -204,8 +204,14 @@ mod tests {
     fn test_repr_transparent_size() {
         // Verify #[repr(transparent)] guarantees same size as u64
         assert_eq!(std::mem::size_of::<TxnId>(), std::mem::size_of::<u64>());
-        assert_eq!(std::mem::size_of::<CommitVersion>(), std::mem::size_of::<u64>());
+        assert_eq!(
+            std::mem::size_of::<CommitVersion>(),
+            std::mem::size_of::<u64>()
+        );
         assert_eq!(std::mem::align_of::<TxnId>(), std::mem::align_of::<u64>());
-        assert_eq!(std::mem::align_of::<CommitVersion>(), std::mem::align_of::<u64>());
+        assert_eq!(
+            std::mem::align_of::<CommitVersion>(),
+            std::mem::align_of::<u64>()
+        );
     }
 }

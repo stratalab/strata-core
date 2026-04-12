@@ -748,7 +748,11 @@ impl EventLog {
         use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
-        let meta: EventLogMeta = match self.db.storage().get_versioned(&meta_key, CommitVersion::MAX)? {
+        let meta: EventLogMeta = match self
+            .db
+            .storage()
+            .get_versioned(&meta_key, CommitVersion::MAX)?
+        {
             Some(vv) => from_stored_value(&vv.value).map_err(|e| {
                 StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
             })?,

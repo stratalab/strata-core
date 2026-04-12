@@ -268,7 +268,8 @@ impl TransactionManager {
         self.version.fetch_max(floor.as_u64(), Ordering::AcqRel);
         // Recovery data at versions ≤ floor is already in storage,
         // so visible_version must reflect this (#1913).
-        self.visible_version.fetch_max(floor.as_u64(), Ordering::AcqRel);
+        self.visible_version
+            .fetch_max(floor.as_u64(), Ordering::AcqRel);
     }
 
     /// Get the current version after draining all in-flight commits (#1710).
@@ -382,7 +383,8 @@ impl TransactionManager {
                 )));
             }
             txn.status = TransactionStatus::Committed;
-            return Ok(external_version.unwrap_or_else(|| CommitVersion(self.version.load(Ordering::Acquire))));
+            return Ok(external_version
+                .unwrap_or_else(|| CommitVersion(self.version.load(Ordering::Acquire))));
         }
 
         let profiling = commit_profile_enabled();
@@ -485,20 +487,25 @@ impl TransactionManager {
                                 let mut rec_buf = rec_cell.borrow_mut();
                                 let mut msg_buf = msg_cell.borrow_mut();
                                 let ts = Instant::now();
+                                // Issue #1696: Use commit_version as WAL record ordering key
+                                let wal_txn_id = TxnId(commit_version.as_u64());
                                 payload::serialize_wal_record_into(
                                     &mut rec_buf,
                                     &mut msg_buf,
                                     txn,
-                                    commit_version.as_u64(),
-                                    commit_version.as_u64(),
+                                    commit_version,
+                                    wal_txn_id,
                                     *txn.branch_id.as_bytes(),
                                     timestamp,
                                 );
                                 wal_serialize_ns = ts.elapsed().as_nanos() as u64;
                                 // Direct mode: no separate mutex
                                 let tw = Instant::now();
-                                let r =
-                                    wal.append_pre_serialized(&rec_buf, commit_version.as_u64(), timestamp);
+                                let r = wal.append_pre_serialized(
+                                    &rec_buf,
+                                    wal_txn_id,
+                                    timestamp,
+                                );
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -518,13 +525,15 @@ impl TransactionManager {
                             MSGPACK_BUF.with(|msg_cell| {
                                 let mut rec_buf = rec_cell.borrow_mut();
                                 let mut msg_buf = msg_cell.borrow_mut();
+                                // Issue #1696: Use commit_version as WAL record ordering key
+                                let wal_txn_id = TxnId(commit_version.as_u64());
                                 let ts = Instant::now();
                                 payload::serialize_wal_record_into(
                                     &mut rec_buf,
                                     &mut msg_buf,
                                     txn,
-                                    commit_version.as_u64(),
-                                    commit_version.as_u64(),
+                                    commit_version,
+                                    wal_txn_id,
                                     *txn.branch_id.as_bytes(),
                                     timestamp,
                                 );
@@ -533,8 +542,11 @@ impl TransactionManager {
                                 let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
                                 wal_mutex_ns = tm.elapsed().as_nanos() as u64;
                                 let tw = Instant::now();
-                                let r =
-                                    wal.append_pre_serialized(&rec_buf, commit_version.as_u64(), timestamp);
+                                let r = wal.append_pre_serialized(
+                                    &rec_buf,
+                                    wal_txn_id,
+                                    timestamp,
+                                );
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -954,8 +966,14 @@ mod tests {
         assert_ne!(v1, v2); // Versions must be unique
 
         // Both keys should be in storage
-        assert!(store.get_versioned(&key1, CommitVersion::MAX).unwrap().is_some());
-        assert!(store.get_versioned(&key2, CommitVersion::MAX).unwrap().is_some());
+        assert!(store
+            .get_versioned(&key1, CommitVersion::MAX)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_versioned(&key2, CommitVersion::MAX)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -994,11 +1012,17 @@ mod tests {
         }
 
         // Both values should be present with correct versions
-        let v1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap();
+        let v1 = store
+            .get_versioned(&key1, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap();
+        let v2 = store
+            .get_versioned(&key2, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }
@@ -1069,7 +1093,8 @@ mod tests {
 
         // Setup: Create initial data with alice and bob
         {
-            let mut setup_txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
+            let mut setup_txn =
+                TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             setup_txn.put(key_bob.clone(), Value::Int(200)).unwrap();
             manager
@@ -1107,7 +1132,10 @@ mod tests {
         );
 
         // T2's update should be preserved
-        let final_value = store.get_versioned(&key_alice, CommitVersion::MAX).unwrap().unwrap();
+        let final_value = store
+            .get_versioned(&key_alice, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(
             final_value.value,
             Value::Int(999),
@@ -1130,7 +1158,8 @@ mod tests {
 
         // Setup: Create alice
         {
-            let mut setup_txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
+            let mut setup_txn =
+                TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
             setup_txn.put(key_alice.clone(), Value::Int(100)).unwrap();
             manager
                 .commit(&mut setup_txn, store.as_ref(), Some(&mut wal))
@@ -1280,7 +1309,10 @@ mod tests {
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
 
-        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let stored = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.value, Value::Int(42));
     }
 
@@ -1393,7 +1425,10 @@ mod tests {
         assert_eq!(v, CommitVersion(1));
 
         // Verify in-memory storage
-        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let stored = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.value, Value::Int(42));
         assert_eq!(stored.version.as_u64(), 1);
 
@@ -1433,7 +1468,10 @@ mod tests {
             .unwrap();
         assert_eq!(v, CommitVersion(1));
 
-        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let stored = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.value, Value::Int(7));
     }
 
@@ -1485,7 +1523,10 @@ mod tests {
         let recovery = crate::RecoveryCoordinator::new(wal_dir);
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.txns_replayed, num_threads);
-        assert_eq!(result.stats.final_version, CommitVersion(num_threads as u64));
+        assert_eq!(
+            result.stats.final_version,
+            CommitVersion(num_threads as u64)
+        );
     }
 
     #[test]
@@ -1529,7 +1570,10 @@ mod tests {
         assert!(result.is_err(), "Should detect read-write conflict");
 
         // T2's value should be preserved in storage
-        let stored = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let stored = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(stored.value, Value::Int(99));
 
         // KEY ASSERTION: WAL should contain exactly 2 records (setup + T2).
@@ -1650,7 +1694,10 @@ mod tests {
         }
 
         // Verify in-memory state
-        assert!(store.get_versioned(&key_a, CommitVersion::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&key_a, CommitVersion::MAX)
+            .unwrap()
+            .is_none());
         assert_eq!(
             store
                 .get_versioned(&key_b, CommitVersion::MAX)
@@ -1735,11 +1782,17 @@ mod tests {
         }
 
         // Both values present with correct versions
-        let v1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap();
+        let v1 = store
+            .get_versioned(&key1, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(v1.value, Value::Int(100));
         assert_eq!(v1.version.as_u64(), 1);
 
-        let v2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap();
+        let v2 = store
+            .get_versioned(&key2, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(v2.value, Value::Int(200));
         assert_eq!(v2.version.as_u64(), 2);
     }
@@ -1891,11 +1944,19 @@ mod tests {
 
         // Both values readable
         assert_eq!(
-            store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&key1, CommitVersion::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(1)
         );
         assert_eq!(
-            store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value,
+            store
+                .get_versioned(&key2, CommitVersion::MAX)
+                .unwrap()
+                .unwrap()
+                .value,
             Value::Int(2)
         );
     }
@@ -1955,7 +2016,7 @@ mod tests {
 
         // T2's record (written first): txn_id should be commit_version=1
         assert_eq!(
-            records[0].txn_id, 1,
+            records[0].txn_id, TxnId(1),
             "T2's WAL record should carry commit_version=1 (not txn_id=2)"
         );
 
@@ -1963,7 +2024,7 @@ mod tests {
         // BUG (pre-fix): would carry txn_id=1 (start-time ID)
         // This would be skipped by any watermark >= 1, losing T1's data
         assert_eq!(
-            records[1].txn_id, 2,
+            records[1].txn_id, TxnId(2),
             "T1's WAL record must carry commit_version=2 (not start-time txn_id=1)"
         );
     }
@@ -2171,8 +2232,7 @@ mod tests {
 
         // The commit should have completed (200ms delay)
         assert_eq!(
-            quiesced,
-            1,
+            quiesced, 1,
             "quiesced_version returns version after commit completes"
         );
         assert!(
@@ -2210,7 +2270,8 @@ mod tests {
             let key = create_test_key(&ns, &format!("key_{}", i));
 
             handles.push(std::thread::spawn(move || {
-                let mut txn = TransactionContext::new(TxnId(i as u64 + 1), branch_id, CommitVersion::ZERO);
+                let mut txn =
+                    TransactionContext::new(TxnId(i as u64 + 1), branch_id, CommitVersion::ZERO);
                 txn.put(key, Value::Int(i as i64)).unwrap();
                 manager_clone
                     .commit(&mut txn, store_clone.as_ref(), None)
@@ -2395,7 +2456,12 @@ mod tests {
         let mut txn = TransactionContext::with_store(TxnId(3), branch_id, real_store);
         txn.put(key.clone(), Value::Int(44)).unwrap();
 
-        let result = manager.commit_with_version(&mut txn, &failing_store, Some(&mut wal), CommitVersion(42));
+        let result = manager.commit_with_version(
+            &mut txn,
+            &failing_store,
+            Some(&mut wal),
+            CommitVersion(42),
+        );
         assert!(
             result.is_err(),
             "commit_with_version() must return Err when apply_writes fails after WAL write"
@@ -2764,8 +2830,11 @@ mod tests {
                     let ns = create_test_namespace(branch_id);
                     let key = create_test_key(&ns, &format!("key_{}", i));
 
-                    let mut txn =
-                        TransactionContext::with_store(TxnId(i as u64 + 1), branch_id, Arc::clone(&store));
+                    let mut txn = TransactionContext::with_store(
+                        TxnId(i as u64 + 1),
+                        branch_id,
+                        Arc::clone(&store),
+                    );
                     txn.put(key, Value::Int(i as i64)).unwrap();
                     txn.status = TransactionStatus::Committed;
 

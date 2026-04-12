@@ -206,7 +206,10 @@ fn manager_initial_version_respected() {
     let manager = TransactionManager::new(CommitVersion(5000));
 
     let v = manager.allocate_version().unwrap();
-    assert!(v >= CommitVersion(5000), "Initial version should be respected");
+    assert!(
+        v >= CommitVersion(5000),
+        "Initial version should be respected"
+    );
 }
 
 #[test]
@@ -218,7 +221,10 @@ fn manager_recovery_scenario() {
     let v1 = manager.allocate_version().unwrap();
     let id1 = manager.next_txn_id().unwrap();
 
-    assert!(v1 >= CommitVersion(10000), "Version should continue from 10000");
+    assert!(
+        v1 >= CommitVersion(10000),
+        "Version should continue from 10000"
+    );
     assert!(id1 > TxnId(500), "Txn ID should continue from 500");
 
     // Subsequent allocations should still be monotonic

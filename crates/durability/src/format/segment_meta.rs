@@ -22,6 +22,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use strata_core::id::TxnId;
 
 /// Magic bytes for segment metadata files.
 pub const SEGMENT_META_MAGIC: &[u8; 4] = b"STAM";
@@ -44,11 +45,11 @@ pub struct SegmentMeta {
     /// `0` when empty.
     pub max_timestamp: u64,
     /// Minimum transaction ID across all records.
-    /// `u64::MAX` when empty.
-    pub min_txn_id: u64,
+    /// `TxnId(u64::MAX)` when empty.
+    pub min_txn_id: TxnId,
     /// Maximum transaction ID across all records.
-    /// `0` when empty.
-    pub max_txn_id: u64,
+    /// `TxnId(0)` when empty.
+    pub max_txn_id: TxnId,
     /// Number of records tracked.
     pub record_count: u64,
 }
@@ -62,14 +63,14 @@ impl SegmentMeta {
             segment_number,
             min_timestamp: u64::MAX,
             max_timestamp: 0,
-            min_txn_id: u64::MAX,
-            max_txn_id: 0,
+            min_txn_id: TxnId(u64::MAX),
+            max_txn_id: TxnId(0),
             record_count: 0,
         }
     }
 
     /// Update running min/max/count with a new record.
-    pub fn track_record(&mut self, txn_id: u64, timestamp: u64) {
+    pub fn track_record(&mut self, txn_id: TxnId, timestamp: u64) {
         self.min_timestamp = self.min_timestamp.min(timestamp);
         self.max_timestamp = self.max_timestamp.max(timestamp);
         self.min_txn_id = self.min_txn_id.min(txn_id);
@@ -141,8 +142,8 @@ impl SegmentMeta {
         buf.extend_from_slice(&self.segment_number.to_le_bytes());
         buf.extend_from_slice(&self.min_timestamp.to_le_bytes());
         buf.extend_from_slice(&self.max_timestamp.to_le_bytes());
-        buf.extend_from_slice(&self.min_txn_id.to_le_bytes());
-        buf.extend_from_slice(&self.max_txn_id.to_le_bytes());
+        buf.extend_from_slice(&self.min_txn_id.as_u64().to_le_bytes());
+        buf.extend_from_slice(&self.max_txn_id.as_u64().to_le_bytes());
         buf.extend_from_slice(&self.record_count.to_le_bytes());
 
         let crc = crc32fast::hash(&buf);
@@ -187,8 +188,8 @@ impl SegmentMeta {
             segment_number: u64::from_le_bytes(data[8..16].try_into().unwrap()),
             min_timestamp: u64::from_le_bytes(data[16..24].try_into().unwrap()),
             max_timestamp: u64::from_le_bytes(data[24..32].try_into().unwrap()),
-            min_txn_id: u64::from_le_bytes(data[32..40].try_into().unwrap()),
-            max_txn_id: u64::from_le_bytes(data[40..48].try_into().unwrap()),
+            min_txn_id: TxnId(u64::from_le_bytes(data[32..40].try_into().unwrap())),
+            max_txn_id: TxnId(u64::from_le_bytes(data[40..48].try_into().unwrap())),
             record_count: u64::from_le_bytes(data[48..56].try_into().unwrap()),
         })
     }
@@ -232,6 +233,7 @@ pub enum SegmentMetaError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::TxnId;
     use tempfile::tempdir;
 
     #[test]
@@ -240,8 +242,8 @@ mod tests {
         assert_eq!(meta.segment_number, 42);
         assert_eq!(meta.min_timestamp, u64::MAX);
         assert_eq!(meta.max_timestamp, 0);
-        assert_eq!(meta.min_txn_id, u64::MAX);
-        assert_eq!(meta.max_txn_id, 0);
+        assert_eq!(meta.min_txn_id, TxnId(u64::MAX));
+        assert_eq!(meta.max_txn_id, TxnId(0));
         assert_eq!(meta.record_count, 0);
         assert!(meta.is_empty());
     }
@@ -250,34 +252,34 @@ mod tests {
     fn test_track_record() {
         let mut meta = SegmentMeta::new_empty(1);
 
-        meta.track_record(10, 1000);
+        meta.track_record(TxnId(10), 1000);
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 1000);
-        assert_eq!(meta.min_txn_id, 10);
-        assert_eq!(meta.max_txn_id, 10);
+        assert_eq!(meta.min_txn_id, TxnId(10));
+        assert_eq!(meta.max_txn_id, TxnId(10));
         assert_eq!(meta.record_count, 1);
         assert!(!meta.is_empty());
 
-        meta.track_record(5, 2000);
+        meta.track_record(TxnId(5), 2000);
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 2000);
-        assert_eq!(meta.min_txn_id, 5);
-        assert_eq!(meta.max_txn_id, 10);
+        assert_eq!(meta.min_txn_id, TxnId(5));
+        assert_eq!(meta.max_txn_id, TxnId(10));
         assert_eq!(meta.record_count, 2);
 
-        meta.track_record(20, 500);
+        meta.track_record(TxnId(20), 500);
         assert_eq!(meta.min_timestamp, 500);
         assert_eq!(meta.max_timestamp, 2000);
-        assert_eq!(meta.min_txn_id, 5);
-        assert_eq!(meta.max_txn_id, 20);
+        assert_eq!(meta.min_txn_id, TxnId(5));
+        assert_eq!(meta.max_txn_id, TxnId(20));
         assert_eq!(meta.record_count, 3);
     }
 
     #[test]
     fn test_roundtrip_serialization() {
         let mut meta = SegmentMeta::new_empty(7);
-        meta.track_record(100, 50000);
-        meta.track_record(200, 60000);
+        meta.track_record(TxnId(100), 50000);
+        meta.track_record(TxnId(200), 60000);
 
         let bytes = meta.to_bytes_full();
         assert_eq!(bytes.len(), SEGMENT_META_SIZE);
@@ -339,8 +341,8 @@ mod tests {
     fn test_write_and_read_file() {
         let dir = tempdir().unwrap();
         let mut meta = SegmentMeta::new_empty(3);
-        meta.track_record(10, 5000);
-        meta.track_record(20, 6000);
+        meta.track_record(TxnId(10), 5000);
+        meta.track_record(TxnId(20), 6000);
 
         meta.write_to_file(dir.path()).unwrap();
 
@@ -362,12 +364,12 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let mut meta1 = SegmentMeta::new_empty(1);
-        meta1.track_record(5, 1000);
+        meta1.track_record(TxnId(5), 1000);
         meta1.write_to_file(dir.path()).unwrap();
 
         let mut meta2 = SegmentMeta::new_empty(1);
-        meta2.track_record(10, 2000);
-        meta2.track_record(20, 3000);
+        meta2.track_record(TxnId(10), 2000);
+        meta2.track_record(TxnId(20), 3000);
         meta2.write_to_file(dir.path()).unwrap();
 
         let loaded = SegmentMeta::read_from_file(dir.path(), 1)

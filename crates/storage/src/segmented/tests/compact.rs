@@ -69,7 +69,11 @@ fn compact_merges_overlapping_versions() {
         Value::Int(2)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1)
     );
 }
@@ -103,11 +107,18 @@ fn compact_prunes_old_versions() {
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2)
     );
     // Version 1 was pruned — reading at snapshot 1 should return nothing
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(1))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -120,7 +131,9 @@ fn compact_removes_dead_tombstones() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
@@ -139,7 +152,9 @@ fn compact_preserves_tombstone_above_floor() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    store.delete_with_version(&kv_key("k"), CommitVersion(3)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(3))
+        .unwrap();
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
@@ -295,7 +310,11 @@ fn compact_result_counts() {
         Value::Int(3)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("a"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("a"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2)
     );
     assert_eq!(
@@ -627,7 +646,11 @@ fn compact_with_active_memtable_data() {
     );
     // Old segment version still readable at old snapshot
     assert_eq!(
-        store.get_versioned(&kv_key("a"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("a"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1)
     );
     // Segment-only data still readable

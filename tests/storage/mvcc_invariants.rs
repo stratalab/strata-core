@@ -33,13 +33,31 @@ fn version_chain_stores_newest_first() {
 
     // Put multiple versions
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(3), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(3),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Get history - should be newest first
@@ -58,13 +76,31 @@ fn get_at_version_returns_value_lte_version() {
 
     // Put values at versions 1, 2, 3
     store
-        .put_with_version_mode(key.clone(), Value::Int(10), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(10),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(20), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(20),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(30), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(30),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Get at version 2 - should return value 20
@@ -86,7 +122,13 @@ fn get_at_version_before_first_returns_none() {
 
     // Put value at version 5
     store
-        .put_with_version_mode(key.clone(), Value::Int(50), CommitVersion(5), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(50),
+            CommitVersion(5),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Get at version 1 (before first) - should return None
@@ -141,7 +183,13 @@ fn expired_values_filtered_at_read_time() {
     // Put value with very short TTL
     let ttl = Some(Duration::from_millis(1));
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), ttl, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            ttl,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Wait for expiration
@@ -161,7 +209,13 @@ fn non_expired_values_returned() {
     // Put value with long TTL
     let ttl = Some(Duration::from_secs(3600)); // 1 hour
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), ttl, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            ttl,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Should be returned (not expired)
@@ -178,7 +232,13 @@ fn no_ttl_never_expires() {
 
     // Put value without TTL
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Should always be returned
@@ -202,7 +262,13 @@ fn tombstone_preserves_snapshot_isolation() {
 
     // Put a value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version BEFORE delete
@@ -232,7 +298,13 @@ fn tombstone_not_returned_to_user() {
 
     // Put and delete
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store.delete_with_version(&key, CommitVersion(2)).unwrap();
 
@@ -273,7 +345,7 @@ fn version_counter_panics_at_u64_max() {
     let store = SegmentedStore::new();
 
     // Set version close to MAX
-    store.set_version(u64::MAX - 2);
+    store.set_version(CommitVersion(u64::MAX - 2));
 
     let v1 = store.next_version();
     assert_eq!(v1, u64::MAX - 1);

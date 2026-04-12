@@ -33,7 +33,13 @@ fn snapshot_captures_current_version() {
 
     // Put value
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version as our "snapshot"
@@ -54,7 +60,13 @@ fn snapshot_acquisition_is_fast() {
     for i in 0..1000 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -82,19 +94,37 @@ fn multiple_snapshots_independent() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v1 = CommitVersion(store.version());
 
     // Update value
     store
-        .put_with_version_mode(key.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v2 = CommitVersion(store.version());
 
     // Update again
     store
-        .put_with_version_mode(key.clone(), Value::Int(3), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(3),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v3 = CommitVersion(store.version());
 
@@ -125,7 +155,13 @@ fn snapshot_ignores_concurrent_writes() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version
@@ -133,10 +169,22 @@ fn snapshot_ignores_concurrent_writes() {
 
     // Modify after version capture
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key.clone(), Value::Int(300), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(300),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Reading at captured version should still see original value
@@ -156,7 +204,13 @@ fn snapshot_sees_pre_delete_value() {
 
     // Put value
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version
@@ -185,7 +239,13 @@ fn repeated_reads_return_same_value() {
     let key = create_test_key(branch_id, "repeated");
 
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let version = CommitVersion(store.version());
@@ -209,10 +269,22 @@ fn multi_key_consistency_within_snapshot() {
     let key_b = create_test_key(branch_id, "balance_b");
 
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_a.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_b.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version
@@ -220,10 +292,22 @@ fn multi_key_consistency_within_snapshot() {
 
     // Transfer in current store
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(50), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_a.clone(),
+            Value::Int(50),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(250), CommitVersion(4), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_b.clone(),
+            Value::Int(250),
+            CommitVersion(4),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Reading at captured version should see consistent pre-transfer state
@@ -251,7 +335,13 @@ fn concurrent_readers_dont_block() {
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -290,7 +380,13 @@ fn snapshot_survives_store_modifications() {
     for i in 0..10 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -350,7 +446,13 @@ fn versioned_read_provides_isolation() {
 
     // Put value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Capture version and read (verifies value exists)
@@ -384,7 +486,13 @@ fn snapshot_scan_sees_consistent_state() {
     for i in 0..10 {
         let key = Key::new_kv(ns.clone(), format!("prefix_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -426,7 +534,13 @@ fn snapshot_list_sees_all_keys() {
     for i in 0..5 {
         let key = Key::new_kv(ns.clone(), format!("list_key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -435,7 +549,9 @@ fn snapshot_list_sees_all_keys() {
     // Delete some in store
     for i in 0..3 {
         let key = Key::new_kv(ns.clone(), format!("list_key_{}", i));
-        store.delete_with_version(&key, CommitVersion((i + 6) as u64)).unwrap();
+        store
+            .delete_with_version(&key, CommitVersion((i + 6) as u64))
+            .unwrap();
     }
 
     // Scan at captured version should still see all 5

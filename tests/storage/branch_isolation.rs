@@ -31,14 +31,34 @@ fn different_branches_have_separate_namespaces() {
     let key2 = create_test_key(branch2, "shared_name");
 
     store
-        .put_with_version_mode(key1.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
-    let val1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap().value;
-    let val2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value;
+    let val1 = store
+        .get_versioned(&key1, CommitVersion::MAX)
+        .unwrap()
+        .unwrap()
+        .value;
+    let val2 = store
+        .get_versioned(&key2, CommitVersion::MAX)
+        .unwrap()
+        .unwrap()
+        .value;
 
     assert_eq!(val1, Value::Int(100));
     assert_eq!(val2, Value::Int(200));
@@ -56,11 +76,23 @@ fn clear_branch_only_affects_target_branch() {
         let key1 = create_test_key(branch1, &format!("key_{}", i));
         let key2 = create_test_key(branch2, &format!("key_{}", i));
         store
-            .put_with_version_mode(key1, Value::Int(i), CommitVersion(version), None, WriteMode::Append)
+            .put_with_version_mode(
+                key1,
+                Value::Int(i),
+                CommitVersion(version),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
         version += 1;
         store
-            .put_with_version_mode(key2, Value::Int(i + 100), CommitVersion(version), None, WriteMode::Append)
+            .put_with_version_mode(
+                key2,
+                Value::Int(i + 100),
+                CommitVersion(version),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
         version += 1;
     }
@@ -71,7 +103,10 @@ fn clear_branch_only_affects_target_branch() {
     // Branch1 should be empty
     for i in 0..5 {
         let key1 = create_test_key(branch1, &format!("key_{}", i));
-        assert!(store.get_versioned(&key1, CommitVersion::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&key1, CommitVersion::MAX)
+            .unwrap()
+            .is_none());
     }
 
     // Branch2 should still have data
@@ -93,21 +128,40 @@ fn delete_in_one_branch_doesnt_affect_other() {
     let key2 = create_test_key(branch2, "shared");
 
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // Delete in branch1
     store.delete_with_version(&key1, CommitVersion(3)).unwrap();
 
     // Branch1 deleted
-    assert!(store.get_versioned(&key1, CommitVersion::MAX).unwrap().is_none());
+    assert!(store
+        .get_versioned(&key1, CommitVersion::MAX)
+        .unwrap()
+        .is_none());
 
     // Branch2 unaffected
     assert_eq!(
-        store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value,
+        store
+            .get_versioned(&key2, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2)
     );
 }
@@ -221,13 +275,31 @@ fn branch_ids_lists_all_active_branches() {
     let key3 = create_test_key(branch3, "k");
 
     store
-        .put_with_version_mode(key1, Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1,
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2, Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2,
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key3, Value::Int(3), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key3,
+            Value::Int(3),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let branches = store.branch_ids();
@@ -246,7 +318,13 @@ fn branch_entry_count() {
     for i in 0..10 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -264,7 +342,13 @@ fn list_branch_keys() {
     for i in 0..5 {
         let key = Key::new_kv(ns.clone(), format!("key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 

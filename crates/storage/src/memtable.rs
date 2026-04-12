@@ -71,19 +71,19 @@ impl MemtableEntry {
     }
 
     /// Convert to a `VersionedValue` using the given commit_id.
-    pub fn to_versioned(&self, commit_id: u64) -> VersionedValue {
+    pub fn to_versioned(&self, commit_id: CommitVersion) -> VersionedValue {
         VersionedValue {
             value: self.value.clone(),
-            version: Version::txn(commit_id),
+            version: Version::txn(commit_id.as_u64()),
             timestamp: self.timestamp,
         }
     }
 
     /// Convert to a `VersionedValue` by moving the value (avoids clone).
-    pub fn into_versioned(self, commit_id: u64) -> VersionedValue {
+    pub fn into_versioned(self, commit_id: CommitVersion) -> VersionedValue {
         VersionedValue {
             value: self.value,
-            version: Version::txn(commit_id),
+            version: Version::txn(commit_id.as_u64()),
             timestamp: self.timestamp,
         }
     }
@@ -184,7 +184,11 @@ impl Memtable {
     /// Point read: get the newest visible version of a key at or before `snapshot_commit`.
     ///
     /// Returns `None` if the key doesn't exist or has no version ≤ `snapshot_commit`.
-    pub fn get_versioned(&self, key: &Key, snapshot_commit: CommitVersion) -> Option<MemtableEntry> {
+    pub fn get_versioned(
+        &self,
+        key: &Key,
+        snapshot_commit: CommitVersion,
+    ) -> Option<MemtableEntry> {
         // Seek to (key, u64::MAX) — the theoretical newest possible version
         let seek_key = InternalKey::encode(key, u64::MAX);
         let typed_prefix = encode_typed_key(key);
@@ -489,15 +493,21 @@ mod tests {
         mt.put(&key("k1"), 3, Value::Int(30), false);
 
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3))
+                .unwrap()
+                .value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(2))
+                .unwrap()
+                .value,
             Value::Int(20)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1))
+                .unwrap()
+                .value,
             Value::Int(10)
         );
         assert!(mt.get_versioned(&key("k1"), CommitVersion(0)).is_none());
@@ -524,13 +534,21 @@ mod tests {
         mt.put(&key("k1"), 2, Value::Null, true);
         mt.put(&key("k1"), 3, Value::Int(30), false);
 
-        assert!(mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().is_tombstone);
+        assert!(
+            mt.get_versioned(&key("k1"), CommitVersion(2))
+                .unwrap()
+                .is_tombstone
+        );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3))
+                .unwrap()
+                .value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1))
+                .unwrap()
+                .value,
             Value::Int(10)
         );
     }
@@ -652,7 +670,9 @@ mod tests {
         mt.freeze();
         assert!(mt.is_frozen());
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion::MAX).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion::MAX)
+                .unwrap()
+                .value,
             Value::Int(42)
         );
     }

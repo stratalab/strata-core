@@ -160,7 +160,7 @@ impl Database {
             .unwrap_or_default();
 
         for record in &records {
-            max_txn_id = max_txn_id.max(record.txn_id);
+            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
 
             let payload = match strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
             {
@@ -168,7 +168,7 @@ impl Database {
                 Err(e) => {
                     warn!(
                         target: "strata::db",
-                        txn_id = record.txn_id,
+                        txn_id = record.txn_id.as_u64(),
                         error = %e,
                         "Refresh: skipping WAL record with corrupt payload"
                     );
@@ -205,7 +205,7 @@ impl Database {
                 ) {
                     warn!(
                         target: "strata::db",
-                        txn_id = record.txn_id,
+                        txn_id = record.txn_id.as_u64(),
                         version = payload.version,
                         error = %e,
                         "Refresh: skipping WAL record due to storage error"
@@ -339,7 +339,7 @@ impl Database {
             // Issue #1734: Advance visible version AFTER secondary indexes are
             // updated, so readers never see KV data without corresponding
             // BM25/HNSW entries.
-            self.storage.advance_version(payload.version);
+            self.storage.advance_version(CommitVersion(payload.version));
 
             applied += 1;
         }

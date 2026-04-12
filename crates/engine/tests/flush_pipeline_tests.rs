@@ -8,7 +8,7 @@ use std::sync::Arc;
 use strata_engine::background::{BackgroundScheduler, TaskPriority};
 use strata_storage::segmented::SegmentedStore;
 
-use strata_core::id::CommitVersion;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
@@ -97,7 +97,7 @@ fn write_entries(store: &SegmentedStore, writer: &mut WalWriter, start: u64, end
         seed(store, key, Value::Int(i as i64), i);
 
         let record = WalRecord::new(
-            i,
+            TxnId(i),
             *branch().as_bytes(),
             i * 1000,
             format!("k{:04}={}", i, i).into_bytes(),
@@ -205,7 +205,7 @@ fn lifecycle_crash_before_flush() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 
@@ -264,7 +264,7 @@ fn lifecycle_crash_after_segment_before_manifest() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 
@@ -392,7 +392,7 @@ fn lifecycle_wal_truncation_after_flush() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 

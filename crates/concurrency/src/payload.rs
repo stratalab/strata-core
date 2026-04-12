@@ -11,6 +11,7 @@
 //! binary encoding with schema evolution support.
 
 use serde::{Deserialize, Serialize};
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::Key;
 use strata_core::value::Value;
 
@@ -101,8 +102,8 @@ pub fn serialize_wal_record_into(
     record_buf: &mut Vec<u8>,
     msgpack_buf: &mut Vec<u8>,
     txn: &TransactionContext,
-    version: u64,
-    txn_id: u64,
+    version: CommitVersion,
+    txn_id: TxnId,
     branch_id: [u8; 16],
     timestamp: u64,
 ) {
@@ -123,7 +124,7 @@ pub fn serialize_wal_record_into(
     let deletes: Vec<&Key> = txn.delete_set.iter().collect();
 
     let payload_ref = TransactionPayloadRef {
-        version,
+        version: version.as_u64(),
         puts,
         deletes,
         put_ttls,
@@ -290,12 +291,12 @@ mod tests {
         txn.ttl_map.insert(Key::new_kv(ns.clone(), "key1"), 60_000);
         txn.delete_set.insert(Key::new_kv(ns.clone(), "key3"));
 
-        let version = 100u64;
-        let txn_id = 100u64;
+        let version = CommitVersion(100);
+        let txn_id = TxnId(100);
         let timestamp = 1234567890u64;
 
         // Old path: clone → serialize → wrap
-        let payload = TransactionPayload::from_transaction(&txn, version);
+        let payload = TransactionPayload::from_transaction(&txn, version.as_u64());
         let old_bytes =
             WalRecord::new(txn_id, *branch_id.as_bytes(), timestamp, payload.to_bytes()).to_bytes();
 
