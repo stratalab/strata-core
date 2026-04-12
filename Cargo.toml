@@ -2,6 +2,7 @@
 name = "stratadb"
 version = "0.6.1"
 edition = "2021"
+license = "Apache-2.0"
 description = "Production-grade embedded database for AI agents"
 
 [workspace]
@@ -25,7 +26,7 @@ members = [
 [workspace.package]
 version = "0.6.1"
 edition = "2021"
-rust-version = "1.70"
+rust-version = "1.88"
 authors = ["Strata contributors"]
 license = "Apache-2.0"
 repository = "https://github.com/anibjoshi/strata"
