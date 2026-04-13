@@ -1,8 +1,8 @@
 use super::*;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
 use crate::recovery::Subsystem;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use strata_concurrency::TransactionPayload;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, Namespace, TypeTag};
@@ -2278,7 +2278,10 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
     let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
 
     let primary_spec = OpenSpec::primary(&db_path)
-        .with_subsystem(TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()))
+        .with_subsystem(TestRuntimeSubsystem::recording(
+            "runtime-subsystem",
+            events.clone(),
+        ))
         .with_default_branch("main");
     let primary = Database::open_runtime(primary_spec).unwrap();
     assert_eq!(
@@ -2289,7 +2292,10 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
 
     let primary_reuse = Database::open_runtime(
         OpenSpec::primary(&db_path)
-            .with_subsystem(TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()))
+            .with_subsystem(TestRuntimeSubsystem::recording(
+                "runtime-subsystem",
+                events.clone(),
+            ))
             .with_default_branch("main"),
     )
     .unwrap();
@@ -2305,10 +2311,9 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
     OPEN_DATABASES.lock().clear();
 
     events.lock().clear();
-    let follower = Database::open_runtime(
-        OpenSpec::follower(&db_path)
-            .with_subsystem(TestRuntimeSubsystem::recording("runtime-subsystem", events.clone())),
-    )
+    let follower = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
+        TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()),
+    ))
     .unwrap();
     assert_eq!(
         events.lock().as_slice(),
@@ -2316,10 +2321,9 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
         "follower open_runtime must skip bootstrap"
     );
 
-    let follower_reuse = Database::open_runtime(
-        OpenSpec::follower(&db_path)
-            .with_subsystem(TestRuntimeSubsystem::recording("runtime-subsystem", events.clone())),
-    )
+    let follower_reuse = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
+        TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()),
+    ))
     .unwrap();
     assert!(Arc::ptr_eq(&follower, &follower_reuse));
     assert_eq!(
@@ -2373,13 +2377,9 @@ fn test_open_runtime_failed_open_can_retry() {
     let db_path = temp_dir.path().join("runtime_retry");
     let fail_once = Arc::new(AtomicBool::new(true));
 
-    let err = match Database::open_runtime(
-        OpenSpec::primary(&db_path)
-            .with_subsystem(TestRuntimeSubsystem::fail_initialize_once(
-                "runtime-subsystem",
-                fail_once.clone(),
-            )),
-    ) {
+    let err = match Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(
+        TestRuntimeSubsystem::fail_initialize_once("runtime-subsystem", fail_once.clone()),
+    )) {
         Ok(_) => panic!("expected first open to fail"),
         Err(err) => err,
     };
@@ -2395,13 +2395,9 @@ fn test_open_runtime_failed_open_can_retry() {
         "failed lifecycle open must not leave a registry entry behind"
     );
 
-    let db = Database::open_runtime(
-        OpenSpec::primary(&db_path)
-            .with_subsystem(TestRuntimeSubsystem::fail_initialize_once(
-                "runtime-subsystem",
-                fail_once,
-            )),
-    )
+    let db = Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(
+        TestRuntimeSubsystem::fail_initialize_once("runtime-subsystem", fail_once),
+    ))
     .unwrap();
     assert!(db.is_lifecycle_complete());
 

@@ -61,8 +61,8 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::any::{Any, TypeId};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_core::id::CommitVersion;
@@ -647,7 +647,10 @@ impl Database {
     }
 
     pub(crate) fn lifecycle_state(&self) -> LifecycleState {
-        LifecycleState::from_u8(self.lifecycle_state.load(std::sync::atomic::Ordering::Acquire))
+        LifecycleState::from_u8(
+            self.lifecycle_state
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
     }
 
     pub(crate) fn set_lifecycle_initializing(&self) {

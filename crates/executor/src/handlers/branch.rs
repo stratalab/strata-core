@@ -6,8 +6,8 @@
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
-use strata_engine::{ForkOptions, MergeOptions};
 use strata_engine::BranchMetadata;
+use strata_engine::{ForkOptions, MergeOptions};
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
 use crate::convert::convert_result;
@@ -282,7 +282,9 @@ pub fn branch_fork(
         .with_creator(creator.clone().unwrap_or_default());
     // Only set message/creator if they were provided
     let options = match (&message, &creator) {
-        (Some(m), Some(c)) => ForkOptions::default().with_message(m.clone()).with_creator(c.clone()),
+        (Some(m), Some(c)) => ForkOptions::default()
+            .with_message(m.clone())
+            .with_creator(c.clone()),
         (Some(m), None) => ForkOptions::default().with_message(m.clone()),
         (None, Some(c)) => ForkOptions::default().with_creator(c.clone()),
         (None, None) => ForkOptions::default(),
@@ -441,11 +443,17 @@ pub fn branch_revert(
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
 
     // Use BranchService for canonical path with DAG integration.
-    let info = p.db.branches().revert(&branch, CommitVersion(from_version), CommitVersion(to_version))
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+    let info =
+        p.db.branches()
+            .revert(
+                &branch,
+                CommitVersion(from_version),
+                CommitVersion(to_version),
+            )
+            .map_err(|e| Error::Internal {
+                reason: e.to_string(),
+                hint: None,
+            })?;
 
     emit_audit_event(
         p,
@@ -488,7 +496,8 @@ pub fn branch_cherry_pick(
             keys: filter_keys,
             primitives: filter_primitives,
         };
-        p.db.branches().cherry_pick_from_diff(&source, &target, filter, None)
+        p.db.branches()
+            .cherry_pick_from_diff(&source, &target, filter, None)
     }
     .map_err(|e| Error::Internal {
         reason: e.to_string(),

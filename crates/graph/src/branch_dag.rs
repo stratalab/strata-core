@@ -889,9 +889,8 @@ impl strata_engine::Subsystem for GraphSubsystem {
         // `register_branch_dag_hooks()` pattern. The hook is fail-fast: errors
         // propagate and abort the calling branch operation.
         let hook = Arc::new(GraphBranchDagHook::new(db.clone()));
-        db.install_dag_hook(hook).map_err(|e| {
-            StrataError::internal(format!("failed to install graph DAG hook: {e}"))
-        })?;
+        db.install_dag_hook(hook)
+            .map_err(|e| StrataError::internal(format!("failed to install graph DAG hook: {e}")))?;
 
         Ok(())
     }
@@ -963,7 +962,13 @@ fn branch_lifecycle_events(branch_name: &str, node: &NodeData) -> Vec<(u64, DagE
         .get("creator")
         .and_then(|value| value.as_str())
         .map(ToString::to_string);
-    events.push((props.get("created_at").and_then(|value| value.as_u64()).unwrap_or(0), create));
+    events.push((
+        props
+            .get("created_at")
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0),
+        create,
+    ));
 
     if props.get("status").and_then(|value| value.as_str()) == Some("deleted") {
         let delete = DagEvent::delete(branch_id, branch_name);
@@ -985,12 +990,14 @@ fn deserialize_prop<T: serde::de::DeserializeOwned>(
     let Some(value) = props.get(key) else {
         return Ok(None);
     };
-    serde_json::from_value(value.clone()).map(Some).map_err(|e| {
-        BranchDagError::new(
-            BranchDagErrorKind::Corrupted,
-            format!("failed to decode '{}' from DAG node: {}", key, e),
-        )
-    })
+    serde_json::from_value(value.clone())
+        .map(Some)
+        .map_err(|e| {
+            BranchDagError::new(
+                BranchDagErrorKind::Corrupted,
+                format!("failed to decode '{}' from DAG node: {}", key, e),
+            )
+        })
 }
 
 fn require_version(
@@ -1018,14 +1025,24 @@ fn single_neighbor(
     edge_type: &str,
 ) -> Result<String, BranchDagError> {
     let neighbors = graph_store
-        .neighbors(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, node_id, direction, Some(edge_type))
-        .map_err(|e| BranchDagError::new(BranchDagErrorKind::ReadFailed, e.to_string()))?;
-    neighbors.first().map(|neighbor| neighbor.node_id.clone()).ok_or_else(|| {
-        BranchDagError::new(
-            BranchDagErrorKind::Corrupted,
-            format!("DAG node '{}' is missing '{}' neighbor", node_id, edge_type),
+        .neighbors(
+            system_id,
+            GRAPH_SPACE,
+            BRANCH_DAG_GRAPH,
+            node_id,
+            direction,
+            Some(edge_type),
         )
-    })
+        .map_err(|e| BranchDagError::new(BranchDagErrorKind::ReadFailed, e.to_string()))?;
+    neighbors
+        .first()
+        .map(|neighbor| neighbor.node_id.clone())
+        .ok_or_else(|| {
+            BranchDagError::new(
+                BranchDagErrorKind::Corrupted,
+                format!("DAG node '{}' is missing '{}' neighbor", node_id, edge_type),
+            )
+        })
 }
 
 fn event_node_to_dag_event(
@@ -1120,37 +1137,38 @@ fn event_node_to_dag_event(
             )
         }
         Some("revert") => {
-            let info = deserialize_prop::<RevertInfo>(props, "revert_info")?.unwrap_or(RevertInfo {
-                branch: props
-                    .get("branch")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| {
-                        BranchDagError::new(
-                            BranchDagErrorKind::Corrupted,
-                            format!("DAG node '{}' is missing branch name", node_id),
-                        )
-                    })?
-                    .to_string(),
-                from_version: deserialize_prop::<CommitVersion>(props, "from_version")?
-                    .ok_or_else(|| {
-                        BranchDagError::new(
-                            BranchDagErrorKind::Corrupted,
-                            format!("DAG node '{}' is missing from_version", node_id),
-                        )
-                    })?,
-                to_version: deserialize_prop::<CommitVersion>(props, "to_version")?
-                    .ok_or_else(|| {
-                        BranchDagError::new(
-                            BranchDagErrorKind::Corrupted,
-                            format!("DAG node '{}' is missing to_version", node_id),
-                        )
-                    })?,
-                keys_reverted: props
-                    .get("keys_reverted")
-                    .and_then(|value| value.as_u64())
-                    .unwrap_or(0),
-                revert_version: Some(require_version(props, "revert_version", node_id)?),
-            });
+            let info =
+                deserialize_prop::<RevertInfo>(props, "revert_info")?.unwrap_or(RevertInfo {
+                    branch: props
+                        .get("branch")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            BranchDagError::new(
+                                BranchDagErrorKind::Corrupted,
+                                format!("DAG node '{}' is missing branch name", node_id),
+                            )
+                        })?
+                        .to_string(),
+                    from_version: deserialize_prop::<CommitVersion>(props, "from_version")?
+                        .ok_or_else(|| {
+                            BranchDagError::new(
+                                BranchDagErrorKind::Corrupted,
+                                format!("DAG node '{}' is missing from_version", node_id),
+                            )
+                        })?,
+                    to_version: deserialize_prop::<CommitVersion>(props, "to_version")?
+                        .ok_or_else(|| {
+                            BranchDagError::new(
+                                BranchDagErrorKind::Corrupted,
+                                format!("DAG node '{}' is missing to_version", node_id),
+                            )
+                        })?,
+                    keys_reverted: props
+                        .get("keys_reverted")
+                        .and_then(|value| value.as_u64())
+                        .unwrap_or(0),
+                    revert_version: Some(require_version(props, "revert_version", node_id)?),
+                });
             DagEvent::revert(
                 resolve_branch_name(&info.branch),
                 info.branch.clone(),
@@ -1173,8 +1191,8 @@ fn event_node_to_dag_event(
                 crate::types::Direction::Outgoing,
                 "cherry_pick_target",
             )?;
-            let info = deserialize_prop::<CherryPickInfo>(props, "cherry_pick_info")?
-                .unwrap_or(CherryPickInfo {
+            let info = deserialize_prop::<CherryPickInfo>(props, "cherry_pick_info")?.unwrap_or(
+                CherryPickInfo {
                     source: source.clone(),
                     target: target.clone(),
                     keys_applied: props
@@ -1185,8 +1203,11 @@ fn event_node_to_dag_event(
                         .get("keys_deleted")
                         .and_then(|value| value.as_u64())
                         .unwrap_or(0),
-                    cherry_pick_version: Some(require_version(props, "cherry_pick_version", node_id)?.0),
-                });
+                    cherry_pick_version: Some(
+                        require_version(props, "cherry_pick_version", node_id)?.0,
+                    ),
+                },
+            );
             DagEvent::cherry_pick(
                 resolve_branch_name(&target),
                 target,
@@ -1285,10 +1306,7 @@ impl BranchDagHook for GraphBranchDagHook {
             }
             DagEventKind::Merge => {
                 let merge_info = event.merge_info.as_ref().ok_or_else(|| {
-                    BranchDagError::new(
-                        BranchDagErrorKind::Other,
-                        "merge event missing MergeInfo",
-                    )
+                    BranchDagError::new(BranchDagErrorKind::Other, "merge event missing MergeInfo")
                 })?;
                 let source = event.source_branch_name.as_deref().ok_or_else(|| {
                     BranchDagError::new(
@@ -1367,7 +1385,8 @@ impl BranchDagHook for GraphBranchDagHook {
         }
 
         // Check for fork relationship
-        if let Ok(Some((child_name, fork_version))) = find_fork_version(&self.db, branch_a, branch_b)
+        if let Ok(Some((child_name, fork_version))) =
+            find_fork_version(&self.db, branch_a, branch_b)
         {
             // Return the forked-from branch as the merge base
             let (base_branch_name, base_name) = if child_name == branch_a {
@@ -1386,11 +1405,7 @@ impl BranchDagHook for GraphBranchDagHook {
         Ok(None)
     }
 
-    fn log(
-        &self,
-        branch: &str,
-        limit: usize,
-    ) -> Result<Vec<DagEvent>, BranchDagError> {
+    fn log(&self, branch: &str, limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
         let graph_store = GraphStore::new(self.db.clone());
         let system_id = resolve_branch_name(SYSTEM_BRANCH);
         let mut timeline: Vec<(u64, DagEvent)> = Vec::new();
@@ -1407,7 +1422,14 @@ impl BranchDagHook for GraphBranchDagHook {
             crate::types::Direction::Outgoing,
         ] {
             let neighbors = graph_store
-                .neighbors(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, branch, direction, None)
+                .neighbors(
+                    system_id,
+                    GRAPH_SPACE,
+                    BRANCH_DAG_GRAPH,
+                    branch,
+                    direction,
+                    None,
+                )
                 .map_err(|e| BranchDagError::new(BranchDagErrorKind::ReadFailed, e.to_string()))?;
             for neighbor in neighbors {
                 event_ids.insert(neighbor.node_id);
@@ -1439,10 +1461,7 @@ impl BranchDagHook for GraphBranchDagHook {
             .collect())
     }
 
-    fn ancestors(
-        &self,
-        branch: &str,
-    ) -> Result<Vec<AncestryEntry>, BranchDagError> {
+    fn ancestors(&self, branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
         let mut ancestors = Vec::new();
         let mut current = branch.to_string();
         let mut visited = std::collections::HashSet::new();
@@ -1457,7 +1476,10 @@ impl BranchDagHook for GraphBranchDagHook {
             let fork_version = fork.fork_version.ok_or_else(|| {
                 BranchDagError::new(
                     BranchDagErrorKind::Corrupted,
-                    format!("fork origin for branch '{}' is missing fork_version", current),
+                    format!(
+                        "fork origin for branch '{}' is missing fork_version",
+                        current
+                    ),
                 )
             })?;
             let parent_id = resolve_branch_name(&fork.parent);
@@ -2091,8 +2113,15 @@ mod tests {
         let db = setup();
         dag_add_branch(&db, "log-target", Some("create target"), Some("alice")).unwrap();
         dag_add_branch(&db, "log-source", Some("create source"), Some("alice")).unwrap();
-        dag_record_fork(&db, "log-target", "log-source", Some(7), Some("fork"), Some("alice"))
-            .unwrap();
+        dag_record_fork(
+            &db,
+            "log-target",
+            "log-source",
+            Some(7),
+            Some("fork"),
+            Some("alice"),
+        )
+        .unwrap();
         dag_record_merge(
             &db,
             "log-source",
@@ -2116,7 +2145,9 @@ mod tests {
         let log = hook.log("log-target", usize::MAX).unwrap();
         assert_eq!(log.len(), 3);
         assert_eq!(log[0].kind, DagEventKind::Merge);
-        assert!(log.iter().any(|event| event.kind == DagEventKind::BranchCreate));
+        assert!(log
+            .iter()
+            .any(|event| event.kind == DagEventKind::BranchCreate));
         assert_eq!(hook.log("log-target", 1).unwrap().len(), 1);
     }
 

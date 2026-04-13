@@ -23,11 +23,11 @@ use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult};
 
+use crate::branch_ops::with_branch_dag_hooks_suppressed;
 use crate::branch_ops::{
     self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
     MergeStrategy, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
-use crate::branch_ops::with_branch_dag_hooks_suppressed;
 use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
 use crate::database::observers::{BranchOpEvent, BranchOpKind};
@@ -210,9 +210,7 @@ impl BranchService {
     /// Emits a DAG delete event if a DAG hook is installed.
     pub fn delete(&self, name: &str) -> StrataResult<()> {
         if name.starts_with(SYSTEM_PREFIX) {
-            return Err(StrataError::invalid_input(
-                "cannot delete system branches",
-            ));
+            return Err(StrataError::invalid_input("cannot delete system branches"));
         }
 
         let mut mutation = BranchMutation::new(&self.db);
@@ -529,8 +527,9 @@ impl BranchService {
         let target_id = resolve_branch_name(target);
 
         // Execute the cherry-pick
-        let info =
-            with_branch_dag_hooks_suppressed(|| branch_ops::cherry_pick_keys(&self.db, source, target, keys))?;
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::cherry_pick_keys(&self.db, source, target, keys)
+        })?;
 
         // Record to DAG — only if cherry-pick actually committed changes
         if let Some(cp_version) = info.cherry_pick_version {
@@ -644,23 +643,41 @@ impl BranchService {
     /// Find the merge base (common ancestor) of two branches.
     ///
     /// Returns `None` if no common ancestor exists (unrelated branches).
-    pub fn merge_base(&self, branch_a: &str, branch_b: &str) -> StrataResult<Option<MergeBaseResult>> {
-        let hook = self.dag_hook().require("merge_base").map_err(dag_to_strata)?;
+    pub fn merge_base(
+        &self,
+        branch_a: &str,
+        branch_b: &str,
+    ) -> StrataResult<Option<MergeBaseResult>> {
+        let hook = self
+            .dag_hook()
+            .require("merge_base")
+            .map_err(dag_to_strata)?;
 
         // Pass branch names directly — DAG is keyed by name, not BranchId UUID
-        hook.find_merge_base(branch_a, branch_b).map_err(dag_to_strata)
+        hook.find_merge_base(branch_a, branch_b)
+            .map_err(dag_to_strata)
     }
 
     /// Get the history log for a branch.
-    pub fn log(&self, branch: &str, limit: usize) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
+    pub fn log(
+        &self,
+        branch: &str,
+        limit: usize,
+    ) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
         // Pass branch name directly — DAG is keyed by name, not BranchId UUID
         hook.log(branch, limit).map_err(dag_to_strata)
     }
 
     /// Get the ancestry chain for a branch.
-    pub fn ancestors(&self, branch: &str) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
-        let hook = self.dag_hook().require("ancestors").map_err(dag_to_strata)?;
+    pub fn ancestors(
+        &self,
+        branch: &str,
+    ) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
+        let hook = self
+            .dag_hook()
+            .require("ancestors")
+            .map_err(dag_to_strata)?;
         // Pass branch name directly — DAG is keyed by name, not BranchId UUID
         hook.ancestors(branch).map_err(dag_to_strata)
     }

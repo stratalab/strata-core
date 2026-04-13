@@ -170,27 +170,50 @@ pub enum IncompatibleReason {
 impl std::fmt::Display for IncompatibleReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ModeMismatch { existing, requested } => {
-                write!(f, "mode mismatch: existing={}, requested={}", existing, requested)
+            Self::ModeMismatch {
+                existing,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "mode mismatch: existing={}, requested={}",
+                    existing, requested
+                )
             }
-            Self::SubsystemMismatch { existing, requested } => {
+            Self::SubsystemMismatch {
+                existing,
+                requested,
+            } => {
                 write!(
                     f,
                     "subsystem mismatch: existing={:?}, requested={:?}",
                     existing, requested
                 )
             }
-            Self::DurabilityMismatch { existing, requested } => {
+            Self::DurabilityMismatch {
+                existing,
+                requested,
+            } => {
                 write!(
                     f,
                     "durability mismatch: existing={:?}, requested={:?}",
                     existing, requested
                 )
             }
-            Self::CodecMismatch { existing, requested } => {
-                write!(f, "codec mismatch: existing={}, requested={}", existing, requested)
+            Self::CodecMismatch {
+                existing,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "codec mismatch: existing={}, requested={}",
+                    existing, requested
+                )
             }
-            Self::DefaultBranchMismatch { existing, requested } => {
+            Self::DefaultBranchMismatch {
+                existing,
+                requested,
+            } => {
                 write!(
                     f,
                     "default branch mismatch: existing={:?}, requested={:?}",
@@ -268,7 +291,10 @@ mod tests {
         );
 
         let result = sig1.check_compatible(&sig2);
-        assert!(matches!(result, Err(IncompatibleReason::ModeMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(IncompatibleReason::ModeMismatch { .. })
+        ));
     }
 
     #[test]
@@ -288,7 +314,10 @@ mod tests {
         );
 
         let result = sig1.check_compatible(&sig2);
-        assert!(matches!(result, Err(IncompatibleReason::SubsystemMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(IncompatibleReason::SubsystemMismatch { .. })
+        ));
     }
 
     #[test]
@@ -308,7 +337,10 @@ mod tests {
         );
 
         let result = sig1.check_compatible(&sig2);
-        assert!(matches!(result, Err(IncompatibleReason::DurabilityMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(IncompatibleReason::DurabilityMismatch { .. })
+        ));
     }
 
     #[test]
@@ -328,7 +360,10 @@ mod tests {
         );
 
         let result = sig1.check_compatible(&sig2);
-        assert!(matches!(result, Err(IncompatibleReason::DefaultBranchMismatch { .. })));
+        assert!(matches!(
+            result,
+            Err(IncompatibleReason::DefaultBranchMismatch { .. })
+        ));
     }
 
     #[test]

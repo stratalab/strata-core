@@ -812,8 +812,9 @@ impl Database {
             None
         };
 
-        let commit_version = self.coordinator
-            .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)?;
+        let commit_version =
+            self.coordinator
+                .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)?;
 
         // Notify commit observers (best-effort, errors logged not propagated)
         if entry_count > 0 {

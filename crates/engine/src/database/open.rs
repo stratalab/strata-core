@@ -444,7 +444,9 @@ impl Database {
         match Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems, None)? {
             AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
             AcquiredDatabase::New { db, canonical_path } => {
-                Self::finish_opened_db(db, &canonical_path, |db| Self::run_lifecycle_hooks(db, true))
+                Self::finish_opened_db(db, &canonical_path, |db| {
+                    Self::run_lifecycle_hooks(db, true)
+                })
             }
         }
     }
@@ -1169,15 +1171,9 @@ impl Database {
 
         // Route to mode-specific open helper
         match spec.mode {
-            DatabaseMode::Primary => {
-                Self::open_runtime_primary(spec)
-            }
-            DatabaseMode::Follower => {
-                Self::open_runtime_follower(spec)
-            }
-            DatabaseMode::Cache => {
-                Self::open_runtime_cache(spec)
-            }
+            DatabaseMode::Primary => Self::open_runtime_primary(spec),
+            DatabaseMode::Follower => Self::open_runtime_follower(spec),
+            DatabaseMode::Cache => Self::open_runtime_cache(spec),
         }
     }
 
@@ -1292,11 +1288,8 @@ impl Database {
         }
 
         // Delegate to existing follower open path with subsystems
-        let db = Self::open_follower_internal_with_subsystems(
-            canonical_path.clone(),
-            cfg,
-            subsystems,
-        )?;
+        let db =
+            Self::open_follower_internal_with_subsystems(canonical_path.clone(), cfg, subsystems)?;
         db.set_runtime_signature(requested_signature.clone());
         db.set_lifecycle_initializing();
 
@@ -1322,7 +1315,9 @@ impl Database {
             registry.insert(canonical_path.clone(), Arc::downgrade(&db));
         }
 
-        Self::finish_opened_db(db, &canonical_path, |db| Self::run_lifecycle_hooks(db, false))
+        Self::finish_opened_db(db, &canonical_path, |db| {
+            Self::run_lifecycle_hooks(db, false)
+        })
     }
 
     /// Open a cache database from an `OpenSpec`.
@@ -1427,11 +1422,17 @@ impl Database {
             super::LifecycleState::Uninitialized => Err(StrataError::internal(
                 "existing database instance was published before lifecycle initialization started",
             )),
-            super::LifecycleState::Initializing => unreachable!("wait returned while still initializing"),
+            super::LifecycleState::Initializing => {
+                unreachable!("wait returned while still initializing")
+            }
         }
     }
 
-    fn finish_opened_db<F>(db: Arc<Self>, canonical_path: &Path, open_fn: F) -> StrataResult<Arc<Self>>
+    fn finish_opened_db<F>(
+        db: Arc<Self>,
+        canonical_path: &Path,
+        open_fn: F,
+    ) -> StrataResult<Arc<Self>>
     where
         F: FnOnce(&Arc<Self>) -> StrataResult<()>,
     {

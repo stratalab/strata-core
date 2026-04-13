@@ -119,7 +119,10 @@ impl BranchDagError {
     pub fn no_hook(operation: &str) -> Self {
         Self::new(
             BranchDagErrorKind::NoDagHook,
-            format!("operation '{}' requires a DAG hook but none is installed", operation),
+            format!(
+                "operation '{}' requires a DAG hook but none is installed",
+                operation
+            ),
         )
     }
 

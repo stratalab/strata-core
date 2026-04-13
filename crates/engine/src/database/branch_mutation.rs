@@ -119,7 +119,10 @@ impl RollbackAction {
     /// Execute this rollback action.
     fn execute(self, db: &Arc<Database>) -> StrataResult<()> {
         match self {
-            Self::DeleteBranch { name, clear_storage } => {
+            Self::DeleteBranch {
+                name,
+                clear_storage,
+            } => {
                 info!(
                     target: "strata::branch_mutation",
                     branch = %name,
@@ -502,11 +505,12 @@ impl<'a> BranchMutation<'a> {
         from_version: CommitVersion,
         to_version: CommitVersion,
     ) {
-        self.rollback_actions.push(RollbackAction::RevertBranchRange {
-            name: name.into(),
-            from_version,
-            to_version,
-        });
+        self.rollback_actions
+            .push(RollbackAction::RevertBranchRange {
+                name: name.into(),
+                from_version,
+                to_version,
+            });
     }
 
     /// Capture a branch snapshot and register it for restore-on-rollback.
@@ -536,9 +540,8 @@ impl<'a> BranchMutation<'a> {
         // Check for injected failure
         #[cfg(any(test, feature = "test-support"))]
         if self.failure_injection == Some(FailurePoint::DagWrite) {
-            return self.handle_dag_failure(BranchDagError::write_failed(
-                "injected failure for testing",
-            ));
+            return self
+                .handle_dag_failure(BranchDagError::write_failed("injected failure for testing"));
         }
 
         let Some(hook) = &self.dag_hook else {
@@ -630,7 +633,9 @@ impl<'a> BranchMutation<'a> {
         // Check for injected failure
         #[cfg(any(test, feature = "test-support"))]
         if self.failure_injection == Some(FailurePoint::Rollback) {
-            return Err(StrataError::internal("injected rollback failure for testing"));
+            return Err(StrataError::internal(
+                "injected rollback failure for testing",
+            ));
         }
 
         let actions = std::mem::take(&mut self.rollback_actions);
@@ -710,9 +715,9 @@ mod tests {
     use super::*;
     use crate::database::dag_hook::{AncestryEntry, MergeBaseResult};
     use crate::Database;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use strata_core::id::CommitVersion;
     use strata_core::types::BranchId;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
     /// Test DAG hook that can be configured to fail.
     struct TestDagHook {
@@ -758,11 +763,7 @@ mod tests {
             Ok(None)
         }
 
-        fn log(
-            &self,
-            _branch: &str,
-            _limit: usize,
-        ) -> Result<Vec<DagEvent>, BranchDagError> {
+        fn log(&self, _branch: &str, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
             Ok(Vec::new())
         }
 
@@ -783,7 +784,8 @@ mod tests {
         assert!(mutation.record_dag_event(&event).is_ok());
 
         // Commit should work
-        let observer_event = super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
+        let observer_event =
+            super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
         mutation.commit(observer_event);
     }
 
@@ -802,7 +804,8 @@ mod tests {
         assert_eq!(hook.event_count(), 1);
 
         // Commit
-        let observer_event = super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
+        let observer_event =
+            super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
         mutation.commit(observer_event);
     }
 

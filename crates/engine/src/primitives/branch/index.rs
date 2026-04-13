@@ -17,8 +17,8 @@
 //! - Primary key format: `<global_namespace>:<TypeTag::Branch>:<branch_id>`
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
-use crate::database::Database;
 use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
+use crate::database::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};

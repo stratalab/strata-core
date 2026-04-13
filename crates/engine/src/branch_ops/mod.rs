@@ -20,13 +20,13 @@ pub mod dag_hooks;
 pub(crate) mod json_merge;
 pub mod primitive_merge;
 
-pub use dag_hooks::{
-    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
-    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
-};
 pub(crate) use dag_hooks::{
     dispatch_cherry_pick_hook, dispatch_fork_hook, dispatch_merge_hook, dispatch_revert_hook,
     with_branch_dag_hooks_suppressed,
+};
+pub use dag_hooks::{
+    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
+    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
 };
 
 use crate::database::Database;

@@ -44,9 +44,10 @@ pub type VectorMergePostCommitFn = fn(
 /// Graph merge plan function signature.
 ///
 /// Called during merge to produce semantic graph merge plan.
-pub type GraphMergePlanFn = fn(
-    ctx: &crate::branch_ops::primitive_merge::MergePlanCtx<'_>,
-) -> StrataResult<crate::branch_ops::primitive_merge::PrimitiveMergePlan>;
+pub type GraphMergePlanFn =
+    fn(
+        ctx: &crate::branch_ops::primitive_merge::MergePlanCtx<'_>,
+    ) -> StrataResult<crate::branch_ops::primitive_merge::PrimitiveMergePlan>;
 
 // =============================================================================
 // Registry Types
@@ -89,7 +90,10 @@ impl MergeHandlerRegistry {
         precheck: VectorMergePrecheckFn,
         post_commit: VectorMergePostCommitFn,
     ) {
-        *self.vector.write() = Some(VectorMergeCallbacks { precheck, post_commit });
+        *self.vector.write() = Some(VectorMergeCallbacks {
+            precheck,
+            post_commit,
+        });
     }
 
     /// Register graph merge plan function.

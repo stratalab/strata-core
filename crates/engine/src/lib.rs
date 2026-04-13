@@ -30,6 +30,7 @@ pub mod transaction_ops; // TransactionOps Trait Definition
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
 pub use coordinator::{TransactionCoordinator, TransactionMetrics};
+pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use database::builder::DatabaseBuilder;
 pub use database::profile::{
     apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, HardwareInfo,
@@ -39,7 +40,6 @@ pub use database::{
     CacheMetrics, Database, DatabaseDiskUsage, HealthReport, ModelConfig, StorageConfig,
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
 };
-pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;
 pub use strata_concurrency::TransactionContext;
