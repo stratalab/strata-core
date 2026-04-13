@@ -26,7 +26,7 @@ use strata_core::{StrataError, StrataResult};
 use crate::branch_ops::with_branch_dag_hooks_suppressed;
 use crate::branch_ops::{
     self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
-    MergeStrategy, RevertInfo, TagInfo, ThreeWayDiffResult,
+    MergeStrategy, NoteInfo, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
@@ -701,19 +701,74 @@ impl BranchService {
     // =========================================================================
 
     /// Create a tag on a branch.
+    ///
+    /// Emits a `BranchOpEvent::Tag` to observers after successful creation.
     pub fn tag(
         &self,
         branch: &str,
         name: &str,
         version: Option<u64>,
         message: Option<&str>,
+        creator: Option<&str>,
     ) -> StrataResult<TagInfo> {
-        branch_ops::create_tag(&self.db, branch, name, version, message, None)
+        let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
+
+        // Emit observer event
+        let branch_id = resolve_branch_name(branch);
+        let mut event = BranchOpEvent {
+            kind: BranchOpKind::Tag,
+            branch_id,
+            branch_name: Some(branch.to_string()),
+            source_branch_id: None,
+            source_branch_name: None,
+            commit_version: Some(CommitVersion(info.version)),
+            message: message.map(|s| s.to_string()),
+            creator: creator.map(|s| s.to_string()),
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
+        };
+        // Add tag name to message if not already set
+        if event.message.is_none() {
+            event.message = Some(name.to_string());
+        }
+        self.db.branch_op_observers().notify(&event);
+
+        Ok(info)
     }
 
     /// Delete a tag from a branch.
+    ///
+    /// Emits a `BranchOpEvent::Untag` to observers if the tag existed.
     pub fn untag(&self, branch: &str, name: &str) -> StrataResult<bool> {
-        branch_ops::delete_tag(&self.db, branch, name)
+        let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
+
+        if deleted {
+            // Emit observer event
+            let branch_id = resolve_branch_name(branch);
+            let event = BranchOpEvent {
+                kind: BranchOpKind::Untag,
+                branch_id,
+                branch_name: Some(branch.to_string()),
+                source_branch_id: None,
+                source_branch_name: None,
+                commit_version: None,
+                message: Some(name.to_string()), // Tag name
+                creator: None,
+                merge_strategy: None,
+                keys_applied: None,
+                keys_deleted: None,
+                keys_reverted: None,
+                from_version: None,
+                to_version: None,
+            };
+            self.db.branch_op_observers().notify(&event);
+        }
+
+        Ok(deleted)
     }
 
     /// List all tags on a branch.
@@ -724,6 +779,35 @@ impl BranchService {
     /// Resolve a tag to its version.
     pub fn resolve_tag(&self, branch: &str, name: &str) -> StrataResult<Option<TagInfo>> {
         branch_ops::resolve_tag(&self.db, branch, name)
+    }
+
+    // =========================================================================
+    // Notes
+    // =========================================================================
+
+    /// Add a note to a specific version on a branch.
+    ///
+    /// Notes are not tracked by the observer pipeline since they are
+    /// metadata annotations, not structural branch operations.
+    pub fn add_note(
+        &self,
+        branch: &str,
+        version: CommitVersion,
+        message: &str,
+        author: Option<&str>,
+        metadata: Option<strata_core::Value>,
+    ) -> StrataResult<NoteInfo> {
+        branch_ops::add_note(&self.db, branch, version, message, author, metadata)
+    }
+
+    /// Get notes for a branch, optionally filtered by version.
+    pub fn get_notes(&self, branch: &str, version: Option<u64>) -> StrataResult<Vec<NoteInfo>> {
+        branch_ops::get_notes(&self.db, branch, version)
+    }
+
+    /// Delete a note from a specific version on a branch.
+    pub fn delete_note(&self, branch: &str, version: CommitVersion) -> StrataResult<bool> {
+        branch_ops::delete_note(&self.db, branch, version)
     }
 
     // =========================================================================

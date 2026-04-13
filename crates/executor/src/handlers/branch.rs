@@ -15,32 +15,6 @@ use crate::types::{BranchId, BranchInfo, VersionedBranchInfo};
 use crate::{Error, Output, Result};
 
 // =============================================================================
-// Audit Log Helper (for operations not routed through BranchService)
-// =============================================================================
-
-/// Emit an audit event on the `_system_` branch. Best-effort — failures are
-/// logged, never propagated.
-///
-/// Note: Most branch operations go through `BranchService` and are audited by
-/// `AuditBranchOpObserver`. This helper is only for operations that bypass
-/// `BranchService` (tag, note) and don't trigger the observer pipeline.
-fn emit_audit_event(p: &Arc<Primitives>, event_type: &str, payload: serde_json::Value) {
-    let system_branch_id = strata_engine::primitives::branch::resolve_branch_name("_system_");
-    let core_value: strata_core::value::Value = payload.into();
-    if let Err(e) = p
-        .event
-        .append(&system_branch_id, "default", event_type, core_value)
-    {
-        tracing::warn!(
-            target: "strata::audit",
-            event_type,
-            error = %e,
-            "Failed to emit audit event"
-        );
-    }
-}
-
-// =============================================================================
 // Conversion Helpers
 // =============================================================================
 
@@ -531,6 +505,8 @@ pub fn branch_bundle_validate(path: String) -> Result<Output> {
 // =============================================================================
 
 /// Handle TagCreate command.
+///
+/// Routes through `db.branches().tag()` for observer notification.
 pub fn tag_create(
     p: &Arc<Primitives>,
     branch: String,
@@ -540,8 +516,9 @@ pub fn tag_create(
     creator: Option<String>,
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let info = strata_engine::branch_ops::create_tag(
-        &p.db,
+
+    // Use BranchService for canonical path with observer notification.
+    let info = p.db.branches().tag(
         &branch,
         &name,
         version,
@@ -553,25 +530,17 @@ pub fn tag_create(
         hint: None,
     })?;
 
-    // Tag operations bypass BranchService, so emit audit event directly.
-    emit_audit_event(
-        p,
-        "branch.tag",
-        serde_json::json!({
-            "branch": branch,
-            "tag": name,
-            "version": info.version,
-            "message": message,
-        }),
-    );
-
     Ok(Output::TagCreated(info))
 }
 
 /// Handle TagDelete command.
+///
+/// Routes through `db.branches().untag()` for observer notification.
 pub fn tag_delete(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let deleted = strata_engine::branch_ops::delete_tag(&p.db, &branch, &name).map_err(|e| {
+
+    // Use BranchService for canonical path with observer notification.
+    let deleted = p.db.branches().untag(&branch, &name).map_err(|e| {
         Error::Internal {
             reason: e.to_string(),
             hint: None,
@@ -583,18 +552,17 @@ pub fn tag_delete(p: &Arc<Primitives>, branch: String, name: String) -> Result<O
 /// Handle TagList command.
 pub fn tag_list(p: &Arc<Primitives>, branch: String) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let tags =
-        strata_engine::branch_ops::list_tags(&p.db, &branch).map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+    let tags = p.db.branches().list_tags(&branch).map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
     Ok(Output::TagList(tags))
 }
 
 /// Handle TagResolve command.
 pub fn tag_resolve(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let tag = strata_engine::branch_ops::resolve_tag(&p.db, &branch, &name).map_err(|e| {
+    let tag = p.db.branches().resolve_tag(&branch, &name).map_err(|e| {
         Error::Internal {
             reason: e.to_string(),
             hint: None,
@@ -608,6 +576,10 @@ pub fn tag_resolve(p: &Arc<Primitives>, branch: String, name: String) -> Result<
 // =============================================================================
 
 /// Handle NoteAdd command.
+///
+/// Routes through `db.branches().add_note()`.
+/// Notes are metadata annotations — they don't trigger the BranchOpObserver
+/// pipeline since they're not structural branch operations.
 pub fn note_add(
     p: &Arc<Primitives>,
     branch: String,
@@ -617,8 +589,9 @@ pub fn note_add(
     metadata: Option<strata_core::Value>,
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let note = strata_engine::branch_ops::add_note(
-        &p.db,
+
+    // Use BranchService for canonical path.
+    let note = p.db.branches().add_note(
         &branch,
         CommitVersion(version),
         &message,
@@ -630,24 +603,13 @@ pub fn note_add(
         hint: None,
     })?;
 
-    // Note operations bypass BranchService, so emit audit event directly.
-    emit_audit_event(
-        p,
-        "branch.note",
-        serde_json::json!({
-            "branch": branch,
-            "version": version,
-            "message": message,
-        }),
-    );
-
     Ok(Output::NoteAdded(note))
 }
 
 /// Handle NoteGet command.
 pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let notes = strata_engine::branch_ops::get_notes(&p.db, &branch, version).map_err(|e| {
+    let notes = p.db.branches().get_notes(&branch, version).map_err(|e| {
         Error::Internal {
             reason: e.to_string(),
             hint: None,
@@ -659,7 +621,7 @@ pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Re
 /// Handle NoteDelete command.
 pub fn note_delete(p: &Arc<Primitives>, branch: String, version: u64) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, CommitVersion(version))
+    let deleted = p.db.branches().delete_note(&branch, CommitVersion(version))
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
             hint: None,
