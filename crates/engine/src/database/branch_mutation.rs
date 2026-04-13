@@ -112,7 +112,7 @@ enum RollbackAction {
         to_version: CommitVersion,
     },
     /// Restore a branch snapshot captured before delete.
-    RestoreBranchSnapshot(BranchSnapshot),
+    RestoreBranchSnapshot(Box<BranchSnapshot>),
 }
 
 impl RollbackAction {
@@ -517,7 +517,7 @@ impl<'a> BranchMutation<'a> {
     pub fn on_rollback_restore_branch(&mut self, name: &str) -> StrataResult<()> {
         let snapshot = BranchSnapshot::capture(self.db, name)?;
         self.rollback_actions
-            .push(RollbackAction::RestoreBranchSnapshot(snapshot));
+            .push(RollbackAction::RestoreBranchSnapshot(Box::new(snapshot)));
         Ok(())
     }
 
