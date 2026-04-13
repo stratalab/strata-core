@@ -31,13 +31,20 @@ jobs:
         run: cargo deny check
       - name: DAG guard
         run: |
-          # Guard: engine must not have normal dep on vector (dev-deps for tests are OK)
+          # Guard: engine must not have normal dep on vector or graph
           if cargo tree --package strata-engine --edges=normal --format="{p}" | grep -q strata-vector; then
             echo "ERROR: strata-engine has normal dep on strata-vector" && exit 1
+          fi
+          if cargo tree --package strata-engine --edges=normal --format="{p}" | grep -q strata-graph; then
+            echo "ERROR: strata-engine has normal dep on strata-graph" && exit 1
           fi
           # Guard: vector_benchmarks must live in vector crate, not engine
           if [ -f crates/engine/benches/vector_benchmarks.rs ]; then
             echo "ERROR: vector_benchmarks.rs belongs in crates/vector/benches/" && exit 1
+          fi
+          # Manifest guard: engine must not depend on vector/graph (neither normal nor dev-deps)
+          if grep -qE "^strata-(vector|graph)" crates/engine/Cargo.toml; then
+            echo "ERROR: engine Cargo.toml must not list strata-vector or strata-graph" && exit 1
           fi
 
   test:
@@ -83,7 +90,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with: { submodules: true }
-      - uses: dtolnay/rust-toolchain@1.74
+      - uses: dtolnay/rust-toolchain@1.88
       - uses: Swatinem/rust-cache@v2
       - name: MSRV check
         run: cargo check --workspace --all-targets --all-features

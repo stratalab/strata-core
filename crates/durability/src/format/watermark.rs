@@ -9,6 +9,8 @@
 //! - WAL entries with txn_id > watermark are needed for recovery
 //! - WAL entries with txn_id <= watermark can be removed by compaction
 
+use strata_core::id::TxnId;
+
 /// Snapshot watermark state
 ///
 /// Tracks the current snapshot and its watermark for recovery and compaction.
@@ -17,7 +19,7 @@ pub struct SnapshotWatermark {
     /// Current snapshot ID (None if no snapshot exists)
     snapshot_id: Option<u64>,
     /// Transaction watermark (all txns <= this are in the snapshot)
-    watermark_txn: Option<u64>,
+    watermark_txn: Option<TxnId>,
     /// Timestamp when watermark was last updated
     updated_at: Option<u64>,
 }
@@ -33,7 +35,7 @@ impl SnapshotWatermark {
     }
 
     /// Create watermark state with initial values
-    pub fn with_values(snapshot_id: u64, watermark_txn: u64, updated_at: u64) -> Self {
+    pub fn with_values(snapshot_id: u64, watermark_txn: TxnId, updated_at: u64) -> Self {
         SnapshotWatermark {
             snapshot_id: Some(snapshot_id),
             watermark_txn: Some(watermark_txn),
@@ -42,7 +44,7 @@ impl SnapshotWatermark {
     }
 
     /// Update the watermark after a successful checkpoint
-    pub fn set(&mut self, snapshot_id: u64, watermark_txn: u64, updated_at: u64) {
+    pub fn set(&mut self, snapshot_id: u64, watermark_txn: TxnId, updated_at: u64) {
         self.snapshot_id = Some(snapshot_id);
         self.watermark_txn = Some(watermark_txn);
         self.updated_at = Some(updated_at);
@@ -54,7 +56,7 @@ impl SnapshotWatermark {
     }
 
     /// Get the watermark transaction ID
-    pub fn watermark_txn(&self) -> Option<u64> {
+    pub fn watermark_txn(&self) -> Option<TxnId> {
         self.watermark_txn
     }
 
@@ -66,7 +68,7 @@ impl SnapshotWatermark {
     /// Check if a transaction ID is covered by the snapshot
     ///
     /// Returns true if the transaction is included in the current snapshot.
-    pub fn is_covered(&self, txn_id: u64) -> bool {
+    pub fn is_covered(&self, txn_id: TxnId) -> bool {
         match self.watermark_txn {
             Some(watermark) => txn_id <= watermark,
             None => false,
@@ -76,7 +78,7 @@ impl SnapshotWatermark {
     /// Check if a transaction ID needs WAL replay
     ///
     /// Returns true if the transaction is NOT in the snapshot and needs replay.
-    pub fn needs_replay(&self, txn_id: u64) -> bool {
+    pub fn needs_replay(&self, txn_id: TxnId) -> bool {
         match self.watermark_txn {
             Some(watermark) => txn_id > watermark,
             None => true, // No snapshot, all transactions need replay
@@ -98,7 +100,7 @@ impl SnapshotWatermark {
             (Some(sid), Some(wtxn), Some(ts)) => {
                 bytes.push(1); // has data
                 bytes.extend_from_slice(&sid.to_le_bytes());
-                bytes.extend_from_slice(&wtxn.to_le_bytes());
+                bytes.extend_from_slice(&wtxn.as_u64().to_le_bytes());
                 bytes.extend_from_slice(&ts.to_le_bytes());
             }
             _ => {
@@ -124,7 +126,7 @@ impl SnapshotWatermark {
         }
 
         let snapshot_id = u64::from_le_bytes(bytes[1..9].try_into().unwrap());
-        let watermark_txn = u64::from_le_bytes(bytes[9..17].try_into().unwrap());
+        let watermark_txn = TxnId(u64::from_le_bytes(bytes[9..17].try_into().unwrap()));
         let updated_at = u64::from_le_bytes(bytes[17..25].try_into().unwrap());
 
         Ok(SnapshotWatermark::with_values(
@@ -154,7 +156,7 @@ pub enum WatermarkError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointInfo {
     /// Transaction ID at checkpoint (watermark)
-    pub watermark_txn: u64,
+    pub watermark_txn: TxnId,
     /// Snapshot identifier
     pub snapshot_id: u64,
     /// Timestamp of checkpoint (microseconds since epoch)
@@ -163,7 +165,7 @@ pub struct CheckpointInfo {
 
 impl CheckpointInfo {
     /// Create new checkpoint info
-    pub fn new(watermark_txn: u64, snapshot_id: u64, timestamp: u64) -> Self {
+    pub fn new(watermark_txn: TxnId, snapshot_id: u64, timestamp: u64) -> Self {
         CheckpointInfo {
             watermark_txn,
             snapshot_id,
@@ -186,34 +188,34 @@ mod tests {
 
     #[test]
     fn test_with_values() {
-        let wm = SnapshotWatermark::with_values(5, 100, 1234567890);
+        let wm = SnapshotWatermark::with_values(5, TxnId(100), 1234567890);
         assert_eq!(wm.snapshot_id(), Some(5));
-        assert_eq!(wm.watermark_txn(), Some(100));
+        assert_eq!(wm.watermark_txn(), Some(TxnId(100)));
         assert_eq!(wm.updated_at(), Some(1234567890));
     }
 
     #[test]
     fn test_set_watermark() {
         let mut wm = SnapshotWatermark::new();
-        wm.set(1, 50, 1000);
+        wm.set(1, TxnId(50), 1000);
 
         assert_eq!(wm.snapshot_id(), Some(1));
-        assert_eq!(wm.watermark_txn(), Some(50));
+        assert_eq!(wm.watermark_txn(), Some(TxnId(50)));
 
-        wm.set(2, 100, 2000);
+        wm.set(2, TxnId(100), 2000);
         assert_eq!(wm.snapshot_id(), Some(2));
-        assert_eq!(wm.watermark_txn(), Some(100));
+        assert_eq!(wm.watermark_txn(), Some(TxnId(100)));
     }
 
     #[test]
     fn test_is_covered() {
-        let wm = SnapshotWatermark::with_values(1, 100, 0);
+        let wm = SnapshotWatermark::with_values(1, TxnId(100), 0);
 
-        assert!(wm.is_covered(1));
-        assert!(wm.is_covered(50));
-        assert!(wm.is_covered(100));
-        assert!(!wm.is_covered(101));
-        assert!(!wm.is_covered(200));
+        assert!(wm.is_covered(TxnId(1)));
+        assert!(wm.is_covered(TxnId(50)));
+        assert!(wm.is_covered(TxnId(100)));
+        assert!(!wm.is_covered(TxnId(101)));
+        assert!(!wm.is_covered(TxnId(200)));
     }
 
     #[test]
@@ -221,18 +223,18 @@ mod tests {
         let wm = SnapshotWatermark::new();
 
         // Nothing is covered without a snapshot
-        assert!(!wm.is_covered(1));
-        assert!(!wm.is_covered(100));
+        assert!(!wm.is_covered(TxnId(1)));
+        assert!(!wm.is_covered(TxnId(100)));
     }
 
     #[test]
     fn test_needs_replay() {
-        let wm = SnapshotWatermark::with_values(1, 100, 0);
+        let wm = SnapshotWatermark::with_values(1, TxnId(100), 0);
 
-        assert!(!wm.needs_replay(1));
-        assert!(!wm.needs_replay(100));
-        assert!(wm.needs_replay(101));
-        assert!(wm.needs_replay(200));
+        assert!(!wm.needs_replay(TxnId(1)));
+        assert!(!wm.needs_replay(TxnId(100)));
+        assert!(wm.needs_replay(TxnId(101)));
+        assert!(wm.needs_replay(TxnId(200)));
     }
 
     #[test]
@@ -240,8 +242,8 @@ mod tests {
         let wm = SnapshotWatermark::new();
 
         // Everything needs replay without a snapshot
-        assert!(wm.needs_replay(1));
-        assert!(wm.needs_replay(100));
+        assert!(wm.needs_replay(TxnId(1)));
+        assert!(wm.needs_replay(TxnId(100)));
     }
 
     #[test]
@@ -249,13 +251,13 @@ mod tests {
         let wm = SnapshotWatermark::new();
         assert_eq!(wm.next_snapshot_id(), 1);
 
-        let wm = SnapshotWatermark::with_values(5, 100, 0);
+        let wm = SnapshotWatermark::with_values(5, TxnId(100), 0);
         assert_eq!(wm.next_snapshot_id(), 6);
     }
 
     #[test]
     fn test_serialization_roundtrip() {
-        let wm = SnapshotWatermark::with_values(42, 1000, 9999);
+        let wm = SnapshotWatermark::with_values(42, TxnId(1000), 9999);
         let bytes = wm.to_bytes();
         let parsed = SnapshotWatermark::from_bytes(&bytes).unwrap();
 
@@ -276,7 +278,7 @@ mod tests {
 
     #[test]
     fn test_serialization_with_data() {
-        let wm = SnapshotWatermark::with_values(1, 100, 12345);
+        let wm = SnapshotWatermark::with_values(1, TxnId(100), 12345);
         let bytes = wm.to_bytes();
 
         assert_eq!(bytes.len(), 25);
@@ -295,9 +297,9 @@ mod tests {
 
     #[test]
     fn test_checkpoint_info() {
-        let info = CheckpointInfo::new(100, 5, 1234567890);
+        let info = CheckpointInfo::new(TxnId(100), 5, 1234567890);
 
-        assert_eq!(info.watermark_txn, 100);
+        assert_eq!(info.watermark_txn, TxnId(100));
         assert_eq!(info.snapshot_id, 5);
         assert_eq!(info.timestamp, 1234567890);
     }

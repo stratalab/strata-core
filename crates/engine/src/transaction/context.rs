@@ -400,7 +400,10 @@ impl<'a> TransactionOps for Transaction<'a> {
 
         // Delegate to ctx which checks json_writes buffer → snapshot
         match self.ctx.json_get_document(&full_key)? {
-            Some(jv) => Ok(Some(Versioned::new(jv, Version::txn(self.ctx.txn_id.as_u64())))),
+            Some(jv) => Ok(Some(Versioned::new(
+                jv,
+                Version::txn(self.ctx.txn_id.as_u64()),
+            ))),
             None => Ok(None),
         }
     }

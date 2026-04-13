@@ -71,19 +71,19 @@ impl MemtableEntry {
     }
 
     /// Convert to a `VersionedValue` using the given commit_id.
-    pub fn to_versioned(&self, commit_id: u64) -> VersionedValue {
+    pub fn to_versioned(&self, commit_id: CommitVersion) -> VersionedValue {
         VersionedValue {
             value: self.value.clone(),
-            version: Version::txn(commit_id),
+            version: Version::txn(commit_id.as_u64()),
             timestamp: self.timestamp,
         }
     }
 
     /// Convert to a `VersionedValue` by moving the value (avoids clone).
-    pub fn into_versioned(self, commit_id: u64) -> VersionedValue {
+    pub fn into_versioned(self, commit_id: CommitVersion) -> VersionedValue {
         VersionedValue {
             value: self.value,
-            version: Version::txn(commit_id),
+            version: Version::txn(commit_id.as_u64()),
             timestamp: self.timestamp,
         }
     }
@@ -145,7 +145,7 @@ impl Memtable {
     ///
     /// # Panics
     /// Panics if the memtable is frozen.
-    pub fn put(&self, key: &Key, commit_id: u64, value: Value, is_tombstone: bool) {
+    pub fn put(&self, key: &Key, commit_id: CommitVersion, value: Value, is_tombstone: bool) {
         self.put_entry(
             key,
             commit_id,
@@ -163,7 +163,7 @@ impl Memtable {
     ///
     /// # Panics
     /// Panics if the memtable is frozen.
-    pub fn put_entry(&self, key: &Key, commit_id: u64, entry: MemtableEntry) {
+    pub fn put_entry(&self, key: &Key, commit_id: CommitVersion, entry: MemtableEntry) {
         assert!(
             !self.frozen.load(Ordering::Acquire),
             "cannot write to frozen memtable"
@@ -177,16 +177,22 @@ impl Memtable {
 
         self.approx_bytes
             .fetch_add(entry_size as u64, Ordering::Relaxed);
-        self.max_commit.fetch_max(commit_id, Ordering::Relaxed);
-        self.min_commit.fetch_min(commit_id, Ordering::Relaxed);
+        self.max_commit
+            .fetch_max(commit_id.as_u64(), Ordering::Relaxed);
+        self.min_commit
+            .fetch_min(commit_id.as_u64(), Ordering::Relaxed);
     }
 
     /// Point read: get the newest visible version of a key at or before `snapshot_commit`.
     ///
     /// Returns `None` if the key doesn't exist or has no version ≤ `snapshot_commit`.
-    pub fn get_versioned(&self, key: &Key, snapshot_commit: CommitVersion) -> Option<MemtableEntry> {
+    pub fn get_versioned(
+        &self,
+        key: &Key,
+        snapshot_commit: CommitVersion,
+    ) -> Option<MemtableEntry> {
         // Seek to (key, u64::MAX) — the theoretical newest possible version
-        let seek_key = InternalKey::encode(key, u64::MAX);
+        let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
 
         // Iterate forward from the seek point
@@ -197,7 +203,7 @@ impl Memtable {
                 break;
             }
             // Check MVCC visibility
-            if ik.commit_id() <= snapshot_commit.as_u64() {
+            if ik.commit_id() <= snapshot_commit {
                 return Some(entry.value().clone());
             }
         }
@@ -212,9 +218,9 @@ impl Memtable {
     pub fn get_versioned_with_commit(
         &self,
         key: &Key,
-        snapshot_commit: u64,
-    ) -> Option<(u64, MemtableEntry)> {
-        let seek_key = InternalKey::encode(key, u64::MAX);
+        snapshot_commit: CommitVersion,
+    ) -> Option<(CommitVersion, MemtableEntry)> {
+        let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
         self.get_versioned_preencoded(&typed_prefix, seek_key.as_bytes(), snapshot_commit)
     }
@@ -225,8 +231,8 @@ impl Memtable {
         &self,
         typed_key: &[u8],
         seek_bytes: &[u8],
-        snapshot_commit: u64,
-    ) -> Option<(u64, MemtableEntry)> {
+        snapshot_commit: CommitVersion,
+    ) -> Option<(CommitVersion, MemtableEntry)> {
         // For frozen memtables, check the bloom filter first to skip
         // skiplist probes for keys that are definitely absent (#1755).
         if self.frozen.load(Ordering::Acquire) {
@@ -252,8 +258,8 @@ impl Memtable {
     /// Get only the latest commit_id for a key (no value clone).
     ///
     /// Used by OCC validation — needs only the version number, not the value.
-    pub fn get_version_only(&self, key: &Key) -> Option<u64> {
-        let seek_key = InternalKey::encode(key, u64::MAX);
+    pub fn get_version_only(&self, key: &Key) -> Option<CommitVersion> {
+        let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
 
         let entry = self.map.range(seek_key..).next()?;
@@ -269,8 +275,8 @@ impl Memtable {
     ///
     /// Results are in descending commit_id order (newest first), matching the
     /// InternalKey sort order.
-    pub fn get_all_versions(&self, key: &Key) -> Vec<(u64, MemtableEntry)> {
-        let seek_key = InternalKey::encode(key, u64::MAX);
+    pub fn get_all_versions(&self, key: &Key) -> Vec<(CommitVersion, MemtableEntry)> {
+        let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
 
         let mut results = Vec::new();
@@ -292,7 +298,7 @@ impl Memtable {
         &'a self,
         prefix: &Key,
     ) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + 'a {
-        let seek_key = InternalKey::encode(prefix, u64::MAX);
+        let seek_key = InternalKey::encode(prefix, CommitVersion::MAX);
         // Use the prefix-match encoding (no terminator) for starts_with checks
         let match_prefix = encode_typed_key_prefix(prefix);
 
@@ -312,7 +318,7 @@ impl Memtable {
         start_key: &Key,
         match_prefix: &Key,
     ) -> impl Iterator<Item = (InternalKey, MemtableEntry)> + 'a {
-        let seek_key = InternalKey::encode(start_key, u64::MAX);
+        let seek_key = InternalKey::encode(start_key, CommitVersion::MAX);
         let match_prefix = encode_typed_key_prefix(match_prefix);
 
         self.map
@@ -459,7 +465,7 @@ mod tests {
     #[test]
     fn put_then_get_returns_value() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(42), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(42), false);
         let result = mt.get_versioned(&key("k1"), CommitVersion::MAX);
         assert_eq!(result.unwrap().value, Value::Int(42));
     }
@@ -473,8 +479,8 @@ mod tests {
     #[test]
     fn put_tombstone_then_get_returns_tombstone() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Null, false);
-        mt.put(&key("k1"), 2, Value::Null, true);
+        mt.put(&key("k1"), CommitVersion(1), Value::Null, false);
+        mt.put(&key("k1"), CommitVersion(2), Value::Null, true);
         let result = mt.get_versioned(&key("k1"), CommitVersion::MAX);
         assert!(result.unwrap().is_tombstone);
     }
@@ -484,20 +490,26 @@ mod tests {
     #[test]
     fn get_versioned_returns_correct_version() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(10), false);
-        mt.put(&key("k1"), 2, Value::Int(20), false);
-        mt.put(&key("k1"), 3, Value::Int(30), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&key("k1"), CommitVersion(2), Value::Int(20), false);
+        mt.put(&key("k1"), CommitVersion(3), Value::Int(30), false);
 
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3))
+                .unwrap()
+                .value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(2))
+                .unwrap()
+                .value,
             Value::Int(20)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1))
+                .unwrap()
+                .value,
             Value::Int(10)
         );
         assert!(mt.get_versioned(&key("k1"), CommitVersion(0)).is_none());
@@ -506,9 +518,9 @@ mod tests {
     #[test]
     fn get_version_only_returns_latest_commit() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 5, Value::Int(50), false);
-        mt.put(&key("k1"), 10, Value::Int(100), false);
-        assert_eq!(mt.get_version_only(&key("k1")), Some(10));
+        mt.put(&key("k1"), CommitVersion(5), Value::Int(50), false);
+        mt.put(&key("k1"), CommitVersion(10), Value::Int(100), false);
+        assert_eq!(mt.get_version_only(&key("k1")), Some(CommitVersion(10)));
     }
 
     #[test]
@@ -520,17 +532,25 @@ mod tests {
     #[test]
     fn tombstone_at_snapshot_hides_older_versions() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(10), false);
-        mt.put(&key("k1"), 2, Value::Null, true);
-        mt.put(&key("k1"), 3, Value::Int(30), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&key("k1"), CommitVersion(2), Value::Null, true);
+        mt.put(&key("k1"), CommitVersion(3), Value::Int(30), false);
 
-        assert!(mt.get_versioned(&key("k1"), CommitVersion(2)).unwrap().is_tombstone);
+        assert!(
+            mt.get_versioned(&key("k1"), CommitVersion(2))
+                .unwrap()
+                .is_tombstone
+        );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(3)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(3))
+                .unwrap()
+                .value,
             Value::Int(30)
         );
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion(1)).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion(1))
+                .unwrap()
+                .value,
             Value::Int(10)
         );
     }
@@ -540,9 +560,9 @@ mod tests {
     #[test]
     fn prefix_scan_returns_matching_keys() {
         let mt = Memtable::new(0);
-        mt.put(&key("user:1"), 1, Value::Int(1), false);
-        mt.put(&key("user:2"), 1, Value::Int(2), false);
-        mt.put(&key("order:1"), 1, Value::Int(100), false);
+        mt.put(&key("user:1"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("user:2"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&key("order:1"), CommitVersion(1), Value::Int(100), false);
 
         let prefix = key("user:");
         let results: Vec<_> = mt.iter_prefix(&prefix).collect();
@@ -553,9 +573,9 @@ mod tests {
     #[test]
     fn prefix_scan_includes_multiple_versions() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(10), false);
-        mt.put(&key("k1"), 3, Value::Int(30), false);
-        mt.put(&key("k2"), 2, Value::Int(20), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&key("k1"), CommitVersion(3), Value::Int(30), false);
+        mt.put(&key("k2"), CommitVersion(2), Value::Int(20), false);
 
         let prefix = key("k");
         let results: Vec<_> = mt.iter_prefix(&prefix).collect();
@@ -566,9 +586,9 @@ mod tests {
     #[test]
     fn prefix_scan_empty_prefix_returns_all_same_type() {
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 1, Value::Int(2), false);
-        mt.put(&key("c"), 1, Value::Int(3), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&key("c"), CommitVersion(1), Value::Int(3), false);
 
         // Empty user_key prefix matches all KV keys in the same namespace
         let prefix = key("");
@@ -579,8 +599,18 @@ mod tests {
     #[test]
     fn prefix_scan_does_not_cross_type_tags() {
         let mt = Memtable::new(0);
-        mt.put(&key_typed(TypeTag::KV, "k1"), 1, Value::Int(1), false);
-        mt.put(&key_typed(TypeTag::Event, "k1"), 1, Value::Int(2), false);
+        mt.put(
+            &key_typed(TypeTag::KV, "k1"),
+            CommitVersion(1),
+            Value::Int(1),
+            false,
+        );
+        mt.put(
+            &key_typed(TypeTag::Event, "k1"),
+            CommitVersion(1),
+            Value::Int(2),
+            false,
+        );
 
         // Prefix scan for KV type should not return Event entries
         let prefix = key_typed(TypeTag::KV, "k");
@@ -593,11 +623,11 @@ mod tests {
     #[test]
     fn iter_range_seeks_to_start_key() {
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 1, Value::Int(2), false);
-        mt.put(&key("c"), 1, Value::Int(3), false);
-        mt.put(&key("d"), 1, Value::Int(4), false);
-        mt.put(&key("e"), 1, Value::Int(5), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&key("c"), CommitVersion(1), Value::Int(3), false);
+        mt.put(&key("d"), CommitVersion(1), Value::Int(4), false);
+        mt.put(&key("e"), CommitVersion(1), Value::Int(5), false);
 
         // Start from "c", prefix matches all KV keys in namespace
         let start = key("c");
@@ -618,9 +648,9 @@ mod tests {
     #[test]
     fn iter_range_with_start_equals_prefix_matches_iter_prefix() {
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 1, Value::Int(2), false);
-        mt.put(&key("c"), 1, Value::Int(3), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&key("c"), CommitVersion(1), Value::Int(3), false);
 
         let prefix = key("");
         let range_results: Vec<_> = mt.iter_range(&prefix, &prefix).collect();
@@ -634,8 +664,8 @@ mod tests {
     #[test]
     fn iter_range_past_all_keys_returns_empty() {
         let mt = Memtable::new(0);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 1, Value::Int(2), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(1), Value::Int(2), false);
 
         let start = key("z");
         let prefix = key("");
@@ -648,11 +678,13 @@ mod tests {
     #[test]
     fn frozen_memtable_is_readable() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(42), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(42), false);
         mt.freeze();
         assert!(mt.is_frozen());
         assert_eq!(
-            mt.get_versioned(&key("k1"), CommitVersion::MAX).unwrap().value,
+            mt.get_versioned(&key("k1"), CommitVersion::MAX)
+                .unwrap()
+                .value,
             Value::Int(42)
         );
     }
@@ -662,15 +694,15 @@ mod tests {
     fn frozen_memtable_rejects_writes() {
         let mt = Memtable::new(0);
         mt.freeze();
-        mt.put(&key("k1"), 1, Value::Int(42), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(42), false);
     }
 
     #[test]
     fn frozen_memtable_iter_all_is_sorted() {
         let mt = Memtable::new(0);
-        mt.put(&key("c"), 1, Value::Int(3), false);
-        mt.put(&key("a"), 1, Value::Int(1), false);
-        mt.put(&key("b"), 1, Value::Int(2), false);
+        mt.put(&key("c"), CommitVersion(1), Value::Int(3), false);
+        mt.put(&key("a"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&key("b"), CommitVersion(1), Value::Int(2), false);
         mt.freeze();
 
         let entries: Vec<_> = mt.iter_all().collect();
@@ -686,7 +718,7 @@ mod tests {
     fn approx_bytes_increases_on_put() {
         let mt = Memtable::new(0);
         assert_eq!(mt.approx_bytes(), 0);
-        mt.put(&key("k1"), 1, Value::Int(42), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(42), false);
         assert!(mt.approx_bytes() > 0);
     }
 
@@ -696,13 +728,13 @@ mod tests {
         assert_eq!(mt.len(), 0);
         assert!(mt.is_empty());
 
-        mt.put(&key("k1"), 1, Value::Int(1), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(1), false);
         assert_eq!(mt.len(), 1);
 
-        mt.put(&key("k1"), 2, Value::Int(2), false);
+        mt.put(&key("k1"), CommitVersion(2), Value::Int(2), false);
         assert_eq!(mt.len(), 2); // both versions stored
 
-        mt.put(&key("k2"), 1, Value::Int(3), false);
+        mt.put(&key("k2"), CommitVersion(1), Value::Int(3), false);
         assert_eq!(mt.len(), 3);
     }
 
@@ -711,9 +743,9 @@ mod tests {
     #[test]
     fn commit_range_tracking() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 5, Value::Int(1), false);
-        mt.put(&key("k2"), 10, Value::Int(2), false);
-        mt.put(&key("k3"), 3, Value::Int(3), false);
+        mt.put(&key("k1"), CommitVersion(5), Value::Int(1), false);
+        mt.put(&key("k2"), CommitVersion(10), Value::Int(2), false);
+        mt.put(&key("k3"), CommitVersion(3), Value::Int(3), false);
         assert_eq!(mt.max_commit(), 10);
         assert_eq!(mt.min_commit(), 3);
     }
@@ -728,7 +760,7 @@ mod tests {
         for i in 0..1000u64 {
             mt.put(
                 &key(&format!("present_{i:04}")),
-                i + 1,
+                CommitVersion(i + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -737,8 +769,8 @@ mod tests {
 
         // Read a key that exists — must be found (no false negatives).
         let typed_hit = encode_typed_key(&key("present_0500"));
-        let seek_hit = InternalKey::from_typed_key_bytes(&typed_hit, u64::MAX);
-        let hit = mt.get_versioned_preencoded(&typed_hit, seek_hit.as_bytes(), u64::MAX);
+        let seek_hit = InternalKey::from_typed_key_bytes(&typed_hit, CommitVersion::MAX);
+        let hit = mt.get_versioned_preencoded(&typed_hit, seek_hit.as_bytes(), CommitVersion::MAX);
         assert!(
             hit.is_some(),
             "existing key must be found in frozen memtable"
@@ -768,7 +800,7 @@ mod tests {
     #[test]
     fn test_issue_1755_bloom_not_built_for_active_memtable() {
         let mt = Memtable::new(0);
-        mt.put(&key("k1"), 1, Value::Int(1), false);
+        mt.put(&key("k1"), CommitVersion(1), Value::Int(1), false);
         // Active (unfrozen) memtable should not have a bloom.
         assert!(
             mt.frozen_bloom().is_none(),
@@ -785,9 +817,9 @@ mod tests {
 
         // Reading from empty frozen memtable should return None and build bloom.
         let typed = encode_typed_key(&key("any"));
-        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
+        let seek = InternalKey::from_typed_key_bytes(&typed, CommitVersion::MAX);
         assert!(mt
-            .get_versioned_preencoded(&typed, seek.as_bytes(), u64::MAX)
+            .get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX)
             .is_none());
         // Empty bloom always returns false — correct.
         assert!(mt.frozen_bloom().is_some());
@@ -798,12 +830,12 @@ mod tests {
         use crate::key_encoding::InternalKey;
 
         let mt = Memtable::new(0);
-        mt.put(&key("deleted"), 1, Value::Null, true); // tombstone
+        mt.put(&key("deleted"), CommitVersion(1), Value::Null, true); // tombstone
         mt.freeze();
 
         let typed = encode_typed_key(&key("deleted"));
-        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
-        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), u64::MAX);
+        let seek = InternalKey::from_typed_key_bytes(&typed, CommitVersion::MAX);
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX);
         assert!(result.is_some(), "tombstone must be visible through bloom");
         assert!(result.unwrap().1.is_tombstone);
     }
@@ -813,20 +845,20 @@ mod tests {
         use crate::key_encoding::InternalKey;
 
         let mt = Memtable::new(0);
-        mt.put(&key("mv"), 1, Value::Int(10), false);
-        mt.put(&key("mv"), 2, Value::Int(20), false);
-        mt.put(&key("mv"), 3, Value::Int(30), false);
+        mt.put(&key("mv"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&key("mv"), CommitVersion(2), Value::Int(20), false);
+        mt.put(&key("mv"), CommitVersion(3), Value::Int(30), false);
         mt.freeze();
 
         let typed = encode_typed_key(&key("mv"));
-        let seek = InternalKey::from_typed_key_bytes(&typed, u64::MAX);
+        let seek = InternalKey::from_typed_key_bytes(&typed, CommitVersion::MAX);
 
         // Snapshot at version 2 should see value 20.
-        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), 2);
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion(2));
         assert_eq!(result.unwrap().1.value, Value::Int(20));
 
         // Snapshot at version 0 should see nothing.
-        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), 0);
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::ZERO);
         assert!(result.is_none());
     }
 
@@ -839,7 +871,12 @@ mod tests {
 
         // Insert some data
         for i in 0..100u64 {
-            mt.put(&key(&format!("k{}", i)), i, Value::Int(i as i64), false);
+            mt.put(
+                &key(&format!("k{}", i)),
+                CommitVersion(i),
+                Value::Int(i as i64),
+                false,
+            );
         }
 
         // Spawn readers

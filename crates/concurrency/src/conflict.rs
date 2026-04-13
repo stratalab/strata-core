@@ -48,6 +48,7 @@ pub fn check_write_write_conflicts(writes: &[JsonPatchEntry]) -> Vec<ConflictTyp
 mod tests {
     use super::*;
     use std::sync::Arc;
+    use strata_core::id::CommitVersion;
     use strata_core::primitives::json::JsonPatch;
     use strata_core::types::{BranchId, Key, Namespace};
 
@@ -67,7 +68,7 @@ mod tests {
         let writes = vec![JsonPatchEntry::new(
             key,
             JsonPatch::set_at("foo".parse().unwrap(), serde_json::json!(1).into()),
-            1,
+            CommitVersion(1),
         )];
 
         let conflicts = check_write_write_conflicts(&writes);
@@ -82,12 +83,12 @@ mod tests {
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("foo".parse().unwrap(), serde_json::json!(1).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("foo.bar".parse().unwrap(), serde_json::json!(2).into()),
-                3,
+                CommitVersion(3),
             ),
         ];
 
@@ -117,12 +118,12 @@ mod tests {
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("foo.bar".parse().unwrap(), serde_json::json!(1).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("foo.bar".parse().unwrap(), serde_json::json!(2).into()),
-                3,
+                CommitVersion(3),
             ),
         ];
 
@@ -138,17 +139,17 @@ mod tests {
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("foo".parse().unwrap(), serde_json::json!(1).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("bar".parse().unwrap(), serde_json::json!(2).into()),
-                3,
+                CommitVersion(3),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("baz".parse().unwrap(), serde_json::json!(3).into()),
-                4,
+                CommitVersion(4),
             ),
         ];
 
@@ -166,12 +167,12 @@ mod tests {
             JsonPatchEntry::new(
                 key1,
                 JsonPatch::set_at("foo".parse().unwrap(), serde_json::json!(1).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key2,
                 JsonPatch::set_at("foo".parse().unwrap(), serde_json::json!(2).into()),
-                3,
+                CommitVersion(3),
             ),
         ];
 
@@ -188,17 +189,17 @@ mod tests {
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("x".parse().unwrap(), serde_json::json!(1).into()),
-                1,
+                CommitVersion(1),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("x.a".parse().unwrap(), serde_json::json!(2).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("x.a.b".parse().unwrap(), serde_json::json!(3).into()),
-                3,
+                CommitVersion(3),
             ),
         ];
 
@@ -225,17 +226,17 @@ mod tests {
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("a".parse().unwrap(), serde_json::json!(1).into()),
-                1,
+                CommitVersion(1),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("b".parse().unwrap(), serde_json::json!(2).into()),
-                2,
+                CommitVersion(2),
             ),
             JsonPatchEntry::new(
                 key.clone(),
                 JsonPatch::set_at("a.child".parse().unwrap(), serde_json::json!(3).into()),
-                3,
+                CommitVersion(3),
             ),
         ];
 

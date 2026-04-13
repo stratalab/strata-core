@@ -115,7 +115,7 @@ fn live_entries_from_versioned(
         .map(|e| {
             let vv = VersionedValue {
                 value: e.value,
-                version: Version::Txn(e.commit_id),
+                version: Version::Txn(e.commit_id.as_u64()),
                 timestamp: strata_core::Timestamp::from_micros(0),
             };
             (e.key, vv)
@@ -567,7 +567,7 @@ pub struct ThreeWayDiffResult {
     /// Merge base branch name
     pub merge_base_branch: String,
     /// Merge base version
-    pub merge_base_version: u64,
+    pub merge_base_version: CommitVersion,
     /// Entries that differ (excludes Unchanged)
     pub entries: Vec<ThreeWayDiffEntry>,
 }
@@ -578,7 +578,7 @@ pub struct MergeBaseInfo {
     /// Branch name at the merge base
     pub branch: String,
     /// MVCC version at the merge base
-    pub version: u64,
+    pub version: CommitVersion,
 }
 
 /// Options for filtering and time-scoping a branch diff.
@@ -934,7 +934,7 @@ pub fn diff_branches_with_options(
     let storage = db.storage();
 
     // Capture snapshot version for consistent reads (#1920)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // COW fast path: if one branch is a direct child of the other and no
     // as_of timestamp, use O(W) diff instead of O(N) full scan.
@@ -1084,11 +1084,11 @@ fn cow_diff_branches(
     id_b: BranchId,
     child_id: BranchId,
     parent_id: BranchId,
-    fork_version: u64,
+    fork_version: CommitVersion,
     branch_a_name: &str,
     branch_b_name: &str,
     options: &DiffOptions,
-    snapshot_version: u64,
+    snapshot_version: CommitVersion,
 ) -> StrataResult<BranchDiffResult> {
     use strata_core::Storage;
     let space_index = SpaceIndex::new(db.clone());
@@ -1146,7 +1146,7 @@ fn cow_diff_branches(
             .clone();
         let key_a = Key::new(ns_a, *type_tag, user_key.clone());
         let val_a = storage
-            .get_versioned(&key_a, CommitVersion(snapshot_version))?
+            .get_versioned(&key_a, snapshot_version)?
             .map(|vv| vv.value);
 
         let ns_b = ns_cache
@@ -1155,7 +1155,7 @@ fn cow_diff_branches(
             .clone();
         let key_b = Key::new(ns_b, *type_tag, user_key.clone());
         let val_b = storage
-            .get_versioned(&key_b, CommitVersion(snapshot_version))?
+            .get_versioned(&key_b, snapshot_version)?
             .map(|vv| vv.value);
 
         let diff_entry = match (&val_a, &val_b) {
@@ -1233,7 +1233,7 @@ pub struct MergeBase {
     /// reads at `version` return the inherited (pre-fork) view.
     pub branch_id: BranchId,
     /// MVCC version to read ancestor state at.
-    pub version: u64,
+    pub version: CommitVersion,
 }
 
 /// Classification of a key in a three-way merge.
@@ -1452,7 +1452,10 @@ fn compute_merge_base(
 ) -> Option<MergeBase> {
     // 1. Executor-provided override (from DAG)
     if let Some((branch_id, version)) = merge_base_override {
-        return Some(MergeBase { branch_id, version });
+        return Some(MergeBase {
+            branch_id,
+            version: CommitVersion(version),
+        });
     }
 
     // 2. Check storage for fork relationship
@@ -1544,7 +1547,7 @@ pub(crate) fn gather_typed_entries(
     target_id: BranchId,
     merge_base: &MergeBase,
     spaces: &[String],
-    snapshot_version: u64,
+    snapshot_version: CommitVersion,
 ) -> StrataResult<TypedEntries> {
     let storage = db.storage();
     let space_set: HashSet<&str> = spaces.iter().map(|s| s.as_str()).collect();
@@ -1920,7 +1923,7 @@ pub fn merge_branches_with_metadata(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot version for consistent reads during diff (#1917)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // Gather typed entries once, then route through the
     // PrimitiveMergeHandler registry. The registry's `precheck` step is
@@ -2569,7 +2572,7 @@ pub struct NoteInfo {
 pub fn add_note(
     db: &Arc<Database>,
     branch: &str,
-    version: u64,
+    version: CommitVersion,
     message: &str,
     author: Option<&str>,
     metadata: Option<Value>,
@@ -2583,7 +2586,7 @@ pub fn add_note(
     let timestamp = strata_core::contract::Timestamp::now().as_micros();
     let note = NoteInfo {
         branch: branch.to_string(),
-        version,
+        version: version.as_u64(),
         message: message.to_string(),
         author: author.map(|s| s.to_string()),
         timestamp,
@@ -2591,7 +2594,7 @@ pub fn add_note(
     };
 
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
-    let note_key = note_key(branch, version);
+    let note_key = note_key(branch, version.as_u64());
     let note_value = serde_json::to_string(&note)
         .map_err(|e| StrataError::internal(format!("Failed to serialize note: {}", e)))?;
 
@@ -2646,9 +2649,9 @@ pub fn get_notes(
 /// Delete a note at a specific version.
 ///
 /// Returns `true` if the note existed and was deleted.
-pub fn delete_note(db: &Arc<Database>, branch: &str, version: u64) -> StrataResult<bool> {
+pub fn delete_note(db: &Arc<Database>, branch: &str, version: CommitVersion) -> StrataResult<bool> {
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
-    let note_key = note_key(branch, version);
+    let note_key = note_key(branch, version.as_u64());
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -2678,13 +2681,13 @@ pub struct RevertInfo {
     /// Branch name
     pub branch: String,
     /// Start of the reverted range (inclusive)
-    pub from_version: u64,
+    pub from_version: CommitVersion,
     /// End of the reverted range (inclusive)
-    pub to_version: u64,
+    pub to_version: CommitVersion,
     /// Number of keys reverted
     pub keys_reverted: u64,
     /// MVCC version of the revert transaction
-    pub revert_version: Option<u64>,
+    pub revert_version: Option<CommitVersion>,
 }
 
 /// Revert a version range on a branch.
@@ -2702,8 +2705,8 @@ pub struct RevertInfo {
 pub fn revert_version_range(
     db: &Arc<Database>,
     branch: &str,
-    from_version: u64,
-    to_version: u64,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
 ) -> StrataResult<RevertInfo> {
     revert_version_range_with_metadata(db, branch, from_version, to_version, None, None)
 }
@@ -2713,13 +2716,13 @@ pub fn revert_version_range(
 pub fn revert_version_range_with_metadata(
     db: &Arc<Database>,
     branch: &str,
-    from_version: u64,
-    to_version: u64,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<RevertInfo> {
     // Validate range
-    if from_version == 0 {
+    if from_version == CommitVersion::ZERO {
         return Err(StrataError::invalid_input("from_version must be > 0"));
     }
     if from_version > to_version {
@@ -2728,7 +2731,7 @@ pub fn revert_version_range_with_metadata(
             from_version, to_version
         )));
     }
-    let current_version = db.current_version().as_u64();
+    let current_version = db.current_version();
     if to_version > current_version {
         return Err(StrataError::invalid_input(format!(
             "to_version ({}) exceeds current database version ({})",
@@ -2745,8 +2748,11 @@ pub fn revert_version_range_with_metadata(
     for &type_tag in &DATA_TYPE_TAGS {
         // 1. "before" state: what the branch looked like at (from_version - 1)
         //    WITH tombstones, so we can distinguish "key existed" from "key absent"
-        let before_entries =
-            storage.list_by_type_at_version(&branch_id, type_tag, from_version.saturating_sub(1));
+        let before_entries = storage.list_by_type_at_version(
+            &branch_id,
+            type_tag,
+            CommitVersion(from_version.as_u64().saturating_sub(1)),
+        );
 
         // 2. "after" state: what the branch looked like at to_version
         //    WITH tombstones
@@ -2809,16 +2815,16 @@ pub fn revert_version_range_with_metadata(
             }
             Ok(())
         })?;
-        revert_version = Some(version);
+        revert_version = Some(CommitVersion(version));
     }
 
     info!(
         target: "strata::branch_ops",
         branch,
-        from_version,
-        to_version,
+        from_version = from_version.as_u64(),
+        to_version = to_version.as_u64(),
         keys_reverted,
-        ?revert_version,
+        revert_version = ?revert_version.map(|v| v.as_u64()),
         "Version range reverted"
     );
 
@@ -3076,7 +3082,7 @@ pub fn cherry_pick_from_diff(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot for consistent reads (#1917)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // Cherry-pick uses the same per-handler `precheck` + `plan` dispatch
     // as `merge_branches`, so it inherits the semantic graph merge and
@@ -5031,7 +5037,15 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
         write_kv(&db, "main", "default", "k", Value::Int(1));
 
-        let note = add_note(&db, "main", 1, "initial state", Some("ai"), None).unwrap();
+        let note = add_note(
+            &db,
+            "main",
+            CommitVersion(1),
+            "initial state",
+            Some("ai"),
+            None,
+        )
+        .unwrap();
         assert_eq!(note.message, "initial state");
         assert_eq!(note.version, 1);
 
@@ -5046,10 +5060,10 @@ mod tests {
     fn test_note_delete() {
         let (_temp, db) = setup_with_branch("main");
 
-        add_note(&db, "main", 1, "note1", None, None).unwrap();
-        add_note(&db, "main", 2, "note2", None, None).unwrap();
+        add_note(&db, "main", CommitVersion(1), "note1", None, None).unwrap();
+        add_note(&db, "main", CommitVersion(2), "note2", None, None).unwrap();
 
-        assert!(delete_note(&db, "main", 1).unwrap());
+        assert!(delete_note(&db, "main", CommitVersion(1)).unwrap());
 
         let notes = get_notes(&db, "main", None).unwrap();
         assert_eq!(notes.len(), 1);
@@ -5094,7 +5108,7 @@ mod tests {
         let base = get_merge_base(&db, "child", "parent", None).unwrap();
         assert!(base.is_some());
         let base = base.unwrap();
-        assert_eq!(base.version, fork_info.fork_version.unwrap());
+        assert_eq!(base.version, CommitVersion(fork_info.fork_version.unwrap()));
     }
 
     #[test]
@@ -5120,7 +5134,7 @@ mod tests {
         write_kv(&db, "main", "default", "b", Value::Int(10)); // v3
 
         // Get current version
-        let current = db.current_version().as_u64();
+        let current = db.current_version();
 
         // Revert the last write (v3 = b:10)
         let info = revert_version_range(&db, "main", current, current).unwrap();
@@ -5139,11 +5153,11 @@ mod tests {
         write_kv(&db, "main", "default", "a", Value::Int(1)); // v_start
         let v_start = db.current_version().as_u64();
         write_kv(&db, "main", "default", "a", Value::Int(2)); // v_change
-        let v_change = db.current_version().as_u64();
+        let v_change = db.current_version();
         write_kv(&db, "main", "default", "a", Value::Int(3)); // v_after (after range)
 
         // Revert [v_start+1, v_change] — but "a" was modified after the range
-        let info = revert_version_range(&db, "main", v_start + 1, v_change).unwrap();
+        let info = revert_version_range(&db, "main", CommitVersion(v_start + 1), v_change).unwrap();
         assert_eq!(
             info.keys_reverted, 0,
             "should skip keys modified after range"
@@ -5158,11 +5172,11 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
 
         // from_version > to_version
-        let result = revert_version_range(&db, "main", 5, 3);
+        let result = revert_version_range(&db, "main", CommitVersion(5), CommitVersion(3));
         assert!(result.is_err());
 
         // from_version == 0
-        let result = revert_version_range(&db, "main", 0, 3);
+        let result = revert_version_range(&db, "main", CommitVersion(0), CommitVersion(3));
         assert!(result.is_err());
     }
 
@@ -5174,13 +5188,14 @@ mod tests {
 
         // Delete "a" in the revert range
         delete_kv(&db, "main", "default", "a");
-        let v_delete = db.current_version().as_u64();
+        let v_delete = db.current_version();
 
         // Verify it's gone
         assert_eq!(read_kv(&db, "main", "default", "a"), None);
 
         // Revert the deletion
-        let info = revert_version_range(&db, "main", v_before + 1, v_delete).unwrap();
+        let info =
+            revert_version_range(&db, "main", CommitVersion(v_before + 1), v_delete).unwrap();
         assert_eq!(info.keys_reverted, 1);
 
         // Key should be restored

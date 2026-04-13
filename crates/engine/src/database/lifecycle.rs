@@ -16,7 +16,7 @@ impl Database {
     ///
     /// Removes old versions from version chains across all entries in the branch.
     /// Returns the number of pruned versions.
-    pub fn gc_versions_before(&self, branch_id: BranchId, min_version: u64) -> usize {
+    pub fn gc_versions_before(&self, branch_id: BranchId, min_version: CommitVersion) -> usize {
         self.storage.gc_branch(&branch_id, min_version)
     }
 
@@ -68,7 +68,9 @@ impl Database {
 
         let mut total_pruned = 0;
         for branch_id in self.storage.branch_ids() {
-            total_pruned += self.storage.gc_branch(&branch_id, safe_point);
+            total_pruned += self
+                .storage
+                .gc_branch(&branch_id, CommitVersion(safe_point));
         }
 
         if total_pruned > 0 {
@@ -160,7 +162,7 @@ impl Database {
             .unwrap_or_default();
 
         for record in &records {
-            max_txn_id = max_txn_id.max(record.txn_id);
+            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
 
             let payload = match strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
             {
@@ -168,7 +170,7 @@ impl Database {
                 Err(e) => {
                     warn!(
                         target: "strata::db",
-                        txn_id = record.txn_id,
+                        txn_id = record.txn_id.as_u64(),
                         error = %e,
                         "Refresh: skipping WAL record with corrupt payload"
                     );
@@ -199,13 +201,13 @@ impl Database {
                 if let Err(e) = self.storage.apply_recovery_atomic(
                     writes,
                     deletes,
-                    payload.version,
+                    CommitVersion(payload.version),
                     record.timestamp,
                     &payload.put_ttls,
                 ) {
                     warn!(
                         target: "strata::db",
-                        txn_id = record.txn_id,
+                        txn_id = record.txn_id.as_u64(),
                         version = payload.version,
                         error = %e,
                         "Refresh: skipping WAL record due to storage error"
@@ -339,7 +341,7 @@ impl Database {
             // Issue #1734: Advance visible version AFTER secondary indexes are
             // updated, so readers never see KV data without corresponding
             // BM25/HNSW entries.
-            self.storage.advance_version(payload.version);
+            self.storage.advance_version(CommitVersion(payload.version));
 
             applied += 1;
         }

@@ -20,6 +20,7 @@ use std::collections::BinaryHeap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
+use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key};
 
 use crate::key_encoding::{encode_typed_key_prefix, InternalKey};
@@ -421,7 +422,7 @@ impl SeekableIterator for MergeSeekableIter {
 /// of the same key are skipped.
 pub struct MvccSeekableIter {
     inner: MergeSeekableIter,
-    max_version: u64,
+    max_version: CommitVersion,
     last_emitted_prefix: Option<Vec<u8>>,
     current_key: Option<InternalKey>,
     current_entry: Option<MemtableEntry>,
@@ -429,7 +430,7 @@ pub struct MvccSeekableIter {
 
 impl MvccSeekableIter {
     /// Create a new MVCC iterator with the given snapshot version.
-    pub fn new(inner: MergeSeekableIter, max_version: u64) -> Self {
+    pub fn new(inner: MergeSeekableIter, max_version: CommitVersion) -> Self {
         Self {
             inner,
             max_version,
@@ -516,7 +517,7 @@ pub struct RewritingSeekableIter {
     inner: Box<dyn SeekableIterator>,
     target_branch_id: BranchId,
     source_branch_id: BranchId,
-    fork_version: u64,
+    fork_version: CommitVersion,
     current_key: Option<InternalKey>,
     current_entry: Option<MemtableEntry>,
 }
@@ -532,7 +533,7 @@ impl RewritingSeekableIter {
         inner: Box<dyn SeekableIterator>,
         target_branch_id: BranchId,
         source_branch_id: BranchId,
-        fork_version: u64,
+        fork_version: CommitVersion,
     ) -> Self {
         Self {
             inner,

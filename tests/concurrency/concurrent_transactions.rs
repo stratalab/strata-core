@@ -47,7 +47,13 @@ fn parallel_commits_different_runs_no_contention() {
 
                 // Setup initial value
                 store
-                    .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
+                    .put_with_version_mode(
+                        key.clone(),
+                        Value::Int(0),
+                        CommitVersion(1),
+                        None,
+                        WriteMode::Append,
+                    )
                     .unwrap();
 
                 barrier.wait();
@@ -68,7 +74,7 @@ fn parallel_commits_different_runs_no_contention() {
                         .unwrap()
                         .version
                         .as_u64();
-                    txn.read_set.insert(key.clone(), v);
+                    txn.read_set.insert(key.clone(), CommitVersion(v));
                     txn.write_set.insert(key.clone(), Value::Int(i));
 
                     // Validate
@@ -110,15 +116,35 @@ fn different_branches_have_independent_namespaces() {
 
     // Write different values to same logical name in different branches
     store
-        .put_with_version_mode(key1.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(200), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(200),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // They should be independent
-    let val1 = store.get_versioned(&key1, CommitVersion::MAX).unwrap().unwrap().value;
-    let val2 = store.get_versioned(&key2, CommitVersion::MAX).unwrap().unwrap().value;
+    let val1 = store
+        .get_versioned(&key1, CommitVersion::MAX)
+        .unwrap()
+        .unwrap()
+        .value;
+    let val2 = store
+        .get_versioned(&key2, CommitVersion::MAX)
+        .unwrap()
+        .unwrap()
+        .value;
 
     assert_eq!(val1, Value::Int(100));
     assert_eq!(val2, Value::Int(200));
@@ -137,7 +163,13 @@ fn high_contention_single_key() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(0), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(0),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let barrier = Arc::new(Barrier::new(8));
@@ -159,12 +191,15 @@ fn high_contention_single_key() {
                 for i in 0..10 {
                     loop {
                         // Read current value
-                        let current = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
-                        let read_version = current.version.as_u64();
+                        let current = store
+                            .get_versioned(&key, CommitVersion::MAX)
+                            .unwrap()
+                            .unwrap();
+                        let read_version = CommitVersion(current.version.as_u64());
 
                         // Create transaction
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(read_version));
+                        let mut txn = TransactionContext::new(txn_id, branch_id, read_version);
                         txn.read_set.insert(key.clone(), read_version);
                         txn.write_set
                             .insert(key.clone(), Value::Int((thread_id * 100 + i) as i64));
@@ -220,24 +255,40 @@ fn interleaved_disjoint_operations_both_commit() {
 
     // Initial values
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_a.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_b.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
-    let va = store
-        .get_versioned(&key_a, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64();
-    let vb = store
-        .get_versioned(&key_b, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64();
+    let va = CommitVersion(
+        store
+            .get_versioned(&key_a, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
+    let vb = CommitVersion(
+        store
+            .get_versioned(&key_b, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // T1: reads A, writes B
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
@@ -366,7 +417,10 @@ fn manager_with_initial_version() {
     let manager = TransactionManager::new(CommitVersion(1000));
 
     let v1 = manager.allocate_version().unwrap();
-    assert!(v1 >= CommitVersion(1000), "First version should be >= initial");
+    assert!(
+        v1 >= CommitVersion(1000),
+        "First version should be >= initial"
+    );
 }
 
 #[test]

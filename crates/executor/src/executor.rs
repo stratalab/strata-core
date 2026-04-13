@@ -1260,7 +1260,7 @@ impl Executor {
                 // Use the current version as the safe GC boundary:
                 // all versions older than the current version are prunable
                 // since they have been superseded by newer commits.
-                let current = self.primitives.db.current_version().as_u64();
+                let current = self.primitives.db.current_version();
                 let _pruned = self.primitives.db.gc_versions_before(branch_id, current);
                 Ok(Output::Unit)
             }

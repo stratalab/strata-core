@@ -183,7 +183,7 @@ impl RecoveryCoordinator {
             let record = record_result.map_err(|e| {
                 strata_core::StrataError::storage(format!("WAL segment read failed: {}", e))
             })?;
-            max_txn_id = max_txn_id.max(record.txn_id);
+            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
 
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
                 strata_core::StrataError::storage(format!(
@@ -201,7 +201,7 @@ impl RecoveryCoordinator {
                 storage.put_recovery_entry(
                     key.clone(),
                     value.clone(),
-                    payload.version,
+                    CommitVersion(payload.version),
                     record.timestamp,
                     ttl_ms,
                 )?;
@@ -210,7 +210,11 @@ impl RecoveryCoordinator {
 
             // Apply deletes with original timestamp (#1619)
             for key in &payload.deletes {
-                storage.delete_recovery_entry(key, payload.version, record.timestamp)?;
+                storage.delete_recovery_entry(
+                    key,
+                    CommitVersion(payload.version),
+                    record.timestamp,
+                )?;
                 stats.deletes_applied += 1;
             }
 
@@ -224,7 +228,8 @@ impl RecoveryCoordinator {
         stats.final_version = CommitVersion(max_version);
         stats.max_txn_id = TxnId(max_txn_id);
 
-        let txn_manager = TransactionManager::with_txn_id(CommitVersion(max_version), TxnId(max_txn_id));
+        let txn_manager =
+            TransactionManager::with_txn_id(CommitVersion(max_version), TxnId(max_txn_id));
 
         Ok(RecoveryResult {
             storage,
@@ -370,7 +375,7 @@ mod tests {
             put_ttls: vec![],
         };
         let record = WalRecord::new(
-            txn_id,
+            TxnId(txn_id),
             *branch_id.as_bytes(),
             now_micros(),
             payload.to_bytes(),

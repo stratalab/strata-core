@@ -301,7 +301,9 @@ impl TransactionCoordinator {
         // Relaxed: observational counters only (see struct-level doc).
         self.active_count.fetch_add(1, Ordering::Relaxed);
         self.total_started.fetch_add(1, Ordering::Relaxed);
-        self.active_snapshots.lock().insert(txn_id.as_u64(), start_version.as_u64());
+        self.active_snapshots
+            .lock()
+            .insert(txn_id.as_u64(), start_version.as_u64());
     }
 
     /// Record transaction commit
@@ -1317,7 +1319,10 @@ mod tests {
 
         // Verify all versions are > 0 (initial version)
         for v in all_versions.iter() {
-            assert!(*v > CommitVersion::ZERO, "Version should be > initial version 0");
+            assert!(
+                *v > CommitVersion::ZERO,
+                "Version should be > initial version 0"
+            );
         }
     }
 

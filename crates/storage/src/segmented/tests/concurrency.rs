@@ -215,13 +215,17 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
         "corrupt manifest must be reported, not silently load as L0"
     );
     // The orphan SST must NOT be accessible (no L0 fallback).
-    let orphan_val = store2.get_versioned(&kv_key("orphan"), CommitVersion::MAX).unwrap();
+    let orphan_val = store2
+        .get_versioned(&kv_key("orphan"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         orphan_val.is_none(),
         "orphan segment must not be loaded when manifest is corrupt"
     );
     // The real segment must also not be accessible (branch skipped entirely).
-    let real_val = store2.get_versioned(&kv_key("real"), CommitVersion::MAX).unwrap();
+    let real_val = store2
+        .get_versioned(&kv_key("real"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         real_val.is_none(),
         "no segments should be loaded for corrupt-manifest branch"
@@ -311,7 +315,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount() {
     let b2 = Arc::clone(&barrier);
     let compact_handle = std::thread::spawn(move || {
         b2.wait();
-        s2.compact_branch(&parent_branch(), 0)
+        s2.compact_branch(&parent_branch(), CommitVersion(0))
     });
 
     let fork_result = fork_handle.join().unwrap().unwrap();
@@ -403,7 +407,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
         let b2 = Arc::clone(&barrier);
         let t2 = std::thread::spawn(move || {
             b2.wait();
-            s2.compact_branch(&parent_branch(), 0)
+            s2.compact_branch(&parent_branch(), CommitVersion(0))
         });
 
         let fork_result = t1.join().unwrap().unwrap();
@@ -457,7 +461,7 @@ fn seed_with_timestamp_and_ttl(
         ttl_ms,
         raw_value: None,
     };
-    branch.active.put_entry(&key, version, entry);
+    branch.active.put_entry(&key, CommitVersion(version), entry);
 }
 
 #[test]
@@ -655,7 +659,7 @@ fn test_issue_1716_compact_branch_cleans_up_on_failure() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Attempt compaction — should fail due to corruption
-    let result = store.compact_branch(&bid, 0);
+    let result = store.compact_branch(&bid, CommitVersion(0));
     assert!(result.is_err(), "compaction must fail on corrupt segment");
 
     // After failed compaction, no new .sst or .tmp files should remain
@@ -724,7 +728,7 @@ fn test_issue_1716_compact_l0_to_l1_cleans_up_on_failure() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Attempt compact_l0_to_l1 — should fail due to corruption
-    let result = store.compact_l0_to_l1(&bid, 0);
+    let result = store.compact_l0_to_l1(&bid, CommitVersion(0));
     assert!(
         result.is_err(),
         "compact_l0_to_l1 must fail on corrupt segment"
@@ -1028,16 +1032,28 @@ fn test_issue_1740_put_recovery_entry_preserves_ttl() {
     let now_us = Timestamp::now().as_micros();
 
     store
-        .put_recovery_entry(key.clone(), Value::Int(42), 1, now_us, ttl_ms)
+        .put_recovery_entry(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            now_us,
+            ttl_ms,
+        )
         .unwrap();
 
     // Read the entry via store (filters expired) — should still be alive
-    let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+    let result = store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(42));
 
     // Verify TTL was preserved by checking via the memtable directly
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "put_recovery_entry must preserve TTL, got ttl_ms={}",
@@ -1059,12 +1075,15 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
     let deletes = vec![];
 
     store
-        .apply_recovery_atomic(writes, deletes, 1, now_us, &put_ttls)
+        .apply_recovery_atomic(writes, deletes, CommitVersion(1), now_us, &put_ttls)
         .unwrap();
 
     // Verify TTL was preserved
     let branch = store.branches.get(&branch()).unwrap();
-    let entry = branch.active.get_versioned(&key, CommitVersion::MAX).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
     assert_eq!(
         entry.ttl_ms, ttl_ms,
         "apply_recovery_atomic must preserve TTL, got ttl_ms={}",
@@ -1152,7 +1171,10 @@ fn test_issue_1721_fork_resets_materializing_status() {
     // 7. Verify data is still readable through the child.
     let child_ns = Arc::new(Namespace::new(child, "default".to_string()));
     let child_key = Key::new(Arc::clone(&child_ns), TypeTag::KV, b"k0".to_vec());
-    let val = store.get_versioned(&child_key, CommitVersion::MAX).unwrap().unwrap();
+    let val = store
+        .get_versioned(&child_key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
     assert_eq!(val.value, Value::Int(0));
 }
 
@@ -1386,7 +1408,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     // CORRECT BEHAVIOR: the storage version should remain at 1 (caller bumps later).
     let writes = vec![(kv_key("new_key"), Value::String("hello".into()))];
     store
-        .apply_recovery_atomic(writes, vec![], 5, 1_000_000, &[0])
+        .apply_recovery_atomic(writes, vec![], CommitVersion(5), 1_000_000, &[0])
         .unwrap();
 
     assert_eq!(
@@ -1406,7 +1428,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     );
 
     // After the caller bumps the version, the entry becomes visible
-    store.advance_version(5);
+    store.advance_version(CommitVersion(5));
     assert_eq!(store.version(), 5);
 
     let visible = store

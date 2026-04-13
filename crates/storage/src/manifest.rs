@@ -20,6 +20,7 @@
 use std::io;
 use std::path::Path;
 
+use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
 /// Magic bytes for segment manifest: "STRAMFST"
@@ -49,7 +50,7 @@ pub struct ManifestInheritedLayer {
     /// Branch ID of the source (parent) branch.
     pub source_branch_id: BranchId,
     /// Version counter of the source branch at fork time.
-    pub fork_version: u64,
+    pub fork_version: CommitVersion,
     /// Layer status: 0=Active, 1=Materializing, 2=Materialized.
     pub status: u8,
     /// Segment entries belonging to this inherited layer.
@@ -88,7 +89,7 @@ pub fn write_manifest(
     buf.extend_from_slice(&(inherited_layers.len() as u32).to_le_bytes());
     for layer in inherited_layers {
         buf.extend_from_slice(layer.source_branch_id.as_bytes());
-        buf.extend_from_slice(&layer.fork_version.to_le_bytes());
+        buf.extend_from_slice(&layer.fork_version.as_u64().to_le_bytes());
         buf.push(layer.status);
         buf.extend_from_slice(&(layer.entries.len() as u32).to_le_bytes());
         for entry in &layer.entries {
@@ -237,7 +238,8 @@ pub fn read_manifest(dir: &Path) -> io::Result<Option<SegmentManifest>> {
                     "manifest truncated (inherited layer fork_version)",
                 ));
             }
-            let fork_version = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            let fork_version =
+                CommitVersion(u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap()));
             pos += 8;
 
             // status: u8
@@ -451,7 +453,7 @@ mod tests {
         }];
         let inherited = vec![ManifestInheritedLayer {
             source_branch_id: BranchId::from_bytes([0xAA; 16]),
-            fork_version: 42,
+            fork_version: CommitVersion(42),
             status: 0, // Active
             entries: vec![
                 ManifestEntry {
@@ -495,7 +497,7 @@ mod tests {
         let inherited = vec![
             ManifestInheritedLayer {
                 source_branch_id: BranchId::from_bytes([1; 16]),
-                fork_version: 10,
+                fork_version: CommitVersion(10),
                 status: 0,
                 entries: vec![
                     ManifestEntry {
@@ -510,7 +512,7 @@ mod tests {
             },
             ManifestInheritedLayer {
                 source_branch_id: BranchId::from_bytes([2; 16]),
-                fork_version: 20,
+                fork_version: CommitVersion(20),
                 status: 1, // Materializing
                 entries: vec![ManifestEntry {
                     filename: "c.sst".into(),
@@ -519,7 +521,7 @@ mod tests {
             },
             ManifestInheritedLayer {
                 source_branch_id: BranchId::from_bytes([3; 16]),
-                fork_version: 30,
+                fork_version: CommitVersion(30),
                 status: 2, // Materialized
                 entries: vec![
                     ManifestEntry {

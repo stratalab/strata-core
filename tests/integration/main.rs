@@ -13,4 +13,5 @@ mod common;
 mod branching;
 mod modes;
 mod primitives;
+mod recovery_cross_crate;
 mod scale;

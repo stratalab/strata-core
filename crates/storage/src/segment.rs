@@ -29,6 +29,7 @@ use crate::segment_builder::{
     HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
 use strata_core::error::StrataError;
+use strata_core::id::CommitVersion;
 use strata_core::types::Key;
 use strata_core::value::Value;
 
@@ -107,7 +108,7 @@ pub struct SegmentEntry {
     /// Whether this is a deletion tombstone.
     pub is_tombstone: bool,
     /// The commit_id of this entry.
-    pub commit_id: u64,
+    pub commit_id: CommitVersion,
     /// Microseconds since epoch (0 for v1 segments).
     pub timestamp: u64,
     /// TTL in milliseconds (0 = no TTL, 0 for v1 segments).
@@ -529,10 +530,10 @@ impl KVSegment {
     pub fn point_lookup(
         &self,
         key: &Key,
-        snapshot_commit: u64,
+        snapshot_commit: CommitVersion,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let typed_key = encode_typed_key(key);
-        let seek_ik = InternalKey::encode(key, u64::MAX);
+        let seek_ik = InternalKey::encode(key, CommitVersion::MAX);
         self.point_lookup_preencoded(&typed_key, seek_ik.as_bytes(), snapshot_commit)
     }
 
@@ -542,7 +543,7 @@ impl KVSegment {
         &self,
         typed_key: &[u8],
         seek_bytes: &[u8],
-        snapshot_commit: u64,
+        snapshot_commit: CommitVersion,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let profiling = Self::segment_profile_enabled();
 
@@ -706,7 +707,7 @@ impl KVSegment {
         index: &FlatIndex,
         typed_key: &[u8],
         seek_bytes: &[u8],
-        snapshot_commit: u64,
+        snapshot_commit: CommitVersion,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let profiling = Self::segment_profile_enabled();
         let ts = if profiling {
@@ -772,7 +773,7 @@ impl KVSegment {
         let (partition_idx, block_within_partition) = if done {
             (0, 0)
         } else {
-            let seek_ik = InternalKey::encode(prefix, u64::MAX);
+            let seek_ik = InternalKey::encode(prefix, CommitVersion::MAX);
             self.index.seek_position(seek_ik.as_bytes())
         };
 
@@ -791,8 +792,11 @@ impl KVSegment {
     }
 
     /// The `(commit_min, commit_max)` range for this segment.
-    pub fn commit_range(&self) -> (u64, u64) {
-        (self.header.commit_min, self.header.commit_max)
+    pub fn commit_range(&self) -> (CommitVersion, CommitVersion) {
+        (
+            CommitVersion(self.header.commit_min),
+            CommitVersion(self.header.commit_max),
+        )
     }
 
     /// Total entry count (all versions).
@@ -1030,7 +1034,7 @@ impl KVSegment {
         &self,
         ie: &IndexEntry,
         typed_key: &[u8],
-        snapshot_commit: u64,
+        snapshot_commit: CommitVersion,
     ) -> Result<Option<SegmentEntry>, StrataError> {
         let profiling = Self::segment_profile_enabled();
 
@@ -1120,7 +1124,7 @@ impl KVSegment {
         start: usize,
         end: usize,
         typed_key: &[u8],
-        snapshot_commit: u64,
+        snapshot_commit: CommitVersion,
     ) -> Option<SegmentEntry> {
         let mut pos = start;
         let mut prev_key: Vec<u8> = Vec::new();
@@ -1144,7 +1148,7 @@ impl KVSegment {
 
             let len = prev_key.len();
             let commit_id = !u64::from_be_bytes(prev_key[len - 8..].try_into().ok()?);
-            if commit_id <= snapshot_commit {
+            if CommitVersion(commit_id) <= snapshot_commit {
                 let header = EntryHeader {
                     is_tombstone: hdr.is_tombstone,
                     timestamp: hdr.timestamp,
@@ -1156,7 +1160,7 @@ impl KVSegment {
                 return Some(SegmentEntry {
                     value,
                     is_tombstone: header.is_tombstone,
-                    commit_id,
+                    commit_id: CommitVersion(commit_id),
                     timestamp: header.timestamp,
                     ttl_ms: header.ttl_ms,
                     raw_value: None,
@@ -1527,7 +1531,7 @@ impl OwnedSegmentIter {
         let (partition_idx, block_within_partition) = if done {
             (0, 0)
         } else {
-            let seek_ik = InternalKey::encode(start_key, u64::MAX);
+            let seek_ik = InternalKey::encode(start_key, CommitVersion::MAX);
             segment.index.seek_position(seek_ik.as_bytes())
         };
         Self {
@@ -1586,7 +1590,7 @@ impl OwnedSegmentIter {
             self.done = true;
             return;
         }
-        let seek_ik = InternalKey::encode(start_key, u64::MAX);
+        let seek_ik = InternalKey::encode(start_key, CommitVersion::MAX);
         let (partition_idx, block_within_partition) =
             self.segment.index_seek_position(seek_ik.as_bytes());
         self.partition_idx = partition_idx;
@@ -2019,13 +2023,13 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k1"), 1, Value::Int(42), false);
+        mt.put(&kv_key("k1"), CommitVersion(1), Value::Int(42), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 1);
-        assert_eq!(seg.commit_range(), (1, 1));
+        assert_eq!(seg.commit_range(), (CommitVersion(1), CommitVersion(1)));
     }
 
     #[test]
@@ -2042,7 +2046,7 @@ mod tests {
         let path = dir.path().join("good.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k1"), 1, Value::Int(1), false);
+        mt.put(&kv_key("k1"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2063,22 +2067,36 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(10), false);
-        mt.put(&kv_key("b"), 2, Value::Int(20), false);
-        mt.put(&kv_key("c"), 3, Value::String("hello".into()), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("b"), CommitVersion(2), Value::Int(20), false);
+        mt.put(
+            &kv_key("c"),
+            CommitVersion(3),
+            Value::String("hello".into()),
+            false,
+        );
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("a"), u64::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("a"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
-        let e = seg.point_lookup(&kv_key("b"), u64::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(20));
 
-        let e = seg.point_lookup(&kv_key("c"), u64::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("c"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::String("hello".into()));
     }
 
@@ -2088,12 +2106,15 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert!(seg.point_lookup(&kv_key("z"), u64::MAX).unwrap().is_none());
+        assert!(seg
+            .point_lookup(&kv_key("z"), CommitVersion::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2102,31 +2123,43 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 5, Value::Int(50), false);
-        mt.put(&kv_key("k"), 10, Value::Int(100), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(5), Value::Int(50), false);
+        mt.put(&kv_key("k"), CommitVersion(10), Value::Int(100), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 10: see version 10
-        let e = seg.point_lookup(&kv_key("k"), 10).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(10))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(100));
-        assert_eq!(e.commit_id, 10);
+        assert_eq!(e.commit_id, CommitVersion(10));
 
         // Snapshot at 7: see version 5
-        let e = seg.point_lookup(&kv_key("k"), 7).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(7))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(50));
-        assert_eq!(e.commit_id, 5);
+        assert_eq!(e.commit_id, CommitVersion(5));
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("k"), 1).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
-        assert_eq!(e.commit_id, 1);
+        assert_eq!(e.commit_id, CommitVersion(1));
 
         // Snapshot at 0: nothing visible
-        assert!(seg.point_lookup(&kv_key("k"), 0).unwrap().is_none());
+        assert!(seg
+            .point_lookup(&kv_key("k"), CommitVersion(0))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2135,20 +2168,26 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 2, Value::Null, true);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(2), Value::Null, true);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 2: see tombstone
-        let e = seg.point_lookup(&kv_key("k"), 2).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
-        assert_eq!(e.commit_id, 2);
+        assert_eq!(e.commit_id, CommitVersion(2));
 
         // Snapshot at 1: see the value
-        let e = seg.point_lookup(&kv_key("k"), 1).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -2163,7 +2202,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("key_{}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2189,10 +2228,10 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("user:1"), 1, Value::Int(1), false);
-        mt.put(&kv_key("user:2"), 1, Value::Int(2), false);
-        mt.put(&kv_key("user:3"), 1, Value::Int(3), false);
-        mt.put(&kv_key("order:1"), 1, Value::Int(100), false);
+        mt.put(&kv_key("user:1"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("user:2"), CommitVersion(1), Value::Int(2), false);
+        mt.put(&kv_key("user:3"), CommitVersion(1), Value::Int(3), false);
+        mt.put(&kv_key("order:1"), CommitVersion(1), Value::Int(100), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2214,8 +2253,8 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(10), false);
-        mt.put(&kv_key("k"), 5, Value::Int(50), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("k"), CommitVersion(5), Value::Int(50), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2223,8 +2262,8 @@ mod tests {
         let results: Vec<_> = seg.iter_seek(&kv_key("k")).collect();
         // Both versions (commit 5 first due to descending commit order)
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].1.commit_id, 5);
-        assert_eq!(results[1].1.commit_id, 1);
+        assert_eq!(results[0].1.commit_id, CommitVersion(5));
+        assert_eq!(results[1].1.commit_id, CommitVersion(1));
     }
 
     #[test]
@@ -2233,7 +2272,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2250,14 +2289,24 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("null"), 1, Value::Null, false);
-        mt.put(&kv_key("bool"), 1, Value::Bool(true), false);
-        mt.put(&kv_key("int"), 1, Value::Int(42), false);
-        mt.put(&kv_key("float"), 1, Value::Float(2.78), false);
-        mt.put(&kv_key("string"), 1, Value::String("hello".into()), false);
+        mt.put(&kv_key("null"), CommitVersion(1), Value::Null, false);
+        mt.put(&kv_key("bool"), CommitVersion(1), Value::Bool(true), false);
+        mt.put(&kv_key("int"), CommitVersion(1), Value::Int(42), false);
+        mt.put(
+            &kv_key("float"),
+            CommitVersion(1),
+            Value::Float(2.78),
+            false,
+        );
+        mt.put(
+            &kv_key("string"),
+            CommitVersion(1),
+            Value::String("hello".into()),
+            false,
+        );
         mt.put(
             &kv_key("bytes"),
-            1,
+            CommitVersion(1),
             Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]),
             false,
         );
@@ -2267,42 +2316,42 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         assert_eq!(
-            seg.point_lookup(&kv_key("null"), u64::MAX)
+            seg.point_lookup(&kv_key("null"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             Value::Null,
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("bool"), u64::MAX)
+            seg.point_lookup(&kv_key("bool"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             Value::Bool(true),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("int"), u64::MAX)
+            seg.point_lookup(&kv_key("int"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             Value::Int(42),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("float"), u64::MAX)
+            seg.point_lookup(&kv_key("float"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             Value::Float(2.78),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("string"), u64::MAX)
+            seg.point_lookup(&kv_key("string"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             Value::String("hello".into()),
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("bytes"), u64::MAX)
+            seg.point_lookup(&kv_key("bytes"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -2321,7 +2370,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2331,26 +2380,26 @@ mod tests {
 
         // Look up specific keys
         let e = seg
-            .point_lookup(&kv_key("key_000000"), u64::MAX)
+            .point_lookup(&kv_key("key_000000"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 1);
+        assert_eq!(e.commit_id, CommitVersion(1));
 
         let e = seg
-            .point_lookup(&kv_key("key_000250"), u64::MAX)
+            .point_lookup(&kv_key("key_000250"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 251);
+        assert_eq!(e.commit_id, CommitVersion(251));
 
         let e = seg
-            .point_lookup(&kv_key("key_000499"), u64::MAX)
+            .point_lookup(&kv_key("key_000499"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 500);
+        assert_eq!(e.commit_id, CommitVersion(500));
 
         // Non-existent key
         assert!(seg
-            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .point_lookup(&kv_key("key_999999"), CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -2363,7 +2412,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2388,7 +2437,7 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("k"), 1, Value::Int(1), false);
+        mt.put(&kv_key("k"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2411,7 +2460,7 @@ mod tests {
         // Open should succeed (data blocks are lazily verified)
         let seg = KVSegment::open(&corrupt_path).unwrap();
         // point_lookup must return an error because read_data_block checks CRC
-        let result = seg.point_lookup(&kv_key("k"), u64::MAX);
+        let result = seg.point_lookup(&kv_key("k"), CommitVersion::MAX);
         assert!(
             result.is_err(),
             "corrupt data block CRC should cause lookup to return Err, got {:?}",
@@ -2427,14 +2476,14 @@ mod tests {
         let path = dir.path().join("test.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 5, Value::Int(1), false);
-        mt.put(&kv_key("b"), 10, Value::Int(2), false);
-        mt.put(&kv_key("c"), 3, Value::Int(3), false);
+        mt.put(&kv_key("a"), CommitVersion(5), Value::Int(1), false);
+        mt.put(&kv_key("b"), CommitVersion(10), Value::Int(2), false);
+        mt.put(&kv_key("c"), CommitVersion(3), Value::Int(3), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert_eq!(seg.commit_range(), (3, 10));
+        assert_eq!(seg.commit_range(), (CommitVersion(3), CommitVersion(10)));
         assert_eq!(seg.entry_count(), 3);
     }
 
@@ -2450,9 +2499,12 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 0);
-        assert_eq!(seg.commit_range(), (0, 0));
+        assert_eq!(
+            seg.commit_range(),
+            (CommitVersion::ZERO, CommitVersion::ZERO)
+        );
         assert!(seg
-            .point_lookup(&kv_key("anything"), u64::MAX)
+            .point_lookup(&kv_key("anything"), CommitVersion::MAX)
             .unwrap()
             .is_none());
         assert_eq!(seg.iter_seek(&kv_key("")).collect::<Vec<_>>().len(), 0);
@@ -2473,22 +2525,22 @@ mod tests {
         let object_val = Value::object(map);
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("arr"), 1, array_val.clone(), false);
-        mt.put(&kv_key("obj"), 1, object_val.clone(), false);
+        mt.put(&kv_key("arr"), CommitVersion(1), array_val.clone(), false);
+        mt.put(&kv_key("obj"), CommitVersion(1), object_val.clone(), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
 
         assert_eq!(
-            seg.point_lookup(&kv_key("arr"), u64::MAX)
+            seg.point_lookup(&kv_key("arr"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
             array_val,
         );
         assert_eq!(
-            seg.point_lookup(&kv_key("obj"), u64::MAX)
+            seg.point_lookup(&kv_key("obj"), CommitVersion::MAX)
                 .unwrap()
                 .unwrap()
                 .value,
@@ -2507,7 +2559,7 @@ mod tests {
         let n = 10_000u32;
         for i in 0..n {
             let k = kv_key(&format!("k_{:08}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -2526,11 +2578,11 @@ mod tests {
         for i in 0..n {
             let k = kv_key(&format!("k_{:08}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap_or_else(|_| panic!("point lookup failed for k_{:08}", i))
                 .unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
-            assert_eq!(e.commit_id, i as u64 + 1);
+            assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
     }
 
@@ -2547,7 +2599,7 @@ mod tests {
         let ts = strata_core::Timestamp::from_micros(1_700_000_000_000_000);
         mt.put_entry(
             &kv_key("k1"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(42),
                 is_tombstone: false,
@@ -2558,7 +2610,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k2"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: true,
@@ -2572,12 +2624,18 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("k1"), u64::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k1"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(42));
         assert_eq!(e.timestamp, 1_700_000_000_000_000);
         assert_eq!(e.ttl_ms, 30_000);
 
-        let e = seg.point_lookup(&kv_key("k2"), u64::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k2"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 555);
         assert_eq!(e.ttl_ms, 10_000);
@@ -2593,7 +2651,7 @@ mod tests {
         let mt = Memtable::new(0);
         mt.put_entry(
             &kv_key("item:1"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(1),
                 is_tombstone: false,
@@ -2604,7 +2662,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("item:2"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::Int(2),
                 is_tombstone: false,
@@ -2637,7 +2695,12 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("k_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::String("x".repeat(50)), false);
+            mt.put(
+                &k,
+                CommitVersion(i as u64 + 1),
+                Value::String("x".repeat(50)),
+                false,
+            );
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -2646,15 +2709,15 @@ mod tests {
         assert_eq!(seg.entry_count(), 500);
         // Spot check a few entries
         let e = seg
-            .point_lookup(&kv_key("k_000000"), u64::MAX)
+            .point_lookup(&kv_key("k_000000"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 1);
+        assert_eq!(e.commit_id, CommitVersion(1));
         let e = seg
-            .point_lookup(&kv_key("k_000499"), u64::MAX)
+            .point_lookup(&kv_key("k_000499"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 500);
+        assert_eq!(e.commit_id, CommitVersion(500));
     }
 
     #[test]
@@ -2669,7 +2732,7 @@ mod tests {
             let k = kv_key(&format!("key_{:06}", i));
             // Highly repetitive data that compresses well
             let val = Value::String("A".repeat(500));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
 
@@ -2686,7 +2749,7 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         for i in 0..200u32 {
             let k = kv_key(&format!("key_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
+            let e = seg.point_lookup(&k, CommitVersion::MAX).unwrap().unwrap();
             assert_eq!(e.value, Value::String("A".repeat(500)));
         }
 
@@ -2708,7 +2771,7 @@ mod tests {
         let path = dir.path().join("kr.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("only"), 1, Value::Int(1), false);
+        mt.put(&kv_key("only"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2724,8 +2787,8 @@ mod tests {
         let path = dir.path().join("kr_multi.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("aaa"), 1, Value::Int(1), false);
-        mt.put(&kv_key("zzz"), 2, Value::Int(2), false);
+        mt.put(&kv_key("aaa"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("zzz"), CommitVersion(2), Value::Int(2), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -2764,7 +2827,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2812,7 +2875,7 @@ mod tests {
         for i in 0..50u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2852,7 +2915,7 @@ mod tests {
         for i in 0..50u32 {
             mt.put(
                 &kv_key(&format!("key_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2892,7 +2955,7 @@ mod tests {
         for i in 0..20u32 {
             mt.put(
                 &kv_key(&format!("aaa:{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2900,7 +2963,7 @@ mod tests {
         for i in 0..20u32 {
             mt.put(
                 &kv_key(&format!("bbb:{:04}", i)),
-                i as u64 + 21,
+                CommitVersion(i as u64 + 21),
                 Value::Int(i as i64 + 100),
                 false,
             );
@@ -2940,7 +3003,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2952,11 +3015,11 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // Look up a key in the first interval (entries 0-15)
         let e = seg
-            .point_lookup(&kv_key("k_0005"), u64::MAX)
+            .point_lookup(&kv_key("k_0005"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(5));
-        assert_eq!(e.commit_id, 6);
+        assert_eq!(e.commit_id, CommitVersion(6));
     }
 
     #[test]
@@ -2969,7 +3032,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -2980,7 +3043,7 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // Key in last interval (entries 32-47)
         let e = seg
-            .point_lookup(&kv_key("k_0045"), u64::MAX)
+            .point_lookup(&kv_key("k_0045"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(45));
@@ -2996,7 +3059,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3007,11 +3070,11 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // Entry 16 is exactly at a restart point
         let e = seg
-            .point_lookup(&kv_key("k_0016"), u64::MAX)
+            .point_lookup(&kv_key("k_0016"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(16));
-        assert_eq!(e.commit_id, 17);
+        assert_eq!(e.commit_id, CommitVersion(17));
     }
 
     #[test]
@@ -3025,14 +3088,19 @@ mod tests {
         for i in 0..30u32 {
             mt.put(
                 &kv_key(&format!("a_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
         }
         // 5 versions of key "b_0000" — entries 30-34 span restart boundary at 32
         for v in 1..=5u64 {
-            mt.put(&kv_key("b_0000"), v, Value::Int(v as i64 * 10), false);
+            mt.put(
+                &kv_key("b_0000"),
+                CommitVersion(v),
+                Value::Int(v as i64 * 10),
+                false,
+            );
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3040,17 +3108,26 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 5: see version 5
-        let e = seg.point_lookup(&kv_key("b_0000"), 5).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(50));
-        assert_eq!(e.commit_id, 5);
+        assert_eq!(e.commit_id, CommitVersion(5));
 
         // Snapshot at 3: see version 3
-        let e = seg.point_lookup(&kv_key("b_0000"), 3).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(3))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(30));
-        assert_eq!(e.commit_id, 3);
+        assert_eq!(e.commit_id, CommitVersion(3));
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("b_0000"), 1).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -3063,7 +3140,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3073,11 +3150,11 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         assert!(seg
-            .point_lookup(&kv_key("zzz_missing"), u64::MAX)
+            .point_lookup(&kv_key("zzz_missing"), CommitVersion::MAX)
             .unwrap()
             .is_none());
         assert!(seg
-            .point_lookup(&kv_key("aaa_missing"), u64::MAX)
+            .point_lookup(&kv_key("aaa_missing"), CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -3092,7 +3169,7 @@ mod tests {
         for i in 0..48u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3120,7 +3197,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("value_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3130,25 +3207,25 @@ mod tests {
 
         // Verify lookups across different blocks
         let e = seg
-            .point_lookup(&kv_key("key_000000"), u64::MAX)
+            .point_lookup(&kv_key("key_000000"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 1);
+        assert_eq!(e.commit_id, CommitVersion(1));
 
         let e = seg
-            .point_lookup(&kv_key("key_000250"), u64::MAX)
+            .point_lookup(&kv_key("key_000250"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 251);
+        assert_eq!(e.commit_id, CommitVersion(251));
 
         let e = seg
-            .point_lookup(&kv_key("key_000499"), u64::MAX)
+            .point_lookup(&kv_key("key_000499"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
-        assert_eq!(e.commit_id, 500);
+        assert_eq!(e.commit_id, CommitVersion(500));
 
         assert!(seg
-            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .point_lookup(&kv_key("key_999999"), CommitVersion::MAX)
             .unwrap()
             .is_none());
 
@@ -3170,7 +3247,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("k_{:04}", i)),
-                i as u64 + 1,
+                CommitVersion(i as u64 + 1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3221,7 +3298,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let val = Value::String(format!("val_{}", "x".repeat(50)));
-            mt.put(&k, i as u64 + 1, val, false);
+            mt.put(&k, CommitVersion(i as u64 + 1), val, false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3233,16 +3310,16 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("key_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("missing key_{:06}", i));
             assert_eq!(e.value, Value::String(format!("val_{}", "x".repeat(50))));
-            assert_eq!(e.commit_id, i as u64 + 1);
+            assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
 
         // Non-existent key
         assert!(seg
-            .point_lookup(&kv_key("key_999999"), u64::MAX)
+            .point_lookup(&kv_key("key_999999"), CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -3255,7 +3332,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3280,7 +3357,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("item_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3305,7 +3382,7 @@ mod tests {
         for i in 0..10_000u32 {
             mt.put(
                 &kv_key(&format!("key_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3334,7 +3411,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("item_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3364,7 +3441,7 @@ mod tests {
         // Point lookups should all succeed
         for i in 0..2000u32 {
             let k = kv_key(&format!("item_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap();
+            let e = seg.point_lookup(&k, CommitVersion::MAX).unwrap();
             assert!(e.is_some(), "point lookup failed for item_{:06}", i);
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }
@@ -3381,7 +3458,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("item_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3433,7 +3510,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("hk_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3447,11 +3524,11 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("hk_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key hk_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
-            assert_eq!(e.commit_id, i as u64 + 1);
+            assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
     }
 
@@ -3465,7 +3542,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..100u32 {
             let k = kv_key(&format!("exist_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3474,22 +3551,22 @@ mod tests {
 
         // Keys that don't exist — various positions relative to existing keys
         assert!(seg
-            .point_lookup(&kv_key("aaa"), u64::MAX)
+            .point_lookup(&kv_key("aaa"), CommitVersion::MAX)
             .unwrap()
             .is_none()); // before all
         assert!(seg
-            .point_lookup(&kv_key("exist_0050x"), u64::MAX)
+            .point_lookup(&kv_key("exist_0050x"), CommitVersion::MAX)
             .unwrap()
             .is_none()); // between
         assert!(seg
-            .point_lookup(&kv_key("zzz"), u64::MAX)
+            .point_lookup(&kv_key("zzz"), CommitVersion::MAX)
             .unwrap()
             .is_none()); // after all
                          // Keys with similar prefixes to stress hash collisions
         for i in 0..50u32 {
             let k = kv_key(&format!("exist_{:04}_GHOST", i));
             assert!(
-                seg.point_lookup(&k, u64::MAX).unwrap().is_none(),
+                seg.point_lookup(&k, CommitVersion::MAX).unwrap().is_none(),
                 "ghost key exist_{:04}_GHOST should not exist",
                 i
             );
@@ -3506,7 +3583,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..500u32 {
             let k = kv_key(&format!("col_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3517,7 +3594,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("col_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key col_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
@@ -3527,7 +3604,7 @@ mod tests {
         for i in 500..600u32 {
             let k = kv_key(&format!("col_{:06}", i));
             assert!(
-                seg.point_lookup(&k, u64::MAX).unwrap().is_none(),
+                seg.point_lookup(&k, CommitVersion::MAX).unwrap().is_none(),
                 "absent key col_{:06} should not be found",
                 i
             );
@@ -3546,7 +3623,12 @@ mod tests {
         let k = kv_key("versioned");
         // 50 versions → spans restart intervals 0..3 (at 16 entries per restart)
         for commit in 1..=50u64 {
-            mt.put(&k, commit, Value::Int(commit as i64 * 10), false);
+            mt.put(
+                &k,
+                CommitVersion(commit),
+                Value::Int(commit as i64 * 10),
+                false,
+            );
         }
         mt.freeze();
         build_segment(&mt, &path);
@@ -3554,20 +3636,20 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Verify specific snapshot points
-        let e = seg.point_lookup(&k, 1).unwrap().unwrap();
+        let e = seg.point_lookup(&k, CommitVersion(1)).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(10));
-        assert_eq!(e.commit_id, 1);
+        assert_eq!(e.commit_id, CommitVersion(1));
 
-        let e = seg.point_lookup(&k, 25).unwrap().unwrap();
+        let e = seg.point_lookup(&k, CommitVersion(25)).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(250));
-        assert_eq!(e.commit_id, 25);
+        assert_eq!(e.commit_id, CommitVersion(25));
 
-        let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
+        let e = seg.point_lookup(&k, CommitVersion::MAX).unwrap().unwrap();
         assert_eq!(e.value, Value::Int(500));
-        assert_eq!(e.commit_id, 50);
+        assert_eq!(e.commit_id, CommitVersion(50));
 
         // snapshot_commit=0 → no version visible
-        assert!(seg.point_lookup(&k, 0).unwrap().is_none());
+        assert!(seg.point_lookup(&k, CommitVersion(0)).unwrap().is_none());
     }
 
     #[test]
@@ -3576,19 +3658,19 @@ mod tests {
         let path = dir.path().join("hash_single.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("only"), 1, Value::Int(42), false);
+        mt.put(&kv_key("only"), CommitVersion(1), Value::Int(42), false);
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
         let e = seg
-            .point_lookup(&kv_key("only"), u64::MAX)
+            .point_lookup(&kv_key("only"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(42));
         // Absent key in single-entry segment
         assert!(seg
-            .point_lookup(&kv_key("nope"), u64::MAX)
+            .point_lookup(&kv_key("nope"), CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -3603,7 +3685,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("it_{:04}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -3646,46 +3728,52 @@ mod tests {
         let path = dir.path().join("hash_tomb.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("alive"), 1, Value::Int(1), false);
-        mt.put(&kv_key("dead"), 1, Value::Int(10), false);
-        mt.put(&kv_key("dead"), 2, Value::Null, true); // tombstone
-        mt.put(&kv_key("revived"), 1, Value::Int(20), false);
-        mt.put(&kv_key("revived"), 2, Value::Null, true);
-        mt.put(&kv_key("revived"), 3, Value::Int(30), false); // re-put after delete
+        mt.put(&kv_key("alive"), CommitVersion(1), Value::Int(1), false);
+        mt.put(&kv_key("dead"), CommitVersion(1), Value::Int(10), false);
+        mt.put(&kv_key("dead"), CommitVersion(2), Value::Null, true); // tombstone
+        mt.put(&kv_key("revived"), CommitVersion(1), Value::Int(20), false);
+        mt.put(&kv_key("revived"), CommitVersion(2), Value::Null, true);
+        mt.put(&kv_key("revived"), CommitVersion(3), Value::Int(30), false); // re-put after delete
         mt.freeze();
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
 
         let e = seg
-            .point_lookup(&kv_key("alive"), u64::MAX)
+            .point_lookup(&kv_key("alive"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(1));
         assert!(!e.is_tombstone);
 
         let e = seg
-            .point_lookup(&kv_key("dead"), u64::MAX)
+            .point_lookup(&kv_key("dead"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert!(e.is_tombstone);
-        assert_eq!(e.commit_id, 2);
+        assert_eq!(e.commit_id, CommitVersion(2));
 
         // "dead" at snapshot 1 → see the value
-        let e = seg.point_lookup(&kv_key("dead"), 1).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("dead"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
         // "revived" at latest → see the re-put
         let e = seg
-            .point_lookup(&kv_key("revived"), u64::MAX)
+            .point_lookup(&kv_key("revived"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(30));
         assert!(!e.is_tombstone);
 
         // "revived" at snapshot 2 → see tombstone
-        let e = seg.point_lookup(&kv_key("revived"), 2).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("revived"), CommitVersion(2))
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
     }
 
@@ -3700,7 +3788,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("alpha_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -3708,7 +3796,7 @@ mod tests {
         for i in 0..100u32 {
             mt.put(
                 &kv_key(&format!("beta_{:04}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(1000 + i as i64),
                 false,
             );
@@ -3759,7 +3847,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..1000u32 {
             let k = kv_key(&format!("pk_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3775,20 +3863,20 @@ mod tests {
         for i in 0..1000u32 {
             let k = kv_key(&format!("pk_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key pk_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
-            assert_eq!(e.commit_id, i as u64 + 1);
+            assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
 
         // Missing keys return None
         assert!(seg
-            .point_lookup(&kv_key("pk_999999"), u64::MAX)
+            .point_lookup(&kv_key("pk_999999"), CommitVersion::MAX)
             .unwrap()
             .is_none());
         assert!(seg
-            .point_lookup(&kv_key("zz_missing"), u64::MAX)
+            .point_lookup(&kv_key("zz_missing"), CommitVersion::MAX)
             .unwrap()
             .is_none());
     }
@@ -3802,11 +3890,16 @@ mod tests {
         // Insert entries with two prefixes to test prefix scan across partitions
         for i in 0..500u32 {
             let k = kv_key(&format!("aa_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         for i in 0..500u32 {
             let k = kv_key(&format!("bb_{:06}", i));
-            mt.put(&k, i as u64 + 1001, Value::Int(i as i64 + 1000), false);
+            mt.put(
+                &k,
+                CommitVersion(i as u64 + 1001),
+                Value::Int(i as i64 + 1000),
+                false,
+            );
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3819,7 +3912,7 @@ mod tests {
         assert_eq!(aa.len(), 500, "expected 500 aa_ entries");
         for (idx, (ik, se)) in aa.iter().enumerate() {
             assert_eq!(se.value, Value::Int(idx as i64));
-            assert_eq!(se.commit_id, idx as u64 + 1);
+            assert_eq!(se.commit_id, CommitVersion(idx as u64 + 1));
             let tkp = ik.typed_key_prefix();
             let expected = format!("aa_{:06}", idx);
             assert!(
@@ -3840,7 +3933,7 @@ mod tests {
         assert_eq!(bb.len(), 500, "expected 500 bb_ entries");
         for (idx, (_, se)) in bb.iter().enumerate() {
             assert_eq!(se.value, Value::Int(idx as i64 + 1000));
-            assert_eq!(se.commit_id, idx as u64 + 1001);
+            assert_eq!(se.commit_id, CommitVersion(idx as u64 + 1001));
         }
     }
 
@@ -3853,7 +3946,7 @@ mod tests {
         let n = 800u32;
         for i in 0..n {
             let k = kv_key(&format!("fi_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3872,7 +3965,12 @@ mod tests {
                 "wrong value at idx {}",
                 idx
             );
-            assert_eq!(se.commit_id, idx as u64 + 1, "wrong commit at idx {}", idx);
+            assert_eq!(
+                se.commit_id,
+                CommitVersion(idx as u64 + 1),
+                "wrong commit at idx {}",
+                idx
+            );
             let tkp = ik.typed_key_prefix();
             let expected = format!("fi_{:06}", idx);
             assert!(
@@ -3898,7 +3996,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..10u32 {
             let k = kv_key(&format!("sm_{:04}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3913,7 +4011,7 @@ mod tests {
         // Point lookups still work
         for i in 0..10u32 {
             let k = kv_key(&format!("sm_{:04}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap();
+            let e = seg.point_lookup(&k, CommitVersion::MAX).unwrap().unwrap();
             assert_eq!(e.value, Value::Int(i as i64));
         }
 
@@ -3931,7 +4029,7 @@ mod tests {
         let n = 800u32;
         for i in 0..n {
             let k = kv_key(&format!("oi_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3951,7 +4049,12 @@ mod tests {
                 "wrong value at idx {}",
                 idx
             );
-            assert_eq!(se.commit_id, idx as u64 + 1, "wrong commit at idx {}", idx);
+            assert_eq!(
+                se.commit_id,
+                CommitVersion(idx as u64 + 1),
+                "wrong commit at idx {}",
+                idx
+            );
         }
         for i in 0..all.len() - 1 {
             assert!(all[i].0.as_bytes() <= all[i + 1].0.as_bytes());
@@ -3964,7 +4067,7 @@ mod tests {
         let path = dir.path().join("v7.sst");
 
         let mt = Memtable::new(0);
-        mt.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt.freeze();
         build_segment(&mt, &path);
 
@@ -3982,8 +4085,8 @@ mod tests {
         // Write enough entries to force partitioning, with multiple versions
         for i in 0..500u32 {
             let k = kv_key(&format!("mv_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false); // version 1
-            mt.put(&k, 5, Value::Int(i as i64 + 1000), false); // version 5
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false); // version 1
+            mt.put(&k, CommitVersion(5), Value::Int(i as i64 + 1000), false); // version 5
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -3995,7 +4098,7 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("mv_{:06}", i));
             let e = seg
-                .point_lookup(&k, 1)
+                .point_lookup(&k, CommitVersion(1))
                 .unwrap()
                 .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 1", i));
             assert_eq!(
@@ -4004,14 +4107,14 @@ mod tests {
                 "wrong value at snapshot 1 for key {}",
                 i
             );
-            assert_eq!(e.commit_id, 1);
+            assert_eq!(e.commit_id, CommitVersion(1));
         }
 
         // Snapshot at commit 5 should see updated values
         for i in 0..500u32 {
             let k = kv_key(&format!("mv_{:06}", i));
             let e = seg
-                .point_lookup(&k, 5)
+                .point_lookup(&k, CommitVersion(5))
                 .unwrap()
                 .unwrap_or_else(|| panic!("key mv_{:06} not found at snapshot 5", i));
             assert_eq!(
@@ -4020,12 +4123,12 @@ mod tests {
                 "wrong value at snapshot 5 for key {}",
                 i
             );
-            assert_eq!(e.commit_id, 5);
+            assert_eq!(e.commit_id, CommitVersion(5));
         }
 
         // Snapshot at commit 0 should find nothing
         let k = kv_key("mv_000000");
-        assert!(seg.point_lookup(&k, 0).unwrap().is_none());
+        assert!(seg.point_lookup(&k, CommitVersion(0)).unwrap().is_none());
     }
 
     #[test]
@@ -4037,10 +4140,10 @@ mod tests {
         // Write enough entries to force partitioning, with some tombstones
         for i in 0..500u32 {
             let k = kv_key(&format!("tb_{:06}", i));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
             // Delete even-numbered keys at commit 2
             if i % 2 == 0 {
-                mt.put(&k, 2, Value::Null, true);
+                mt.put(&k, CommitVersion(2), Value::Null, true);
             }
         }
         mt.freeze();
@@ -4053,23 +4156,23 @@ mod tests {
         for i in 0..500u32 {
             let k = kv_key(&format!("tb_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key tb_{:06} not found", i));
             if i % 2 == 0 {
                 assert!(e.is_tombstone, "key {} should be tombstone", i);
-                assert_eq!(e.commit_id, 2);
+                assert_eq!(e.commit_id, CommitVersion(2));
             } else {
                 assert!(!e.is_tombstone, "key {} should not be tombstone", i);
                 assert_eq!(e.value, Value::Int(i as i64));
-                assert_eq!(e.commit_id, 1);
+                assert_eq!(e.commit_id, CommitVersion(1));
             }
         }
 
         // At snapshot 1: all keys should be non-tombstone values
         for i in (0..500u32).step_by(50) {
             let k = kv_key(&format!("tb_{:06}", i));
-            let e = seg.point_lookup(&k, 1).unwrap().unwrap();
+            let e = seg.point_lookup(&k, CommitVersion(1)).unwrap().unwrap();
             assert!(!e.is_tombstone);
             assert_eq!(e.value, Value::Int(i as i64));
         }
@@ -4087,7 +4190,7 @@ mod tests {
         let n = 1500u32;
         for i in 0..n {
             let k = kv_key(&format!("bd_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path);
@@ -4137,7 +4240,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..1000u32 {
             let k = kv_key(&format!("ft_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_tiny_blocks(&mt, &path_part);
@@ -4148,7 +4251,7 @@ mod tests {
         // Monolithic segment
         let path_mono = dir.path().join("ft_mono.sst");
         let mt2 = Memtable::new(0);
-        mt2.put(&kv_key("a"), 1, Value::Int(1), false);
+        mt2.put(&kv_key("a"), CommitVersion(1), Value::Int(1), false);
         mt2.freeze();
         build_segment(&mt2, &path_mono);
 
@@ -4170,7 +4273,7 @@ mod tests {
         let mt = Memtable::new(0);
         for i in 0..200u32 {
             let k = kv_key(&format!("b129_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
 
@@ -4193,7 +4296,7 @@ mod tests {
         for i in 0..200u32 {
             let k = kv_key(&format!("b129_{:06}", i));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key b129_{:06} not found", i));
             assert_eq!(e.value, Value::Int(i as i64));
@@ -4220,7 +4323,7 @@ mod tests {
         for i in 0..2000u32 {
             mt.put(
                 &kv_key(&format!("present_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -4275,7 +4378,7 @@ mod tests {
         // These will have similar xxh3 hashes and tend to collide in the hash index.
         for i in 0..500u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            mt.put(&k, i as u64 + 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(i as u64 + 1), Value::Int(i as i64), false);
         }
         mt.freeze();
         build_segment_small_blocks(&mt, &path);
@@ -4286,17 +4389,20 @@ mod tests {
         // Every key must be findable despite hash collisions
         for i in 0..500u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            let e = seg.point_lookup(&k, u64::MAX).unwrap().unwrap_or_else(|| {
-                panic!("key shared_prefix_collision_test_key_{:06} not found", i)
-            });
+            let e = seg
+                .point_lookup(&k, CommitVersion::MAX)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("key shared_prefix_collision_test_key_{:06} not found", i)
+                });
             assert_eq!(e.value, Value::Int(i as i64));
-            assert_eq!(e.commit_id, i as u64 + 1);
+            assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
 
         // Non-existent keys with similar prefix must not be found
         for i in 500..550u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            assert!(seg.point_lookup(&k, u64::MAX).unwrap().is_none());
+            assert!(seg.point_lookup(&k, CommitVersion::MAX).unwrap().is_none());
         }
     }
 
@@ -4315,14 +4421,14 @@ mod tests {
                 "very_long_shared_prefix_that_exercises_shortening_{:04}",
                 i
             ));
-            mt.put(&k, 1, Value::Int(i as i64), false);
+            mt.put(&k, CommitVersion(1), Value::Int(i as i64), false);
         }
         // Same key, multiple commit versions (differ only in commit_id)
         let multi_ver_key = kv_key("very_long_shared_prefix_that_exercises_shortening_0150");
         for commit in 2..=10u64 {
             mt.put(
                 &multi_ver_key,
-                commit,
+                CommitVersion(commit),
                 Value::Int(commit as i64 * 100),
                 false,
             );
@@ -4339,7 +4445,7 @@ mod tests {
                 i
             ));
             let e = seg
-                .point_lookup(&k, u64::MAX)
+                .point_lookup(&k, CommitVersion::MAX)
                 .unwrap()
                 .unwrap_or_else(|| panic!("key ..._shortening_{:04} not found", i));
             // Key 150 was overwritten; others have their original value
@@ -4351,11 +4457,17 @@ mod tests {
         }
 
         // MVCC: snapshot at commit 5 for the multi-version key
-        let e = seg.point_lookup(&multi_ver_key, 5).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&multi_ver_key, CommitVersion(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(500)); // commit 5 * 100
 
         // MVCC: snapshot at commit 1 gets the original value
-        let e = seg.point_lookup(&multi_ver_key, 1).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&multi_ver_key, CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(150)); // original from loop
     }
 
@@ -4370,7 +4482,7 @@ mod tests {
         for i in 0..5000u32 {
             mt.put(
                 &kv_key(&format!("fpr_{:06}", i)),
-                1,
+                CommitVersion(1),
                 Value::Int(i as i64),
                 false,
             );
@@ -4418,7 +4530,7 @@ mod tests {
         let ts = strata_core::Timestamp::from_micros(1_000_000);
         mt.put_entry(
             &kv_key("k_int"),
-            1,
+            CommitVersion(1),
             MemtableEntry {
                 value: Value::Int(42),
                 is_tombstone: false,
@@ -4429,7 +4541,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_str"),
-            2,
+            CommitVersion(2),
             MemtableEntry {
                 value: Value::String("hello world".to_string()),
                 is_tombstone: false,
@@ -4440,7 +4552,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_bytes"),
-            3,
+            CommitVersion(3),
             MemtableEntry {
                 value: Value::Bytes([0xDE, 0xAD, 0xBE, 0xEF, 0xFF].repeat(50)),
                 is_tombstone: false,
@@ -4451,7 +4563,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_tomb"),
-            4,
+            CommitVersion(4),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: true,
@@ -4462,7 +4574,7 @@ mod tests {
         );
         mt.put_entry(
             &kv_key("k_obj"),
-            5,
+            CommitVersion(5),
             MemtableEntry {
                 value: Value::object({
                     let mut m = HashMap::new();
@@ -4478,7 +4590,7 @@ mod tests {
         // Edge case: non-tombstone Value::Null (user stored null)
         mt.put_entry(
             &kv_key("k_null"),
-            6,
+            CommitVersion(6),
             MemtableEntry {
                 value: Value::Null,
                 is_tombstone: false,
@@ -4490,7 +4602,7 @@ mod tests {
         // Edge case: empty Bytes
         mt.put_entry(
             &kv_key("k_empty_bytes"),
-            7,
+            CommitVersion(7),
             MemtableEntry {
                 value: Value::Bytes(vec![]),
                 is_tombstone: false,
@@ -4502,7 +4614,7 @@ mod tests {
         // Edge case: entry with TTL (must be preserved through raw path)
         mt.put_entry(
             &kv_key("k_ttl"),
-            8,
+            CommitVersion(8),
             MemtableEntry {
                 value: Value::Int(99),
                 is_tombstone: false,
@@ -4548,19 +4660,19 @@ mod tests {
         // Verify output segment has identical values
         let dst_seg = KVSegment::open(&dst_path).unwrap();
         let e = dst_seg
-            .point_lookup(&kv_key("k_int"), u64::MAX)
+            .point_lookup(&kv_key("k_int"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(42));
 
         let e = dst_seg
-            .point_lookup(&kv_key("k_str"), u64::MAX)
+            .point_lookup(&kv_key("k_str"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::String("hello world".to_string()));
 
         let e = dst_seg
-            .point_lookup(&kv_key("k_bytes"), u64::MAX)
+            .point_lookup(&kv_key("k_bytes"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(
@@ -4569,13 +4681,13 @@ mod tests {
         );
 
         let e = dst_seg
-            .point_lookup(&kv_key("k_tomb"), u64::MAX)
+            .point_lookup(&kv_key("k_tomb"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert!(e.is_tombstone);
 
         let e = dst_seg
-            .point_lookup(&kv_key("k_obj"), u64::MAX)
+            .point_lookup(&kv_key("k_obj"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         let obj = e.value.as_object().unwrap();
@@ -4583,7 +4695,7 @@ mod tests {
 
         // Edge case: non-tombstone Null preserved
         let e = dst_seg
-            .point_lookup(&kv_key("k_null"), u64::MAX)
+            .point_lookup(&kv_key("k_null"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Null);
@@ -4591,14 +4703,14 @@ mod tests {
 
         // Edge case: empty Bytes preserved
         let e = dst_seg
-            .point_lookup(&kv_key("k_empty_bytes"), u64::MAX)
+            .point_lookup(&kv_key("k_empty_bytes"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Bytes(vec![]));
 
         // Edge case: TTL and timestamp preserved through raw path
         let e = dst_seg
-            .point_lookup(&kv_key("k_ttl"), u64::MAX)
+            .point_lookup(&kv_key("k_ttl"), CommitVersion::MAX)
             .unwrap()
             .unwrap();
         assert_eq!(e.value, Value::Int(99));

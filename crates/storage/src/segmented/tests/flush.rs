@@ -140,11 +140,19 @@ fn mvcc_correct_across_flush() {
     seed(&store, kv_key("k"), Value::Int(2), 2);
 
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1),
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2),
     );
 }
@@ -296,11 +304,20 @@ fn delete_across_flush_boundary() {
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
 
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
 
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(2))
+        .unwrap()
+        .is_none());
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1),
     );
 }
@@ -312,15 +329,24 @@ fn tombstone_survives_flush() {
 
     // Write value then delete, so the frozen memtable contains both
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
 
     // Tombstone must survive the flush — key is deleted at snapshot 2
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(2))
+        .unwrap()
+        .is_none());
     // Value is still visible at snapshot 1
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1),
     );
     // History shows both versions from the segment
@@ -376,7 +402,13 @@ fn recover_segments_multiple_branches() {
     for i in 1..=10u64 {
         let key = Key::new(ns1.clone(), TypeTag::KV, format!("k{}", i).into_bytes());
         store
-            .put_with_version_mode(key, Value::Int(i as i64), CommitVersion(i), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i as i64),
+                CommitVersion(i),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
     store.rotate_memtable(&b1);
@@ -385,7 +417,13 @@ fn recover_segments_multiple_branches() {
     for i in 11..=20u64 {
         let key = Key::new(ns2.clone(), TypeTag::KV, format!("k{}", i).into_bytes());
         store
-            .put_with_version_mode(key, Value::Int(i as i64), CommitVersion(i), None, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i as i64),
+                CommitVersion(i),
+                None,
+                WriteMode::Append,
+            )
             .unwrap();
     }
     store.rotate_memtable(&b2);
@@ -398,8 +436,14 @@ fn recover_segments_multiple_branches() {
 
     let k1 = Key::new(ns1, TypeTag::KV, "k1".as_bytes().to_vec());
     let k11 = Key::new(ns2, TypeTag::KV, "k11".as_bytes().to_vec());
-    assert!(store2.get_versioned(&k1, CommitVersion::MAX).unwrap().is_some());
-    assert!(store2.get_versioned(&k11, CommitVersion::MAX).unwrap().is_some());
+    assert!(store2
+        .get_versioned(&k1, CommitVersion::MAX)
+        .unwrap()
+        .is_some());
+    assert!(store2
+        .get_versioned(&k11, CommitVersion::MAX)
+        .unwrap()
+        .is_some());
 }
 
 #[test]
@@ -480,12 +524,12 @@ fn max_flushed_commit_returns_correct_value() {
     seed(&store, kv_key("k2"), Value::Int(2), 10);
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
-    assert_eq!(store.max_flushed_commit(&branch()), Some(10));
+    assert_eq!(store.max_flushed_commit(&branch()), Some(CommitVersion(10)));
 
     seed(&store, kv_key("k3"), Value::Int(3), 20);
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
-    assert_eq!(store.max_flushed_commit(&branch()), Some(20));
+    assert_eq!(store.max_flushed_commit(&branch()), Some(CommitVersion(20)));
 }
 
 #[test]
@@ -529,11 +573,19 @@ fn frozen_memtable_reads_correct_order() {
         Value::Int(3),
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2),
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1),
     );
 }

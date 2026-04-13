@@ -273,7 +273,7 @@ fn transaction_with_cas_is_not_read_only() {
     let key = Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), "test");
     txn.cas_set.push(CASOperation {
         key,
-        expected_version: 1,
+        expected_version: CommitVersion(1),
         new_value: Value::Int(42),
     });
 
@@ -289,7 +289,7 @@ fn transaction_with_only_reads_is_read_only() {
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
 
     let key = Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), "test");
-    txn.read_set.insert(key, 1);
+    txn.read_set.insert(key, CommitVersion(1));
 
     assert!(txn.is_read_only());
 }
@@ -332,9 +332,12 @@ fn read_count_tracks_reads() {
 
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r1"), 1);
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r2"), 2);
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r3"), 3);
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r1"), CommitVersion(1));
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r2"), CommitVersion(2));
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r3"), CommitVersion(3));
 
     assert_eq!(txn.read_count(), 3);
 }

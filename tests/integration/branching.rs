@@ -6,6 +6,7 @@
 use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
+use strata_core::id::CommitVersion;
 use strata_engine::branch_ops::{self, MergeStrategy};
 use strata_engine::SpaceIndex;
 
@@ -6957,9 +6958,13 @@ fn dag_records_revert() {
     kv.put(&branch_id, "default", "k1", Value::Int(99)).unwrap();
     let v_after = test_db.db.current_version().as_u64();
 
-    let revert_info =
-        branch_ops::revert_version_range(&test_db.db, "dag_revert_branch", v_before + 1, v_after)
-            .unwrap();
+    let revert_info = branch_ops::revert_version_range(
+        &test_db.db,
+        "dag_revert_branch",
+        CommitVersion(v_before + 1),
+        CommitVersion(v_after),
+    )
+    .unwrap();
     // The range covers the v2 (k2 add) and v3 (k1 update) writes, so both
     // keys must come back to their pre-range states: k1 → 1, k2 → gone.
     assert_eq!(
@@ -7015,7 +7020,7 @@ fn dag_records_revert() {
     );
     assert_eq!(
         props.get("revert_version").and_then(|v| v.as_u64()),
-        revert_info.revert_version,
+        revert_info.revert_version.map(|v| v.as_u64()),
         "revert_version on the DAG event must match the engine's RevertInfo"
     );
     assert_eq!(

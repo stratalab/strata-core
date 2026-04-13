@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use strata_core::id::CommitVersion;
 use strata_engine::BranchMetadata;
 use strata_graph::branch_dag;
 
@@ -469,12 +470,16 @@ pub fn branch_revert(
     to_version: u64,
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let info =
-        strata_engine::branch_ops::revert_version_range(&p.db, &branch, from_version, to_version)
-            .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+    let info = strata_engine::branch_ops::revert_version_range(
+        &p.db,
+        &branch,
+        CommitVersion(from_version),
+        CommitVersion(to_version),
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
 
     emit_audit_event(
         p,
@@ -695,7 +700,7 @@ pub fn note_add(
     let note = strata_engine::branch_ops::add_note(
         &p.db,
         &branch,
-        version,
+        CommitVersion(version),
         &message,
         author.as_deref(),
         metadata,
@@ -733,12 +738,11 @@ pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Re
 /// Handle NoteDelete command.
 pub fn note_delete(p: &Arc<Primitives>, branch: String, version: u64) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, version).map_err(|e| {
-        Error::Internal {
+    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, CommitVersion(version))
+        .map_err(|e| Error::Internal {
             reason: e.to_string(),
             hint: None,
-        }
-    })?;
+        })?;
     Ok(Output::Bool(deleted))
 }
 

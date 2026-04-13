@@ -215,8 +215,8 @@ impl WalOnlyCompactor {
                     debug!(target: "strata::compaction", segment = segment_number, "Empty segment (via .meta), considered covered");
                     return Ok(true);
                 }
-                let covered = meta.max_txn_id <= watermark;
-                debug!(target: "strata::compaction", segment = segment_number, max_txn_id = meta.max_txn_id, watermark, covered, "Coverage check via .meta");
+                let covered = meta.max_txn_id.as_u64() <= watermark;
+                debug!(target: "strata::compaction", segment = segment_number, max_txn_id = meta.max_txn_id.as_u64(), watermark, covered, "Coverage check via .meta");
                 return Ok(covered);
             }
             Ok(Some(_)) => {
@@ -280,7 +280,7 @@ impl WalOnlyCompactor {
         while cursor < file_data.len() {
             match WalRecord::from_bytes(&file_data[cursor..]) {
                 Ok((record, consumed)) => {
-                    max_txn_id = max_txn_id.max(record.txn_id);
+                    max_txn_id = max_txn_id.max(record.txn_id.as_u64());
                     cursor += consumed;
                 }
                 Err(WalRecordError::InsufficientData) => {
@@ -328,6 +328,7 @@ fn segment_path(dir: &Path, segment_number: u64) -> PathBuf {
 mod tests {
     use super::*;
     use crate::format::WalSegment;
+    use strata_core::id::{CommitVersion, TxnId};
     use tempfile::tempdir;
 
     fn test_uuid() -> [u8; 16] {
@@ -354,7 +355,12 @@ mod tests {
         let mut segment = WalSegment::create(wal_dir, segment_number, test_uuid())?;
 
         for &txn_id in txn_ids {
-            let record = WalRecord::new(txn_id, test_uuid(), txn_id * 1000, vec![txn_id as u8; 10]);
+            let record = WalRecord::new(
+                TxnId(txn_id),
+                test_uuid(),
+                txn_id * 1000,
+                vec![txn_id as u8; 10],
+            );
             segment.write(&record.to_bytes())?;
         }
 
@@ -418,7 +424,7 @@ mod tests {
         // Set flush watermark at txn 6 and active segment at 4
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(6).unwrap();
+            m.set_flush_watermark(CommitVersion(6)).unwrap();
             m.manifest_mut().active_wal_segment = 4;
             m.persist().unwrap();
         }
@@ -448,7 +454,7 @@ mod tests {
         // Set watermark high but active segment is 1
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(100).unwrap();
+            m.set_flush_watermark(CommitVersion(100)).unwrap();
             m.manifest_mut().active_wal_segment = 1; // Segment 1 is active
             m.persist().unwrap();
         }
@@ -468,7 +474,7 @@ mod tests {
         // Set flush watermark but no segments
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(100).unwrap();
+            m.set_flush_watermark(CommitVersion(100)).unwrap();
             m.persist().unwrap();
         }
 
@@ -493,7 +499,7 @@ mod tests {
         // Set watermark and active segment
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(5).unwrap();
+            m.set_flush_watermark(CommitVersion(5)).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -532,7 +538,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(10).unwrap();
+            m.set_flush_watermark(CommitVersion(10)).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -557,15 +563,15 @@ mod tests {
 
         // Write .meta files for both segments
         let mut meta1 = SegmentMeta::new_empty(1);
-        meta1.track_record(1, 1000);
-        meta1.track_record(2, 2000);
-        meta1.track_record(3, 3000);
+        meta1.track_record(TxnId(1), 1000);
+        meta1.track_record(TxnId(2), 2000);
+        meta1.track_record(TxnId(3), 3000);
         meta1.write_to_file(&wal_dir).unwrap();
 
         let mut meta2 = SegmentMeta::new_empty(2);
-        meta2.track_record(4, 4000);
-        meta2.track_record(5, 5000);
-        meta2.track_record(6, 6000);
+        meta2.track_record(TxnId(4), 4000);
+        meta2.track_record(TxnId(5), 5000);
+        meta2.track_record(TxnId(6), 6000);
         meta2.write_to_file(&wal_dir).unwrap();
 
         // Verify .meta files exist
@@ -575,7 +581,7 @@ mod tests {
         // Set watermark to cover segment 1 only
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(3).unwrap();
+            m.set_flush_watermark(CommitVersion(3)).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -603,15 +609,15 @@ mod tests {
 
         // Write a .meta file (this avoids the full scan path)
         let mut meta = SegmentMeta::new_empty(1);
-        meta.track_record(1, 1000);
-        meta.track_record(2, 2000);
-        meta.track_record(3, 3000);
+        meta.track_record(TxnId(1), 1000);
+        meta.track_record(TxnId(2), 2000);
+        meta.track_record(TxnId(3), 3000);
         meta.write_to_file(&wal_dir).unwrap();
 
         // Set watermark at exactly max_txn_id=3 and active segment high
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(3).unwrap();
+            m.set_flush_watermark(CommitVersion(3)).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -641,7 +647,7 @@ mod tests {
         // safe_active = max(3, 5) = 5. Segments >= 5 are protected.
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(100).unwrap(); // high watermark covers all
+            m.set_flush_watermark(CommitVersion(100)).unwrap(); // high watermark covers all
             m.manifest_mut().active_wal_segment = 3;
             m.persist().unwrap();
         }
@@ -672,7 +678,7 @@ mod tests {
         // MANIFEST active=5, override=3 → max(5,3)=5
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(100).unwrap();
+            m.set_flush_watermark(CommitVersion(100)).unwrap();
             m.manifest_mut().active_wal_segment = 5;
             m.persist().unwrap();
         }
@@ -694,7 +700,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(10).unwrap();
+            m.set_flush_watermark(CommitVersion(10)).unwrap();
             m.manifest_mut().active_wal_segment = 3;
             m.persist().unwrap();
         }
@@ -726,7 +732,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(5).unwrap();
+            m.set_flush_watermark(CommitVersion(5)).unwrap();
             m.manifest_mut().active_wal_segment = 2; // stale
             m.persist().unwrap();
         }
@@ -788,7 +794,7 @@ mod tests {
         // Set only snapshot watermark (no flush watermark)
         {
             let mut m = manifest.lock();
-            m.set_snapshot_watermark(1, 100).unwrap();
+            m.set_snapshot_watermark(1, TxnId(100)).unwrap();
             m.manifest_mut().active_wal_segment = 10;
             m.persist().unwrap();
         }
@@ -833,7 +839,7 @@ mod tests {
 
         {
             let mut m = manifest.lock();
-            m.set_flush_watermark(10).unwrap(); // covers everything
+            m.set_flush_watermark(CommitVersion(10)).unwrap(); // covers everything
             m.manifest_mut().active_wal_segment = 2; // stale: writer is at 4
             m.persist().unwrap();
         }

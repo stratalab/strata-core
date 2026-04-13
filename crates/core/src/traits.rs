@@ -84,7 +84,11 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn get_versioned(&self, key: &Key, max_version: CommitVersion) -> StrataResult<Option<VersionedValue>>;
+    fn get_versioned(
+        &self,
+        key: &Key,
+        max_version: CommitVersion,
+    ) -> StrataResult<Option<VersionedValue>>;
 
     /// Get version history for a key
     ///
@@ -182,7 +186,11 @@ pub trait Storage: Send + Sync {
     /// branch guards once per branch instead of per entry).
     ///
     /// All writes share the same `version` (same transaction commit version).
-    fn apply_batch(&self, writes: Vec<(Key, Value, WriteMode)>, version: CommitVersion) -> StrataResult<()> {
+    fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: CommitVersion,
+    ) -> StrataResult<()> {
         for (key, value, mode) in writes {
             self.put_with_version_mode(key, value, version, None, mode)?;
         }
@@ -237,10 +245,10 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<CommitVersion>> {
         Ok(self
             .get_versioned(key, CommitVersion::MAX)?
-            .map(|vv| vv.version.as_u64()))
+            .map(|vv| CommitVersion(vv.version.as_u64())))
     }
 }
 
@@ -400,7 +408,10 @@ mod tests {
         let store = MockStorage::new();
         let ns = test_ns();
         let key = test_key(&ns, "missing");
-        assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -410,7 +421,10 @@ mod tests {
         let key = test_key(&ns, "hello");
         seed(&store, key.clone(), Value::Int(42), 1);
 
-        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let result = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.value, Value::Int(42));
     }
 
@@ -424,11 +438,17 @@ mod tests {
         seed(&store, key.clone(), Value::Int(2), 2);
 
         // Reading at v1 should see the first write
-        let result = store.get_versioned(&key, CommitVersion(1)).unwrap().unwrap();
+        let result = store
+            .get_versioned(&key, CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(result.value, Value::Int(1));
 
         // Reading at CommitVersion::MAX should see the latest write
-        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let result = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.value, Value::Int(2));
     }
 
@@ -440,7 +460,10 @@ mod tests {
         seed(&store, key.clone(), Value::Int(1), 1);
 
         // Version 0 is before any write
-        assert!(store.get_versioned(&key, CommitVersion::ZERO).unwrap().is_none());
+        assert!(store
+            .get_versioned(&key, CommitVersion::ZERO)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -494,12 +517,16 @@ mod tests {
         seed(&store, key.clone(), Value::Int(3), 3);
 
         // Get history before v3 (should return v2 and v1)
-        let history = store.get_history(&key, None, Some(CommitVersion(3))).unwrap();
+        let history = store
+            .get_history(&key, None, Some(CommitVersion(3)))
+            .unwrap();
         assert_eq!(history.len(), 2);
         assert_eq!(history[0].value, Value::Int(2));
 
         // Get history before v2 (should return only v1)
-        let history = store.get_history(&key, None, Some(CommitVersion(2))).unwrap();
+        let history = store
+            .get_history(&key, None, Some(CommitVersion(2)))
+            .unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].value, Value::Int(1));
     }
@@ -525,7 +552,10 @@ mod tests {
         let key = test_key(&ns, "explicit");
         seed(&store, key.clone(), Value::Int(99), 42);
 
-        let result = store.get_versioned(&key, CommitVersion::MAX).unwrap().unwrap();
+        let result = store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(result.value, Value::Int(99));
         assert_eq!(result.version().as_u64(), 42);
     }
@@ -566,7 +596,10 @@ mod tests {
         seed(&store, key.clone(), Value::Int(1), 1);
 
         store.delete_with_version(&key, CommitVersion(2)).unwrap();
-        assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
+        assert!(store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .is_none());
     }
 
     // ====================================================================
@@ -588,7 +621,11 @@ mod tests {
         ) -> StrataResult<Vec<VersionedValue>> {
             Err(StrataError::storage("disk read failed"))
         }
-        fn scan_prefix(&self, _: &Key, _: CommitVersion) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        fn scan_prefix(
+            &self,
+            _: &Key,
+            _: CommitVersion,
+        ) -> StrataResult<Vec<(Key, VersionedValue)>> {
             Err(StrataError::storage("disk read failed"))
         }
         fn current_version(&self) -> CommitVersion {
@@ -619,7 +656,13 @@ mod tests {
         assert!(store.get_history(&key, None, None).is_err());
         assert!(store.scan_prefix(&key, CommitVersion::ZERO).is_err());
         assert!(store
-            .put_with_version_mode(key.clone(), Value::Null, CommitVersion(1), None, WriteMode::Append)
+            .put_with_version_mode(
+                key.clone(),
+                Value::Null,
+                CommitVersion(1),
+                None,
+                WriteMode::Append
+            )
             .is_err());
         assert!(store.delete_with_version(&key, CommitVersion(1)).is_err());
     }

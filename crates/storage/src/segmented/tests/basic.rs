@@ -27,7 +27,9 @@ fn get_nonexistent_returns_none() {
 fn delete_creates_tombstone() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(42), 1);
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     assert!(store
         .get_versioned(&kv_key("k"), CommitVersion::MAX)
         .unwrap()
@@ -42,37 +44,65 @@ fn versioned_read_respects_snapshot() {
     seed(&store, kv_key("k"), Value::Int(30), 3);
 
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(10)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(20)
     );
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(3)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(3))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(30)
     );
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(0)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(0))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
 fn tombstone_snapshot_isolation() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(10), 1);
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     seed(&store, kv_key("k"), Value::Int(30), 3);
 
     // Snapshot at 1: see original value
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(1)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(10)
     );
     // Snapshot at 2: tombstone → None
-    assert!(store.get_versioned(&kv_key("k"), CommitVersion(2)).unwrap().is_none());
+    assert!(store
+        .get_versioned(&kv_key("k"), CommitVersion(2))
+        .unwrap()
+        .is_none());
     // Snapshot at 3: see re-written value
     assert_eq!(
-        store.get_versioned(&kv_key("k"), CommitVersion(3)).unwrap().unwrap().value,
+        store
+            .get_versioned(&kv_key("k"), CommitVersion(3))
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(30)
     );
 }
@@ -112,7 +142,9 @@ fn get_history_with_before_version() {
     seed(&store, kv_key("k"), Value::Int(2), 2);
     seed(&store, kv_key("k"), Value::Int(3), 3);
 
-    let history = store.get_history(&kv_key("k"), None, Some(CommitVersion(3))).unwrap();
+    let history = store
+        .get_history(&kv_key("k"), None, Some(CommitVersion(3)))
+        .unwrap();
     assert_eq!(history.len(), 2);
     assert_eq!(history[0].value, Value::Int(2));
 }
@@ -121,7 +153,9 @@ fn get_history_with_before_version() {
 fn get_history_includes_tombstones() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     seed(&store, kv_key("k"), Value::Int(3), 3);
 
     let history = store.get_history(&kv_key("k"), None, None).unwrap();
@@ -150,7 +184,9 @@ fn scan_prefix_filters_tombstones() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k1"), Value::Int(1), 1);
     seed(&store, kv_key("k2"), Value::Int(2), 2);
-    store.delete_with_version(&kv_key("k1"), CommitVersion(3)).unwrap();
+    store
+        .delete_with_version(&kv_key("k1"), CommitVersion(3))
+        .unwrap();
 
     let prefix = Key::new(ns(), TypeTag::KV, "k".as_bytes().to_vec());
     let results = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap();
@@ -188,7 +224,7 @@ fn version_next_version_set_version() {
     assert_eq!(store.version(), 0);
     assert_eq!(store.next_version(), 1);
     assert_eq!(store.version(), 1);
-    store.set_version(100);
+    store.set_version(CommitVersion(100));
     assert_eq!(store.version(), 100);
 }
 
@@ -200,7 +236,7 @@ fn test_issue_1718_next_version_overflow_panics() {
     // This is consistent with TransactionManager::allocate_version()
     // which returns Err(CounterOverflow) at u64::MAX.
     let store = SegmentedStore::new();
-    store.set_version(u64::MAX - 1);
+    store.set_version(CommitVersion(u64::MAX - 1));
     // Advances from MAX-1 to MAX — should succeed
     assert_eq!(store.next_version(), u64::MAX);
     // Advances from MAX — should panic (overflow)
@@ -231,7 +267,9 @@ fn list_branch_returns_live_entries() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("a"), Value::Int(1), 1);
     seed(&store, kv_key("b"), Value::Int(2), 2);
-    store.delete_with_version(&kv_key("a"), CommitVersion(3)).unwrap();
+    store
+        .delete_with_version(&kv_key("a"), CommitVersion(3))
+        .unwrap();
 
     let entries = store.list_branch(&branch());
     assert_eq!(entries.len(), 1);
@@ -249,18 +287,38 @@ fn multiple_branches_isolated() {
 
     let store = SegmentedStore::new();
     store
-        .put_with_version_mode(k1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            k1.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(k2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            k2.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     assert_eq!(
-        store.get_versioned(&k1, CommitVersion::MAX).unwrap().unwrap().value,
+        store
+            .get_versioned(&k1, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(1)
     );
     assert_eq!(
-        store.get_versioned(&k2, CommitVersion::MAX).unwrap().unwrap().value,
+        store
+            .get_versioned(&k2, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
         Value::Int(2)
     );
     assert_eq!(store.branch_ids().len(), 2);
@@ -309,7 +367,7 @@ fn compaction_does_not_cross_branches() {
     assert_eq!(store.l0_segment_count(&b2), 1);
 
     // Compact only branch 1 L0→L1
-    store.compact_l0_to_l1(&b1, 0).unwrap();
+    store.compact_l0_to_l1(&b1, CommitVersion(0)).unwrap();
 
     // Branch 1: compacted to L1
     assert_eq!(store.l0_segment_count(&b1), 0);
@@ -371,11 +429,14 @@ fn ttl_expiration_at_read_time() {
         ttl_ms: 1,                            // 1ms TTL — definitely expired
         raw_value: None,
     };
-    branch.active.put_entry(&key, 1, entry);
+    branch.active.put_entry(&key, CommitVersion(1), entry);
     drop(branch);
 
     // Should be expired
-    assert!(store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none());
+    assert!(store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -428,7 +489,10 @@ fn get_version_only_existing() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 5);
     seed(&store, kv_key("k"), Value::Int(2), 10);
-    assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), Some(10));
+    assert_eq!(
+        store.get_version_only(&kv_key("k")).unwrap(),
+        Some(CommitVersion(10))
+    );
 }
 
 #[test]
@@ -441,7 +505,9 @@ fn get_version_only_nonexistent() {
 fn get_version_only_tombstoned() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    store.delete_with_version(&kv_key("k"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&kv_key("k"), CommitVersion(2))
+        .unwrap();
     assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), None);
 }
 
@@ -469,7 +535,13 @@ fn test_issue_1700_keep_last_does_not_prune_at_write_time() {
 
     // Write a 4th version with KeepLast(1) — memtable must still keep all 4.
     store
-        .put_with_version_mode(key.clone(), Value::Int(99), CommitVersion(4), None, WriteMode::KeepLast(1))
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(99),
+            CommitVersion(4),
+            None,
+            WriteMode::KeepLast(1),
+        )
         .unwrap();
 
     let history = store.get_history(&key, None, None).unwrap();
@@ -513,7 +585,9 @@ fn test_issue_1700_apply_batch_keep_last_preserves_versions() {
 fn delete_nonexistent_key() {
     let store = SegmentedStore::new();
     // Deleting a key that never existed should succeed (creates tombstone)
-    store.delete_with_version(&kv_key("ghost"), CommitVersion(1)).unwrap();
+    store
+        .delete_with_version(&kv_key("ghost"), CommitVersion(1))
+        .unwrap();
     assert!(store
         .get_versioned(&kv_key("ghost"), CommitVersion::MAX)
         .unwrap()
@@ -675,7 +749,10 @@ fn count_prefix_matches_scan_prefix() {
     seed(&store, kv_key("c"), Value::Int(3), 3);
 
     let prefix = Key::new(ns(), TypeTag::KV, vec![]);
-    let scan_count = store.scan_prefix(&prefix, CommitVersion::MAX).unwrap().len() as u64;
+    let scan_count = store
+        .scan_prefix(&prefix, CommitVersion::MAX)
+        .unwrap()
+        .len() as u64;
     let direct_count = store.count_prefix(&prefix, CommitVersion::MAX).unwrap();
     assert_eq!(scan_count, direct_count);
     assert_eq!(direct_count, 3);
@@ -687,7 +764,9 @@ fn count_prefix_excludes_tombstones() {
     seed(&store, kv_key("a"), Value::Int(1), 1);
     seed(&store, kv_key("b"), Value::Int(2), 2);
     seed(&store, kv_key("c"), Value::Int(3), 3);
-    store.delete_with_version(&kv_key("b"), CommitVersion(4)).unwrap();
+    store
+        .delete_with_version(&kv_key("b"), CommitVersion(4))
+        .unwrap();
 
     let prefix = Key::new(ns(), TypeTag::KV, vec![]);
     let count = store.count_prefix(&prefix, CommitVersion::MAX).unwrap();
@@ -722,10 +801,20 @@ fn count_prefix_with_key_filter() {
     seed(&store, kv_key("task:1"), Value::Int(3), 3);
 
     let user_prefix = Key::new(ns(), TypeTag::KV, "user:".as_bytes().to_vec());
-    assert_eq!(store.count_prefix(&user_prefix, CommitVersion::MAX).unwrap(), 2);
+    assert_eq!(
+        store
+            .count_prefix(&user_prefix, CommitVersion::MAX)
+            .unwrap(),
+        2
+    );
 
     let task_prefix = Key::new(ns(), TypeTag::KV, "task:".as_bytes().to_vec());
-    assert_eq!(store.count_prefix(&task_prefix, CommitVersion::MAX).unwrap(), 1);
+    assert_eq!(
+        store
+            .count_prefix(&task_prefix, CommitVersion::MAX)
+            .unwrap(),
+        1
+    );
 }
 
 // ===== BranchSnapshot tests =====
@@ -750,7 +839,7 @@ fn snapshot_survives_rotation() {
     let prefix = Key::new(ns(), TypeTag::KV, vec![]);
     let (merge, flags) =
         SegmentedStore::build_snapshot_merge_iter(&snapshot, &prefix, &prefix).unwrap();
-    let mvcc = MvccIterator::new(merge, 3); // snapshot at version 3
+    let mvcc = MvccIterator::new(merge, CommitVersion(3)); // snapshot at version 3
     let count = mvcc
         .filter(|(_, entry)| !entry.is_tombstone)
         .filter(|(ik, _)| ik.decode().is_some())

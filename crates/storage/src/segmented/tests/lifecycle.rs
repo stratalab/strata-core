@@ -206,7 +206,7 @@ fn concurrent_fork_and_compaction_no_data_loss() {
     let barrier_compact = Arc::clone(&barrier);
     let compact_handle = std::thread::spawn(move || {
         barrier_compact.wait();
-        store_compact.compact_branch(&parent_branch(), 0)
+        store_compact.compact_branch(&parent_branch(), CommitVersion(0))
     });
 
     let (_fork_ver, segments_shared) = fork_handle.join().unwrap();
@@ -279,7 +279,7 @@ fn concurrent_fork_and_compaction_stress() {
         let b2 = Arc::clone(&barrier);
         let t2 = std::thread::spawn(move || {
             b2.wait();
-            s2.compact_branch(&parent_branch(), 0)
+            s2.compact_branch(&parent_branch(), CommitVersion(0))
         });
 
         let fork_result = t1.join().unwrap().unwrap();
@@ -416,7 +416,9 @@ fn bench_100_branch_fanout() {
     );
 
     // Compact parent — should NOT delete shared segments
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
 
     // Verify all 100 children can still read
     let start = std::time::Instant::now();
@@ -550,7 +552,7 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
     let orphan_path = branch_dir.join("999999.sst");
     // Write a valid segment file using the correct builder API
     let typed_key = crate::key_encoding::encode_typed_key(&parent_kv("orphan"));
-    let ik = crate::key_encoding::InternalKey::from_typed_key_bytes(&typed_key, 1);
+    let ik = crate::key_encoding::InternalKey::from_typed_key_bytes(&typed_key, CommitVersion(1));
     let me = crate::memtable::MemtableEntry {
         value: Value::Int(999),
         is_tombstone: false,
@@ -625,7 +627,7 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 
     // 3. Compact parent L0 → L1. Old segments kept on disk (refcount > 0).
     store
-        .compact_l0_to_l1(&parent_branch(), 0)
+        .compact_l0_to_l1(&parent_branch(), CommitVersion(0))
         .unwrap()
         .expect("compaction should produce output");
 
@@ -654,14 +656,18 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
     // 5. Child must still see inherited data after recovery
     //    This is the bug: without the fix, inherited layer resolution can't
     //    find the orphan segments because they're not in the parent's version.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
+    let val_a_recovered = store2
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery (orphan segment)"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
+    let val_b_recovered = store2
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery (orphan segment)"
@@ -736,14 +742,18 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
     let info = store2.recover_segments().unwrap();
 
     // 6. Child must still see inherited data after recovery.
-    let val_a_recovered = store2.get_versioned(&child_kv("a"), CommitVersion::MAX).unwrap();
+    let val_a_recovered = store2
+        .get_versioned(&child_kv("a"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_a_recovered.is_some(),
         "child should see inherited key 'a' after recovery"
     );
     assert_eq!(val_a_recovered.unwrap().value, Value::Int(1));
 
-    let val_b_recovered = store2.get_versioned(&child_kv("b"), CommitVersion::MAX).unwrap();
+    let val_b_recovered = store2
+        .get_versioned(&child_kv("b"), CommitVersion::MAX)
+        .unwrap();
     assert!(
         val_b_recovered.is_some(),
         "child should see inherited key 'b' after recovery"
@@ -960,7 +970,9 @@ fn gc_orphan_segments_cleans_leaked_files() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),
@@ -1044,7 +1056,9 @@ fn test_issue_1705_materialize_layer_gc_orphan_segments() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),
@@ -1205,7 +1219,7 @@ fn test_issue_1677_compaction_aborts_on_corrupt_segment() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Compaction must return an error, not silently drop entries
-    let result = store.compact_branch(&bid, 0);
+    let result = store.compact_branch(&bid, CommitVersion(0));
     assert!(
         result.is_err(),
         "compaction must abort on corrupt segment, not silently drop entries"

@@ -146,7 +146,7 @@ impl SpaceIndex {
         let mut spaces: BTreeSet<String> = BTreeSet::new();
         spaces.insert("default".to_string());
 
-        let snapshot = self.db.storage().version();
+        let snapshot = strata_core::id::CommitVersion(self.db.storage().version());
         for type_tag in [
             TypeTag::KV,
             TypeTag::Event,

@@ -4,6 +4,7 @@
 //! durability guarantees based on the configured mode.
 
 use serde::{Deserialize, Serialize};
+use strata_core::id::TxnId;
 
 use super::DurabilityMode;
 use crate::codec::StorageCodec;
@@ -236,7 +237,7 @@ impl WalWriter {
     pub fn append_pre_serialized(
         &mut self,
         record_bytes: &[u8],
-        txn_id: u64,
+        txn_id: TxnId,
         timestamp: u64,
     ) -> std::io::Result<()> {
         if !self.durability.requires_wal() {
@@ -275,7 +276,12 @@ impl WalWriter {
     ///
     /// Handles segment rotation, writing, metadata tracking, and counter updates.
     /// Callers are responsible for encoding and post-write sync behavior.
-    fn append_inner(&mut self, encoded: &[u8], txn_id: u64, timestamp: u64) -> std::io::Result<()> {
+    fn append_inner(
+        &mut self,
+        encoded: &[u8],
+        txn_id: TxnId,
+        timestamp: u64,
+    ) -> std::io::Result<()> {
         let segment = self
             .segment
             .as_mut()
@@ -306,7 +312,7 @@ impl WalWriter {
         self.total_wal_appends += 1;
         self.total_bytes_written += encoded.len() as u64;
 
-        debug!(target: "strata::wal", txn_id, record_bytes = encoded.len(), segment = self.current_segment_number, "WAL record appended");
+        debug!(target: "strata::wal", txn_id = txn_id.as_u64(), record_bytes = encoded.len(), segment = self.current_segment_number, "WAL record appended");
 
         self.bytes_since_sync += encoded.len() as u64;
         self.writes_since_sync += 1;
@@ -764,6 +770,7 @@ impl Drop for WalWriter {
 mod tests {
     use super::*;
     use crate::codec::IdentityCodec;
+    use strata_core::id::TxnId;
     use tempfile::tempdir;
 
     fn make_writer(dir: &Path, durability: DurabilityMode) -> WalWriter {
@@ -778,7 +785,7 @@ mod tests {
     }
 
     fn make_record(txn_id: u64) -> WalRecord {
-        WalRecord::new(txn_id, [1u8; 16], 12345, vec![1, 2, 3])
+        WalRecord::new(TxnId(txn_id), [1u8; 16], 12345, vec![1, 2, 3])
     }
 
     #[test]
@@ -827,7 +834,7 @@ mod tests {
         // Write enough records to trigger rotation
         for i in 0..10 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], 0, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
                 .unwrap();
         }
 
@@ -926,7 +933,7 @@ mod tests {
         // Read all records — should see all 10 in order
         let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
-        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, (1..=10).collect::<Vec<_>>());
     }
 
@@ -952,7 +959,7 @@ mod tests {
         // All 3 records should be readable
         let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
-        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
     }
 
@@ -977,7 +984,7 @@ mod tests {
 
         // Writer A writes one record
         writer_a
-            .append_and_flush(&WalRecord::new(1, [1u8; 16], 0, vec![0; 50]))
+            .append_and_flush(&WalRecord::new(TxnId(1), [1u8; 16], 0, vec![0; 50]))
             .unwrap();
         let seg_a = writer_a.current_segment();
 
@@ -993,7 +1000,7 @@ mod tests {
             .unwrap();
             for i in 2..=5 {
                 writer_b
-                    .append_and_flush(&WalRecord::new(i, [1u8; 16], 0, vec![0; 50]))
+                    .append_and_flush(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
                     .unwrap();
             }
             assert!(
@@ -1005,7 +1012,7 @@ mod tests {
         // Writer A should detect the new segment after reopen
         writer_a.reopen_if_needed().unwrap();
         writer_a
-            .append_and_flush(&WalRecord::new(99, [1u8; 16], 0, vec![0; 10]))
+            .append_and_flush(&WalRecord::new(TxnId(99), [1u8; 16], 0, vec![0; 10]))
             .unwrap();
 
         // All records should be readable
@@ -1017,7 +1024,7 @@ mod tests {
             result.records.len()
         );
         // Record 99 should be last
-        assert_eq!(result.records.last().unwrap().txn_id, 99);
+        assert_eq!(result.records.last().unwrap().txn_id, TxnId(99));
     }
 
     #[test]
@@ -1041,7 +1048,7 @@ mod tests {
 
         let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
-        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
     }
 
@@ -1090,7 +1097,7 @@ mod tests {
         let record = make_record(42);
         let record_bytes = record.to_bytes();
         writer
-            .append_pre_serialized(&record_bytes, 42, 12345)
+            .append_pre_serialized(&record_bytes, TxnId(42), 12345)
             .unwrap();
         writer.flush().unwrap();
 
@@ -1098,7 +1105,7 @@ mod tests {
         let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 1);
-        assert_eq!(result.records[0].txn_id, 42);
+        assert_eq!(result.records[0].txn_id, TxnId(42));
         assert_eq!(result.records[0].timestamp, 12345);
         assert_eq!(result.records[0].writeset, vec![1, 2, 3]);
     }
@@ -1156,10 +1163,10 @@ mod tests {
 
         // Write enough records via pre_serialized to trigger rotation
         for i in 0..10u64 {
-            let record = WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]);
+            let record = WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]);
             let record_bytes = record.to_bytes();
             writer
-                .append_pre_serialized(&record_bytes, i, i * 1000)
+                .append_pre_serialized(&record_bytes, TxnId(i), i * 1000)
                 .unwrap();
         }
 
@@ -1177,7 +1184,7 @@ mod tests {
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 10);
         for (i, rec) in result.records.iter().enumerate() {
-            assert_eq!(rec.txn_id, i as u64);
+            assert_eq!(rec.txn_id, TxnId(i as u64));
         }
     }
 
@@ -1189,7 +1196,7 @@ mod tests {
         let record = make_record(1);
         let record_bytes = record.to_bytes();
         writer
-            .append_pre_serialized(&record_bytes, 1, 12345)
+            .append_pre_serialized(&record_bytes, TxnId(1), 12345)
             .unwrap();
 
         // No files should be created
@@ -1209,7 +1216,7 @@ mod tests {
         let record = make_record(1);
         let record_bytes = record.to_bytes();
         writer
-            .append_pre_serialized(&record_bytes, 1, 12345)
+            .append_pre_serialized(&record_bytes, TxnId(1), 12345)
             .unwrap();
 
         let counters_after = writer.counters();
@@ -1234,7 +1241,7 @@ mod tests {
         // append_pre_serialized()
         let r2 = make_record(2);
         writer
-            .append_pre_serialized(&r2.to_bytes(), 2, 12345)
+            .append_pre_serialized(&r2.to_bytes(), TxnId(2), 12345)
             .unwrap();
 
         // append()
@@ -1244,7 +1251,7 @@ mod tests {
 
         let reader = crate::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
-        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id).collect();
+        let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
     }
 
@@ -1400,7 +1407,12 @@ mod tests {
         // Write some records
         for i in 1..=5 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
 
@@ -1415,8 +1427,8 @@ mod tests {
 
         assert_eq!(meta.segment_number, seg_num);
         assert_eq!(meta.record_count, 5);
-        assert_eq!(meta.min_txn_id, 1);
-        assert_eq!(meta.max_txn_id, 5);
+        assert_eq!(meta.min_txn_id, TxnId(1));
+        assert_eq!(meta.max_txn_id, TxnId(5));
         // Verify timestamps are also tracked correctly
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 5000);
@@ -1432,7 +1444,12 @@ mod tests {
         // Write initial records and flush meta
         for i in 1..=3 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
         writer.flush_active_meta();
@@ -1442,14 +1459,19 @@ mod tests {
             .unwrap()
             .expect(".meta should exist");
         assert_eq!(meta.record_count, 3);
-        assert_eq!(meta.max_txn_id, 3);
+        assert_eq!(meta.max_txn_id, TxnId(3));
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 3000);
 
         // Write more records and flush again
         for i in 4..=7 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
         writer.flush_active_meta();
@@ -1458,8 +1480,8 @@ mod tests {
             .unwrap()
             .expect(".meta should exist after update");
         assert_eq!(meta.record_count, 7);
-        assert_eq!(meta.min_txn_id, 1);
-        assert_eq!(meta.max_txn_id, 7);
+        assert_eq!(meta.min_txn_id, TxnId(1));
+        assert_eq!(meta.max_txn_id, TxnId(7));
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 7000);
     }
@@ -1489,7 +1511,12 @@ mod tests {
         // Write records
         for i in 1..=3 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
 
@@ -1503,8 +1530,8 @@ mod tests {
 
         assert_eq!(meta.segment_number, seg_num);
         assert_eq!(meta.record_count, 3);
-        assert_eq!(meta.min_txn_id, 1);
-        assert_eq!(meta.max_txn_id, 3);
+        assert_eq!(meta.min_txn_id, TxnId(1));
+        assert_eq!(meta.max_txn_id, TxnId(3));
     }
 
     // ========================================================================
@@ -1537,7 +1564,7 @@ mod tests {
 
         for i in 1..=10 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
                 .unwrap();
         }
         writer.flush().unwrap();
@@ -1577,7 +1604,7 @@ mod tests {
         // Write enough to force rotation
         for i in 0..10 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], 0, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
                 .unwrap();
         }
 
@@ -1634,7 +1661,7 @@ mod tests {
         // Write enough records to force several rotations
         for i in 1..=20 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
                 .unwrap();
         }
 

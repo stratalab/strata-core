@@ -67,7 +67,7 @@ pub fn attach_inherited_layer(
     let mut child = store.branches.get_mut(&child_branch_id).unwrap();
     child.inherited_layers.push(InheritedLayer {
         source_branch_id,
-        fork_version,
+        fork_version: CommitVersion(fork_version),
         segments: snapshot,
         status: LayerStatus::Active,
     });

@@ -200,7 +200,13 @@ fn stress_ttl_expiration_cleanup() {
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
         store
-            .put_with_version_mode(key, Value::Int(i), CommitVersion((i + 1) as u64), ttl, WriteMode::Append)
+            .put_with_version_mode(
+                key,
+                Value::Int(i),
+                CommitVersion((i + 1) as u64),
+                ttl,
+                WriteMode::Append,
+            )
             .unwrap();
     }
 
@@ -211,7 +217,11 @@ fn stress_ttl_expiration_cleanup() {
     let mut expired_count = 0;
     for i in 0..10_000 {
         let key = create_test_key(branch_id, &format!("ttl_key_{}", i));
-        if store.get_versioned(&key, CommitVersion::MAX).unwrap().is_none() {
+        if store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .is_none()
+        {
             expired_count += 1;
         }
     }

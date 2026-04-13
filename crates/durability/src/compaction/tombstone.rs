@@ -18,6 +18,8 @@
 
 use std::collections::HashMap;
 
+use strata_core::id::CommitVersion;
+
 /// Tombstone for a deleted/compacted entry
 ///
 /// Records metadata about when and why an entry was removed.
@@ -97,7 +99,7 @@ impl Tombstone {
         branch_id: [u8; 16],
         primitive_type: u8,
         key: Vec<u8>,
-        version: u64,
+        version: CommitVersion,
         reason: TombstoneReason,
     ) -> Self {
         let created_at = std::time::SystemTime::now()
@@ -109,7 +111,7 @@ impl Tombstone {
             branch_id,
             primitive_type,
             key,
-            version,
+            version: version.as_u64(),
             created_at,
             reason,
         }
@@ -120,7 +122,7 @@ impl Tombstone {
         branch_id: [u8; 16],
         primitive_type: u8,
         key: Vec<u8>,
-        version: u64,
+        version: CommitVersion,
         reason: TombstoneReason,
         created_at: u64,
     ) -> Self {
@@ -128,7 +130,7 @@ impl Tombstone {
             branch_id,
             primitive_type,
             key,
-            version,
+            version: version.as_u64(),
             created_at,
             reason,
         }
@@ -303,13 +305,13 @@ impl TombstoneIndex {
         branch_id: &[u8; 16],
         primitive_type: u8,
         key: &[u8],
-        version: u64,
+        version: CommitVersion,
     ) -> bool {
         let lookup_key = TombstoneKey::new(*branch_id, primitive_type, key.to_vec());
 
         self.tombstones
             .get(&lookup_key)
-            .is_some_and(|ts| ts.iter().any(|t| t.version == version))
+            .is_some_and(|ts| ts.iter().any(|t| t.version == version.as_u64()))
     }
 
     /// Get all tombstones for a specific entry
@@ -492,7 +494,7 @@ mod tests {
             test_branch_id(),
             0,
             b"test-key".to_vec(),
-            42,
+            CommitVersion(42),
             TombstoneReason::UserDelete,
         );
 
@@ -510,7 +512,7 @@ mod tests {
             test_branch_id(),
             1,
             b"key".to_vec(),
-            100,
+            CommitVersion(100),
             TombstoneReason::Compaction,
             123456789,
         );
@@ -524,7 +526,7 @@ mod tests {
             test_branch_id(),
             2,
             b"my-key".to_vec(),
-            42,
+            CommitVersion(42),
             TombstoneReason::RetentionPolicy,
             1000000,
         );
@@ -547,7 +549,7 @@ mod tests {
             test_branch_id(),
             0,
             Vec::new(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
             0,
         );
@@ -572,16 +574,16 @@ mod tests {
             test_branch_id(),
             0,
             b"key1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         );
 
         index.add(ts);
 
-        assert!(index.is_tombstoned(&test_branch_id(), 0, b"key1", 1));
-        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key1", 2));
-        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key2", 1));
-        assert!(!index.is_tombstoned(&test_branch_id(), 1, b"key1", 1));
+        assert!(index.is_tombstoned(&test_branch_id(), 0, b"key1", CommitVersion(1)));
+        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key1", CommitVersion(2)));
+        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key2", CommitVersion(1)));
+        assert!(!index.is_tombstoned(&test_branch_id(), 1, b"key1", CommitVersion(1)));
     }
 
     #[test]
@@ -593,7 +595,7 @@ mod tests {
                 test_branch_id(),
                 0,
                 b"key".to_vec(),
-                version,
+                CommitVersion(version),
                 TombstoneReason::Compaction,
             );
             index.add(ts);
@@ -602,9 +604,9 @@ mod tests {
         assert_eq!(index.len(), 5);
 
         for version in 1..=5 {
-            assert!(index.is_tombstoned(&test_branch_id(), 0, b"key", version));
+            assert!(index.is_tombstoned(&test_branch_id(), 0, b"key", CommitVersion(version)));
         }
-        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key", 6));
+        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"key", CommitVersion(6)));
     }
 
     #[test]
@@ -615,14 +617,14 @@ mod tests {
             test_branch_id(),
             0,
             b"key".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
         index.add(Tombstone::new(
             test_branch_id(),
             0,
             b"key".to_vec(),
-            2,
+            CommitVersion(2),
             TombstoneReason::Compaction,
         ));
 
@@ -641,21 +643,21 @@ mod tests {
             branch1,
             0,
             b"key1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
         index.add(Tombstone::new(
             branch1,
             0,
             b"key2".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
         index.add(Tombstone::new(
             branch2,
             0,
             b"key1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
 
@@ -671,21 +673,21 @@ mod tests {
             test_branch_id(),
             0,
             b"k1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
         index.add(Tombstone::new(
             test_branch_id(),
             0,
             b"k2".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::Compaction,
         ));
         index.add(Tombstone::new(
             test_branch_id(),
             0,
             b"k3".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::Compaction,
         ));
 
@@ -705,7 +707,7 @@ mod tests {
             test_branch_id(),
             0,
             b"k1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
             100,
         ));
@@ -713,7 +715,7 @@ mod tests {
             test_branch_id(),
             0,
             b"k2".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
             200,
         ));
@@ -721,7 +723,7 @@ mod tests {
             test_branch_id(),
             0,
             b"k3".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
             300,
         ));
@@ -732,9 +734,9 @@ mod tests {
         assert_eq!(removed, 2);
         assert_eq!(index.len(), 1);
 
-        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"k1", 1));
-        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"k2", 1));
-        assert!(index.is_tombstoned(&test_branch_id(), 0, b"k3", 1));
+        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"k1", CommitVersion(1)));
+        assert!(!index.is_tombstoned(&test_branch_id(), 0, b"k2", CommitVersion(1)));
+        assert!(index.is_tombstoned(&test_branch_id(), 0, b"k3", CommitVersion(1)));
     }
 
     #[test]
@@ -745,7 +747,7 @@ mod tests {
             test_branch_id(),
             0,
             b"k".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
 
@@ -763,7 +765,7 @@ mod tests {
             test_branch_id(),
             0,
             b"key1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
             100,
         ));
@@ -771,7 +773,7 @@ mod tests {
             test_branch_id(),
             1,
             b"key2".to_vec(),
-            2,
+            CommitVersion(2),
             TombstoneReason::Compaction,
             200,
         ));
@@ -780,8 +782,8 @@ mod tests {
         let parsed = TombstoneIndex::from_bytes(&bytes).unwrap();
 
         assert_eq!(parsed.len(), 2);
-        assert!(parsed.is_tombstoned(&test_branch_id(), 0, b"key1", 1));
-        assert!(parsed.is_tombstoned(&test_branch_id(), 1, b"key2", 2));
+        assert!(parsed.is_tombstoned(&test_branch_id(), 0, b"key1", CommitVersion(1)));
+        assert!(parsed.is_tombstoned(&test_branch_id(), 1, b"key2", CommitVersion(2)));
     }
 
     #[test]
@@ -792,14 +794,14 @@ mod tests {
             test_branch_id(),
             0,
             b"k1".to_vec(),
-            1,
+            CommitVersion(1),
             TombstoneReason::UserDelete,
         ));
         index.add(Tombstone::new(
             test_branch_id(),
             0,
             b"k2".to_vec(),
-            2,
+            CommitVersion(2),
             TombstoneReason::Compaction,
         ));
 

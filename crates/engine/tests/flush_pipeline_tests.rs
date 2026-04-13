@@ -8,7 +8,7 @@ use std::sync::Arc;
 use strata_engine::background::{BackgroundScheduler, TaskPriority};
 use strata_storage::segmented::SegmentedStore;
 
-use strata_core::id::CommitVersion;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
@@ -97,7 +97,7 @@ fn write_entries(store: &SegmentedStore, writer: &mut WalWriter, start: u64, end
         seed(store, key, Value::Int(i as i64), i);
 
         let record = WalRecord::new(
-            i,
+            TxnId(i),
             *branch().as_bytes(),
             i * 1000,
             format!("k{:04}={}", i, i).into_bytes(),
@@ -142,7 +142,7 @@ fn lifecycle_write_flush_recover_all_data_correct() {
     let store2 = SegmentedStore::with_dir(segments_dir, 0);
     let manifest_mgr2 = ManifestManager::load(manifest_path).unwrap();
     let flush_watermark = manifest_mgr2.manifest().flushed_through_commit_id.unwrap();
-    assert_eq!(flush_watermark, max_commit);
+    assert_eq!(flush_watermark, max_commit.as_u64());
 
     let info = store2.recover_segments().unwrap();
     assert_eq!(info.branches_recovered, 1);
@@ -205,7 +205,7 @@ fn lifecycle_crash_before_flush() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 
@@ -264,7 +264,7 @@ fn lifecycle_crash_after_segment_before_manifest() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 
@@ -392,7 +392,7 @@ fn lifecycle_wal_truncation_after_flush() {
         if let Some((k, v)) = key_val.split_once('=') {
             let key = kv_key(k);
             let val: i64 = v.parse().unwrap();
-            seed(&store2, key, Value::Int(val), record.txn_id);
+            seed(&store2, key, Value::Int(val), record.txn_id.as_u64());
         }
     }
 
@@ -404,7 +404,7 @@ fn lifecycle_wal_truncation_after_flush() {
         assert_eq!(result.value, Value::Int(i as i64));
     }
 
-    assert_eq!(compact_info.snapshot_watermark, Some(max_commit));
+    assert_eq!(compact_info.snapshot_watermark, Some(max_commit.as_u64()));
 }
 
 #[test]
@@ -424,13 +424,19 @@ fn multi_level_compaction_cascades() {
     assert_eq!(store.l0_segment_count(&b), 5);
 
     // L0 → L1
-    let r = store.compact_level(&b, 0, 0).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 0, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 5);
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.level_segment_count(&b, 1), 1);
 
     // L1 → L2 (trivial move — single file, no overlap in L2)
-    let r = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 1, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 1);
     assert_eq!(r.output_entries, 5);
     assert_eq!(r.entries_pruned, 0);
@@ -438,7 +444,10 @@ fn multi_level_compaction_cascades() {
     assert_eq!(store.level_segment_count(&b, 2), 1);
 
     // L2 → L3 (trivial move)
-    let r = store.compact_level(&b, 2, 0).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 2, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 1);
     assert_eq!(r.output_entries, 5);
     assert_eq!(r.entries_pruned, 0);
@@ -499,13 +508,14 @@ fn test_issue_1726_version_counter_from_segments() {
     let seg_info = result.storage.recover_segments().unwrap();
     assert_eq!(seg_info.segments_loaded, 1);
     assert_eq!(
-        seg_info.max_commit_id, 100,
+        seg_info.max_commit_id,
+        CommitVersion(100),
         "recover_segments must report max_commit_id from loaded segments",
     );
 
     // Phase 4: The version counter must be bumped to at least segment max.
     let coordinator = TransactionCoordinator::from_recovery_with_limits(&result, 0);
-    coordinator.bump_version_floor(CommitVersion(seg_info.max_commit_id));
+    coordinator.bump_version_floor(seg_info.max_commit_id);
     assert_eq!(
         coordinator.current_version(),
         CommitVersion(100),

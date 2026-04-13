@@ -49,7 +49,7 @@ fn compaction_deletes_when_unreferenced() {
     assert!(sst_before.len() >= 2);
 
     // Compact — segments are unreferenced, so they should be deleted
-    store.compact_branch(&bid, 0).unwrap();
+    store.compact_branch(&bid, CommitVersion(0)).unwrap();
 
     // Old .sst files should be gone, only the compacted output remains
     let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
@@ -112,7 +112,7 @@ fn compaction_preserves_when_referenced() {
     assert!(sst_before.len() >= 2);
 
     // Compact — uses is_referenced() (not decrement) so refcount stays at 2
-    store.compact_branch(&bid, 0).unwrap();
+    store.compact_branch(&bid, CommitVersion(0)).unwrap();
 
     // The referenced segment file should still exist on disk
     assert!(
@@ -191,7 +191,13 @@ fn inherited_layer_write_shadows() {
 
     // Write to child — this should shadow the inherited value
     store
-        .put_with_version_mode(child_kv("k"), Value::Int(999), CommitVersion(11), None, WriteMode::Append)
+        .put_with_version_mode(
+            child_kv("k"),
+            Value::Int(999),
+            CommitVersion(11),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let result = store
@@ -201,7 +207,10 @@ fn inherited_layer_write_shadows() {
     assert_eq!(result.value, Value::Int(999));
 
     // But at snapshot before the child write, we see the inherited value
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(10))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(100));
 }
 
@@ -211,7 +220,9 @@ fn inherited_layer_delete_shadows() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Delete on child hides inherited entry
-    store.delete_with_version(&child_kv("k"), CommitVersion(11)).unwrap();
+    store
+        .delete_with_version(&child_kv("k"), CommitVersion(11))
+        .unwrap();
 
     assert!(store
         .get_versioned(&child_kv("k"), CommitVersion::MAX)
@@ -219,7 +230,10 @@ fn inherited_layer_delete_shadows() {
         .is_none());
 
     // Snapshot before the delete still sees inherited data
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(10)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(10))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(42));
 }
 
@@ -253,7 +267,9 @@ fn inherited_layer_range_scan() {
         )
         .unwrap();
 
-    let results = store.scan_prefix(&child_kv("user:"), CommitVersion::MAX).unwrap();
+    let results = store
+        .scan_prefix(&child_kv("user:"), CommitVersion::MAX)
+        .unwrap();
     assert_eq!(results.len(), 4); // alice, bob(200), carol, dave
 
     let values: Vec<i64> = results
@@ -273,7 +289,13 @@ fn inherited_layer_list_branch() {
 
     // Write one more on child
     store
-        .put_with_version_mode(child_kv("c"), Value::Int(3), CommitVersion(11), None, WriteMode::Append)
+        .put_with_version_mode(
+            child_kv("c"),
+            Value::Int(3),
+            CommitVersion(11),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let entries = store.list_branch(&child_branch());
@@ -373,7 +395,7 @@ fn inherited_layer_two_levels() {
         let mut child_state = store.branches.get_mut(&child).unwrap();
         child_state.inherited_layers.push(InheritedLayer {
             source_branch_id: grandparent,
-            fork_version: 10,
+            fork_version: CommitVersion(10),
             segments: gp_snapshot,
             status: LayerStatus::Active,
         });
@@ -418,11 +440,17 @@ fn inherited_layer_version_clamping() {
     attach_inherited_layer(&store, parent_branch(), child_branch(), 10);
 
     // Snapshot at version 3: should see version 1
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(3)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(3))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(10));
 
     // Snapshot at version 7: should see version 5
-    let result = store.get_versioned(&child_kv("k"), CommitVersion(7)).unwrap().unwrap();
+    let result = store
+        .get_versioned(&child_kv("k"), CommitVersion(7))
+        .unwrap()
+        .unwrap();
     assert_eq!(result.value, Value::Int(50));
 }
 
@@ -433,10 +461,10 @@ fn inherited_layer_get_at_timestamp() {
 
     // Write entries with specific timestamps via recovery API
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000, 0)
+        .put_recovery_entry(parent_kv("k"), Value::Int(100), CommitVersion(1), 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000, 0)
+        .put_recovery_entry(parent_kv("k"), Value::Int(200), CommitVersion(2), 2000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -477,13 +505,31 @@ fn inherited_layer_scan_prefix_at_timestamp() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
     store
-        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000, 0)
+        .put_recovery_entry(
+            parent_kv("user:a"),
+            Value::Int(1),
+            CommitVersion(1),
+            1000,
+            0,
+        )
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000, 0)
+        .put_recovery_entry(
+            parent_kv("user:b"),
+            Value::Int(2),
+            CommitVersion(2),
+            2000,
+            0,
+        )
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000, 0)
+        .put_recovery_entry(
+            parent_kv("user:c"),
+            Value::Int(3),
+            CommitVersion(3),
+            3000,
+            0,
+        )
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -517,7 +563,7 @@ fn inherited_layer_materialized_skipped() {
     let mut child = store.branches.get_mut(&child_branch()).unwrap();
     child.inherited_layers.push(InheritedLayer {
         source_branch_id: parent_branch(),
-        fork_version: 10,
+        fork_version: CommitVersion(10),
         segments: snapshot,
         status: LayerStatus::Materialized,
     });
@@ -736,7 +782,7 @@ fn fork_creates_inherited_layer() {
     let child = store.branches.get(&child_branch()).unwrap();
     assert_eq!(child.inherited_layers.len(), 1);
     assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
-    assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
+    assert_eq!(child.inherited_layers[0].fork_version, fork_version);
     assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
     assert!(segments_shared > 0);
 }
@@ -1101,7 +1147,7 @@ fn fork_manifest_roundtrip() {
     {
         let child = store.branches.get(&child_branch()).unwrap();
         assert_eq!(child.inherited_layers.len(), 1);
-        assert_eq!(child.inherited_layers[0].fork_version, fork_version.as_u64());
+        assert_eq!(child.inherited_layers[0].fork_version, fork_version);
     }
 
     // Create a new store and recover from the same directory
@@ -1120,7 +1166,7 @@ fn fork_manifest_roundtrip() {
         1,
         "Inherited layers should survive recovery"
     );
-    assert_eq!(child2.inherited_layers[0].fork_version, fork_version.as_u64());
+    assert_eq!(child2.inherited_layers[0].fork_version, fork_version);
 
     // Verify data is readable through inherited layers after recovery
     let r = store2
@@ -1308,7 +1354,9 @@ fn list_own_entries_includes_tombstones() {
     attach_inherited_layer(&store, pid, cid, 1);
 
     // Child deletes "alpha" (writes tombstone)
-    store.delete_with_version(&child_kv("alpha"), CommitVersion(2)).unwrap();
+    store
+        .delete_with_version(&child_kv("alpha"), CommitVersion(2))
+        .unwrap();
 
     // list_own_entries should include the tombstone
     let own = store.list_own_entries(&cid, None);
@@ -1332,7 +1380,7 @@ fn list_own_entries_since_version() {
     seed(&store, parent_kv("post_fork_2"), Value::Int(4), 4);
 
     // list_own_entries with min_commit_id=2 should return only post-fork entries
-    let own = store.list_own_entries(&pid, Some(2));
+    let own = store.list_own_entries(&pid, Some(CommitVersion(2)));
     assert_eq!(own.len(), 2);
     let keys: HashSet<String> = own
         .iter()
@@ -1359,5 +1407,5 @@ fn list_own_entries_mvcc_dedup() {
     let own = store.list_own_entries(&pid, None);
     assert_eq!(own.len(), 1);
     assert_eq!(own[0].value, Value::Int(3));
-    assert_eq!(own[0].commit_id, 3);
+    assert_eq!(own[0].commit_id, CommitVersion(3));
 }

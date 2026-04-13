@@ -1,6 +1,7 @@
 //! Flush, checkpoint, and compaction.
 
 use std::sync::Arc;
+use strata_core::id::TxnId;
 use strata_core::types::{Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
 use strata_durability::{
@@ -78,15 +79,16 @@ impl Database {
         let mut manifest = self.load_or_create_manifest()?;
 
         // Build watermark state from existing MANIFEST if present
-        let existing_watermark = {
-            let m = manifest.manifest();
-            match (m.snapshot_id, m.snapshot_watermark) {
-                (Some(sid), Some(wtxn)) => Some(strata_durability::SnapshotWatermark::with_values(
-                    sid, wtxn, 0,
-                )),
-                _ => None,
-            }
-        };
+        let existing_watermark =
+            {
+                let m = manifest.manifest();
+                match (m.snapshot_id, m.snapshot_watermark) {
+                    (Some(sid), Some(wtxn)) => Some(
+                        strata_durability::SnapshotWatermark::with_values(sid, TxnId(wtxn), 0),
+                    ),
+                    _ => None,
+                }
+            };
 
         // Create CheckpointCoordinator with the configured codec and database UUID
         let db_uuid = self.database_uuid;
@@ -102,11 +104,12 @@ impl Database {
         };
 
         // Create the checkpoint
-        let info = coordinator
-            .checkpoint(watermark_txn, data)
-            .map_err(|e: CheckpointError| {
-                StrataError::internal(format!("checkpoint failed: {}", e))
-            })?;
+        let info =
+            coordinator
+                .checkpoint(TxnId(watermark_txn), data)
+                .map_err(|e: CheckpointError| {
+                    StrataError::internal(format!("checkpoint failed: {}", e))
+                })?;
 
         // Update MANIFEST with snapshot watermark
         manifest
@@ -118,7 +121,7 @@ impl Database {
         info!(
             target: "strata::db",
             snapshot_id = info.snapshot_id,
-            watermark_txn = info.watermark_txn,
+            watermark_txn = info.watermark_txn.as_u64(),
             "Checkpoint created"
         );
 

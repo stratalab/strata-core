@@ -167,7 +167,7 @@ impl SegmentedStore {
     pub fn pick_and_compact(
         &self,
         branch_id: &BranchId,
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> io::Result<Option<PickAndCompactResult>> {
         if self.segments_dir.is_none() {
             return Ok(None);
@@ -213,7 +213,7 @@ impl SegmentedStore {
     pub fn compact_branch(
         &self,
         branch_id: &BranchId,
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> io::Result<Option<CompactionResult>> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
@@ -253,7 +253,7 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
+        let snap_floor = CommitVersion(self.snapshot_floor.load(Ordering::Relaxed));
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
             .with_snapshot_floor(snap_floor)
@@ -363,7 +363,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         segment_indices: &[usize],
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> io::Result<Option<CompactionResult>> {
         if segment_indices.len() < 2 {
             return Ok(None);
@@ -411,7 +411,7 @@ impl SegmentedStore {
 
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
+        let snap_floor = CommitVersion(self.snapshot_floor.load(Ordering::Relaxed));
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
             .with_snapshot_floor(snap_floor)
@@ -499,7 +499,7 @@ impl SegmentedStore {
     pub fn compact_l0_to_l1(
         &self,
         branch_id: &BranchId,
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> io::Result<Option<CompactionResult>> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
@@ -602,7 +602,7 @@ impl SegmentedStore {
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
+        let snap_floor = CommitVersion(self.snapshot_floor.load(Ordering::Relaxed));
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
             .with_snapshot_floor(snap_floor)
@@ -729,7 +729,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         level: usize,
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> io::Result<Option<CompactionResult>> {
         if level >= NUM_LEVELS - 1 {
             return Ok(None); // can't compact the last level further
@@ -878,7 +878,7 @@ impl SegmentedStore {
         let (sources, corruption_flags) = streaming_sources(&all_inputs, &limiter);
         let merge = MergeIterator::new(sources);
         let max_versions = self.max_versions_per_key.load(Ordering::Relaxed);
-        let snap_floor = self.snapshot_floor.load(Ordering::Relaxed);
+        let snap_floor = CommitVersion(self.snapshot_floor.load(Ordering::Relaxed));
         let compaction_iter = CompactionIterator::new(merge, prune_floor)
             .with_max_versions(max_versions)
             .with_snapshot_floor(snap_floor)

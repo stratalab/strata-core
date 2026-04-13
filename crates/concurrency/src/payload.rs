@@ -11,6 +11,7 @@
 //! binary encoding with schema evolution support.
 
 use serde::{Deserialize, Serialize};
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::Key;
 use strata_core::value::Value;
 
@@ -50,7 +51,7 @@ impl TransactionPayload {
     ///
     /// CAS operations are included as puts (they have already been validated
     /// at commit time, so recovery just replays the final value).
-    pub fn from_transaction(txn: &TransactionContext, version: u64) -> Self {
+    pub fn from_transaction(txn: &TransactionContext, version: CommitVersion) -> Self {
         let mut puts: Vec<(Key, Value)> = Vec::new();
         let mut put_ttls: Vec<u64> = Vec::new();
 
@@ -68,7 +69,7 @@ impl TransactionPayload {
         let deletes: Vec<Key> = txn.delete_set.iter().cloned().collect();
 
         TransactionPayload {
-            version,
+            version: version.as_u64(),
             puts,
             deletes,
             put_ttls,
@@ -101,8 +102,8 @@ pub fn serialize_wal_record_into(
     record_buf: &mut Vec<u8>,
     msgpack_buf: &mut Vec<u8>,
     txn: &TransactionContext,
-    version: u64,
-    txn_id: u64,
+    version: CommitVersion,
+    txn_id: TxnId,
     branch_id: [u8; 16],
     timestamp: u64,
 ) {
@@ -123,7 +124,7 @@ pub fn serialize_wal_record_into(
     let deletes: Vec<&Key> = txn.delete_set.iter().collect();
 
     let payload_ref = TransactionPayloadRef {
-        version,
+        version: version.as_u64(),
         puts,
         deletes,
         put_ttls,
@@ -290,8 +291,8 @@ mod tests {
         txn.ttl_map.insert(Key::new_kv(ns.clone(), "key1"), 60_000);
         txn.delete_set.insert(Key::new_kv(ns.clone(), "key3"));
 
-        let version = 100u64;
-        let txn_id = 100u64;
+        let version = CommitVersion(100);
+        let txn_id = TxnId(100);
         let timestamp = 1234567890u64;
 
         // Old path: clone → serialize → wrap

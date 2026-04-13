@@ -35,6 +35,7 @@ use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use strata_core::id::TxnId;
 
 /// Magic bytes identifying a WAL segment file: "STRA"
 pub const SEGMENT_MAGIC: [u8; 4] = *b"STRA";
@@ -568,7 +569,7 @@ impl WalSegment {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WalRecord {
     /// Transaction ID (assigned by engine, NOT by storage)
-    pub txn_id: u64,
+    pub txn_id: TxnId,
 
     /// Run this transaction belongs to (UUID bytes)
     pub branch_id: [u8; 16],
@@ -582,7 +583,7 @@ pub struct WalRecord {
 
 impl WalRecord {
     /// Create a new WAL record.
-    pub fn new(txn_id: u64, branch_id: [u8; 16], timestamp: u64, writeset: Vec<u8>) -> Self {
+    pub fn new(txn_id: TxnId, branch_id: [u8; 16], timestamp: u64, writeset: Vec<u8>) -> Self {
         WalRecord {
             txn_id,
             branch_id,
@@ -603,7 +604,7 @@ impl WalRecord {
         let mut payload = Vec::with_capacity(37 + self.writeset.len());
         payload.push(WAL_RECORD_FORMAT_VERSION); // 1 byte: version = 2
         payload.extend_from_slice(&[0u8; 4]); // 4 bytes: placeholder for length_crc
-        payload.extend_from_slice(&self.txn_id.to_le_bytes());
+        payload.extend_from_slice(&self.txn_id.as_u64().to_le_bytes());
         payload.extend_from_slice(&self.branch_id);
         payload.extend_from_slice(&self.timestamp.to_le_bytes());
         payload.extend_from_slice(&self.writeset);
@@ -636,7 +637,7 @@ impl WalRecord {
     /// `writeset: Vec<u8>`, and avoids the double-Vec allocation in `to_bytes()`.
     pub fn build_bytes_from_writeset_into(
         buf: &mut Vec<u8>,
-        txn_id: u64,
+        txn_id: TxnId,
         branch_id: [u8; 16],
         timestamp: u64,
         writeset: &[u8],
@@ -656,7 +657,7 @@ impl WalRecord {
         let payload_start = buf.len();
         buf.push(WAL_RECORD_FORMAT_VERSION);
         buf.extend_from_slice(&[0u8; 4]); // length_crc placeholder
-        buf.extend_from_slice(&txn_id.to_le_bytes());
+        buf.extend_from_slice(&txn_id.as_u64().to_le_bytes());
         buf.extend_from_slice(&branch_id);
         buf.extend_from_slice(&timestamp.to_le_bytes());
         buf.extend_from_slice(writeset);
@@ -735,7 +736,7 @@ impl WalRecord {
                 return Err(WalRecordError::InvalidFormat);
             }
 
-            let txn_id = u64::from_le_bytes(payload[5..13].try_into().unwrap());
+            let txn_id = TxnId(u64::from_le_bytes(payload[5..13].try_into().unwrap()));
             let branch_id: [u8; 16] = payload[13..29].try_into().unwrap();
             let timestamp = u64::from_le_bytes(payload[29..37].try_into().unwrap());
             let writeset = payload[37..].to_vec();
@@ -770,7 +771,7 @@ impl WalRecord {
                 return Err(WalRecordError::InvalidFormat);
             }
 
-            let txn_id = u64::from_le_bytes(payload[1..9].try_into().unwrap());
+            let txn_id = TxnId(u64::from_le_bytes(payload[1..9].try_into().unwrap()));
             let branch_id: [u8; 16] = payload[9..25].try_into().unwrap();
             let timestamp = u64::from_le_bytes(payload[25..33].try_into().unwrap());
             let writeset = payload[33..].to_vec();
@@ -835,6 +836,7 @@ pub enum WalRecordError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::TxnId;
     use tempfile::tempdir;
 
     #[test]
@@ -913,12 +915,12 @@ mod tests {
 
     #[test]
     fn test_wal_record_roundtrip() {
-        let record = WalRecord::new(42, [1u8; 16], 1234567890, vec![1, 2, 3, 4, 5]);
+        let record = WalRecord::new(TxnId(42), [1u8; 16], 1234567890, vec![1, 2, 3, 4, 5]);
 
         let bytes = record.to_bytes();
         let (parsed, consumed) = WalRecord::from_bytes(&bytes).unwrap();
 
-        assert_eq!(parsed.txn_id, 42);
+        assert_eq!(parsed.txn_id, TxnId(42));
         assert_eq!(parsed.branch_id, [1u8; 16]);
         assert_eq!(parsed.timestamp, 1234567890);
         assert_eq!(parsed.writeset, vec![1, 2, 3, 4, 5]);
@@ -927,7 +929,7 @@ mod tests {
 
     #[test]
     fn test_wal_record_empty_writeset() {
-        let record = WalRecord::new(1, [0u8; 16], 0, Vec::new());
+        let record = WalRecord::new(TxnId(1), [0u8; 16], 0, Vec::new());
 
         let bytes = record.to_bytes();
         let (parsed, _) = WalRecord::from_bytes(&bytes).unwrap();
@@ -937,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_wal_record_checksum_failure() {
-        let record = WalRecord::new(42, [1u8; 16], 1234567890, vec![1, 2, 3]);
+        let record = WalRecord::new(TxnId(42), [1u8; 16], 1234567890, vec![1, 2, 3]);
 
         let mut bytes = record.to_bytes();
 
@@ -964,7 +966,7 @@ mod tests {
 
     #[test]
     fn test_wal_record_verify_checksum() {
-        let record = WalRecord::new(1, [0u8; 16], 123, vec![1, 2, 3]);
+        let record = WalRecord::new(TxnId(1), [0u8; 16], 123, vec![1, 2, 3]);
         let bytes = record.to_bytes();
 
         assert!(WalRecord::verify_checksum(&bytes).is_ok());
@@ -1004,7 +1006,7 @@ mod tests {
         record_bytes.extend_from_slice(&crc.to_le_bytes());
 
         let (parsed, consumed) = WalRecord::from_bytes(&record_bytes).unwrap();
-        assert_eq!(parsed.txn_id, txn_id);
+        assert_eq!(parsed.txn_id, TxnId(txn_id));
         assert_eq!(parsed.branch_id, branch_id);
         assert_eq!(parsed.timestamp, timestamp);
         assert_eq!(parsed.writeset, writeset);
@@ -1014,9 +1016,9 @@ mod tests {
     #[test]
     fn test_multiple_records_in_sequence() {
         let records = vec![
-            WalRecord::new(1, [1u8; 16], 100, vec![1, 2, 3]),
-            WalRecord::new(2, [2u8; 16], 200, vec![4, 5, 6, 7]),
-            WalRecord::new(3, [3u8; 16], 300, vec![]),
+            WalRecord::new(TxnId(1), [1u8; 16], 100, vec![1, 2, 3]),
+            WalRecord::new(TxnId(2), [2u8; 16], 200, vec![4, 5, 6, 7]),
+            WalRecord::new(TxnId(3), [3u8; 16], 300, vec![]),
         ];
 
         // Serialize all records

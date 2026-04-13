@@ -33,20 +33,26 @@ fn first_committer_wins_read_write_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 reads the key
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     let value = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     t1.read_set
-        .insert(key.clone(), value.unwrap().version.as_u64());
+        .insert(key.clone(), CommitVersion(value.unwrap().version.as_u64()));
 
     // T2 reads and commits first
     let mut t2 = TransactionContext::new(TxnId(2), branch_id, CommitVersion(1));
     let value = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     t2.read_set
-        .insert(key.clone(), value.unwrap().version.as_u64());
+        .insert(key.clone(), CommitVersion(value.unwrap().version.as_u64()));
     t2.write_set.insert(key.clone(), Value::Int(200));
 
     // T2 commits - should succeed
@@ -55,7 +61,13 @@ fn first_committer_wins_read_write_conflict() {
 
     // Apply T2's write
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 tries to commit - should fail with read-write conflict
@@ -72,8 +84,8 @@ fn first_committer_wins_read_write_conflict() {
             current_version,
         } => {
             assert_eq!(k, &key);
-            assert_eq!(*read_version, 1);
-            assert!(*current_version > 1);
+            assert_eq!(*read_version, CommitVersion(1));
+            assert!(*current_version > CommitVersion(1));
         }
         _ => panic!("Expected ReadWriteConflict"),
     }
@@ -87,7 +99,13 @@ fn blind_writes_dont_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 does a blind write (no read)
@@ -96,7 +114,13 @@ fn blind_writes_dont_conflict() {
 
     // T2 modifies the key
     store
-        .put_with_version_mode(key.clone(), Value::Int(300), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(300),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 should still commit - blind writes don't conflict
@@ -115,18 +139,30 @@ fn read_only_transaction_always_commits() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 only reads
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     let value = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     t1.read_set
-        .insert(key.clone(), value.unwrap().version.as_u64());
+        .insert(key.clone(), CommitVersion(value.unwrap().version.as_u64()));
 
     // Another transaction modifies the key
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 should still commit - read-only transactions always succeed
@@ -154,24 +190,46 @@ fn write_skew_is_allowed() {
 
     // Initial balances
     store
-        .put_with_version_mode(key_a.clone(), Value::Int(50), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_a.clone(),
+            Value::Int(50),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key_b.clone(), Value::Int(50), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key_b.clone(),
+            Value::Int(50),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 reads A and B, writes A
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    let val_a = store.get_versioned(&key_a, CommitVersion::MAX).unwrap().unwrap();
-    let val_b = store.get_versioned(&key_b, CommitVersion::MAX).unwrap().unwrap();
-    t1.read_set.insert(key_a.clone(), val_a.version.as_u64());
-    t1.read_set.insert(key_b.clone(), val_b.version.as_u64());
+    let val_a = store
+        .get_versioned(&key_a, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    let val_b = store
+        .get_versioned(&key_b, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    t1.read_set
+        .insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
+    t1.read_set
+        .insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
     t1.write_set.insert(key_a.clone(), Value::Int(-10));
 
     // T2 reads A and B, writes B
     let mut t2 = TransactionContext::new(TxnId(2), branch_id, CommitVersion(1));
-    t2.read_set.insert(key_a.clone(), val_a.version.as_u64());
-    t2.read_set.insert(key_b.clone(), val_b.version.as_u64());
+    t2.read_set
+        .insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
+    t2.read_set
+        .insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
     t2.write_set.insert(key_b.clone(), Value::Int(-10));
 
     // Both should validate successfully (write skew allowed)
@@ -200,7 +258,13 @@ fn conflict_reports_correct_versions() {
 
     // Initial value at version 1
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v1 = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -211,11 +275,17 @@ fn conflict_reports_correct_versions() {
 
     // T1 reads at version 1
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    t1.read_set.insert(key.clone(), v1);
+    t1.read_set.insert(key.clone(), CommitVersion(v1));
 
     // Update to version 2
     store
-        .put_with_version_mode(key.clone(), Value::Int(200), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(200),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let v2 = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -236,8 +306,8 @@ fn conflict_reports_correct_versions() {
             current_version,
             ..
         } => {
-            assert_eq!(*read_version, v1);
-            assert_eq!(*current_version, v2);
+            assert_eq!(*read_version, CommitVersion(v1));
+            assert_eq!(*current_version, CommitVersion(v2));
         }
         _ => panic!("Expected ReadWriteConflict"),
     }
@@ -252,10 +322,22 @@ fn multiple_conflicts_all_reported() {
 
     // Initial values
     store
-        .put_with_version_mode(key1.clone(), Value::Int(1), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(1),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(2), CommitVersion(2), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(2),
+            CommitVersion(2),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     let v1 = store
@@ -273,15 +355,27 @@ fn multiple_conflicts_all_reported() {
 
     // T1 reads both
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    t1.read_set.insert(key1.clone(), v1);
-    t1.read_set.insert(key2.clone(), v2);
+    t1.read_set.insert(key1.clone(), CommitVersion(v1));
+    t1.read_set.insert(key2.clone(), CommitVersion(v2));
 
     // Both keys modified
     store
-        .put_with_version_mode(key1.clone(), Value::Int(10), CommitVersion(3), None, WriteMode::Append)
+        .put_with_version_mode(
+            key1.clone(),
+            Value::Int(10),
+            CommitVersion(3),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     store
-        .put_with_version_mode(key2.clone(), Value::Int(20), CommitVersion(4), None, WriteMode::Append)
+        .put_with_version_mode(
+            key2.clone(),
+            Value::Int(20),
+            CommitVersion(4),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 writes
@@ -300,7 +394,13 @@ fn no_conflict_when_versions_match() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let version = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -311,7 +411,7 @@ fn no_conflict_when_versions_match() {
 
     // T1 reads and writes
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    t1.read_set.insert(key.clone(), version);
+    t1.read_set.insert(key.clone(), CommitVersion(version));
     t1.write_set.insert(key.clone(), Value::Int(200));
 
     // No concurrent modification - version still matches
@@ -351,11 +451,17 @@ fn read_nonexistent_key_tracks_version_zero() {
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     let result = store.get_versioned(&key, CommitVersion::MAX).unwrap();
     assert!(result.is_none());
-    t1.read_set.insert(key.clone(), 0); // Version 0 = doesn't exist
+    t1.read_set.insert(key.clone(), CommitVersion(0)); // Version 0 = doesn't exist
 
     // Key is created
     store
-        .put_with_version_mode(key.clone(), Value::Int(42), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
 
     // T1 writes - should conflict (version changed from 0 to non-zero)
@@ -376,7 +482,13 @@ fn delete_after_read_causes_conflict() {
 
     // Initial value
     store
-        .put_with_version_mode(key.clone(), Value::Int(100), CommitVersion(1), None, WriteMode::Append)
+        .put_with_version_mode(
+            key.clone(),
+            Value::Int(100),
+            CommitVersion(1),
+            None,
+            WriteMode::Append,
+        )
         .unwrap();
     let version = store
         .get_versioned(&key, CommitVersion::MAX)
@@ -387,7 +499,7 @@ fn delete_after_read_causes_conflict() {
 
     // T1 reads
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    t1.read_set.insert(key.clone(), version);
+    t1.read_set.insert(key.clone(), CommitVersion(version));
 
     // Key is deleted
     store.delete_with_version(&key, CommitVersion(2)).unwrap();
@@ -407,8 +519,8 @@ fn validation_result_merge_combines_conflicts() {
     let mut result1 = ValidationResult::ok();
     let result2 = ValidationResult::conflict(ConflictType::ReadWriteConflict {
         key: create_test_key(BranchId::new(), "k1"),
-        read_version: 1,
-        current_version: 2,
+        read_version: CommitVersion(1),
+        current_version: CommitVersion(2),
     });
 
     assert!(result1.is_valid());

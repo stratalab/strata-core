@@ -227,7 +227,7 @@ impl WalReader {
 
         Ok(records
             .into_iter()
-            .filter(|r| r.txn_id > watermark)
+            .filter(|r| r.txn_id.as_u64() > watermark)
             .collect())
     }
 
@@ -258,7 +258,7 @@ impl WalReader {
                 match SegmentMeta::read_from_file(wal_dir, segment_number) {
                     Ok(Some(meta))
                         if meta.segment_number == segment_number
-                            && meta.max_txn_id <= watermark =>
+                            && meta.max_txn_id.as_u64() <= watermark =>
                     {
                         // All records in this segment are at or below the watermark — skip
                         continue;
@@ -288,7 +288,11 @@ impl WalReader {
             }
             // Active segment (no .meta) or closed segment that may have records above watermark
             let (records, _, _, _) = self.read_segment(wal_dir, segment_number)?;
-            result.extend(records.into_iter().filter(|r| r.txn_id > watermark));
+            result.extend(
+                records
+                    .into_iter()
+                    .filter(|r| r.txn_id.as_u64() > watermark),
+            );
         }
 
         Ok(result)
@@ -322,13 +326,13 @@ impl WalReader {
         segment_number: u64,
     ) -> Result<Option<u64>, WalReaderError> {
         let (records, _, _, _) = self.read_segment(wal_dir, segment_number)?;
-        Ok(records.iter().map(|r| r.txn_id).max())
+        Ok(records.iter().map(|r| r.txn_id.as_u64()).max())
     }
 
     /// Get the highest transaction ID across all segments.
     pub fn max_txn_id(&self, wal_dir: &Path) -> Result<Option<u64>, WalReaderError> {
         let result = self.read_all(wal_dir)?;
-        Ok(result.records.iter().map(|r| r.txn_id).max())
+        Ok(result.records.iter().map(|r| r.txn_id.as_u64()).max())
     }
 
     /// List all segments with their metadata sidecars.
@@ -610,6 +614,7 @@ mod tests {
     use crate::wal::config::WalConfig;
     use crate::wal::writer::WalWriter;
     use crate::wal::DurabilityMode;
+    use strata_core::id::TxnId;
     use tempfile::tempdir;
 
     fn make_codec() -> Box<dyn StorageCodec> {
@@ -653,14 +658,14 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        let record = WalRecord::new(1, [1u8; 16], 12345, vec![1, 2, 3]);
+        let record = WalRecord::new(TxnId(1), [1u8; 16], 12345, vec![1, 2, 3]);
         write_records(&wal_dir, std::slice::from_ref(&record));
 
         let reader = WalReader::new();
         let (records, _, _, _) = reader.read_segment(&wal_dir, 1).unwrap();
 
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].txn_id, 1);
+        assert_eq!(records[0].txn_id, TxnId(1));
         assert_eq!(records[0].writeset, vec![1, 2, 3]);
     }
 
@@ -670,7 +675,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=5)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 10]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 10]))
             .collect();
 
         write_records(&wal_dir, &records);
@@ -680,7 +685,7 @@ mod tests {
 
         assert_eq!(result.records.len(), 5);
         for (i, record) in result.records.iter().enumerate() {
-            assert_eq!(record.txn_id, (i + 1) as u64);
+            assert_eq!(record.txn_id, TxnId((i + 1) as u64));
         }
     }
 
@@ -690,7 +695,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=10)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![]))
             .collect();
 
         write_records(&wal_dir, &records);
@@ -699,7 +704,7 @@ mod tests {
         let filtered = reader.read_all_after_watermark(&wal_dir, 5).unwrap();
 
         assert_eq!(filtered.len(), 5);
-        assert!(filtered.iter().all(|r| r.txn_id > 5));
+        assert!(filtered.iter().all(|r| r.txn_id.as_u64() > 5));
     }
 
     #[test]
@@ -725,7 +730,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=10)
-            .map(|i| WalRecord::new(i, [1u8; 16], 0, vec![]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], 0, vec![]))
             .collect();
 
         write_records(&wal_dir, &records);
@@ -743,7 +748,7 @@ mod tests {
 
         // Write valid records
         let records: Vec<_> = (1..=3)
-            .map(|i| WalRecord::new(i, [1u8; 16], 0, vec![i as u8]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], 0, vec![i as u8]))
             .collect();
         write_records(&wal_dir, &records);
 
@@ -805,9 +810,9 @@ mod tests {
             let mut segment = WalSegment::create(wal_dir, seg_num, [1u8; 16]).unwrap();
             let mut meta = SegmentMeta::new_empty(seg_num);
             for (&txn_id, &ts) in txn_ids.iter().zip(timestamps.iter()) {
-                let record = WalRecord::new(txn_id, [1u8; 16], ts, vec![txn_id as u8; 10]);
+                let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
                 segment.write(&record.to_bytes()).unwrap();
-                meta.track_record(txn_id, ts);
+                meta.track_record(TxnId(txn_id), ts);
             }
             segment.close().unwrap();
             meta.write_to_file(wal_dir).unwrap();
@@ -820,7 +825,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=3)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
             .collect();
         write_records_with_close(&wal_dir, &records);
 
@@ -829,8 +834,8 @@ mod tests {
             .unwrap()
             .expect(".meta should exist");
         assert_eq!(meta.segment_number, 1);
-        assert_eq!(meta.min_txn_id, 1);
-        assert_eq!(meta.max_txn_id, 3);
+        assert_eq!(meta.min_txn_id, TxnId(1));
+        assert_eq!(meta.max_txn_id, TxnId(3));
         assert_eq!(meta.min_timestamp, 1000);
         assert_eq!(meta.max_timestamp, 3000);
         assert_eq!(meta.record_count, 3);
@@ -857,13 +862,13 @@ mod tests {
 
         // Write enough records to force at least one rotation
         writer
-            .append(&WalRecord::new(1, [1u8; 16], 1000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(1), [1u8; 16], 1000, vec![0; 50]))
             .unwrap();
         writer
-            .append(&WalRecord::new(2, [1u8; 16], 2000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(2), [1u8; 16], 2000, vec![0; 50]))
             .unwrap();
         writer
-            .append(&WalRecord::new(3, [1u8; 16], 3000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(3), [1u8; 16], 3000, vec![0; 50]))
             .unwrap();
 
         writer.close().unwrap();
@@ -1042,7 +1047,7 @@ mod tests {
             )
             .unwrap();
             writer
-                .append(&WalRecord::new(1, [1u8; 16], 1000, vec![1]))
+                .append(&WalRecord::new(TxnId(1), [1u8; 16], 1000, vec![1]))
                 .unwrap();
             writer.flush().unwrap();
             // Drop without close — no .meta written
@@ -1061,21 +1066,21 @@ mod tests {
 
             // In-memory metadata should have been rebuilt from existing records
             let meta = writer.current_segment_meta().expect("should have metadata");
-            assert_eq!(meta.min_txn_id, 1);
-            assert_eq!(meta.max_txn_id, 1);
+            assert_eq!(meta.min_txn_id, TxnId(1));
+            assert_eq!(meta.max_txn_id, TxnId(1));
             assert_eq!(meta.min_timestamp, 1000);
             assert_eq!(meta.max_timestamp, 1000);
             assert_eq!(meta.record_count, 1);
 
             // Append another record
             writer
-                .append(&WalRecord::new(2, [1u8; 16], 2000, vec![2]))
+                .append(&WalRecord::new(TxnId(2), [1u8; 16], 2000, vec![2]))
                 .unwrap();
 
             // Metadata should track both records
             let meta = writer.current_segment_meta().unwrap();
-            assert_eq!(meta.min_txn_id, 1);
-            assert_eq!(meta.max_txn_id, 2);
+            assert_eq!(meta.min_txn_id, TxnId(1));
+            assert_eq!(meta.max_txn_id, TxnId(2));
             assert_eq!(meta.min_timestamp, 1000);
             assert_eq!(meta.max_timestamp, 2000);
             assert_eq!(meta.record_count, 2);
@@ -1092,8 +1097,8 @@ mod tests {
         let meta = SegmentMeta::read_from_file(&wal_dir, seg_num)
             .unwrap()
             .expect(".meta should exist after close");
-        assert_eq!(meta.min_txn_id, 1);
-        assert_eq!(meta.max_txn_id, 2);
+        assert_eq!(meta.min_txn_id, TxnId(1));
+        assert_eq!(meta.max_txn_id, TxnId(2));
         assert_eq!(meta.record_count, 2);
     }
 
@@ -1115,9 +1120,9 @@ mod tests {
             let mut segment = WalSegment::create(wal_dir, seg_num, [1u8; 16]).unwrap();
             let mut meta = SegmentMeta::new_empty(seg_num);
             for (&txn_id, &ts) in txn_ids.iter().zip(timestamps.iter()) {
-                let record = WalRecord::new(txn_id, [1u8; 16], ts, vec![txn_id as u8; 10]);
+                let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
                 segment.write(&record.to_bytes()).unwrap();
-                meta.track_record(txn_id, ts);
+                meta.track_record(TxnId(txn_id), ts);
             }
             segment.close().unwrap();
             meta.write_to_file(wal_dir).unwrap();
@@ -1126,7 +1131,7 @@ mod tests {
         // Active segment — no .meta
         let mut segment = WalSegment::create(wal_dir, 3, [1u8; 16]).unwrap();
         for (&txn_id, &ts) in [5u64, 6].iter().zip([5000u64, 6000].iter()) {
-            let record = WalRecord::new(txn_id, [1u8; 16], ts, vec![txn_id as u8; 10]);
+            let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
             segment.write(&record.to_bytes()).unwrap();
         }
         // Deliberately NOT closing or writing .meta — this is the active segment
@@ -1150,7 +1155,7 @@ mod tests {
         // Watermark=4: segments 1 (max_txn_id=2) and 2 (max_txn_id=4) should be
         // skipped via .meta check. Segment 3 (active, no .meta) is always read.
         let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![5, 6]);
 
         // Watermark=0: nothing skippable, all 6 records returned
@@ -1160,7 +1165,7 @@ mod tests {
         // Watermark=2: segment 1 (max_txn_id=2 <= 2) skipped.
         // Segment 2 (max_txn_id=4 > 2) read. Segment 3 (active) read.
         let filtered = reader.read_all_after_watermark(&wal_dir, 2).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![3, 4, 5, 6]);
     }
 
@@ -1185,14 +1190,14 @@ mod tests {
 
         // .meta for segment 1 still says max_txn_id=2
         let meta = SegmentMeta::read_from_file(&wal_dir, 1).unwrap().unwrap();
-        assert_eq!(meta.max_txn_id, 2);
+        assert_eq!(meta.max_txn_id, TxnId(2));
 
         let reader = WalReader::new();
 
         // Watermark=2: segment 1 (max_txn_id=2 <= 2) should be SKIPPED via .meta.
         // If it were read, the corrupted data would cause an error or wrong results.
         let filtered = reader.read_all_after_watermark(&wal_dir, 2).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![3, 4, 5, 6]);
 
         // Watermark=0: segment 1 MUST be read — and it's corrupted.
@@ -1207,8 +1212,8 @@ mod tests {
         );
         let has_seg2_and_3: Vec<u64> = filtered
             .iter()
-            .filter(|r| r.txn_id >= 3)
-            .map(|r| r.txn_id)
+            .filter(|r| r.txn_id.as_u64() >= 3)
+            .map(|r| r.txn_id.as_u64())
             .collect();
         assert_eq!(has_seg2_and_3, vec![3, 4, 5, 6]);
     }
@@ -1226,12 +1231,12 @@ mod tests {
 
         // Watermark=3: segment 2 max_txn_id=4 > 3, so segment 2 is NOT skipped
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![4, 5, 6], "txn_id=4 should be included");
 
         // Watermark=4: segment 2 max_txn_id=4 <= 4, so segment 2 IS skipped
         let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![5, 6], "txn_ids 3,4 should be excluded");
     }
 
@@ -1244,7 +1249,7 @@ mod tests {
         // D-7: flush() now writes .meta for the active segment, so delete it
         // to simulate the pre-D-7 scenario where active segments lack .meta.
         let records: Vec<_> = (1..=5)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
             .collect();
         write_records(&wal_dir, &records);
 
@@ -1259,7 +1264,7 @@ mod tests {
 
         // Watermark=3: only txn_ids 4,5 returned
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![4, 5]);
 
         // Watermark=0: all records
@@ -1294,7 +1299,7 @@ mod tests {
         // Segment 2 (meta max_txn_id=4 <= 4) is skipped.
         // Segment 3 (latest) is always read.
         let filtered = reader.read_all_after_watermark(&wal_dir, 4).unwrap();
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![5, 6]);
     }
 
@@ -1352,7 +1357,7 @@ mod tests {
         // Write enough records to force multiple rotations
         for i in 1..=6 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
                 .unwrap();
         }
         // close() writes .meta for the final segment too
@@ -1371,8 +1376,8 @@ mod tests {
         assert_eq!(all.len(), 6);
 
         let filtered = reader.read_all_after_watermark(&wal_dir, 3).unwrap();
-        assert!(filtered.iter().all(|r| r.txn_id > 3));
-        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id).collect();
+        assert!(filtered.iter().all(|r| r.txn_id.as_u64() > 3));
+        let txn_ids: Vec<u64> = filtered.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![4, 5, 6]);
     }
 
@@ -1384,7 +1389,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=10)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 20]))
             .collect();
 
         write_records(&wal_dir, &records);
@@ -1451,7 +1456,7 @@ mod tests {
 
         for i in 1..=6u64 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
                 .unwrap();
         }
         writer.close().unwrap();
@@ -1481,7 +1486,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let records: Vec<_> = (1..=3)
-            .map(|i| WalRecord::new(i, [1u8; 16], 0, vec![i as u8]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], 0, vec![i as u8]))
             .collect();
         write_records(&wal_dir, &records);
 
@@ -1506,7 +1511,7 @@ mod tests {
             .unwrap();
         assert_eq!(iter_records.len(), 3);
         for (i, record) in iter_records.iter().enumerate() {
-            assert_eq!(record.txn_id, (i + 1) as u64);
+            assert_eq!(record.txn_id, TxnId((i + 1) as u64));
         }
     }
 
@@ -1522,7 +1527,7 @@ mod tests {
 
         // Write 6 valid records
         let records: Vec<_> = (1..=6)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 20]))
             .collect();
         write_records(&wal_dir, &records);
 
@@ -1565,7 +1570,7 @@ mod tests {
         let (lossy_records, _, _, skipped) = lossy_reader.read_segment(&wal_dir, 1).unwrap();
         assert!(skipped > 0, "Lossy reader should report skipped corruption");
         // Records 1-2 before corruption and 4-6 after should be present
-        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(txn_ids, vec![1, 2, 4, 5, 6]);
     }
 
@@ -1598,7 +1603,12 @@ mod tests {
         // Write 10 records with large enough payloads to spread across segments
         for i in 1..=10u64 {
             writer
-                .append(&WalRecord::new(i, [1u8; 16], i * 1000, vec![0xAA; 40]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![0xAA; 40],
+                ))
                 .unwrap();
         }
         writer.close().unwrap();
@@ -1712,7 +1722,7 @@ mod tests {
 
         // Write 6 valid records into a single segment
         let records: Vec<_> = (1..=6)
-            .map(|i| WalRecord::new(i, [1u8; 16], i * 1000, vec![i as u8; 20]))
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 20]))
             .collect();
         write_records(&wal_dir, &records);
 
@@ -1736,7 +1746,7 @@ mod tests {
         let lossy_reader = WalReader::new().with_lossy_recovery();
         let (lossy_records, _, _, skipped) = lossy_reader.read_segment(&wal_dir, 1).unwrap();
         assert!(skipped > 0, "Lossy reader should report skipped corruption");
-        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id).collect();
+        let txn_ids: Vec<u64> = lossy_records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(
             txn_ids,
             vec![1, 2, 4, 5, 6],
@@ -1748,7 +1758,7 @@ mod tests {
     /// to be "reasonable" (within segment bounds but pointing to the wrong offset).
     #[test]
     fn test_issue_1577_length_crc_catches_plausible_torn_length() {
-        let record = WalRecord::new(42, [1u8; 16], 99999, vec![1, 2, 3, 4, 5]);
+        let record = WalRecord::new(TxnId(42), [1u8; 16], 99999, vec![1, 2, 3, 4, 5]);
         let bytes = record.to_bytes();
 
         // Corrupt only the length field to a plausible but wrong value

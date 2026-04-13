@@ -523,7 +523,8 @@ impl Database {
     ) -> StrataResult<Vec<VersionedValue>> {
         use strata_core::id::CommitVersion;
         use strata_core::Storage;
-        self.storage.get_history(key, limit, before_version.map(CommitVersion))
+        self.storage
+            .get_history(key, limit, before_version.map(CommitVersion))
     }
 
     /// Get value at or before the given timestamp directly from storage.
@@ -543,7 +544,11 @@ impl Database {
     /// Bypasses the transaction layer (read-only, no conflict tracking needed).
     /// Uses the same MVCC pipeline as scan_prefix but counts instead of
     /// collecting, avoiding the O(N) Vec allocation.
-    pub(crate) fn count_prefix(&self, prefix: &Key, max_version: CommitVersion) -> StrataResult<u64> {
+    pub(crate) fn count_prefix(
+        &self,
+        prefix: &Key,
+        max_version: CommitVersion,
+    ) -> StrataResult<u64> {
         self.storage.count_prefix(prefix, max_version)
     }
 
@@ -556,7 +561,7 @@ impl Database {
         &self,
         prefix: &Key,
         start_key: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         self.storage

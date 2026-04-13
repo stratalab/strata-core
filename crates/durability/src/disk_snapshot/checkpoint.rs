@@ -10,6 +10,7 @@ use crate::disk_snapshot::{SnapshotSection, SnapshotWriter};
 use crate::format::primitive_tags;
 use crate::format::primitives::SnapshotSerializer;
 use crate::format::watermark::{CheckpointInfo, SnapshotWatermark};
+use strata_core::id::TxnId;
 
 /// Checkpoint coordinator
 ///
@@ -81,7 +82,7 @@ impl CheckpointCoordinator {
     /// Returns `CheckpointInfo` on success.
     pub fn checkpoint(
         &mut self,
-        watermark_txn: u64,
+        watermark_txn: TxnId,
         data: CheckpointData,
     ) -> Result<CheckpointInfo, CheckpointError> {
         let snapshot_id = self.watermark.next_snapshot_id();
@@ -127,7 +128,7 @@ impl CheckpointCoordinator {
         // Create the snapshot
         let snapshot_info = self
             .snapshot_writer
-            .create_snapshot(snapshot_id, watermark_txn, sections)
+            .create_snapshot(snapshot_id, watermark_txn.as_u64(), sections)
             .map_err(CheckpointError::Io)?;
 
         // Update watermark on success
@@ -246,15 +247,15 @@ mod tests {
         .unwrap();
 
         let data = CheckpointData::new();
-        let info = coordinator.checkpoint(100, data).unwrap();
+        let info = coordinator.checkpoint(TxnId(100), data).unwrap();
 
         assert_eq!(info.snapshot_id, 1);
-        assert_eq!(info.watermark_txn, 100);
+        assert_eq!(info.watermark_txn, TxnId(100));
         assert!(info.timestamp > 0);
 
         // Watermark should be updated
         assert_eq!(coordinator.watermark().snapshot_id(), Some(1));
-        assert_eq!(coordinator.watermark().watermark_txn(), Some(100));
+        assert_eq!(coordinator.watermark().watermark_txn(), Some(TxnId(100)));
     }
 
     #[test]
@@ -284,10 +285,10 @@ mod tests {
         ];
 
         let data = CheckpointData::new().with_kv(kv_entries);
-        let info = coordinator.checkpoint(50, data).unwrap();
+        let info = coordinator.checkpoint(TxnId(50), data).unwrap();
 
         assert_eq!(info.snapshot_id, 1);
-        assert_eq!(info.watermark_txn, 50);
+        assert_eq!(info.watermark_txn, TxnId(50));
     }
 
     #[test]
@@ -302,20 +303,26 @@ mod tests {
         .unwrap();
 
         // First checkpoint
-        let info1 = coordinator.checkpoint(100, CheckpointData::new()).unwrap();
+        let info1 = coordinator
+            .checkpoint(TxnId(100), CheckpointData::new())
+            .unwrap();
         assert_eq!(info1.snapshot_id, 1);
 
         // Second checkpoint
-        let info2 = coordinator.checkpoint(200, CheckpointData::new()).unwrap();
+        let info2 = coordinator
+            .checkpoint(TxnId(200), CheckpointData::new())
+            .unwrap();
         assert_eq!(info2.snapshot_id, 2);
 
         // Third checkpoint
-        let info3 = coordinator.checkpoint(300, CheckpointData::new()).unwrap();
+        let info3 = coordinator
+            .checkpoint(TxnId(300), CheckpointData::new())
+            .unwrap();
         assert_eq!(info3.snapshot_id, 3);
 
         // Watermark should reflect latest
         assert_eq!(coordinator.watermark().snapshot_id(), Some(3));
-        assert_eq!(coordinator.watermark().watermark_txn(), Some(300));
+        assert_eq!(coordinator.watermark().watermark_txn(), Some(TxnId(300)));
     }
 
     #[test]
@@ -342,7 +349,7 @@ mod tests {
                 timestamp: 0,
             }]);
 
-        let info = coordinator.checkpoint(100, data).unwrap();
+        let info = coordinator.checkpoint(TxnId(100), data).unwrap();
         assert_eq!(info.snapshot_id, 1);
     }
 
@@ -358,28 +365,30 @@ mod tests {
         .unwrap();
 
         // Before checkpoint, nothing is covered
-        assert!(!coordinator.watermark().is_covered(50));
-        assert!(coordinator.watermark().needs_replay(50));
+        assert!(!coordinator.watermark().is_covered(TxnId(50)));
+        assert!(coordinator.watermark().needs_replay(TxnId(50)));
 
         // Create checkpoint at txn 100
-        coordinator.checkpoint(100, CheckpointData::new()).unwrap();
+        coordinator
+            .checkpoint(TxnId(100), CheckpointData::new())
+            .unwrap();
 
         // Txns <= 100 are covered
-        assert!(coordinator.watermark().is_covered(50));
-        assert!(coordinator.watermark().is_covered(100));
-        assert!(!coordinator.watermark().is_covered(101));
+        assert!(coordinator.watermark().is_covered(TxnId(50)));
+        assert!(coordinator.watermark().is_covered(TxnId(100)));
+        assert!(!coordinator.watermark().is_covered(TxnId(101)));
 
         // Txns > 100 need replay
-        assert!(!coordinator.watermark().needs_replay(50));
-        assert!(!coordinator.watermark().needs_replay(100));
-        assert!(coordinator.watermark().needs_replay(101));
+        assert!(!coordinator.watermark().needs_replay(TxnId(50)));
+        assert!(!coordinator.watermark().needs_replay(TxnId(100)));
+        assert!(coordinator.watermark().needs_replay(TxnId(101)));
     }
 
     #[test]
     fn test_with_existing_watermark() {
         let temp_dir = tempfile::tempdir().unwrap();
 
-        let existing_watermark = SnapshotWatermark::with_values(5, 500, 12345);
+        let existing_watermark = SnapshotWatermark::with_values(5, TxnId(500), 12345);
 
         let mut coordinator = CheckpointCoordinator::with_watermark(
             temp_dir.path().to_path_buf(),
@@ -390,7 +399,9 @@ mod tests {
         .unwrap();
 
         // Next snapshot should be 6
-        let info = coordinator.checkpoint(600, CheckpointData::new()).unwrap();
+        let info = coordinator
+            .checkpoint(TxnId(600), CheckpointData::new())
+            .unwrap();
         assert_eq!(info.snapshot_id, 6);
     }
 
