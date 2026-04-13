@@ -24,6 +24,7 @@ pub mod branch_service;
 pub mod compat;
 pub mod config;
 pub mod dag_hook;
+pub mod merge_registry;
 pub mod observers;
 pub mod profile;
 mod registry;
@@ -35,6 +36,10 @@ pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
 pub use dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
     DagHookSlot, MergeBaseResult,
+};
+pub use merge_registry::{
+    GraphMergePlanFn, MergeHandlerRegistry, VectorMergeCallbacks, VectorMergePostCommitFn,
+    VectorMergePrecheckFn,
 };
 pub use observers::{
     BranchOpEvent, BranchOpKind, BranchOpObserver, BranchOpObserverRegistry, CommitInfo,
@@ -415,6 +420,12 @@ pub struct Database {
     ///
     /// Prevents re-running lifecycle on reuse via open_runtime.
     lifecycle_complete: AtomicBool,
+
+    /// Per-database merge handler registry.
+    ///
+    /// Stores vector and graph merge callbacks. Replaces the process-global
+    /// OnceCell patterns in primitive_merge.rs.
+    merge_registry: MergeHandlerRegistry,
 }
 
 // Split impl blocks
@@ -590,6 +601,18 @@ impl Database {
     /// Called after initialize() and bootstrap() succeed.
     pub(crate) fn set_lifecycle_complete(&self) {
         self.lifecycle_complete.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    // =========================================================================
+    // Merge Handler Registry
+    // =========================================================================
+
+    /// Get the per-database merge handler registry.
+    ///
+    /// Used by subsystems to register merge callbacks and by `merge_branches`
+    /// to look them up. Replaces the process-global OnceCell patterns.
+    pub fn merge_registry(&self) -> &MergeHandlerRegistry {
+        &self.merge_registry
     }
 
     // =========================================================================

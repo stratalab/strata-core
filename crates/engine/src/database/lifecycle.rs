@@ -343,6 +343,22 @@ impl Database {
             // BM25/HNSW entries.
             self.storage.advance_version(CommitVersion(payload.version));
 
+            // Notify replay observers (best-effort, errors logged not propagated)
+            // Extract branch_id from the first put or delete key
+            let branch_id = payload
+                .puts
+                .first()
+                .map(|(k, _)| k.namespace.branch_id)
+                .or_else(|| payload.deletes.first().map(|k| k.namespace.branch_id))
+                .unwrap_or(BranchId::new());
+            let entry_count = payload.puts.len() + payload.deletes.len();
+            let info = super::observers::ReplayInfo {
+                branch_id,
+                commit_version: CommitVersion(payload.version),
+                entry_count,
+            };
+            self.replay_observers().notify(&info);
+
             applied += 1;
         }
 

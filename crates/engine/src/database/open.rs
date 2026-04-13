@@ -591,6 +591,7 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_complete: AtomicBool::new(false),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         Ok(db)
@@ -934,6 +935,7 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_complete: AtomicBool::new(false),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         // Trigger compaction if any levels have accumulated segments from
@@ -1044,6 +1046,7 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_complete: AtomicBool::new(false),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry

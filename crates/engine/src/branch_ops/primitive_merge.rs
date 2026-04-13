@@ -984,7 +984,11 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
         // (it requires decoding CollectionRecord). If no callback is
         // registered, fall through — the engine has nothing to validate
         // on its own.
-        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+        //
+        // Check per-database registry first, then fall back to global.
+        if let Some(callbacks) = ctx.db.merge_registry().vector_callbacks() {
+            (callbacks.precheck)(ctx.db, ctx.source_id, ctx.target_id)?;
+        } else if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
             (callbacks.precheck)(ctx.db, ctx.source_id, ctx.target_id)?;
         }
         Ok(())
@@ -1033,7 +1037,10 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
             return Ok(());
         }
 
-        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+        // Check per-database registry first, then fall back to global.
+        if let Some(callbacks) = ctx.db.merge_registry().vector_callbacks() {
+            (callbacks.post_commit)(ctx.db, ctx.source_id, ctx.target_id, &affected)?;
+        } else if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
             (callbacks.post_commit)(ctx.db, ctx.source_id, ctx.target_id, &affected)?;
         }
         // No callback → no rebuild fires here. Vectors are still
@@ -1103,10 +1110,10 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
     }
 
     fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
-        // If a semantic merge is registered, validation lives inside `plan`.
-        // Otherwise, fall back to the divergence refusal so divergent graph
-        // merges still get caught.
-        if GRAPH_MERGE_PLAN_FN.get().is_some() {
+        // If a semantic merge is registered (per-database or global),
+        // validation lives inside `plan`. Otherwise, fall back to the
+        // divergence refusal so divergent graph merges still get caught.
+        if ctx.db.merge_registry().has_graph() || GRAPH_MERGE_PLAN_FN.get().is_some() {
             return Ok(());
         }
         for ((space, type_tag), cell) in &ctx.typed_entries.cells {
@@ -1119,6 +1126,10 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
     }
 
     fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+        // Check per-database registry first, then fall back to global.
+        if let Some(plan_fn) = ctx.db.merge_registry().graph_plan_fn() {
+            return plan_fn(ctx);
+        }
         if let Some(plan_fn) = GRAPH_MERGE_PLAN_FN.get() {
             return plan_fn(ctx);
         }
