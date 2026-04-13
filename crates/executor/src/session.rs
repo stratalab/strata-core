@@ -50,7 +50,7 @@ use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
-use strata_vector::ext::{StagedVectorOp, VectorStoreExt};
+use strata_vector::ext::VectorStoreExt;
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, to_core_branch_id, to_versioned_value,
@@ -86,6 +86,9 @@ use crate::{Command, Error, Executor, Output, Result};
 /// Best-effort: failures are logged but never propagate back to the caller.
 /// The primary data is already committed to KV; derived indices will catch
 /// up on next recovery if an update fails.
+///
+/// Note: VectorBackendOp was removed in T2-E2. Vector HNSW maintenance is now
+/// subsystem-owned via VectorCommitObserver in VectorSubsystem.
 enum PostCommitOp {
     GraphIndexNode {
         branch_id: CoreBranchId,
@@ -100,7 +103,6 @@ enum PostCommitOp {
         graph: String,
         node_id: String,
     },
-    VectorBackendOp(StagedVectorOp),
 }
 
 /// A stateful session that wraps an [`Executor`] and manages an optional
@@ -382,8 +384,17 @@ impl Session {
         let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
-        self.txn_branch_id = None;
+        let branch_id = self.txn_branch_id.take();
         self.post_commit_ops.clear();
+
+        // Clear pending vector ops for this branch (T2-E2: subsystem-owned cleanup).
+        // These ops were queued by VectorStoreExt but will not be committed.
+        if let Some(bid) = branch_id {
+            if let Ok(state) = self.executor.primitives().vector.state() {
+                state.clear_pending_ops(bid);
+            }
+        }
+
         self.db.end_transaction(ctx);
         Ok(Output::TxnAborted)
     }
@@ -430,11 +441,6 @@ impl Session {
                     primitives
                         .graph
                         .deindex_node_for_search(branch_id, &space, &graph, &node_id);
-                }
-                PostCommitOp::VectorBackendOp(staged_op) => {
-                    if let Ok(state) = primitives.vector.state() {
-                        strata_vector::ext::apply_staged_vector_op(&state, staged_op);
-                    }
                 }
             }
         }
@@ -950,7 +956,9 @@ impl Session {
                     .vector
                     .state()
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                let (version, staged_op) = ctx
+                // VectorStoreExt queues ops internally for VectorCommitObserver;
+                // we ignore the returned staged_op (T2-E2: subsystem-owned).
+                let (version, _staged_op) = ctx
                     .vector_upsert(
                         branch_id,
                         &space,
@@ -962,7 +970,6 @@ impl Session {
                         &state,
                     )
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                post_commit_ops.push(PostCommitOp::VectorBackendOp(staged_op));
                 Ok(Output::VectorWriteResult {
                     collection,
                     key,
@@ -986,12 +993,11 @@ impl Session {
                     .vector
                     .state()
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                let (existed, staged_op) = ctx
+                // VectorStoreExt queues ops internally for VectorCommitObserver;
+                // we ignore the returned staged_op (T2-E2: subsystem-owned).
+                let (existed, _staged_op) = ctx
                     .vector_delete(branch_id, &space, &collection, &key, &state)
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                if let Some(op) = staged_op {
-                    post_commit_ops.push(PostCommitOp::VectorBackendOp(op));
-                }
                 Ok(Output::VectorDeleteResult {
                     collection,
                     key,

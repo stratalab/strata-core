@@ -73,13 +73,61 @@ pub struct VectorBackendState {
     /// `DashMap` provides per-shard locking so that operations on different
     /// collections proceed concurrently without a global write lock.
     pub backends: DashMap<CollectionId, Box<dyn VectorIndexBackend>>,
+
+    /// Pending HNSW operations to be applied after transaction commit.
+    ///
+    /// Operations are keyed by branch_id. On commit, the VectorCommitObserver
+    /// drains and applies pending ops for the committed branch. On abort,
+    /// the Session clears pending ops for the aborted branch.
+    ///
+    /// This moves vector backend maintenance ownership from executor (Session)
+    /// to subsystem (VectorSubsystem), fulfilling the T2-E2 requirement.
+    pending_ops: DashMap<strata_core::types::BranchId, Vec<crate::ext::StagedVectorOp>>,
 }
 
 impl Default for VectorBackendState {
     fn default() -> Self {
         Self {
             backends: DashMap::new(),
+            pending_ops: DashMap::new(),
         }
+    }
+}
+
+impl VectorBackendState {
+    /// Queue a staged vector operation for post-commit application.
+    ///
+    /// Called by VectorStoreExt during transactions. The operation will be
+    /// applied by VectorCommitObserver after the transaction commits.
+    pub fn queue_pending_op(
+        &self,
+        branch_id: strata_core::types::BranchId,
+        op: crate::ext::StagedVectorOp,
+    ) {
+        self.pending_ops.entry(branch_id).or_default().push(op);
+    }
+
+    /// Apply and clear all pending operations for a branch.
+    ///
+    /// Called by VectorCommitObserver after transaction commit.
+    /// Returns the number of operations applied.
+    pub fn apply_pending_ops(&self, branch_id: strata_core::types::BranchId) -> usize {
+        if let Some((_, ops)) = self.pending_ops.remove(&branch_id) {
+            let count = ops.len();
+            for op in ops {
+                crate::ext::apply_staged_vector_op(self, op);
+            }
+            count
+        } else {
+            0
+        }
+    }
+
+    /// Clear pending operations for a branch without applying them.
+    ///
+    /// Called by Session on transaction abort to clean up uncommitted ops.
+    pub fn clear_pending_ops(&self, branch_id: strata_core::types::BranchId) {
+        self.pending_ops.remove(&branch_id);
     }
 }
 

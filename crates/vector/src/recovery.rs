@@ -480,6 +480,8 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
+        use std::sync::Arc;
+
         // Register vector merge handlers with the per-database registry.
         // This enables dimension/metric validation during merge precheck
         // and per-collection HNSW rebuilds after merge commit.
@@ -487,11 +489,67 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
             crate::merge_handler::vector_precheck_fn,
             crate::merge_handler::vector_post_commit_fn,
         );
+
+        // Register commit observer for HNSW backend maintenance.
+        // Vector write methods queue StagedVectorOps during transactions;
+        // this observer applies them after successful commit.
+        let commit_observer = Arc::new(VectorCommitObserver {
+            db: Arc::downgrade(db),
+        });
+        db.commit_observers().register(commit_observer);
+
         Ok(())
     }
 
     fn freeze(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
         db.freeze_vector_heaps()
+    }
+}
+
+// =============================================================================
+// Vector Commit Observer
+// =============================================================================
+
+use strata_engine::database::observers::{CommitInfo, CommitObserver, ObserverError};
+
+/// Observer that applies pending HNSW backend operations after commit.
+///
+/// Vector write methods queue `StagedVectorOp`s in `VectorBackendState` during
+/// transactions. This observer applies them after successful commit, updating
+/// the in-memory HNSW indices.
+///
+/// This moves vector backend maintenance ownership from executor (Session's
+/// `PostCommitOp::VectorBackendOp`) to subsystem (VectorSubsystem), fulfilling
+/// the T2-E2 requirement.
+struct VectorCommitObserver {
+    db: std::sync::Weak<strata_engine::Database>,
+}
+
+impl CommitObserver for VectorCommitObserver {
+    fn name(&self) -> &'static str {
+        "vector"
+    }
+
+    fn on_commit(&self, info: &CommitInfo) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(()); // Database dropped
+        };
+
+        // Get vector backend state and apply pending ops for this branch
+        if let Ok(state) = db.extension::<super::VectorBackendState>() {
+            let applied = state.apply_pending_ops(info.branch_id);
+            if applied > 0 {
+                tracing::debug!(
+                    target: "strata::vector",
+                    branch_id = ?info.branch_id,
+                    commit_version = info.commit_version.0,
+                    ops_applied = applied,
+                    "Applied pending HNSW operations"
+                );
+            }
+        }
+
+        Ok(())
     }
 }
 
