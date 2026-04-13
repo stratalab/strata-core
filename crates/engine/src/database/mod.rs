@@ -19,9 +19,29 @@
 //!
 //! Per spec Section 4: Implicit transactions wrap legacy-style operations.
 
+pub mod branch_mutation;
+pub mod branch_service;
+pub mod compat;
 pub mod config;
+pub mod dag_hook;
+pub mod observers;
 pub mod profile;
 mod registry;
+pub mod spec;
+
+pub use branch_mutation::{BranchMutation, FailurePoint};
+pub use branch_service::{BranchService, ForkOptions, MergeOptions};
+pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
+pub use dag_hook::{
+    AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
+    DagHookSlot, MergeBaseResult,
+};
+pub use observers::{
+    BranchOpEvent, BranchOpKind, BranchOpObserver, BranchOpObserverRegistry, CommitInfo,
+    CommitObserver, CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo,
+    ReplayObserver, ReplayObserverRegistry,
+};
+pub use spec::{DatabaseMode, OpenSpec};
 
 pub use config::{ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 pub use profile::{
@@ -365,6 +385,19 @@ pub struct Database {
     /// Populated by `DatabaseBuilder` or `Database::open()` (backward compat).
     /// Frozen in reverse order during shutdown/drop.
     subsystems: parking_lot::RwLock<Vec<Box<dyn crate::recovery::Subsystem>>>,
+
+    /// Per-database DAG hook slot.
+    ///
+    /// Installed by `GraphSubsystem::initialize()`. Used by `BranchService`
+    /// for branch DAG operations (merge-base, log, ancestors, record_event).
+    /// Replaces the process-global `BRANCH_DAG_HOOKS` OnceCell.
+    dag_hook_slot: DagHookSlot,
+
+    /// Per-database branch operation observer registry.
+    ///
+    /// Observers are notified after branch operations complete (create, delete,
+    /// fork, merge, etc.). Best-effort: failures are logged, not propagated.
+    branch_op_observers: BranchOpObserverRegistry,
 }
 
 // Split impl blocks
@@ -457,6 +490,52 @@ impl Database {
     /// but before the recovery loop completes).
     pub fn installed_subsystem_names(&self) -> Vec<&'static str> {
         self.subsystems.read().iter().map(|s| s.name()).collect()
+    }
+
+    // =========================================================================
+    // DAG Hook
+    // =========================================================================
+
+    /// Get the per-database DAG hook slot.
+    ///
+    /// Used by `BranchService` to access the installed DAG hook for
+    /// merge-base, log, ancestors, and record_event operations.
+    pub fn dag_hook(&self) -> &DagHookSlot {
+        &self.dag_hook_slot
+    }
+
+    /// Install a DAG hook for this database.
+    ///
+    /// Called by `GraphSubsystem::initialize()` to install the graph crate's
+    /// implementation. Returns an error if a hook is already installed.
+    ///
+    /// ## Usage
+    ///
+    /// ```text
+    /// impl Subsystem for GraphSubsystem {
+    ///     fn initialize(&self, db: &Arc<Database>) -> StrataResult<()> {
+    ///         let hook = Arc::new(GraphDagHook::new(db.clone()));
+    ///         db.install_dag_hook(hook).map_err(|e| ...)?;
+    ///         Ok(())
+    ///     }
+    /// }
+    /// ```
+    pub fn install_dag_hook(
+        &self,
+        hook: Arc<dyn BranchDagHook>,
+    ) -> Result<(), dag_hook::BranchDagError> {
+        self.dag_hook_slot.install(hook)
+    }
+
+    // =========================================================================
+    // Branch Operation Observers
+    // =========================================================================
+
+    /// Get the per-database branch operation observer registry.
+    ///
+    /// Used by `BranchService` to notify observers after branch operations.
+    pub fn branch_op_observers(&self) -> &BranchOpObserverRegistry {
+        &self.branch_op_observers
     }
 
     /// Run freeze hooks on all registered subsystems.

@@ -586,6 +586,8 @@ impl Database {
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
+            dag_hook_slot: super::DagHookSlot::new(),
+            branch_op_observers: super::BranchOpObserverRegistry::new(),
         });
 
         Ok(db)
@@ -924,6 +926,8 @@ impl Database {
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
+            dag_hook_slot: super::DagHookSlot::new(),
+            branch_op_observers: super::BranchOpObserverRegistry::new(),
         });
 
         // Trigger compaction if any levels have accumulated segments from
@@ -1029,6 +1033,8 @@ impl Database {
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
+            dag_hook_slot: super::DagHookSlot::new(),
+            branch_op_observers: super::BranchOpObserverRegistry::new(),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -1041,5 +1047,221 @@ impl Database {
         index.enable();
 
         Ok(db)
+    }
+
+    // ========================================================================
+    // OpenSpec-based Entry Point (T2-E1)
+    // ========================================================================
+
+    /// Open a database using an `OpenSpec`.
+    ///
+    /// This is the single internal constructor dispatcher for all database modes.
+    /// It validates the spec, routes to the appropriate open helper, and runs
+    /// the full subsystem lifecycle (recover → initialize → bootstrap).
+    ///
+    /// ## Lifecycle Order
+    ///
+    /// 1. Validate spec fields
+    /// 2. Resolve configuration (from spec or file)
+    /// 3. Route to mode-specific open helper (primary, follower, cache)
+    /// 4. For each subsystem: `recover()`
+    /// 5. For each subsystem: `initialize()` (write-free wiring)
+    /// 6. If mode allows bootstrap: for each subsystem `bootstrap()`
+    /// 7. Ensure default branch (if specified and mode allows)
+    /// 8. Return initialized database
+    ///
+    /// ## Mode Behavior
+    ///
+    /// | Mode | Recover | Initialize | Bootstrap | Default Branch |
+    /// |------|---------|------------|-----------|----------------|
+    /// | Primary | Yes | Yes | Yes | Yes |
+    /// | Follower | Yes | Yes | No | No |
+    /// | Cache | No* | Yes | Yes | Yes |
+    ///
+    /// *Cache databases have no persistent state to recover.
+    ///
+    /// ## Thread Safety
+    ///
+    /// For Primary and Follower modes, the registry ensures that opening the
+    /// same path twice returns the same `Arc<Database>`.
+    pub fn open_runtime(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        use super::spec::DatabaseMode;
+
+        // Validate spec
+        if !spec.mode.is_ephemeral() && spec.path.as_os_str().is_empty() {
+            return Err(StrataError::invalid_input(
+                "path is required for Primary and Follower modes",
+            ));
+        }
+
+        // Route to mode-specific open helper
+        match spec.mode {
+            DatabaseMode::Primary => {
+                Self::open_runtime_primary(spec)
+            }
+            DatabaseMode::Follower => {
+                Self::open_runtime_follower(spec)
+            }
+            DatabaseMode::Cache => {
+                Self::open_runtime_cache(spec)
+            }
+        }
+    }
+
+    /// Open a primary database from an `OpenSpec`.
+    fn open_runtime_primary(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        let data_dir = spec.path.clone();
+        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
+
+        // Resolve configuration
+        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
+        let cfg = if let Some(cfg) = spec.config {
+            // Write supplied config to file
+            cfg.write_to_file(&config_path)?;
+            cfg
+        } else {
+            // Read from file or create default
+            config::StrataConfig::write_default_if_missing(&config_path)?;
+            config::StrataConfig::from_file(&config_path)?
+        };
+
+        let durability_mode = cfg.durability_mode()?;
+
+        // Delegate to existing open path with subsystems
+        let db = Self::acquire_primary_db(
+            &data_dir,
+            durability_mode,
+            cfg,
+            spec.subsystems,
+        )?;
+
+        // Run new lifecycle hooks (initialize and bootstrap)
+        Self::run_lifecycle_hooks(&db, true)?;
+
+        // Ensure default branch if specified
+        if let Some(branch_name) = &spec.default_branch {
+            Self::ensure_default_branch(&db, branch_name)?;
+        }
+
+        Ok(db)
+    }
+
+    /// Open a follower database from an `OpenSpec`.
+    fn open_runtime_follower(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        let data_dir = spec.path.clone();
+        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
+
+        // Resolve configuration
+        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
+        let cfg = if let Some(cfg) = spec.config {
+            cfg
+        } else if config_path.exists() {
+            config::StrataConfig::from_file(&config_path)?
+        } else {
+            config::StrataConfig::default()
+        };
+
+        // Delegate to existing follower open path with subsystems
+        let db = Self::open_follower_internal_with_subsystems(
+            canonical_path,
+            cfg,
+            spec.subsystems,
+        )?;
+
+        // Run new lifecycle hooks (initialize only, no bootstrap for followers)
+        Self::run_lifecycle_hooks(&db, false)?;
+
+        // Followers do not ensure default branch (read-only)
+
+        Ok(db)
+    }
+
+    /// Open a cache database from an `OpenSpec`.
+    fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        // Create ephemeral database (config is applied internally by cache())
+        let db = Self::cache()?;
+
+        // Run subsystem recovery (no-op for cache, but maintains consistency)
+        // and install subsystems for freeze-on-drop
+        for subsystem in &spec.subsystems {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running subsystem recovery (cache mode)"
+            );
+            // Cache databases have no persistent state, so recover() should
+            // be fast (initialize to empty). We call it for consistency with
+            // primary/follower paths and to let subsystems know they're starting.
+            subsystem.recover(&db)?;
+        }
+        db.set_subsystems(spec.subsystems);
+
+        // Run new lifecycle hooks (initialize and bootstrap)
+        Self::run_lifecycle_hooks(&db, true)?;
+
+        // Ensure default branch if specified
+        if let Some(branch_name) = &spec.default_branch {
+            Self::ensure_default_branch(&db, branch_name)?;
+        }
+
+        Ok(db)
+    }
+
+    /// Run the new lifecycle hooks on subsystems.
+    ///
+    /// Called after `recover()` has already run (via acquire_*_db helpers).
+    /// Runs `initialize()` on all subsystems, then optionally `bootstrap()`.
+    fn run_lifecycle_hooks(db: &Arc<Self>, run_bootstrap: bool) -> StrataResult<()> {
+        let subsystems = db.subsystems.read();
+
+        // Phase 1: initialize (write-free wiring)
+        for subsystem in subsystems.iter() {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running subsystem initialize"
+            );
+            subsystem.initialize(db)?;
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Subsystem initialize complete"
+            );
+        }
+
+        // Phase 2: bootstrap (idempotent writes) — skipped for followers
+        if run_bootstrap {
+            for subsystem in subsystems.iter() {
+                info!(
+                    target: "strata::recovery",
+                    subsystem = subsystem.name(),
+                    "Running subsystem bootstrap"
+                );
+                subsystem.bootstrap(db)?;
+                info!(
+                    target: "strata::recovery",
+                    subsystem = subsystem.name(),
+                    "Subsystem bootstrap complete"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure a default branch exists.
+    ///
+    /// Creates the branch if it doesn't exist. Idempotent.
+    fn ensure_default_branch(db: &Arc<Self>, branch_name: &str) -> StrataResult<()> {
+        let branch_index = crate::primitives::branch::BranchIndex::new(db.clone());
+        if !branch_index.exists(branch_name)? {
+            info!(
+                target: "strata::db",
+                branch = branch_name,
+                "Creating default branch"
+            );
+            branch_index.create_branch(branch_name)?;
+        }
+        Ok(())
     }
 }
