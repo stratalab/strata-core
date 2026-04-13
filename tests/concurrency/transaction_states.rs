@@ -332,9 +332,12 @@ fn read_count_tracks_reads() {
 
     let ns = Arc::new(Namespace::for_branch(branch_id));
 
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r1"), CommitVersion(1));
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r2"), CommitVersion(2));
-    txn.read_set.insert(Key::new_kv(ns.clone(), "r3"), CommitVersion(3));
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r1"), CommitVersion(1));
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r2"), CommitVersion(2));
+    txn.read_set
+        .insert(Key::new_kv(ns.clone(), "r3"), CommitVersion(3));
 
     assert_eq!(txn.read_count(), 3);
 }

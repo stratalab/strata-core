@@ -313,7 +313,9 @@ fn stress_long_running_transaction() {
 
     // Start a long-running transaction
     let mut long_txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(initial_version));
-    long_txn.read_set.insert(key.clone(), CommitVersion(initial_version));
+    long_txn
+        .read_set
+        .insert(key.clone(), CommitVersion(initial_version));
 
     // Spawn concurrent writers
     let store_clone = Arc::clone(&store);

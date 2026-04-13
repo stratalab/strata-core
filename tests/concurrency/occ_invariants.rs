@@ -218,14 +218,18 @@ fn write_skew_is_allowed() {
         .get_versioned(&key_b, CommitVersion::MAX)
         .unwrap()
         .unwrap();
-    t1.read_set.insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
-    t1.read_set.insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
+    t1.read_set
+        .insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
+    t1.read_set
+        .insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
     t1.write_set.insert(key_a.clone(), Value::Int(-10));
 
     // T2 reads A and B, writes B
     let mut t2 = TransactionContext::new(TxnId(2), branch_id, CommitVersion(1));
-    t2.read_set.insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
-    t2.read_set.insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
+    t2.read_set
+        .insert(key_a.clone(), CommitVersion(val_a.version.as_u64()));
+    t2.read_set
+        .insert(key_b.clone(), CommitVersion(val_b.version.as_u64()));
     t2.write_set.insert(key_b.clone(), Value::Int(-10));
 
     // Both should validate successfully (write skew allowed)

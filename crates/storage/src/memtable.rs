@@ -770,11 +770,7 @@ mod tests {
         // Read a key that exists — must be found (no false negatives).
         let typed_hit = encode_typed_key(&key("present_0500"));
         let seek_hit = InternalKey::from_typed_key_bytes(&typed_hit, CommitVersion::MAX);
-        let hit = mt.get_versioned_preencoded(
-            &typed_hit,
-            seek_hit.as_bytes(),
-            CommitVersion::MAX,
-        );
+        let hit = mt.get_versioned_preencoded(&typed_hit, seek_hit.as_bytes(), CommitVersion::MAX);
         assert!(
             hit.is_some(),
             "existing key must be found in frozen memtable"
@@ -839,8 +835,7 @@ mod tests {
 
         let typed = encode_typed_key(&key("deleted"));
         let seek = InternalKey::from_typed_key_bytes(&typed, CommitVersion::MAX);
-        let result =
-            mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX);
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX);
         assert!(result.is_some(), "tombstone must be visible through bloom");
         assert!(result.unwrap().1.is_tombstone);
     }

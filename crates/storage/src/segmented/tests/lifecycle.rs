@@ -416,7 +416,9 @@ fn bench_100_branch_fanout() {
     );
 
     // Compact parent — should NOT delete shared segments
-    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
 
     // Verify all 100 children can still read
     let start = std::time::Instant::now();
@@ -968,7 +970,9 @@ fn gc_orphan_segments_cleans_leaked_files() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),
@@ -1052,7 +1056,9 @@ fn test_issue_1705_materialize_layer_gc_orphan_segments() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),

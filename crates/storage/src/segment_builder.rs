@@ -445,7 +445,12 @@ impl SegmentBuilder {
 
         // 7. Backfill header
         w.seek(SeekFrom::Start(0))?;
-        let header = encode_header(entry_count, commit_min.as_u64(), commit_max.as_u64(), self.data_block_size);
+        let header = encode_header(
+            entry_count,
+            commit_min.as_u64(),
+            commit_max.as_u64(),
+            self.data_block_size,
+        );
         w.write_all(&header)?;
 
         // 8. Flush and sync
@@ -1755,12 +1760,18 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&key("a"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&key("a"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.timestamp, 1_600_000_000_000_000);
         assert_eq!(e.ttl_ms, 60_000);
 
-        let e = seg.point_lookup(&key("b"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&key("b"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 999);
         assert_eq!(e.ttl_ms, 0);
@@ -2769,13 +2780,17 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
         // Even keys should have tombstone at commit 100+i
         for i in (0..20u64).step_by(2) {
-            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), CommitVersion(200)).unwrap();
+            let e = seg
+                .point_lookup(&key(&format!("k_{:04}", i)), CommitVersion(200))
+                .unwrap();
             assert!(e.is_some(), "tombstone k_{:04} should be visible", i);
             assert!(e.unwrap().is_tombstone, "k_{:04} should be a tombstone", i);
         }
         // Odd keys should still have their values
         for i in (1..20u64).step_by(2) {
-            let e = seg.point_lookup(&key(&format!("k_{:04}", i)), CommitVersion(200)).unwrap();
+            let e = seg
+                .point_lookup(&key(&format!("k_{:04}", i)), CommitVersion(200))
+                .unwrap();
             assert!(e.is_some());
             assert_eq!(e.unwrap().value, Value::Int(i as i64));
         }

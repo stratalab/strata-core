@@ -1224,8 +1224,8 @@ impl SegmentedStore {
             let own_version = branch.version.load_full();
 
             // Snapshot closer inherited layers (indices 0..layer_index)
-            let closer_layers: Vec<(Arc<SegmentVersion>, BranchId, CommitVersion)> = branch.inherited_layers
-                [..layer_index]
+            let closer_layers: Vec<(Arc<SegmentVersion>, BranchId, CommitVersion)> = branch
+                .inherited_layers[..layer_index]
                 .iter()
                 .map(|l| (Arc::clone(&l.segments), l.source_branch_id, l.fork_version))
                 .collect();
@@ -1674,7 +1674,8 @@ impl SegmentedStore {
         dest.inherited_layers = dest_layers;
         // Propagate fork_version so subsequent forks from this child
         // correctly report the inherited data's version range.
-        dest.max_version.fetch_max(fork_version.as_u64(), Ordering::Release);
+        dest.max_version
+            .fetch_max(fork_version.as_u64(), Ordering::Release);
         drop(dest);
 
         // 7. Write manifest
@@ -2283,7 +2284,7 @@ impl SegmentedStore {
 
     /// Garbage collect old versions for a branch.
     /// SegmentedStore prunes via compaction — this is a no-op stub.
-    pub fn gc_branch(&self, _branch_id: &BranchId, _min_version: u64) -> usize {
+    pub fn gc_branch(&self, _branch_id: &BranchId, _min_version: CommitVersion) -> usize {
         0
     }
 
@@ -3008,7 +3009,7 @@ impl SegmentedStore {
 
                 inherited_layers.push(InheritedLayer {
                     source_branch_id: ml.source_branch_id,
-                    fork_version: CommitVersion(ml.fork_version),
+                    fork_version: ml.fork_version,
                     segments: Arc::new(SegmentVersion {
                         levels: layer_levels,
                     }),
@@ -3987,11 +3988,7 @@ impl SegmentedStore {
         snapshot_version: CommitVersion,
     ) -> Option<StorageIterator> {
         let snapshot = self.snapshot_branch(branch_id)?;
-        Some(StorageIterator::new(
-            snapshot,
-            prefix,
-            snapshot_version,
-        ))
+        Some(StorageIterator::new(snapshot, prefix, snapshot_version))
     }
 
     /// Scan entries starting from `start_key` within `prefix`, with optional limit.
@@ -4153,7 +4150,7 @@ impl SegmentedStore {
 
                 crate::manifest::ManifestInheritedLayer {
                     source_branch_id: layer.source_branch_id,
-                    fork_version: layer.fork_version.as_u64(),
+                    fork_version: layer.fork_version,
                     status,
                     entries: layer_entries,
                 }

@@ -676,7 +676,8 @@ impl TransactionContext {
             Some(vv) => {
                 // Key exists - track its version for conflict detection
                 if !self.read_only {
-                    self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
+                    self.read_set
+                        .insert(key.clone(), CommitVersion(vv.version.as_u64()));
                 }
                 Ok(Some(vv.value))
             }
@@ -734,7 +735,8 @@ impl TransactionContext {
         // Track in read_set for conflict detection (skip in read-only mode)
         if !self.read_only {
             if let Some(ref vv) = versioned {
-                self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
+                self.read_set
+                    .insert(key.clone(), CommitVersion(vv.version.as_u64()));
             } else {
                 self.read_set.insert(key.clone(), CommitVersion::ZERO);
             }
@@ -802,7 +804,8 @@ impl TransactionContext {
         let mut snapshot_filtered: Vec<(Key, Value)> = Vec::with_capacity(snapshot_results.len());
         for (key, vv) in snapshot_results {
             if !self.read_only {
-                self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
+                self.read_set
+                    .insert(key.clone(), CommitVersion(vv.version.as_u64()));
             }
             if !self.delete_set.contains(&key) {
                 snapshot_filtered.push((key, vv.value));
@@ -1081,7 +1084,12 @@ impl TransactionContext {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn cas(&mut self, key: Key, expected_version: CommitVersion, new_value: Value) -> StrataResult<()> {
+    pub fn cas(
+        &mut self,
+        key: Key,
+        expected_version: CommitVersion,
+        new_value: Value,
+    ) -> StrataResult<()> {
         self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
@@ -1241,7 +1249,10 @@ impl TransactionContext {
             if let Some(store) = &self.store {
                 match store.get_versioned(key, self.start_version) {
                     Ok(Some(vv)) => {
-                        self.record_json_snapshot_version(key.clone(), CommitVersion(vv.version.as_u64()));
+                        self.record_json_snapshot_version(
+                            key.clone(),
+                            CommitVersion(vv.version.as_u64()),
+                        );
                     }
                     Ok(None) => {
                         self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
@@ -2240,7 +2251,8 @@ mod tests {
 
         // 1 put + 1 CAS = 2
         txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
-        txn.cas(test_key(&ns, "k2"), CommitVersion::ZERO, Value::Int(2)).unwrap();
+        txn.cas(test_key(&ns, "k2"), CommitVersion::ZERO, Value::Int(2))
+            .unwrap();
 
         // 3rd operation should fail (total = 2 >= limit of 2)
         let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
@@ -2515,7 +2527,8 @@ mod tests {
         let store = store_with_key(&key, Value::Int(10), 5);
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
-        txn.cas_with_read(key.clone(), CommitVersion(5), Value::Int(20)).unwrap();
+        txn.cas_with_read(key.clone(), CommitVersion(5), Value::Int(20))
+            .unwrap();
 
         // read_set should contain the key (from the read)
         assert_eq!(txn.read_set.get(&key), Some(&CommitVersion(5)));
@@ -2532,7 +2545,8 @@ mod tests {
         let store = empty_store();
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
-        txn.cas_with_read(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
+        txn.cas_with_read(key.clone(), CommitVersion::ZERO, Value::Int(1))
+            .unwrap();
 
         // Non-existent key should be tracked with version 0
         assert_eq!(txn.read_set.get(&key), Some(&CommitVersion::ZERO));
@@ -2696,7 +2710,9 @@ mod tests {
         let mut txn = TransactionContext::new(TxnId(1), branch_a, CommitVersion(100));
 
         // CAS on a key from branch B inside a branch A transaction must fail
-        let err = txn.cas(cross_key, CommitVersion(1), Value::Int(2)).unwrap_err();
+        let err = txn
+            .cas(cross_key, CommitVersion(1), Value::Int(2))
+            .unwrap_err();
         assert!(
             format!("{}", err).contains("branch"),
             "Error should mention branch mismatch: {}",
@@ -2715,7 +2731,9 @@ mod tests {
         let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
 
         // cas_with_read on a key from branch B must fail
-        let err = txn.cas_with_read(cross_key, CommitVersion::ZERO, Value::Int(2)).unwrap_err();
+        let err = txn
+            .cas_with_read(cross_key, CommitVersion::ZERO, Value::Int(2))
+            .unwrap_err();
         assert!(
             format!("{}", err).contains("branch"),
             "Error should mention branch mismatch: {}",

@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use strata_core::id::CommitVersion;
 use strata_engine::BranchMetadata;
 use strata_graph::branch_dag;
 
@@ -469,12 +470,16 @@ pub fn branch_revert(
     to_version: u64,
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let info =
-        strata_engine::branch_ops::revert_version_range(&p.db, &branch, from_version, to_version)
-            .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+    let info = strata_engine::branch_ops::revert_version_range(
+        &p.db,
+        &branch,
+        CommitVersion(from_version),
+        CommitVersion(to_version),
+    )
+    .map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: None,
+    })?;
 
     emit_audit_event(
         p,

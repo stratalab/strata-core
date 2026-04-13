@@ -1481,7 +1481,10 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
     db.storage().flush_oldest_frozen(&branch_id).unwrap();
 
     // Now compact — this is where max_versions would drop the old version.
-    let compacted = db.storage().compact_branch(&branch_id, CommitVersion::ZERO).unwrap();
+    let compacted = db
+        .storage()
+        .compact_branch(&branch_id, CommitVersion::ZERO)
+        .unwrap();
     assert!(compacted.is_some(), "compaction should have run");
 
     // The reader's snapshot must still be able to find version 1

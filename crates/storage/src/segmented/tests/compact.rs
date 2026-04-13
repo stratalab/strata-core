@@ -169,7 +169,10 @@ fn compact_noop_zero_segments() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
+    assert!(store
+        .compact_branch(&b, CommitVersion(0))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -181,7 +184,10 @@ fn compact_noop_one_segment() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
-    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
+    assert!(store
+        .compact_branch(&b, CommitVersion(0))
+        .unwrap()
+        .is_none());
 }
 
 #[test]
@@ -189,7 +195,10 @@ fn compact_noop_ephemeral() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
+    assert!(store
+        .compact_branch(&b, CommitVersion(0))
+        .unwrap()
+        .is_none());
 }
 
 #[test]

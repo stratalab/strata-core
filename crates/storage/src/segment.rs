@@ -793,7 +793,10 @@ impl KVSegment {
 
     /// The `(commit_min, commit_max)` range for this segment.
     pub fn commit_range(&self) -> (CommitVersion, CommitVersion) {
-        (CommitVersion(self.header.commit_min), CommitVersion(self.header.commit_max))
+        (
+            CommitVersion(self.header.commit_min),
+            CommitVersion(self.header.commit_max),
+        )
     }
 
     /// Total entry count (all versions).
@@ -2077,14 +2080,23 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("a"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("a"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
-        let e = seg.point_lookup(&kv_key("b"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(20));
 
-        let e = seg.point_lookup(&kv_key("c"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("c"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::String("hello".into()));
     }
 
@@ -2099,7 +2111,10 @@ mod tests {
         build_segment(&mt, &path);
 
         let seg = KVSegment::open(&path).unwrap();
-        assert!(seg.point_lookup(&kv_key("z"), CommitVersion::MAX).unwrap().is_none());
+        assert!(seg
+            .point_lookup(&kv_key("z"), CommitVersion::MAX)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2117,22 +2132,34 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 10: see version 10
-        let e = seg.point_lookup(&kv_key("k"), CommitVersion(10)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(10))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(100));
         assert_eq!(e.commit_id, CommitVersion(10));
 
         // Snapshot at 7: see version 5
-        let e = seg.point_lookup(&kv_key("k"), CommitVersion(7)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(7))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(50));
         assert_eq!(e.commit_id, CommitVersion(5));
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("k"), CommitVersion(1)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert_eq!(e.commit_id, CommitVersion(1));
 
         // Snapshot at 0: nothing visible
-        assert!(seg.point_lookup(&kv_key("k"), CommitVersion(0)).unwrap().is_none());
+        assert!(seg
+            .point_lookup(&kv_key("k"), CommitVersion(0))
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -2149,12 +2176,18 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 2: see tombstone
-        let e = seg.point_lookup(&kv_key("k"), CommitVersion(2)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(2))
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.commit_id, CommitVersion(2));
 
         // Snapshot at 1: see the value
-        let e = seg.point_lookup(&kv_key("k"), CommitVersion(1)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -2466,7 +2499,10 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
         assert_eq!(seg.entry_count(), 0);
-        assert_eq!(seg.commit_range(), (CommitVersion::ZERO, CommitVersion::ZERO));
+        assert_eq!(
+            seg.commit_range(),
+            (CommitVersion::ZERO, CommitVersion::ZERO)
+        );
         assert!(seg
             .point_lookup(&kv_key("anything"), CommitVersion::MAX)
             .unwrap()
@@ -2588,12 +2624,18 @@ mod tests {
 
         let seg = KVSegment::open(&path).unwrap();
 
-        let e = seg.point_lookup(&kv_key("k1"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k1"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(42));
         assert_eq!(e.timestamp, 1_700_000_000_000_000);
         assert_eq!(e.ttl_ms, 30_000);
 
-        let e = seg.point_lookup(&kv_key("k2"), CommitVersion::MAX).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("k2"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
         assert_eq!(e.timestamp, 555);
         assert_eq!(e.ttl_ms, 10_000);
@@ -3066,17 +3108,26 @@ mod tests {
         let seg = KVSegment::open(&path).unwrap();
 
         // Snapshot at 5: see version 5
-        let e = seg.point_lookup(&kv_key("b_0000"), CommitVersion(5)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(50));
         assert_eq!(e.commit_id, CommitVersion(5));
 
         // Snapshot at 3: see version 3
-        let e = seg.point_lookup(&kv_key("b_0000"), CommitVersion(3)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(3))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(30));
         assert_eq!(e.commit_id, CommitVersion(3));
 
         // Snapshot at 1: see version 1
-        let e = seg.point_lookup(&kv_key("b_0000"), CommitVersion(1)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("b_0000"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
     }
 
@@ -3703,7 +3754,10 @@ mod tests {
         assert_eq!(e.commit_id, CommitVersion(2));
 
         // "dead" at snapshot 1 → see the value
-        let e = seg.point_lookup(&kv_key("dead"), CommitVersion(1)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("dead"), CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(10));
         assert!(!e.is_tombstone);
 
@@ -3716,7 +3770,10 @@ mod tests {
         assert!(!e.is_tombstone);
 
         // "revived" at snapshot 2 → see tombstone
-        let e = seg.point_lookup(&kv_key("revived"), CommitVersion(2)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&kv_key("revived"), CommitVersion(2))
+            .unwrap()
+            .unwrap();
         assert!(e.is_tombstone);
     }
 
@@ -3908,7 +3965,12 @@ mod tests {
                 "wrong value at idx {}",
                 idx
             );
-            assert_eq!(se.commit_id, CommitVersion(idx as u64 + 1), "wrong commit at idx {}", idx);
+            assert_eq!(
+                se.commit_id,
+                CommitVersion(idx as u64 + 1),
+                "wrong commit at idx {}",
+                idx
+            );
             let tkp = ik.typed_key_prefix();
             let expected = format!("fi_{:06}", idx);
             assert!(
@@ -3987,7 +4049,12 @@ mod tests {
                 "wrong value at idx {}",
                 idx
             );
-            assert_eq!(se.commit_id, CommitVersion(idx as u64 + 1), "wrong commit at idx {}", idx);
+            assert_eq!(
+                se.commit_id,
+                CommitVersion(idx as u64 + 1),
+                "wrong commit at idx {}",
+                idx
+            );
         }
         for i in 0..all.len() - 1 {
             assert!(all[i].0.as_bytes() <= all[i + 1].0.as_bytes());
@@ -4322,9 +4389,12 @@ mod tests {
         // Every key must be findable despite hash collisions
         for i in 0..500u32 {
             let k = kv_key(&format!("shared_prefix_collision_test_key_{:06}", i));
-            let e = seg.point_lookup(&k, CommitVersion::MAX).unwrap().unwrap_or_else(|| {
-                panic!("key shared_prefix_collision_test_key_{:06} not found", i)
-            });
+            let e = seg
+                .point_lookup(&k, CommitVersion::MAX)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!("key shared_prefix_collision_test_key_{:06} not found", i)
+                });
             assert_eq!(e.value, Value::Int(i as i64));
             assert_eq!(e.commit_id, CommitVersion(i as u64 + 1));
         }
@@ -4387,11 +4457,17 @@ mod tests {
         }
 
         // MVCC: snapshot at commit 5 for the multi-version key
-        let e = seg.point_lookup(&multi_ver_key, CommitVersion(5)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&multi_ver_key, CommitVersion(5))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(500)); // commit 5 * 100
 
         // MVCC: snapshot at commit 1 gets the original value
-        let e = seg.point_lookup(&multi_ver_key, CommitVersion(1)).unwrap().unwrap();
+        let e = seg
+            .point_lookup(&multi_ver_key, CommitVersion(1))
+            .unwrap()
+            .unwrap();
         assert_eq!(e.value, Value::Int(150)); // original from loop
     }
 

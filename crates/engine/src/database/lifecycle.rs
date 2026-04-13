@@ -16,7 +16,7 @@ impl Database {
     ///
     /// Removes old versions from version chains across all entries in the branch.
     /// Returns the number of pruned versions.
-    pub fn gc_versions_before(&self, branch_id: BranchId, min_version: u64) -> usize {
+    pub fn gc_versions_before(&self, branch_id: BranchId, min_version: CommitVersion) -> usize {
         self.storage.gc_branch(&branch_id, min_version)
     }
 
@@ -68,7 +68,7 @@ impl Database {
 
         let mut total_pruned = 0;
         for branch_id in self.storage.branch_ids() {
-            total_pruned += self.storage.gc_branch(&branch_id, safe_point);
+            total_pruned += self.storage.gc_branch(&branch_id, CommitVersion(safe_point));
         }
 
         if total_pruned > 0 {

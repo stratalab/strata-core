@@ -44,12 +44,14 @@ fn read_write_conflict_version_increased() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = CommitVersion(store
-        .get_versioned(&key, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let v1 = CommitVersion(
+        store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -91,12 +93,14 @@ fn read_write_conflict_key_deleted() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = CommitVersion(store
-        .get_versioned(&key, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let v1 = CommitVersion(
+        store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -152,12 +156,14 @@ fn no_read_write_conflict_version_same() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = CommitVersion(store
-        .get_versioned(&key, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let v1 = CommitVersion(
+        store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -201,12 +207,14 @@ fn cas_conflict_version_mismatch() {
             WriteMode::Append,
         )
         .unwrap();
-    let v2 = CommitVersion(store
-        .get_versioned(&key, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let v2 = CommitVersion(
+        store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // CAS with stale expected_version (1, but current is 2)
     let cas_set = vec![CASOperation {
@@ -282,12 +290,14 @@ fn cas_success_version_matches() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = CommitVersion(store
-        .get_versioned(&key, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let v1 = CommitVersion(
+        store
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // CAS with correct expected_version
     let cas_set = vec![CASOperation {

@@ -159,7 +159,8 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 // max_versions pruning because an active snapshot may need them.
                 if self.max_versions > 0
                     && self.versions_emitted >= self.max_versions
-                    && (self.snapshot_floor == CommitVersion::ZERO || commit_id < self.snapshot_floor)
+                    && (self.snapshot_floor == CommitVersion::ZERO
+                        || commit_id < self.snapshot_floor)
                 {
                     continue; // Safe to skip — no snapshot needs this version
                 }
@@ -182,7 +183,8 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 // Keep one floor entry, but respect max_versions (with snapshot safety #1697)
                 if self.max_versions > 0
                     && self.versions_emitted >= self.max_versions
-                    && (self.snapshot_floor == CommitVersion::ZERO || commit_id < self.snapshot_floor)
+                    && (self.snapshot_floor == CommitVersion::ZERO
+                        || commit_id < self.snapshot_floor)
                 {
                     continue;
                 }

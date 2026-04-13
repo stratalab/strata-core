@@ -1452,7 +1452,10 @@ fn compute_merge_base(
 ) -> Option<MergeBase> {
     // 1. Executor-provided override (from DAG)
     if let Some((branch_id, version)) = merge_base_override {
-        return Some(MergeBase { branch_id, version: CommitVersion(version) });
+        return Some(MergeBase {
+            branch_id,
+            version: CommitVersion(version),
+        });
     }
 
     // 2. Check storage for fork relationship
@@ -2678,13 +2681,13 @@ pub struct RevertInfo {
     /// Branch name
     pub branch: String,
     /// Start of the reverted range (inclusive)
-    pub from_version: u64,
+    pub from_version: CommitVersion,
     /// End of the reverted range (inclusive)
-    pub to_version: u64,
+    pub to_version: CommitVersion,
     /// Number of keys reverted
     pub keys_reverted: u64,
     /// MVCC version of the revert transaction
-    pub revert_version: Option<u64>,
+    pub revert_version: Option<CommitVersion>,
 }
 
 /// Revert a version range on a branch.
@@ -2702,8 +2705,8 @@ pub struct RevertInfo {
 pub fn revert_version_range(
     db: &Arc<Database>,
     branch: &str,
-    from_version: u64,
-    to_version: u64,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
 ) -> StrataResult<RevertInfo> {
     revert_version_range_with_metadata(db, branch, from_version, to_version, None, None)
 }
@@ -2713,13 +2716,13 @@ pub fn revert_version_range(
 pub fn revert_version_range_with_metadata(
     db: &Arc<Database>,
     branch: &str,
-    from_version: u64,
-    to_version: u64,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<RevertInfo> {
     // Validate range
-    if from_version == 0 {
+    if from_version == CommitVersion::ZERO {
         return Err(StrataError::invalid_input("from_version must be > 0"));
     }
     if from_version > to_version {
@@ -2728,7 +2731,7 @@ pub fn revert_version_range_with_metadata(
             from_version, to_version
         )));
     }
-    let current_version = db.current_version().as_u64();
+    let current_version = db.current_version();
     if to_version > current_version {
         return Err(StrataError::invalid_input(format!(
             "to_version ({}) exceeds current database version ({})",
@@ -2745,12 +2748,15 @@ pub fn revert_version_range_with_metadata(
     for &type_tag in &DATA_TYPE_TAGS {
         // 1. "before" state: what the branch looked like at (from_version - 1)
         //    WITH tombstones, so we can distinguish "key existed" from "key absent"
-        let before_entries =
-            storage.list_by_type_at_version(&branch_id, type_tag, CommitVersion(from_version.saturating_sub(1)));
+        let before_entries = storage.list_by_type_at_version(
+            &branch_id,
+            type_tag,
+            CommitVersion(from_version.as_u64().saturating_sub(1)),
+        );
 
         // 2. "after" state: what the branch looked like at to_version
         //    WITH tombstones
-        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, CommitVersion(to_version));
+        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, to_version);
 
         // 3. Current live state
         let current_entries = storage.list_by_type(&branch_id, type_tag);
@@ -2809,16 +2815,16 @@ pub fn revert_version_range_with_metadata(
             }
             Ok(())
         })?;
-        revert_version = Some(version);
+        revert_version = Some(CommitVersion(version));
     }
 
     info!(
         target: "strata::branch_ops",
         branch,
-        from_version,
-        to_version,
+        from_version = from_version.as_u64(),
+        to_version = to_version.as_u64(),
         keys_reverted,
-        ?revert_version,
+        revert_version = ?revert_version.map(|v| v.as_u64()),
         "Version range reverted"
     );
 
@@ -5120,7 +5126,7 @@ mod tests {
         write_kv(&db, "main", "default", "b", Value::Int(10)); // v3
 
         // Get current version
-        let current = db.current_version().as_u64();
+        let current = db.current_version();
 
         // Revert the last write (v3 = b:10)
         let info = revert_version_range(&db, "main", current, current).unwrap();
@@ -5139,11 +5145,11 @@ mod tests {
         write_kv(&db, "main", "default", "a", Value::Int(1)); // v_start
         let v_start = db.current_version().as_u64();
         write_kv(&db, "main", "default", "a", Value::Int(2)); // v_change
-        let v_change = db.current_version().as_u64();
+        let v_change = db.current_version();
         write_kv(&db, "main", "default", "a", Value::Int(3)); // v_after (after range)
 
         // Revert [v_start+1, v_change] — but "a" was modified after the range
-        let info = revert_version_range(&db, "main", v_start + 1, v_change).unwrap();
+        let info = revert_version_range(&db, "main", CommitVersion(v_start + 1), v_change).unwrap();
         assert_eq!(
             info.keys_reverted, 0,
             "should skip keys modified after range"
@@ -5158,11 +5164,11 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
 
         // from_version > to_version
-        let result = revert_version_range(&db, "main", 5, 3);
+        let result = revert_version_range(&db, "main", CommitVersion(5), CommitVersion(3));
         assert!(result.is_err());
 
         // from_version == 0
-        let result = revert_version_range(&db, "main", 0, 3);
+        let result = revert_version_range(&db, "main", CommitVersion(0), CommitVersion(3));
         assert!(result.is_err());
     }
 
@@ -5174,13 +5180,13 @@ mod tests {
 
         // Delete "a" in the revert range
         delete_kv(&db, "main", "default", "a");
-        let v_delete = db.current_version().as_u64();
+        let v_delete = db.current_version();
 
         // Verify it's gone
         assert_eq!(read_kv(&db, "main", "default", "a"), None);
 
         // Revert the deletion
-        let info = revert_version_range(&db, "main", v_before + 1, v_delete).unwrap();
+        let info = revert_version_range(&db, "main", CommitVersion(v_before + 1), v_delete).unwrap();
         assert_eq!(info.keys_reverted, 1);
 
         // Key should be restored

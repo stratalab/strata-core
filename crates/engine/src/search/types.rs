@@ -12,6 +12,7 @@
 //! See `the architecture documentation` for authoritative specification.
 
 use std::collections::HashMap;
+use strata_core::id::CommitVersion;
 use strata_core::primitives::json::JsonValue;
 use strata_core::types::BranchId;
 
@@ -170,7 +171,7 @@ pub struct SearchRequest {
     /// When set, all primitive searches in a retrieval substrate query share the
     /// same snapshot. Primitives that support versioned reads use this bound; the
     /// inverted index scoring is not yet version-bounded (future work).
-    pub snapshot_version: Option<u64>,
+    pub snapshot_version: Option<CommitVersion>,
 
     /// Optional: field filter for secondary index queries on JsonStore.
     /// When present, only documents matching the filter are returned.
@@ -332,7 +333,7 @@ impl SearchRequest {
     }
 
     /// Builder: set MVCC snapshot version for consistent cross-primitive reads
-    pub fn with_snapshot_version(mut self, version: u64) -> Self {
+    pub fn with_snapshot_version(mut self, version: CommitVersion) -> Self {
         self.snapshot_version = Some(version);
         self
     }
@@ -686,8 +687,9 @@ mod tests {
 
     #[test]
     fn test_issue_1921_snapshot_version_in_request() {
-        let req = SearchRequest::new(BranchId::new(), "test query").with_snapshot_version(42);
-        assert_eq!(req.snapshot_version, Some(42));
+        let req = SearchRequest::new(BranchId::new(), "test query")
+            .with_snapshot_version(CommitVersion(42));
+        assert_eq!(req.snapshot_version, Some(CommitVersion(42)));
 
         // Default should be None
         let req2 = SearchRequest::new(BranchId::new(), "test query");

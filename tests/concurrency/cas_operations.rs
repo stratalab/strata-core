@@ -269,7 +269,8 @@ fn cas_validated_separately_from_reads() {
 
     // Transaction reads one key, CAS on another
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(read_key.clone(), CommitVersion(read_version));
+    txn.read_set
+        .insert(read_key.clone(), CommitVersion(read_version));
     txn.cas_set.push(CASOperation {
         key: cas_key.clone(),
         expected_version: CommitVersion(cas_version),

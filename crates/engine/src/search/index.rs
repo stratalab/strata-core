@@ -45,6 +45,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
+use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
 // ============================================================================
@@ -585,17 +586,17 @@ impl InvertedIndex {
     }
 
     /// Check if index is at least at given version
-    pub fn is_at_version(&self, min_version: u64) -> bool {
-        self.version.load(Ordering::Acquire) >= min_version
+    pub fn is_at_version(&self, min_version: CommitVersion) -> bool {
+        self.version.load(Ordering::Acquire) >= min_version.as_u64()
     }
 
     /// Wait for index to reach a version (with timeout)
     ///
     /// Returns true if version was reached, false on timeout.
-    pub fn wait_for_version(&self, version: u64, timeout: Duration) -> bool {
+    pub fn wait_for_version(&self, version: CommitVersion, timeout: Duration) -> bool {
         let start = Instant::now();
         loop {
-            if self.version.load(Ordering::Acquire) >= version {
+            if self.version.load(Ordering::Acquire) >= version.as_u64() {
                 return true;
             }
             if start.elapsed() >= timeout {
@@ -1746,7 +1747,7 @@ mod tests {
         });
 
         // Wait for version to increment
-        let result = index.wait_for_version(1, Duration::from_secs(1));
+        let result = index.wait_for_version(CommitVersion(1), Duration::from_secs(1));
         handle.join().unwrap();
 
         assert!(result);
@@ -1758,7 +1759,7 @@ mod tests {
         let index = InvertedIndex::new();
 
         // Version is 0, waiting for 100 should timeout
-        let result = index.wait_for_version(100, Duration::from_millis(10));
+        let result = index.wait_for_version(CommitVersion(100), Duration::from_millis(10));
         assert!(!result);
     }
 

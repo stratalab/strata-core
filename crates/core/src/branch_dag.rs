@@ -4,6 +4,7 @@
 //! The types live in core because they're used across multiple crates (engine,
 //! graph, executor) without creating circular dependencies.
 
+use crate::id::CommitVersion;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -171,12 +172,12 @@ pub struct RevertRecord {
     /// Branch that was reverted.
     pub branch: String,
     /// Start of the reverted version range (inclusive).
-    pub from_version: u64,
+    pub from_version: CommitVersion,
     /// End of the reverted version range (inclusive).
-    pub to_version: u64,
+    pub to_version: CommitVersion,
     /// MVCC version of the revert transaction itself.
     #[serde(default)]
-    pub revert_version: Option<u64>,
+    pub revert_version: Option<CommitVersion>,
     /// Number of keys reverted.
     pub keys_reverted: u64,
     /// Timestamp in microseconds.

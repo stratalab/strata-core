@@ -764,10 +764,7 @@ fn fork_creates_inherited_layer() {
     let child = store.branches.get(&child_branch()).unwrap();
     assert_eq!(child.inherited_layers.len(), 1);
     assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
-    assert_eq!(
-        child.inherited_layers[0].fork_version,
-        fork_version
-    );
+    assert_eq!(child.inherited_layers[0].fork_version, fork_version);
     assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
     assert!(segments_shared > 0);
 }
@@ -1132,10 +1129,7 @@ fn fork_manifest_roundtrip() {
     {
         let child = store.branches.get(&child_branch()).unwrap();
         assert_eq!(child.inherited_layers.len(), 1);
-        assert_eq!(
-            child.inherited_layers[0].fork_version,
-            fork_version
-        );
+        assert_eq!(child.inherited_layers[0].fork_version, fork_version);
     }
 
     // Create a new store and recover from the same directory
@@ -1154,10 +1148,7 @@ fn fork_manifest_roundtrip() {
         1,
         "Inherited layers should survive recovery"
     );
-    assert_eq!(
-        child2.inherited_layers[0].fork_version,
-        fork_version
-    );
+    assert_eq!(child2.inherited_layers[0].fork_version, fork_version);
 
     // Verify data is readable through inherited layers after recovery
     let r = store2

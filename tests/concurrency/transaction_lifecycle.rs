@@ -298,7 +298,8 @@ fn read_modify_write_workflow() {
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap();
-    txn.read_set.insert(key.clone(), CommitVersion(current.version.as_u64()));
+    txn.read_set
+        .insert(key.clone(), CommitVersion(current.version.as_u64()));
 
     // Modify
     if let Value::Int(v) = current.value {

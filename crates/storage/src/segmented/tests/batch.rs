@@ -585,7 +585,7 @@ fn time_range_empty_branch() {
 fn gc_branch_is_noop() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert_eq!(store.gc_branch(&branch(), 100), 0);
+    assert_eq!(store.gc_branch(&branch(), CommitVersion(100)), 0);
 }
 
 #[test]

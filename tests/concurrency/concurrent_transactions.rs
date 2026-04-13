@@ -199,8 +199,7 @@ fn high_contention_single_key() {
 
                         // Create transaction
                         let txn_id = manager.next_txn_id().unwrap();
-                        let mut txn =
-                            TransactionContext::new(txn_id, branch_id, read_version);
+                        let mut txn = TransactionContext::new(txn_id, branch_id, read_version);
                         txn.read_set.insert(key.clone(), read_version);
                         txn.write_set
                             .insert(key.clone(), Value::Int((thread_id * 100 + i) as i64));
@@ -274,18 +273,22 @@ fn interleaved_disjoint_operations_both_commit() {
         )
         .unwrap();
 
-    let va = CommitVersion(store
-        .get_versioned(&key_a, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
-    let vb = CommitVersion(store
-        .get_versioned(&key_b, CommitVersion::MAX)
-        .unwrap()
-        .unwrap()
-        .version
-        .as_u64());
+    let va = CommitVersion(
+        store
+            .get_versioned(&key_a, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
+    let vb = CommitVersion(
+        store
+            .get_versioned(&key_b, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .version
+            .as_u64(),
+    );
 
     // T1: reads A, writes B
     let mut t1 = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));

@@ -129,7 +129,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         .map(|ms| start + std::time::Duration::from_millis(ms));
 
     // INV-3: Snapshot isolation — all primitives see the same version.
-    let snapshot = db.current_version().as_u64();
+    let snapshot = db.current_version();
 
     let has_bm25 = recipe
         .retrieve
@@ -500,7 +500,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
         aggregations: None,
         groups: None,
         stats: RetrievalStats {
-            snapshot_version: CommitVersion(snapshot),
+            snapshot_version: snapshot,
             recipe_used: "resolved".into(),
             elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
             stages,

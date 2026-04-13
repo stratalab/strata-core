@@ -133,9 +133,7 @@ fn lifecycle_write_flush_recover_all_data_correct() {
     store.flush_oldest_frozen(&branch()).unwrap();
 
     let max_commit = store.max_flushed_commit(&branch()).unwrap();
-    manifest_mgr
-        .set_flush_watermark(max_commit)
-        .unwrap();
+    manifest_mgr.set_flush_watermark(max_commit).unwrap();
 
     drop(store);
     drop(writer);
@@ -310,9 +308,7 @@ fn lifecycle_multiple_flush_cycles() {
         store.flush_oldest_frozen(&branch()).unwrap();
 
         let max_commit = store.max_flushed_commit(&branch()).unwrap();
-        manifest_mgr
-            .set_flush_watermark(max_commit)
-            .unwrap();
+        manifest_mgr.set_flush_watermark(max_commit).unwrap();
     }
 
     drop(store);
@@ -428,13 +424,19 @@ fn multi_level_compaction_cascades() {
     assert_eq!(store.l0_segment_count(&b), 5);
 
     // L0 → L1
-    let r = store.compact_level(&b, 0, CommitVersion::ZERO).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 0, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 5);
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.level_segment_count(&b, 1), 1);
 
     // L1 → L2 (trivial move — single file, no overlap in L2)
-    let r = store.compact_level(&b, 1, CommitVersion::ZERO).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 1, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 1);
     assert_eq!(r.output_entries, 5);
     assert_eq!(r.entries_pruned, 0);
@@ -442,7 +444,10 @@ fn multi_level_compaction_cascades() {
     assert_eq!(store.level_segment_count(&b, 2), 1);
 
     // L2 → L3 (trivial move)
-    let r = store.compact_level(&b, 2, CommitVersion::ZERO).unwrap().unwrap();
+    let r = store
+        .compact_level(&b, 2, CommitVersion::ZERO)
+        .unwrap()
+        .unwrap();
     assert_eq!(r.segments_merged, 1);
     assert_eq!(r.output_entries, 5);
     assert_eq!(r.entries_pruned, 0);
@@ -503,7 +508,8 @@ fn test_issue_1726_version_counter_from_segments() {
     let seg_info = result.storage.recover_segments().unwrap();
     assert_eq!(seg_info.segments_loaded, 1);
     assert_eq!(
-        seg_info.max_commit_id, CommitVersion(100),
+        seg_info.max_commit_id,
+        CommitVersion(100),
         "recover_segments must report max_commit_id from loaded segments",
     );
 

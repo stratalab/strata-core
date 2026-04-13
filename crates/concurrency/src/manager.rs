@@ -1361,7 +1361,8 @@ mod tests {
 
         // CAS operation → not a blind write, should validate
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
-        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1))
+            .unwrap();
         assert!(!txn.cas_set.is_empty());
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
@@ -2644,7 +2645,8 @@ mod tests {
             Arc::clone(&store),
         );
         // First: cas(K, 0, v1)
-        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1))
+            .unwrap();
         // Then: put(K, v2) on the same key — must be rejected
         let result = txn.put(key.clone(), Value::Int(2));
         assert!(
@@ -2667,7 +2669,8 @@ mod tests {
             Arc::clone(&store),
         );
         // First: cas(K, 0, v1)
-        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1))
+            .unwrap();
         // Then: delete(K) on the same key — must be rejected
         let result = txn.delete(key.clone());
         assert!(

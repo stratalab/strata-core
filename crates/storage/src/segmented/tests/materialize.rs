@@ -40,7 +40,9 @@ fn compaction_preserves_shared_segments() {
     assert!(!shared_paths.is_empty(), "should have shared segment files");
 
     // Compact parent — should NOT delete shared segments
-    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
+    store
+        .compact_branch(&parent_branch(), CommitVersion(0))
+        .unwrap();
 
     // Verify shared segment files still exist
     for path in &shared_paths {
@@ -874,7 +876,9 @@ fn materialize_multi_level_inherited_layer() {
     seed(&store, parent_kv("c"), Value::Int(3), 2);
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
-    store.compact_l0_to_l1(&parent_branch(), CommitVersion(0)).unwrap();
+    store
+        .compact_l0_to_l1(&parent_branch(), CommitVersion(0))
+        .unwrap();
     assert_eq!(store.l0_segment_count(&parent_branch()), 0);
     assert_eq!(store.l1_segment_count(&parent_branch()), 1);
 

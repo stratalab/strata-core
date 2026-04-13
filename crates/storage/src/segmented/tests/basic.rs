@@ -489,7 +489,10 @@ fn get_version_only_existing() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 5);
     seed(&store, kv_key("k"), Value::Int(2), 10);
-    assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), Some(CommitVersion(10)));
+    assert_eq!(
+        store.get_version_only(&kv_key("k")).unwrap(),
+        Some(CommitVersion(10))
+    );
 }
 
 #[test]
