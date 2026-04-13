@@ -354,12 +354,19 @@ impl BranchService {
 
         // Commit: fires observers, clears rollback actions
         if let Some(fork_version) = info.fork_version {
-            let observer_event = BranchOpEvent::fork(
+            let mut observer_event = BranchOpEvent::fork(
                 resolve_branch_name(destination),
                 destination,
                 resolve_branch_name(source),
+                source,
                 CommitVersion(fork_version),
             );
+            if let Some(msg) = &options.message {
+                observer_event = observer_event.with_message(msg.clone());
+            }
+            if let Some(creator) = &options.creator {
+                observer_event = observer_event.with_creator(creator.clone());
+            }
             mutation.commit(observer_event);
         } else {
             mutation.commit_silent();
@@ -437,15 +444,26 @@ impl BranchService {
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
-            let observer_event = BranchOpEvent {
-                kind: BranchOpKind::Merge,
-                branch_id: target_id,
-                branch_name: Some(target.to_string()),
-                source_branch_id: Some(source_id),
-                commit_version: Some(CommitVersion(merge_version)),
-                message: options.message.clone(),
-                creator: options.creator.clone(),
+            let strategy_str = match options.strategy {
+                crate::MergeStrategy::LastWriterWins => "last_writer_wins",
+                crate::MergeStrategy::Strict => "strict",
             };
+            let mut observer_event = BranchOpEvent::merge(
+                target_id,
+                target,
+                source_id,
+                source,
+                strategy_str,
+                info.keys_applied,
+                info.keys_deleted,
+                CommitVersion(merge_version),
+            );
+            if let Some(msg) = &options.message {
+                observer_event = observer_event.with_message(msg.clone());
+            }
+            if let Some(creator) = &options.creator {
+                observer_event = observer_event.with_creator(creator.clone());
+            }
             mutation.commit(observer_event);
         } else {
             // No-op merge: skip DAG recording but still commit silently
@@ -487,15 +505,13 @@ impl BranchService {
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
-            let observer_event = BranchOpEvent {
-                kind: BranchOpKind::Revert,
+            let observer_event = BranchOpEvent::revert(
                 branch_id,
-                branch_name: Some(branch.to_string()),
-                source_branch_id: None,
-                commit_version: Some(revert_version),
-                message: None,
-                creator: None,
-            };
+                branch,
+                from_version,
+                to_version,
+                info.keys_reverted,
+            );
             mutation.commit(observer_event);
         } else {
             // No-op revert: skip DAG recording
@@ -549,15 +565,14 @@ impl BranchService {
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
-            let observer_event = BranchOpEvent {
-                kind: BranchOpKind::CherryPick,
-                branch_id: target_id,
-                branch_name: Some(target.to_string()),
-                source_branch_id: Some(source_id),
-                commit_version: Some(CommitVersion(cp_version)),
-                message: None,
-                creator: None,
-            };
+            let observer_event = BranchOpEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                info.keys_applied,
+                info.keys_deleted,
+            );
             mutation.commit(observer_event);
         } else {
             // No-op cherry-pick: skip DAG recording
@@ -618,15 +633,14 @@ impl BranchService {
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
-            let observer_event = BranchOpEvent {
-                kind: BranchOpKind::CherryPick,
-                branch_id: target_id,
-                branch_name: Some(target.to_string()),
-                source_branch_id: Some(source_id),
-                commit_version: Some(CommitVersion(cp_version)),
-                message: None,
-                creator: None,
-            };
+            let observer_event = BranchOpEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                info.keys_applied,
+                info.keys_deleted,
+            );
             mutation.commit(observer_event);
         } else {
             // No-op cherry-pick: skip DAG recording

@@ -15,6 +15,32 @@ use crate::types::{BranchId, BranchInfo, VersionedBranchInfo};
 use crate::{Error, Output, Result};
 
 // =============================================================================
+// Audit Log Helper (for operations not routed through BranchService)
+// =============================================================================
+
+/// Emit an audit event on the `_system_` branch. Best-effort — failures are
+/// logged, never propagated.
+///
+/// Note: Most branch operations go through `BranchService` and are audited by
+/// `AuditBranchOpObserver`. This helper is only for operations that bypass
+/// `BranchService` (tag, note) and don't trigger the observer pipeline.
+fn emit_audit_event(p: &Arc<Primitives>, event_type: &str, payload: serde_json::Value) {
+    let system_branch_id = strata_engine::primitives::branch::resolve_branch_name("_system_");
+    let core_value: strata_core::value::Value = payload.into();
+    if let Err(e) = p
+        .event
+        .append(&system_branch_id, "default", event_type, core_value)
+    {
+        tracing::warn!(
+            target: "strata::audit",
+            event_type,
+            error = %e,
+            "Failed to emit audit event"
+        );
+    }
+}
+
+// =============================================================================
 // Conversion Helpers
 // =============================================================================
 
@@ -527,6 +553,18 @@ pub fn tag_create(
         hint: None,
     })?;
 
+    // Tag operations bypass BranchService, so emit audit event directly.
+    emit_audit_event(
+        p,
+        "branch.tag",
+        serde_json::json!({
+            "branch": branch,
+            "tag": name,
+            "version": info.version,
+            "message": message,
+        }),
+    );
+
     Ok(Output::TagCreated(info))
 }
 
@@ -591,6 +629,17 @@ pub fn note_add(
         reason: e.to_string(),
         hint: None,
     })?;
+
+    // Note operations bypass BranchService, so emit audit event directly.
+    emit_audit_event(
+        p,
+        "branch.note",
+        serde_json::json!({
+            "branch": branch,
+            "version": version,
+            "message": message,
+        }),
+    );
 
     Ok(Output::NoteAdded(note))
 }

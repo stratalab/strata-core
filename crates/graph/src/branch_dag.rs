@@ -958,22 +958,68 @@ impl BranchOpObserver for AuditBranchOpObserver {
         };
 
         let mut payload = serde_json::Map::new();
+
+        // Core fields present in most events
         if let Some(ref name) = event.branch_name {
             payload.insert("branch".to_string(), serde_json::Value::String(name.clone()));
         }
-        if let Some(ref source_id) = event.source_branch_id {
-            // Source branch ID as hex string
-            let source_hex = format!("{:032x}", u128::from_be_bytes(*source_id.as_bytes()));
-            payload.insert("source_branch_id".to_string(), serde_json::Value::String(source_hex));
+        if let Some(ref source_name) = event.source_branch_name {
+            // Use field names matching original executor payloads
+            match event.kind {
+                BranchOpKind::Fork => {
+                    // Fork uses parent/child naming
+                    payload.insert("parent".to_string(), serde_json::Value::String(source_name.clone()));
+                    if let Some(ref child) = event.branch_name {
+                        payload.insert("child".to_string(), serde_json::Value::String(child.clone()));
+                    }
+                }
+                _ => {
+                    // Merge/cherry-pick use source/target naming
+                    payload.insert("source".to_string(), serde_json::Value::String(source_name.clone()));
+                    if let Some(ref target) = event.branch_name {
+                        payload.insert("target".to_string(), serde_json::Value::String(target.clone()));
+                    }
+                }
+            }
         }
         if let Some(version) = event.commit_version {
-            payload.insert("version".to_string(), serde_json::Value::Number(version.0.into()));
+            // Use operation-specific version field names
+            let version_key = match event.kind {
+                BranchOpKind::Fork => "fork_version",
+                BranchOpKind::Merge => "merge_version",
+                _ => "version",
+            };
+            payload.insert(version_key.to_string(), serde_json::Value::Number(version.0.into()));
         }
         if let Some(ref message) = event.message {
             payload.insert("message".to_string(), serde_json::Value::String(message.clone()));
         }
         if let Some(ref creator) = event.creator {
             payload.insert("creator".to_string(), serde_json::Value::String(creator.clone()));
+        }
+
+        // Merge-specific fields
+        if let Some(ref strategy) = event.merge_strategy {
+            payload.insert("strategy".to_string(), serde_json::Value::String(strategy.clone()));
+        }
+
+        // Keys applied/deleted (merge, cherry-pick)
+        if let Some(keys_applied) = event.keys_applied {
+            payload.insert("keys_applied".to_string(), serde_json::Value::Number(keys_applied.into()));
+        }
+        if let Some(keys_deleted) = event.keys_deleted {
+            payload.insert("keys_deleted".to_string(), serde_json::Value::Number(keys_deleted.into()));
+        }
+
+        // Revert-specific fields
+        if let Some(keys_reverted) = event.keys_reverted {
+            payload.insert("keys_reverted".to_string(), serde_json::Value::Number(keys_reverted.into()));
+        }
+        if let Some(from_version) = event.from_version {
+            payload.insert("from_version".to_string(), serde_json::Value::Number(from_version.0.into()));
+        }
+        if let Some(to_version) = event.to_version {
+            payload.insert("to_version".to_string(), serde_json::Value::Number(to_version.0.into()));
         }
 
         // Convert to core Value

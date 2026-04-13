@@ -242,12 +242,26 @@ pub struct BranchOpEvent {
     pub branch_name: Option<String>,
     /// Source branch for fork/merge/cherry-pick (if applicable).
     pub source_branch_id: Option<BranchId>,
+    /// Source branch name (for fork: parent, for merge/cherry-pick: source).
+    pub source_branch_name: Option<String>,
     /// The commit version at which the operation occurred.
     pub commit_version: Option<CommitVersion>,
     /// Optional message (for fork, merge, revert).
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+    /// Merge strategy (for merge operations).
+    pub merge_strategy: Option<String>,
+    /// Number of keys applied (for merge, cherry-pick).
+    pub keys_applied: Option<u64>,
+    /// Number of keys deleted (for merge, cherry-pick).
+    pub keys_deleted: Option<u64>,
+    /// Number of keys reverted (for revert).
+    pub keys_reverted: Option<u64>,
+    /// Start version for revert range.
+    pub from_version: Option<CommitVersion>,
+    /// End version for revert range.
+    pub to_version: Option<CommitVersion>,
 }
 
 impl BranchOpEvent {
@@ -258,9 +272,16 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_name: None,
             commit_version: None,
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
@@ -271,9 +292,16 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_name: None,
             commit_version: None,
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
@@ -282,6 +310,7 @@ impl BranchOpEvent {
         branch_id: BranchId,
         branch_name: impl Into<String>,
         source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
     ) -> Self {
         Self {
@@ -289,9 +318,98 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(commit_version),
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
+        }
+    }
+
+    /// Create an event for branch merge.
+    pub fn merge(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        strategy: impl Into<String>,
+        keys_applied: u64,
+        keys_deleted: u64,
+        merge_version: CommitVersion,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::Merge,
+            branch_id: target_branch_id,
+            branch_name: Some(target_branch_name.into()),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version: Some(merge_version),
+            message: None,
+            creator: None,
+            merge_strategy: Some(strategy.into()),
+            keys_applied: Some(keys_applied),
+            keys_deleted: Some(keys_deleted),
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
+        }
+    }
+
+    /// Create an event for branch revert.
+    pub fn revert(
+        branch_id: BranchId,
+        branch_name: impl Into<String>,
+        from_version: CommitVersion,
+        to_version: CommitVersion,
+        keys_reverted: u64,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::Revert,
+            branch_id,
+            branch_name: Some(branch_name.into()),
+            source_branch_id: None,
+            source_branch_name: None,
+            commit_version: None,
+            message: None,
+            creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: Some(keys_reverted),
+            from_version: Some(from_version),
+            to_version: Some(to_version),
+        }
+    }
+
+    /// Create an event for cherry-pick.
+    pub fn cherry_pick(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        keys_applied: u64,
+        keys_deleted: u64,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::CherryPick,
+            branch_id: target_branch_id,
+            branch_name: Some(target_branch_name.into()),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version: None,
+            message: None,
+            creator: None,
+            merge_strategy: None,
+            keys_applied: Some(keys_applied),
+            keys_deleted: Some(keys_deleted),
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
