@@ -21,6 +21,27 @@
 //! // Commit
 //! session.execute(Command::TxnCommit)?;
 //! ```
+//!
+//! # Deferred Operations
+//!
+//! The session maintains two distinct deferred operation mechanisms:
+//!
+//! ## PostCommitOp (Executor Layer)
+//!
+//! Command-specific side effects requiring data staged during execution.
+//! Applied by `run_post_commit_ops()` after successful commit. Examples:
+//! - Graph node indexing for BM25 search
+//! - Vector HNSW index updates
+//!
+//! ## CommitObserver (Engine Layer)
+//!
+//! Generic commit notifications via `db.commit_observers().notify()`.
+//! Receives only `CommitInfo` (branch_id, commit_version, entry_count).
+//! Used for audit, metrics, and other cross-cutting concerns.
+//!
+//! These are complementary, not competing patterns. `PostCommitOp` handles
+//! operations requiring command-specific data (embeddings, node properties),
+//! while `CommitObserver` handles generic notifications.
 
 use std::sync::Arc;
 
@@ -40,7 +61,31 @@ use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
 
-/// Deferred operations that run after a successful commit.
+/// Deferred operations executed after a successful transaction commit.
+///
+/// ## Why PostCommitOp Exists
+///
+/// These operations update derived indices (graph search index, vector HNSW)
+/// that cannot participate in OCC (Optimistic Concurrency Control):
+/// - HNSW index updates are in-memory and not rollback-safe
+/// - Graph search index updates depend on committed node data
+///
+/// ## Why Not CommitObserver?
+///
+/// Engine's `CommitObserver` receives only `CommitInfo` (branch_id,
+/// commit_version, entry_count). `PostCommitOp` variants require
+/// operation-specific data captured during command execution:
+/// - `GraphIndexNode` needs `NodeData` (properties, entity_ref)
+/// - `VectorBackendOp` needs `StagedVectorOp` (embedding, vector_id)
+///
+/// This data cannot be reconstructed from generic commit info without
+/// re-reading and parsing committed data, making `CommitObserver` unsuitable.
+///
+/// ## Failure Model
+///
+/// Best-effort: failures are logged but never propagate back to the caller.
+/// The primary data is already committed to KV; derived indices will catch
+/// up on next recovery if an update fails.
 enum PostCommitOp {
     GraphIndexNode {
         branch_id: CoreBranchId,

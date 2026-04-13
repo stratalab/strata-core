@@ -63,10 +63,24 @@ fn versioned_to_branch_info(v: strata_core::Versioned<BranchMetadata>) -> Versio
     }
 }
 
-/// Validate a branch name.
+/// Validate a branch name (executor layer).
 ///
-/// Rejects empty names, whitespace-only names, and names containing
-/// control characters or NUL bytes.
+/// ## Layered Validation
+///
+/// Branch names are validated at two layers:
+/// - **Executor (here):** User-facing validation with helpful hints
+/// - **Engine (`BranchService`):** API contract enforcement
+///
+/// This duplication is intentional. Executor catches invalid input early
+/// with UX-friendly error messages and hints. Engine enforces contracts
+/// even for direct API callers (bypassing executor).
+///
+/// ## Rules
+///
+/// - Non-empty, non-whitespace
+/// - No NUL bytes or control characters
+/// - Max 255 bytes
+/// - No `_system` prefix (reserved for system branches)
 fn validate_branch_name(name: &str) -> Result<()> {
     if name.is_empty() {
         return Err(Error::InvalidInput {

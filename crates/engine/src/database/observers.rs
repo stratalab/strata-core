@@ -129,7 +129,15 @@ pub struct CommitInfo {
 
 /// Observer called after each successful commit.
 ///
-/// Use for index maintenance, audit logging, metrics, etc.
+/// Use for audit logging, metrics, and other cross-cutting concerns that
+/// only need generic commit information (branch_id, commit_version, entry_count).
+///
+/// ## Scope
+///
+/// `CommitObserver` receives only [`CommitInfo`], not the actual committed data.
+/// For operation-specific deferred work (graph node indexing, vector HNSW updates)
+/// that requires data captured during command execution, see `PostCommitOp` in
+/// the executor crate's session module.
 ///
 /// ## Thread Safety
 ///
