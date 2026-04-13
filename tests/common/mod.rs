@@ -65,6 +65,14 @@ fn test_db_builder() -> DatabaseBuilder {
         .with_subsystem(SearchSubsystem)
 }
 
+/// Open a test database at the given path with production subsystems.
+/// Used for recovery tests that need to reopen at a specific path.
+pub fn test_db_open(path: &std::path::Path) -> Arc<Database> {
+    test_db_builder()
+        .open(path)
+        .expect("Failed to open test database")
+}
+
 /// Create a StrataConfig with always durability mode.
 pub fn always_config() -> StrataConfig {
     StrataConfig {
