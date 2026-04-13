@@ -458,21 +458,21 @@ mod tests {
 
         fn find_merge_base(
             &self,
-            _a: &BranchId,
-            _b: &BranchId,
+            _branch_a: &str,
+            _branch_b: &str,
         ) -> Result<Option<MergeBaseResult>, BranchDagError> {
             Ok(None)
         }
 
         fn log(
             &self,
-            _branch_id: &BranchId,
+            _branch: &str,
             _limit: usize,
         ) -> Result<Vec<DagEvent>, BranchDagError> {
             Ok(Vec::new())
         }
 
-        fn ancestors(&self, _branch_id: &BranchId) -> Result<Vec<AncestryEntry>, BranchDagError> {
+        fn ancestors(&self, _branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
             Ok(Vec::new())
         }
     }

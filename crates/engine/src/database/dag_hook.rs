@@ -449,22 +449,25 @@ pub trait BranchDagHook: Send + Sync + 'static {
 
     /// Find the merge base (common ancestor) of two branches.
     ///
+    /// Accepts branch names (not BranchId) because the DAG is keyed by name.
     /// Returns `None` if no common ancestor exists.
     fn find_merge_base(
         &self,
-        branch_a: &BranchId,
-        branch_b: &BranchId,
+        branch_a: &str,
+        branch_b: &str,
     ) -> Result<Option<MergeBaseResult>, BranchDagError>;
 
     /// Get the history log for a branch.
     ///
+    /// Accepts branch name (not BranchId) because the DAG is keyed by name.
     /// Returns events in reverse chronological order (newest first).
-    fn log(&self, branch_id: &BranchId, limit: usize) -> Result<Vec<DagEvent>, BranchDagError>;
+    fn log(&self, branch: &str, limit: usize) -> Result<Vec<DagEvent>, BranchDagError>;
 
     /// Get the ancestry chain for a branch.
     ///
+    /// Accepts branch name (not BranchId) because the DAG is keyed by name.
     /// Returns the chain from the branch back to its root.
-    fn ancestors(&self, branch_id: &BranchId) -> Result<Vec<AncestryEntry>, BranchDagError>;
+    fn ancestors(&self, branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError>;
 }
 
 // =============================================================================
@@ -558,17 +561,17 @@ mod tests {
 
         fn find_merge_base(
             &self,
-            _a: &BranchId,
-            _b: &BranchId,
+            _branch_a: &str,
+            _branch_b: &str,
         ) -> Result<Option<MergeBaseResult>, BranchDagError> {
             Ok(None)
         }
 
-        fn log(&self, _branch_id: &BranchId, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
+        fn log(&self, _branch: &str, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
             Ok(Vec::new())
         }
 
-        fn ancestors(&self, _branch_id: &BranchId) -> Result<Vec<AncestryEntry>, BranchDagError> {
+        fn ancestors(&self, _branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
             Ok(Vec::new())
         }
     }

@@ -1090,35 +1090,30 @@ impl BranchDagHook for GraphBranchDagHook {
 
     fn find_merge_base(
         &self,
-        branch_a: &strata_core::types::BranchId,
-        branch_b: &strata_core::types::BranchId,
+        branch_a: &str,
+        branch_b: &str,
     ) -> Result<Option<MergeBaseResult>, BranchDagError> {
-        // BranchId is a UUID, but DAG stores branch names. We need to convert.
-        // The branch name is typically the UUID string representation.
-        let name_a = branch_a.to_string();
-        let name_b = branch_b.to_string();
-
         // Check for previous merge first (takes priority over fork)
-        if let Ok(Some(merge_version)) = find_last_merge_version(&self.db, &name_a, &name_b) {
+        if let Ok(Some(merge_version)) = find_last_merge_version(&self.db, branch_a, branch_b) {
             // The merge was into the target branch, so that's the merge base
             return Ok(Some(MergeBaseResult {
-                branch_id: branch_b.clone(),
-                branch_name: name_b,
+                branch_id: resolve_branch_name(branch_b),
+                branch_name: branch_b.to_string(),
                 commit_version: CommitVersion(merge_version),
             }));
         }
 
         // Check for fork relationship
-        if let Ok(Some((child_name, fork_version))) = find_fork_version(&self.db, &name_a, &name_b)
+        if let Ok(Some((child_name, fork_version))) = find_fork_version(&self.db, branch_a, branch_b)
         {
             // Return the forked-from branch as the merge base
-            let (base_branch, base_name) = if child_name == name_a {
-                (branch_b.clone(), name_b) // a was forked from b
+            let (base_branch_name, base_name) = if child_name == branch_a {
+                (branch_b, branch_b.to_string()) // a was forked from b
             } else {
-                (branch_a.clone(), name_a) // b was forked from a
+                (branch_a, branch_a.to_string()) // b was forked from a
             };
             return Ok(Some(MergeBaseResult {
-                branch_id: base_branch,
+                branch_id: resolve_branch_name(base_branch_name),
                 branch_name: base_name,
                 commit_version: CommitVersion(fork_version),
             }));
@@ -1130,10 +1125,9 @@ impl BranchDagHook for GraphBranchDagHook {
 
     fn log(
         &self,
-        branch_id: &strata_core::types::BranchId,
+        branch: &str,
         limit: usize,
     ) -> Result<Vec<DagEvent>, BranchDagError> {
-        let branch_name = branch_id.to_string();
         let graph_store = GraphStore::new(self.db.clone());
         let system_id = resolve_branch_name(SYSTEM_BRANCH);
         let mut events = Vec::new();
@@ -1145,7 +1139,7 @@ impl BranchDagHook for GraphBranchDagHook {
                 system_id,
                 GRAPH_SPACE,
                 BRANCH_DAG_GRAPH,
-                &branch_name,
+                branch,
                 crate::types::Direction::Incoming,
                 None,
             )
@@ -1158,7 +1152,7 @@ impl BranchDagHook for GraphBranchDagHook {
                 BRANCH_DAG_GRAPH,
                 &neighbor.node_id,
             ) {
-                if let Some(event) = node_to_dag_event(&node, &branch_name) {
+                if let Some(event) = node_to_dag_event(&node, branch) {
                     events.push(event);
                 }
             }
@@ -1169,10 +1163,10 @@ impl BranchDagHook for GraphBranchDagHook {
 
     fn ancestors(
         &self,
-        branch_id: &strata_core::types::BranchId,
+        branch: &str,
     ) -> Result<Vec<AncestryEntry>, BranchDagError> {
         let mut ancestors = Vec::new();
-        let mut current = branch_id.to_string();
+        let mut current = branch.to_string();
         let mut visited = std::collections::HashSet::new();
 
         // Walk up the parent chain via fork relationships

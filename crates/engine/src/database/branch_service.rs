@@ -28,7 +28,7 @@ use crate::branch_ops::{
     MergeStrategy, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
-use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot};
+use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
 use crate::database::observers::{BranchOpEvent, BranchOpKind, BranchOpObserverRegistry};
 use crate::database::Database;
 use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
@@ -592,30 +592,27 @@ impl BranchService {
     // =========================================================================
 
     /// Find the merge base (common ancestor) of two branches.
-    pub fn merge_base(&self, branch_a: &str, branch_b: &str) -> StrataResult<Option<(BranchId, CommitVersion)>> {
+    ///
+    /// Returns `None` if no common ancestor exists (unrelated branches).
+    pub fn merge_base(&self, branch_a: &str, branch_b: &str) -> StrataResult<Option<MergeBaseResult>> {
         let hook = self.dag_hook().require("merge_base").map_err(dag_to_strata)?;
-        let id_a = resolve_branch_name(branch_a);
-        let id_b = resolve_branch_name(branch_b);
 
-        match hook.find_merge_base(&id_a, &id_b) {
-            Ok(Some(result)) => Ok(Some((result.branch_id, result.commit_version))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(dag_to_strata(e)),
-        }
+        // Pass branch names directly — DAG is keyed by name, not BranchId UUID
+        hook.find_merge_base(branch_a, branch_b).map_err(dag_to_strata)
     }
 
     /// Get the history log for a branch.
     pub fn log(&self, branch: &str, limit: usize) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
-        let branch_id = resolve_branch_name(branch);
-        hook.log(&branch_id, limit).map_err(dag_to_strata)
+        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
+        hook.log(branch, limit).map_err(dag_to_strata)
     }
 
     /// Get the ancestry chain for a branch.
     pub fn ancestors(&self, branch: &str) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
         let hook = self.dag_hook().require("ancestors").map_err(dag_to_strata)?;
-        let branch_id = resolve_branch_name(branch);
-        hook.ancestors(&branch_id).map_err(dag_to_strata)
+        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
+        hook.ancestors(branch).map_err(dag_to_strata)
     }
 
     // =========================================================================
