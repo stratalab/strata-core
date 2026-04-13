@@ -476,10 +476,25 @@ use std::sync::{atomic::AtomicU64, Weak};
 
 /// Commit observer for search index maintenance.
 ///
-/// Index updates happen inline during primitive operations (KV, Event, JSON put).
-/// This observer handles secondary concerns:
-/// - Periodic seal operations for durability (every N commits)
-/// - Metrics tracking (commit count)
+/// ## Architectural Note: Why Search Differs from Vector
+///
+/// Unlike vector (where HNSW can't participate in OCC and needs post-commit
+/// updates via VectorCommitObserver), search index updates happen **inline**
+/// during primitive operations (KV, Event, JSON put). This is intentional:
+///
+/// - **Search index is transactional**: Updates can be rolled back by simply
+///   not committing. The inline updates participate in MVCC.
+/// - **Immediate visibility**: Search results reflect writes within the same
+///   transaction (read-your-writes).
+/// - **No staged ops needed**: Unlike embeddings, search tokens don't require
+///   separate storage - they're derived from committed data on recovery.
+///
+/// Moving to observer-based indexing would change semantics (search results
+/// not visible until commit) and complicate rollback. The current inline
+/// approach is the correct architecture for search.
+///
+/// This observer handles secondary concerns (metrics, periodic seal) rather
+/// than primary indexing.
 struct SearchCommitObserver {
     db: Weak<Database>,
 }
@@ -490,21 +505,32 @@ impl CommitObserver for SearchCommitObserver {
     }
 
     fn on_commit(&self, _info: &CommitInfo) -> Result<(), ObserverError> {
-        // Index updates already happen inline during primitive operations.
-        // This observer could trigger periodic seal, but that's handled by
-        // freeze() on shutdown and periodic background tasks.
-        //
-        // For now, this is a no-op placeholder ensuring the infrastructure
-        // is in place for future enhancements (commit count metrics, etc.).
+        // Primary index updates happen inline during primitive operations.
+        // This observer handles secondary concerns:
+        // - Could trigger periodic seal (currently handled by freeze/shutdown)
+        // - Could track commit metrics (future enhancement)
         Ok(())
     }
 }
 
 /// Replay observer for follower search index maintenance.
 ///
-/// Followers receive data via WAL replay, not primitive operations. This
-/// observer ensures the search index stays consistent by triggering
-/// reconciliation after replay batches complete.
+/// ## Architectural Note: Follower Search Reconciliation
+///
+/// Followers receive data via WAL replay, not primitive operations. Unlike
+/// vector (which uses RefreshHook to capture embeddings during WAL apply),
+/// search doesn't need real-time incremental updates because:
+///
+/// - **Recovery rebuilds**: Search index is rebuildable from committed data,
+///   so recovery can fully reconcile the index.
+/// - **Derived state**: Search tokens are derived from document content, not
+///   stored separately like embeddings.
+/// - **Cost tradeoff**: Real-time reconciliation would require re-parsing all
+///   replayed documents to extract tokens. Recovery-based reconciliation is
+///   more efficient for read replicas.
+///
+/// For workloads requiring real-time follower search, a RefreshHook-based
+/// approach (like vector) could be implemented as a future enhancement.
 struct SearchReplayObserver {
     db: Weak<Database>,
 }
@@ -514,17 +540,9 @@ impl ReplayObserver for SearchReplayObserver {
         "search"
     }
 
-    fn on_replay(&self, info: &ReplayInfo) -> Result<(), ObserverError> {
-        // ReplayInfo only contains branch_id, commit_version, entry_count.
-        // Full reconciliation would require re-scanning storage, which is
-        // expensive. The search index is "derived/rebuildable state" so we
-        // defer full reconciliation to recovery and periodic maintenance.
-        //
-        // For real-time follower updates, a RefreshHook pattern (like vector)
-        // would be needed to capture the actual data during WAL apply.
-        // That's a future enhancement - for now, followers rely on recovery
-        // reconciliation to catch up.
-        let _ = (info, &self.db);
+    fn on_replay(&self, _info: &ReplayInfo) -> Result<(), ObserverError> {
+        // Follower search index reconciliation is deferred to recovery.
+        // See architectural note above for rationale.
         Ok(())
     }
 }
