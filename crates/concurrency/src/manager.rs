@@ -1251,7 +1251,7 @@ mod tests {
         txn.record_json_write(
             create_test_key(&create_test_namespace(branch_id), "doc"),
             JsonPatch::set_at(JsonPath::root(), serde_json::json!({"a": 1}).into()),
-            0,
+            CommitVersion(0),
         );
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
@@ -1634,7 +1634,7 @@ mod tests {
         txn.record_json_write(
             create_test_key(&ns, "doc"),
             JsonPatch::set_at(JsonPath::root(), serde_json::json!({"a": 1}).into()),
-            0,
+            CommitVersion(0),
         );
 
         let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));

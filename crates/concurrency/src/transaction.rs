@@ -253,12 +253,12 @@ pub struct JsonPatchEntry {
     /// Patch to apply
     pub patch: JsonPatch,
     /// Version the document will have after this patch
-    pub resulting_version: u64,
+    pub resulting_version: CommitVersion,
 }
 
 impl JsonPatchEntry {
     /// Create a new JSON patch entry
-    pub fn new(key: Key, patch: JsonPatch, resulting_version: u64) -> Self {
+    pub fn new(key: Key, patch: JsonPatch, resulting_version: CommitVersion) -> Self {
         Self {
             key,
             patch,
@@ -1223,7 +1223,7 @@ impl TransactionContext {
     ///
     /// This should be called when modifying a JSON document via patch.
     /// The patch will be applied at commit time.
-    pub fn record_json_write(&mut self, key: Key, patch: JsonPatch, resulting_version: u64) {
+    pub fn record_json_write(&mut self, key: Key, patch: JsonPatch, resulting_version: CommitVersion) {
         self.ensure_json_writes()
             .push(JsonPatchEntry::new(key, patch, resulting_version));
     }
@@ -1988,7 +1988,7 @@ impl JsonStoreExt for TransactionContext {
         // Record the write
         let patch = JsonPatch::set_at(path.clone(), value);
         // We don't know the resulting version until commit, use 0 as placeholder
-        self.record_json_write(key.clone(), patch, 0);
+        self.record_json_write(key.clone(), patch, CommitVersion(0));
 
         Ok(())
     }
@@ -1999,7 +1999,7 @@ impl JsonStoreExt for TransactionContext {
 
         // Record the delete
         let patch = JsonPatch::delete_at(path.clone());
-        self.record_json_write(key.clone(), patch, 0);
+        self.record_json_write(key.clone(), patch, CommitVersion(0));
 
         Ok(())
     }

@@ -461,10 +461,10 @@ fn inherited_layer_get_at_timestamp() {
 
     // Write entries with specific timestamps via recovery API
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(100), 1, 1000, 0)
+        .put_recovery_entry(parent_kv("k"), Value::Int(100), CommitVersion(1), 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("k"), Value::Int(200), 2, 2000, 0)
+        .put_recovery_entry(parent_kv("k"), Value::Int(200), CommitVersion(2), 2000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();
@@ -505,13 +505,13 @@ fn inherited_layer_scan_prefix_at_timestamp() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
     store
-        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), 1, 1000, 0)
+        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), CommitVersion(1), 1000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), 2, 2000, 0)
+        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), CommitVersion(2), 2000, 0)
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), 3, 3000, 0)
+        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), CommitVersion(3), 3000, 0)
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();

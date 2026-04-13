@@ -1032,7 +1032,7 @@ fn test_issue_1740_put_recovery_entry_preserves_ttl() {
     let now_us = Timestamp::now().as_micros();
 
     store
-        .put_recovery_entry(key.clone(), Value::Int(42), 1, now_us, ttl_ms)
+        .put_recovery_entry(key.clone(), Value::Int(42), CommitVersion(1), now_us, ttl_ms)
         .unwrap();
 
     // Read the entry via store (filters expired) — should still be alive
@@ -1069,7 +1069,7 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
     let deletes = vec![];
 
     store
-        .apply_recovery_atomic(writes, deletes, 1, now_us, &put_ttls)
+        .apply_recovery_atomic(writes, deletes, CommitVersion(1), now_us, &put_ttls)
         .unwrap();
 
     // Verify TTL was preserved
@@ -1402,7 +1402,7 @@ fn test_issue_1734_apply_recovery_atomic_does_not_bump_version() {
     // CORRECT BEHAVIOR: the storage version should remain at 1 (caller bumps later).
     let writes = vec![(kv_key("new_key"), Value::String("hello".into()))];
     store
-        .apply_recovery_atomic(writes, vec![], 5, 1_000_000, &[0])
+        .apply_recovery_atomic(writes, vec![], CommitVersion(5), 1_000_000, &[0])
         .unwrap();
 
     assert_eq!(

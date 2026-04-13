@@ -2572,7 +2572,7 @@ pub struct NoteInfo {
 pub fn add_note(
     db: &Arc<Database>,
     branch: &str,
-    version: u64,
+    version: CommitVersion,
     message: &str,
     author: Option<&str>,
     metadata: Option<Value>,
@@ -2586,7 +2586,7 @@ pub fn add_note(
     let timestamp = strata_core::contract::Timestamp::now().as_micros();
     let note = NoteInfo {
         branch: branch.to_string(),
-        version,
+        version: version.as_u64(),
         message: message.to_string(),
         author: author.map(|s| s.to_string()),
         timestamp,
@@ -2594,7 +2594,7 @@ pub fn add_note(
     };
 
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
-    let note_key = note_key(branch, version);
+    let note_key = note_key(branch, version.as_u64());
     let note_value = serde_json::to_string(&note)
         .map_err(|e| StrataError::internal(format!("Failed to serialize note: {}", e)))?;
 
@@ -2649,9 +2649,9 @@ pub fn get_notes(
 /// Delete a note at a specific version.
 ///
 /// Returns `true` if the note existed and was deleted.
-pub fn delete_note(db: &Arc<Database>, branch: &str, version: u64) -> StrataResult<bool> {
+pub fn delete_note(db: &Arc<Database>, branch: &str, version: CommitVersion) -> StrataResult<bool> {
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
-    let note_key = note_key(branch, version);
+    let note_key = note_key(branch, version.as_u64());
 
     let storage = db.storage();
     let entries = storage.list_by_type(&system_id, TypeTag::KV);
@@ -5037,7 +5037,7 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
         write_kv(&db, "main", "default", "k", Value::Int(1));
 
-        let note = add_note(&db, "main", 1, "initial state", Some("ai"), None).unwrap();
+        let note = add_note(&db, "main", CommitVersion(1), "initial state", Some("ai"), None).unwrap();
         assert_eq!(note.message, "initial state");
         assert_eq!(note.version, 1);
 
@@ -5052,10 +5052,10 @@ mod tests {
     fn test_note_delete() {
         let (_temp, db) = setup_with_branch("main");
 
-        add_note(&db, "main", 1, "note1", None, None).unwrap();
-        add_note(&db, "main", 2, "note2", None, None).unwrap();
+        add_note(&db, "main", CommitVersion(1), "note1", None, None).unwrap();
+        add_note(&db, "main", CommitVersion(2), "note2", None, None).unwrap();
 
-        assert!(delete_note(&db, "main", 1).unwrap());
+        assert!(delete_note(&db, "main", CommitVersion(1)).unwrap());
 
         let notes = get_notes(&db, "main", None).unwrap();
         assert_eq!(notes.len(), 1);

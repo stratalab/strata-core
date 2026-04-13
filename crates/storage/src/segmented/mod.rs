@@ -382,8 +382,8 @@ impl BranchState {
 
     /// Update max applied version for this branch.
     #[inline]
-    fn track_version(&self, version: u64) {
-        self.max_version.fetch_max(version, Ordering::Release);
+    fn track_version(&self, version: CommitVersion) {
+        self.max_version.fetch_max(version.as_u64(), Ordering::Release);
     }
 }
 
@@ -2303,7 +2303,7 @@ impl SegmentedStore {
         &self,
         key: Key,
         value: Value,
-        version: u64,
+        version: CommitVersion,
         timestamp_micros: u64,
         ttl_ms: u64,
     ) -> StrataResult<()> {
@@ -2322,12 +2322,12 @@ impl SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(&key, CommitVersion(version), entry);
+        branch.active.put_entry(&key, version, entry);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
 
         Ok(())
     }
@@ -2336,7 +2336,7 @@ impl SegmentedStore {
     pub fn delete_recovery_entry(
         &self,
         key: &Key,
-        version: u64,
+        version: CommitVersion,
         timestamp_micros: u64,
     ) -> StrataResult<()> {
         let branch_id = key.namespace.branch_id;
@@ -2354,12 +2354,12 @@ impl SegmentedStore {
             raw_value: None,
         };
         let ts = entry.timestamp.as_micros();
-        branch.active.put_entry(key, CommitVersion(version), entry);
+        branch.active.put_entry(key, version, entry);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
         self.maybe_rotate_branch(branch_id, &mut branch);
-        self.version.fetch_max(version, Ordering::AcqRel);
+        self.version.fetch_max(version.as_u64(), Ordering::AcqRel);
 
         Ok(())
     }
@@ -2371,7 +2371,7 @@ impl SegmentedStore {
         &self,
         writes: Vec<(Key, Value)>,
         deletes: Vec<Key>,
-        version: u64,
+        version: CommitVersion,
         timestamp_micros: u64,
         put_ttls: &[u64],
     ) -> StrataResult<()> {
@@ -2417,7 +2417,7 @@ impl SegmentedStore {
                     ttl_ms,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, CommitVersion(version), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
             branch.track_version(version);
@@ -2438,7 +2438,7 @@ impl SegmentedStore {
                     ttl_ms: 0,
                     raw_value: None,
                 };
-                branch.active.put_entry(&key, CommitVersion(version), entry);
+                branch.active.put_entry(&key, version, entry);
             }
             branch.track_timestamp(ts);
             branch.track_version(version);
@@ -4318,7 +4318,7 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(&key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
-        branch.track_version(version.as_u64());
+        branch.track_version(version);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -4351,7 +4351,7 @@ impl Storage for SegmentedStore {
         branch.active.put_entry(key, version, entry);
         // Track timestamp for O(1) time_range
         branch.track_timestamp(ts);
-        branch.track_version(version.as_u64());
+        branch.track_version(version);
 
         // Rotate if active memtable exceeds threshold
         self.maybe_rotate_branch(branch_id, &mut branch);
@@ -4402,7 +4402,7 @@ impl Storage for SegmentedStore {
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
-            branch.track_version(version.as_u64());
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -4443,7 +4443,7 @@ impl Storage for SegmentedStore {
             }
             // Track timestamp for O(1) time_range
             branch.track_timestamp(ts);
-            branch.track_version(version.as_u64());
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -4504,7 +4504,7 @@ impl Storage for SegmentedStore {
             }
             branch.num_entries.fetch_add(put_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
-            branch.track_version(version.as_u64());
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 
@@ -4527,7 +4527,7 @@ impl Storage for SegmentedStore {
             }
             branch.num_deletions.fetch_add(del_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
-            branch.track_version(version.as_u64());
+            branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
         }
 

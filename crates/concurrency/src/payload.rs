@@ -51,7 +51,7 @@ impl TransactionPayload {
     ///
     /// CAS operations are included as puts (they have already been validated
     /// at commit time, so recovery just replays the final value).
-    pub fn from_transaction(txn: &TransactionContext, version: u64) -> Self {
+    pub fn from_transaction(txn: &TransactionContext, version: CommitVersion) -> Self {
         let mut puts: Vec<(Key, Value)> = Vec::new();
         let mut put_ttls: Vec<u64> = Vec::new();
 
@@ -69,7 +69,7 @@ impl TransactionPayload {
         let deletes: Vec<Key> = txn.delete_set.iter().cloned().collect();
 
         TransactionPayload {
-            version,
+            version: version.as_u64(),
             puts,
             deletes,
             put_ttls,
@@ -296,7 +296,7 @@ mod tests {
         let timestamp = 1234567890u64;
 
         // Old path: clone → serialize → wrap
-        let payload = TransactionPayload::from_transaction(&txn, version.as_u64());
+        let payload = TransactionPayload::from_transaction(&txn, version);
         let old_bytes =
             WalRecord::new(txn_id, *branch_id.as_bytes(), timestamp, payload.to_bytes()).to_bytes();
 

@@ -199,7 +199,7 @@ impl Database {
                 if let Err(e) = self.storage.apply_recovery_atomic(
                     writes,
                     deletes,
-                    payload.version,
+                    CommitVersion(payload.version),
                     record.timestamp,
                     &payload.put_ttls,
                 ) {

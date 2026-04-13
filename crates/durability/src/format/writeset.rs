@@ -22,6 +22,7 @@
 //! └──────────────────┴──────────────────┴────────────────────────────┘
 //! ```
 
+use strata_core::id::CommitVersion;
 use strata_core::{BranchId, EntityRef};
 
 use super::primitive_tags;
@@ -102,11 +103,11 @@ impl Writeset {
     }
 
     /// Add a Put mutation.
-    pub fn put(&mut self, entity_ref: EntityRef, value: Vec<u8>, version: u64) {
+    pub fn put(&mut self, entity_ref: EntityRef, value: Vec<u8>, version: CommitVersion) {
         self.mutations.push(Mutation::Put {
             entity_ref,
             value,
-            version,
+            version: version.as_u64(),
         });
     }
 
@@ -116,11 +117,11 @@ impl Writeset {
     }
 
     /// Add an Append mutation.
-    pub fn append(&mut self, entity_ref: EntityRef, value: Vec<u8>, version: u64) {
+    pub fn append(&mut self, entity_ref: EntityRef, value: Vec<u8>, version: CommitVersion) {
         self.mutations.push(Mutation::Append {
             entity_ref,
             value,
-            version,
+            version: version.as_u64(),
         });
     }
 
@@ -524,7 +525,7 @@ mod tests {
         let entity_ref = EntityRef::kv(branch_id, "default", "my-key");
 
         let mut ws = Writeset::new();
-        ws.put(entity_ref.clone(), vec![1, 2, 3], 42);
+        ws.put(entity_ref.clone(), vec![1, 2, 3], CommitVersion(42));
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();
@@ -570,7 +571,7 @@ mod tests {
         let entity_ref = EntityRef::event(branch_id, "default", 100);
 
         let mut ws = Writeset::new();
-        ws.append(entity_ref.clone(), vec![4, 5, 6, 7], 123);
+        ws.append(entity_ref.clone(), vec![4, 5, 6, 7], CommitVersion(123));
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();
@@ -595,10 +596,10 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", "key1"), vec![1], 1);
-        ws.put(EntityRef::kv(branch_id, "default", "key2"), vec![2], 2);
+        ws.put(EntityRef::kv(branch_id, "default", "key1"), vec![1], CommitVersion(1));
+        ws.put(EntityRef::kv(branch_id, "default", "key2"), vec![2], CommitVersion(2));
         ws.delete(EntityRef::kv(branch_id, "default", "key3"));
-        ws.append(EntityRef::event(branch_id, "default", 1), vec![3], 3);
+        ws.append(EntityRef::event(branch_id, "default", 1), vec![3], CommitVersion(3));
 
         assert_eq!(ws.len(), 4);
 
@@ -624,7 +625,7 @@ mod tests {
 
         for entity_ref in refs {
             let mut ws = Writeset::new();
-            ws.put(entity_ref.clone(), vec![1, 2, 3], 1);
+            ws.put(entity_ref.clone(), vec![1, 2, 3], CommitVersion(1));
 
             let bytes = ws.to_bytes();
             let restored = Writeset::from_bytes(&bytes).unwrap();
@@ -649,7 +650,7 @@ mod tests {
         ws.put(
             EntityRef::kv(branch_id, "default", "large"),
             large_value.clone(),
-            1,
+            CommitVersion(1),
         );
 
         let bytes = ws.to_bytes();
@@ -668,11 +669,11 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", "键值对"), vec![1], 1);
+        ws.put(EntityRef::kv(branch_id, "default", "键值对"), vec![1], CommitVersion(1));
         ws.put(
             EntityRef::vector(branch_id, "default", "коллекция", "κλειδί"),
             vec![3],
-            3,
+            CommitVersion(3),
         );
 
         let bytes = ws.to_bytes();
@@ -696,8 +697,8 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", ""), vec![1], 1);
-        ws.put(EntityRef::vector(branch_id, "default", "", ""), vec![2], 2);
+        ws.put(EntityRef::kv(branch_id, "default", ""), vec![1], CommitVersion(1));
+        ws.put(EntityRef::vector(branch_id, "default", "", ""), vec![2], CommitVersion(2));
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();
