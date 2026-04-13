@@ -64,6 +64,14 @@ use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
 use super::{Database, PersistenceMode};
 
+enum AcquiredDatabase {
+    Existing(Arc<Database>),
+    New {
+        db: Arc<Database>,
+        canonical_path: PathBuf,
+    },
+}
+
 impl Database {
     /// Open database at given path with automatic recovery
     ///
@@ -238,8 +246,9 @@ impl Database {
     ///   5. `db.set_subsystems(subsystems)` — install the same ordered list
     ///      for drop-time freeze. Matches Epic 5's partial-failure
     ///      contract: only install after every `recover()` succeeds.
-    ///   6. Insert `Arc::downgrade(&db)` into `OPEN_DATABASES`.
-    ///   7. Drop the mutex (via end-of-scope).
+    ///   6. Mark lifecycle as `initializing` and publish the `Arc` into
+    ///      `OPEN_DATABASES` so concurrent openers can wait on it.
+    ///   7. Drop the mutex and let the caller run lifecycle hooks.
     ///
     /// A concurrent opener that blocks on step (1)'s mutex will not see
     /// the new `Arc` until step (6), by which point recovery is complete
@@ -252,7 +261,8 @@ impl Database {
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
         subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
-    ) -> StrataResult<Arc<Self>> {
+        runtime_signature: Option<super::CompatibilitySignature>,
+    ) -> StrataResult<AcquiredDatabase> {
         // Create directory first so we can canonicalize the path
         let data_dir = path.to_path_buf();
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
@@ -267,35 +277,51 @@ impl Database {
 
         if let Some(weak) = registry.get(&canonical_path) {
             if let Some(db) = weak.upgrade() {
-                // Mixed-opener detection (audit follow-up to #2354
-                // Finding 2): compare the requested subsystem list to
-                // the list that is actually installed on the existing
-                // instance. If they differ, the second caller's
-                // subsystems are silently dropped — the single-
-                // instance-per-path contract requires us to return
-                // the existing Arc unchanged. Log a warning so the
-                // misuse surfaces at runtime. Order matters: reversed
-                // lists produce different freeze orders.
-                let installed = db.installed_subsystem_names();
-                let requested: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
-                if installed != requested {
-                    tracing::warn!(
-                        target: "strata::db",
-                        path = ?canonical_path,
-                        installed = ?installed,
-                        requested = ?requested,
-                        "Mixed-opener detected: an earlier caller opened this \
-                         database with a different subsystem list. Returning \
-                         the existing instance with the EARLIER subsystems; \
-                         the requested subsystems were silently dropped. Use \
-                         the same opener (e.g. `Strata::open` everywhere, or \
-                         `DatabaseBuilder` with the same list) across all \
-                         call sites for this path. See audit follow-up to \
-                         #2354 Finding 2."
-                    );
+                if let Some(requested_signature) = runtime_signature.as_ref() {
+                    let existing_signature = db.runtime_signature().ok_or_else(|| {
+                        StrataError::incompatible_reuse(
+                            "existing database instance was not opened via open_runtime",
+                        )
+                    })?;
+                    if let Err(reason) = existing_signature.check_compatible(requested_signature) {
+                        return Err(StrataError::incompatible_reuse(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
+                    }
+                } else {
+                    // Mixed-opener detection (audit follow-up to #2354
+                    // Finding 2): compare the requested subsystem list to
+                    // the list that is actually installed on the existing
+                    // instance. If they differ, the second caller's
+                    // subsystems are silently dropped — the single-
+                    // instance-per-path contract requires us to return
+                    // the existing Arc unchanged. Log a warning so the
+                    // misuse surfaces at runtime. Order matters: reversed
+                    // lists produce different freeze orders.
+                    let installed = db.installed_subsystem_names();
+                    let requested: Vec<&'static str> =
+                        subsystems.iter().map(|s| s.name()).collect();
+                    if installed != requested {
+                        tracing::warn!(
+                            target: "strata::db",
+                            path = ?canonical_path,
+                            installed = ?installed,
+                            requested = ?requested,
+                            "Mixed-opener detected: an earlier caller opened this \
+                             database with a different subsystem list. Returning \
+                             the existing instance with the EARLIER subsystems; \
+                             the requested subsystems were silently dropped. Use \
+                             the same opener (e.g. `Strata::open` everywhere, or \
+                             `DatabaseBuilder` with the same list) across all \
+                             call sites for this path. See audit follow-up to \
+                             #2354 Finding 2."
+                        );
+                    }
                 }
                 info!(target: "strata::db", path = ?canonical_path, "Returning existing database instance");
-                return Ok(db);
+                drop(registry);
+                return Ok(AcquiredDatabase::Existing(db));
             }
         }
 
@@ -367,12 +393,19 @@ impl Database {
         // populated subsystems vec for `Drop for Database` to freeze.
         db.set_subsystems(subsystems);
 
-        // Publish the fully-recovered Arc. Concurrent openers that were
-        // waiting on the mutex will now see a Database with recovery
-        // complete and subsystems installed.
-        registry.insert(canonical_path, Arc::downgrade(&db));
+        // NOTE: Lifecycle hooks (initialize, bootstrap) are handled by callers.
+        // This function does recovery, subsystem installation, runtime-signature
+        // capture, and early registry publication so concurrent opens can wait
+        // on the in-flight instance. Callers still finish lifecycle and any
+        // mode-specific setup (for example default-branch creation).
+        if let Some(signature) = runtime_signature {
+            db.set_runtime_signature(signature);
+        }
+        db.set_lifecycle_initializing();
+        registry.insert(canonical_path.clone(), Arc::downgrade(&db));
+        drop(registry);
 
-        Ok(db)
+        Ok(AcquiredDatabase::New { db, canonical_path })
     }
 
     /// Convenience entry point used by `Database::open` / `open_with_config`.
@@ -402,20 +435,20 @@ impl Database {
     /// canonical open path — both `DatabaseBuilder` and the `Database::open`
     /// convenience API route through here, so the supplied `subsystems` list
     /// is the sole driver of recovery.
-    ///
-    /// All the heavy lifting (directory prep, registry dedup, WAL replay,
-    /// `repair_space_metadata_on_open`, the `subsystem.recover(&db)` loop,
-    /// `set_subsystems`, and the final registry insert) happens inside
-    /// `acquire_primary_db` while it holds the `OPEN_DATABASES` mutex, so
-    /// concurrent openers for the same path cannot observe a half-
-    /// initialized instance.
     pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
         subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
     ) -> StrataResult<Arc<Self>> {
-        Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems)
+        match Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems, None)? {
+            AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
+            AcquiredDatabase::New { db, canonical_path } => {
+                Self::finish_opened_db(db, &canonical_path, |db| {
+                    Self::run_lifecycle_hooks(db, true)
+                })
+            }
+        }
     }
 
     /// Repair space metadata at open time by reconciling registered metadata
@@ -485,7 +518,13 @@ impl Database {
             config::StrataConfig::default()
         };
 
-        Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)
+        let db = Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)?;
+
+        // Lifecycle hooks: initialize only (no bootstrap for followers)
+        Self::run_lifecycle_hooks(&db, false)?;
+        db.set_lifecycle_complete();
+
+        Ok(db)
     }
 
     /// Open a follower `Database` at the given canonicalized path.
@@ -588,6 +627,15 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_state: std::sync::atomic::AtomicU8::new(
+                super::LifecycleState::Uninitialized.as_u8(),
+            ),
+            lifecycle_state_mu: parking_lot::Mutex::new(()),
+            lifecycle_state_cv: parking_lot::Condvar::new(),
+            runtime_signature: parking_lot::RwLock::new(None),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         Ok(db)
@@ -603,11 +651,17 @@ impl Database {
         canonical_path: PathBuf,
         cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
-        Self::open_follower_internal_with_subsystems(
+        let db = Self::open_follower_internal_with_subsystems(
             canonical_path,
             cfg,
             vec![Box::new(crate::search::SearchSubsystem)],
-        )
+        )?;
+
+        // Lifecycle hooks: initialize only (no bootstrap for followers)
+        Self::run_lifecycle_hooks(&db, false)?;
+        db.set_lifecycle_complete();
+
+        Ok(db)
     }
 
     /// Open a follower database with an explicit subsystem list.
@@ -646,6 +700,9 @@ impl Database {
         }
 
         db.set_subsystems(subsystems);
+
+        // NOTE: Lifecycle hooks (initialize) and lifecycle_complete are handled
+        // by callers. Followers skip bootstrap since they read from primary.
 
         Ok(db)
     }
@@ -928,6 +985,15 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_state: std::sync::atomic::AtomicU8::new(
+                super::LifecycleState::Uninitialized.as_u8(),
+            ),
+            lifecycle_state_mu: parking_lot::Mutex::new(()),
+            lifecycle_state_cv: parking_lot::Condvar::new(),
+            runtime_signature: parking_lot::RwLock::new(None),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         // Trigger compaction if any levels have accumulated segments from
@@ -1035,6 +1101,15 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_state: std::sync::atomic::AtomicU8::new(
+                super::LifecycleState::Uninitialized.as_u8(),
+            ),
+            lifecycle_state_mu: parking_lot::Mutex::new(()),
+            lifecycle_state_cv: parking_lot::Condvar::new(),
+            runtime_signature: parking_lot::RwLock::new(None),
+            merge_registry: super::MergeHandlerRegistry::new(),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -1096,89 +1171,159 @@ impl Database {
 
         // Route to mode-specific open helper
         match spec.mode {
-            DatabaseMode::Primary => {
-                Self::open_runtime_primary(spec)
-            }
-            DatabaseMode::Follower => {
-                Self::open_runtime_follower(spec)
-            }
-            DatabaseMode::Cache => {
-                Self::open_runtime_cache(spec)
-            }
+            DatabaseMode::Primary => Self::open_runtime_primary(spec),
+            DatabaseMode::Follower => Self::open_runtime_follower(spec),
+            DatabaseMode::Cache => Self::open_runtime_cache(spec),
         }
     }
 
     /// Open a primary database from an `OpenSpec`.
     fn open_runtime_primary(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
-        let data_dir = spec.path.clone();
+        use super::compat::CompatibilitySignature;
+
+        let super::spec::OpenSpec {
+            mode: _,
+            path,
+            config,
+            subsystems,
+            default_branch,
+        } = spec;
+
+        let data_dir = path;
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
-
-        // Resolve configuration
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
-        let cfg = if let Some(cfg) = spec.config {
-            // Write supplied config to file
-            cfg.write_to_file(&config_path)?;
-            cfg
-        } else {
-            // Read from file or create default
-            config::StrataConfig::write_default_if_missing(&config_path)?;
-            config::StrataConfig::from_file(&config_path)?
-        };
-
-        let durability_mode = cfg.durability_mode()?;
-
-        // Delegate to existing open path with subsystems
-        let db = Self::acquire_primary_db(
-            &data_dir,
-            durability_mode,
-            cfg,
-            spec.subsystems,
-        )?;
-
-        // Run new lifecycle hooks (initialize and bootstrap)
-        Self::run_lifecycle_hooks(&db, true)?;
-
-        // Ensure default branch if specified
-        if let Some(branch_name) = &spec.default_branch {
-            Self::ensure_default_branch(&db, branch_name)?;
-        }
-
-        Ok(db)
-    }
-
-    /// Open a follower database from an `OpenSpec`.
-    fn open_runtime_follower(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
-        let data_dir = spec.path.clone();
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
-
-        // Resolve configuration
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let cfg = if let Some(cfg) = spec.config {
-            cfg
+        let resolved_cfg = if let Some(cfg) = config.as_ref() {
+            cfg.clone()
         } else if config_path.exists() {
             config::StrataConfig::from_file(&config_path)?
         } else {
             config::StrataConfig::default()
         };
+        let durability_mode = resolved_cfg.durability_mode()?;
+
+        let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
+        let requested_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Primary,
+            subsystem_names,
+            durability_mode,
+            default_branch.clone(),
+        );
+
+        match Self::acquire_primary_db(
+            &canonical_path,
+            durability_mode,
+            resolved_cfg.clone(),
+            subsystems,
+            Some(requested_signature),
+        )? {
+            AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
+            AcquiredDatabase::New { db, canonical_path } => {
+                Self::finish_opened_db(db, &canonical_path, |db| {
+                    if let Some(cfg) = config.as_ref() {
+                        cfg.write_to_file(&config_path)?;
+                    } else {
+                        config::StrataConfig::write_default_if_missing(&config_path)?;
+                    }
+                    Self::run_lifecycle_hooks(db, true)?;
+                    if let Some(branch_name) = &default_branch {
+                        Self::ensure_default_branch(db, branch_name)?;
+                    }
+                    Ok(())
+                })
+            }
+        }
+    }
+
+    /// Open a follower database from an `OpenSpec`.
+    fn open_runtime_follower(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        use super::compat::CompatibilitySignature;
+
+        let super::spec::OpenSpec {
+            mode: _,
+            path,
+            config,
+            subsystems,
+            default_branch,
+        } = spec;
+
+        let data_dir = path;
+        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
+        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
+        let cfg = if let Some(cfg) = config.as_ref() {
+            cfg.clone()
+        } else if config_path.exists() {
+            config::StrataConfig::from_file(&config_path)?
+        } else {
+            config::StrataConfig::default()
+        };
+        let durability_mode = cfg.durability_mode()?;
+        let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
+        let requested_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Follower,
+            subsystem_names,
+            durability_mode,
+            default_branch,
+        );
+
+        {
+            let registry = super::OPEN_DATABASES.lock();
+            if let Some(weak) = registry.get(&canonical_path) {
+                if let Some(existing_db) = weak.upgrade() {
+                    let existing_signature = existing_db.runtime_signature().ok_or_else(|| {
+                        StrataError::incompatible_reuse(
+                            "existing database instance was not opened via open_runtime",
+                        )
+                    })?;
+                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
+                        return Err(StrataError::incompatible_reuse(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
+                    }
+                    drop(registry);
+                    return Self::wait_for_opened_db(existing_db);
+                }
+            }
+        }
 
         // Delegate to existing follower open path with subsystems
-        let db = Self::open_follower_internal_with_subsystems(
-            canonical_path,
-            cfg,
-            spec.subsystems,
-        )?;
+        let db =
+            Self::open_follower_internal_with_subsystems(canonical_path.clone(), cfg, subsystems)?;
+        db.set_runtime_signature(requested_signature.clone());
+        db.set_lifecycle_initializing();
 
-        // Run new lifecycle hooks (initialize only, no bootstrap for followers)
-        Self::run_lifecycle_hooks(&db, false)?;
+        {
+            let mut registry = super::OPEN_DATABASES.lock();
+            if let Some(weak) = registry.get(&canonical_path) {
+                if let Some(existing_db) = weak.upgrade() {
+                    let existing_signature = existing_db.runtime_signature().ok_or_else(|| {
+                        StrataError::incompatible_reuse(
+                            "existing database instance was not opened via open_runtime",
+                        )
+                    })?;
+                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
+                        return Err(StrataError::incompatible_reuse(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
+                    }
+                    drop(registry);
+                    return Self::wait_for_opened_db(existing_db);
+                }
+            }
+            registry.insert(canonical_path.clone(), Arc::downgrade(&db));
+        }
 
-        // Followers do not ensure default branch (read-only)
-
-        Ok(db)
+        Self::finish_opened_db(db, &canonical_path, |db| {
+            Self::run_lifecycle_hooks(db, false)
+        })
     }
 
     /// Open a cache database from an `OpenSpec`.
     fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
         // Create ephemeral database (config is applied internally by cache())
+        // Cache databases are not in the registry, so no reuse check needed.
         let db = Self::cache()?;
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
@@ -1196,13 +1341,16 @@ impl Database {
         }
         db.set_subsystems(spec.subsystems);
 
-        // Run new lifecycle hooks (initialize and bootstrap)
+        // Run lifecycle hooks (initialize and bootstrap)
         Self::run_lifecycle_hooks(&db, true)?;
 
         // Ensure default branch if specified
         if let Some(branch_name) = &spec.default_branch {
             Self::ensure_default_branch(&db, branch_name)?;
         }
+
+        // Mark lifecycle complete
+        db.set_lifecycle_complete();
 
         Ok(db)
     }
@@ -1263,5 +1411,52 @@ impl Database {
             branch_index.create_branch(branch_name)?;
         }
         Ok(())
+    }
+
+    fn wait_for_opened_db(db: Arc<Self>) -> StrataResult<Arc<Self>> {
+        match db.wait_for_lifecycle_state() {
+            super::LifecycleState::Initialized => Ok(db),
+            super::LifecycleState::Failed => Err(StrataError::internal(
+                "existing database instance failed during lifecycle initialization; retry the open",
+            )),
+            super::LifecycleState::Uninitialized => Err(StrataError::internal(
+                "existing database instance was published before lifecycle initialization started",
+            )),
+            super::LifecycleState::Initializing => {
+                unreachable!("wait returned while still initializing")
+            }
+        }
+    }
+
+    fn finish_opened_db<F>(
+        db: Arc<Self>,
+        canonical_path: &Path,
+        open_fn: F,
+    ) -> StrataResult<Arc<Self>>
+    where
+        F: FnOnce(&Arc<Self>) -> StrataResult<()>,
+    {
+        match open_fn(&db) {
+            Ok(()) => {
+                db.set_lifecycle_complete();
+                Ok(db)
+            }
+            Err(error) => {
+                db.set_lifecycle_failed();
+                Self::remove_registry_entry_if_same(canonical_path, &db);
+                Err(error)
+            }
+        }
+    }
+
+    fn remove_registry_entry_if_same(canonical_path: &Path, db: &Arc<Self>) {
+        let mut registry = super::OPEN_DATABASES.lock();
+        let should_remove = registry.get(canonical_path).is_some_and(|weak| {
+            weak.upgrade()
+                .is_none_or(|existing| Arc::ptr_eq(&existing, db))
+        });
+        if should_remove {
+            registry.remove(canonical_path);
+        }
     }
 }

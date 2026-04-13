@@ -984,9 +984,14 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
         // (it requires decoding CollectionRecord). If no callback is
         // registered, fall through — the engine has nothing to validate
         // on its own.
-        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+        //
+        // Per-database registry is the canonical path. No global fallback.
+        if let Some(callbacks) = ctx.db.merge_registry().vector_callbacks() {
             (callbacks.precheck)(ctx.db, ctx.source_id, ctx.target_id)?;
         }
+        // No callback registered → no validation. Vector data is still
+        // KV-correct (the generic classifier writes it), but dimension/metric
+        // mismatches won't be caught until the next full recovery.
         Ok(())
     }
 
@@ -1033,11 +1038,12 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
             return Ok(());
         }
 
-        if let Some(callbacks) = VECTOR_MERGE_CALLBACKS.get() {
+        // Per-database registry is the canonical path. No global fallback.
+        if let Some(callbacks) = ctx.db.merge_registry().vector_callbacks() {
             (callbacks.post_commit)(ctx.db, ctx.source_id, ctx.target_id, &affected)?;
         }
-        // No callback → no rebuild fires here. Vectors are still
-        // KV-correct (the generic classifier wrote them) but the
+        // No callback registered → no HNSW rebuild fires here. Vectors are
+        // still KV-correct (the generic classifier wrote them) but the
         // in-memory HNSW backends are not refreshed until the next full
         // recovery on db open. Engine-only unit tests are the typical
         // unregistered case.
@@ -1103,10 +1109,12 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
     }
 
     fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
-        // If a semantic merge is registered, validation lives inside `plan`.
-        // Otherwise, fall back to the divergence refusal so divergent graph
-        // merges still get caught.
-        if GRAPH_MERGE_PLAN_FN.get().is_some() {
+        // If a semantic merge is registered in the per-database registry,
+        // validation lives inside `plan`. Otherwise, fall back to the
+        // divergence refusal so divergent graph merges still get caught.
+        //
+        // Per-database registry is the canonical path. No global fallback.
+        if ctx.db.merge_registry().has_graph() {
             return Ok(());
         }
         for ((space, type_tag), cell) in &ctx.typed_entries.cells {
@@ -1119,7 +1127,8 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
     }
 
     fn plan(&self, ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
-        if let Some(plan_fn) = GRAPH_MERGE_PLAN_FN.get() {
+        // Per-database registry is the canonical path. No global fallback.
+        if let Some(plan_fn) = ctx.db.merge_registry().graph_plan_fn() {
             return plan_fn(ctx);
         }
         // No semantic merge registered → use the default classify path.

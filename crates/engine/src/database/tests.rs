@@ -1,11 +1,13 @@
 use super::*;
+use crate::recovery::Subsystem;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::TransactionPayload;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_core::{Storage, Timestamp};
+use strata_core::{Storage, StrataError, Timestamp};
 use strata_durability::codec::IdentityCodec;
 use strata_durability::format::WalRecord;
 use strata_durability::now_micros;
@@ -2199,6 +2201,250 @@ fn test_shutdown_flush_thread_termination() {
         db.flush_handle.lock().is_none(),
         "flush thread handle must be joined (consumed) during shutdown"
     );
+}
+
+struct TestRuntimeSubsystem {
+    name: &'static str,
+    events: Option<Arc<parking_lot::Mutex<Vec<&'static str>>>>,
+    fail_initialize_once: Option<Arc<AtomicBool>>,
+}
+
+impl TestRuntimeSubsystem {
+    fn named(name: &'static str) -> Self {
+        Self {
+            name,
+            events: None,
+            fail_initialize_once: None,
+        }
+    }
+
+    fn recording(name: &'static str, events: Arc<parking_lot::Mutex<Vec<&'static str>>>) -> Self {
+        Self {
+            name,
+            events: Some(events),
+            fail_initialize_once: None,
+        }
+    }
+
+    fn fail_initialize_once(name: &'static str, fail_flag: Arc<AtomicBool>) -> Self {
+        Self {
+            name,
+            events: None,
+            fail_initialize_once: Some(fail_flag),
+        }
+    }
+
+    fn record(&self, event: &'static str) {
+        if let Some(events) = &self.events {
+            events.lock().push(event);
+        }
+    }
+}
+
+impl Subsystem for TestRuntimeSubsystem {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> StrataResult<()> {
+        self.record("recover");
+        Ok(())
+    }
+
+    fn initialize(&self, _db: &Arc<Database>) -> StrataResult<()> {
+        self.record("initialize");
+        if self
+            .fail_initialize_once
+            .as_ref()
+            .is_some_and(|flag| flag.swap(false, Ordering::SeqCst))
+        {
+            return Err(StrataError::internal("initialize failed"));
+        }
+        Ok(())
+    }
+
+    fn bootstrap(&self, _db: &Arc<Database>) -> StrataResult<()> {
+        self.record("bootstrap");
+        Ok(())
+    }
+}
+
+#[test]
+fn test_open_runtime_lifecycle_order_and_reuse() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("runtime_lifecycle");
+    let events = Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+    let primary_spec = OpenSpec::primary(&db_path)
+        .with_subsystem(TestRuntimeSubsystem::recording(
+            "runtime-subsystem",
+            events.clone(),
+        ))
+        .with_default_branch("main");
+    let primary = Database::open_runtime(primary_spec).unwrap();
+    assert_eq!(
+        events.lock().as_slice(),
+        ["recover", "initialize", "bootstrap"],
+        "primary open_runtime must run recover -> initialize -> bootstrap"
+    );
+
+    let primary_reuse = Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::recording(
+                "runtime-subsystem",
+                events.clone(),
+            ))
+            .with_default_branch("main"),
+    )
+    .unwrap();
+    assert!(Arc::ptr_eq(&primary, &primary_reuse));
+    assert_eq!(
+        events.lock().as_slice(),
+        ["recover", "initialize", "bootstrap"],
+        "reusing an initialized primary must not rerun lifecycle hooks"
+    );
+
+    drop(primary_reuse);
+    drop(primary);
+    OPEN_DATABASES.lock().clear();
+
+    events.lock().clear();
+    let follower = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
+        TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()),
+    ))
+    .unwrap();
+    assert_eq!(
+        events.lock().as_slice(),
+        ["recover", "initialize"],
+        "follower open_runtime must skip bootstrap"
+    );
+
+    let follower_reuse = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
+        TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()),
+    ))
+    .unwrap();
+    assert!(Arc::ptr_eq(&follower, &follower_reuse));
+    assert_eq!(
+        events.lock().as_slice(),
+        ["recover", "initialize"],
+        "reusing an initialized follower must not rerun lifecycle hooks"
+    );
+
+    drop(follower_reuse);
+    drop(follower);
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+fn test_open_runtime_rejects_incompatible_reuse() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("runtime_signature");
+
+    let db = Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem"))
+            .with_default_branch("main"),
+    )
+    .unwrap();
+
+    let err = match Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem"))
+            .with_default_branch("develop"),
+    ) {
+        Ok(_) => panic!("expected incompatible reuse error"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::IncompatibleReuse { .. }),
+        "expected IncompatibleReuse, got {:?}",
+        err
+    );
+
+    drop(db);
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+fn test_open_runtime_failed_open_can_retry() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("runtime_retry");
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let err = match Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(
+        TestRuntimeSubsystem::fail_initialize_once("runtime-subsystem", fail_once.clone()),
+    )) {
+        Ok(_) => panic!("expected first open to fail"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::Internal { .. }),
+        "unexpected error for failed first open: {:?}",
+        err
+    );
+
+    let canonical_path = db_path.canonicalize().unwrap();
+    assert!(
+        !OPEN_DATABASES.lock().contains_key(&canonical_path),
+        "failed lifecycle open must not leave a registry entry behind"
+    );
+
+    let db = Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(
+        TestRuntimeSubsystem::fail_initialize_once("runtime-subsystem", fail_once),
+    ))
+    .unwrap();
+    assert!(db.is_lifecycle_complete());
+
+    drop(db);
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+fn test_open_runtime_failed_config_write_can_retry() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("runtime_config_write");
+    std::fs::create_dir_all(&db_path).unwrap();
+    std::fs::create_dir_all(db_path.join(crate::database::config::CONFIG_FILE_NAME)).unwrap();
+
+    let err = match Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_config(StrataConfig::default())
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
+    ) {
+        Ok(_) => panic!("config write should fail while strata.toml is a directory"),
+        Err(err) => err,
+    };
+
+    let canonical_path = db_path.canonicalize().unwrap();
+    assert!(
+        !OPEN_DATABASES.lock().contains_key(&canonical_path),
+        "failed config persistence must not leave a registry entry behind"
+    );
+    assert!(
+        !matches!(err, StrataError::IncompatibleReuse { .. }),
+        "expected a real open failure, got incompatible reuse: {:?}",
+        err
+    );
+
+    std::fs::remove_dir_all(db_path.join(crate::database::config::CONFIG_FILE_NAME)).unwrap();
+
+    let db = Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
+    )
+    .unwrap();
+    assert!(db.is_lifecycle_complete());
+
+    drop(db);
+    OPEN_DATABASES.lock().clear();
 }
 
 // ========================================================================

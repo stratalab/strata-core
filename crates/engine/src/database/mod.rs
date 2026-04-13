@@ -24,6 +24,7 @@ pub mod branch_service;
 pub mod compat;
 pub mod config;
 pub mod dag_hook;
+pub mod merge_registry;
 pub mod observers;
 pub mod profile;
 mod registry;
@@ -35,6 +36,10 @@ pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
 pub use dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
     DagHookSlot, MergeBaseResult,
+};
+pub use merge_registry::{
+    GraphMergePlanFn, MergeHandlerRegistry, VectorMergeCallbacks, VectorMergePostCommitFn,
+    VectorMergePrecheckFn,
 };
 pub use observers::{
     BranchOpEvent, BranchOpKind, BranchOpObserver, BranchOpObserverRegistry, CommitInfo,
@@ -56,8 +61,8 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::any::{Any, TypeId};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_core::id::CommitVersion;
@@ -169,6 +174,38 @@ pub struct DatabaseDiskUsage {
     pub wal: strata_durability::WalDiskUsage,
     /// Snapshot directory usage in bytes.
     pub snapshot_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleState {
+    Uninitialized,
+    Initializing,
+    Initialized,
+    Failed,
+}
+
+impl LifecycleState {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Uninitialized => 0,
+            Self::Initializing => 1,
+            Self::Initialized => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Uninitialized,
+            1 => Self::Initializing,
+            2 => Self::Initialized,
+            3 => Self::Failed,
+            _ => {
+                debug_assert!(false, "invalid lifecycle state value: {}", value);
+                Self::Failed
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -398,6 +435,37 @@ pub struct Database {
     /// Observers are notified after branch operations complete (create, delete,
     /// fork, merge, etc.). Best-effort: failures are logged, not propagated.
     branch_op_observers: BranchOpObserverRegistry,
+
+    /// Per-database commit observer registry.
+    ///
+    /// Observers are notified after each successful WAL-backed commit.
+    /// Best-effort: failures are logged, not propagated.
+    commit_observers: CommitObserverRegistry,
+
+    /// Per-database replay observer registry.
+    ///
+    /// Observers are notified after each fully-applied follower replay record.
+    /// Best-effort: failures are logged, not propagated.
+    replay_observers: ReplayObserverRegistry,
+
+    /// Lifecycle state for `open_runtime` and registry reuse.
+    ///
+    /// Tracks whether this instance is uninitialized, currently initializing,
+    /// fully initialized, or failed during lifecycle.
+    lifecycle_state: AtomicU8,
+
+    /// Wait primitive for lifecycle transitions.
+    lifecycle_state_mu: parking_lot::Mutex<()>,
+    lifecycle_state_cv: parking_lot::Condvar,
+
+    /// Runtime compatibility signature, when opened via `open_runtime`.
+    runtime_signature: parking_lot::RwLock<Option<CompatibilitySignature>>,
+
+    /// Per-database merge handler registry.
+    ///
+    /// Stores vector and graph merge callbacks. Replaces the process-global
+    /// OnceCell patterns in primitive_merge.rs.
+    merge_registry: MergeHandlerRegistry,
 }
 
 // Split impl blocks
@@ -492,6 +560,16 @@ impl Database {
         self.subsystems.read().iter().map(|s| s.name()).collect()
     }
 
+    /// Return a read guard to the subsystems list.
+    ///
+    /// Used by `acquire_primary_db` to iterate subsystems for lifecycle
+    /// hooks (initialize, bootstrap) after recovery completes.
+    pub(crate) fn installed_subsystems(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, Vec<Box<dyn crate::recovery::Subsystem>>> {
+        self.subsystems.read()
+    }
+
     // =========================================================================
     // DAG Hook
     // =========================================================================
@@ -536,6 +614,122 @@ impl Database {
     /// Used by `BranchService` to notify observers after branch operations.
     pub fn branch_op_observers(&self) -> &BranchOpObserverRegistry {
         &self.branch_op_observers
+    }
+
+    // =========================================================================
+    // Commit/Replay Observers
+    // =========================================================================
+
+    /// Get the per-database commit observer registry.
+    ///
+    /// Observers are notified after each successful WAL-backed commit.
+    pub fn commit_observers(&self) -> &CommitObserverRegistry {
+        &self.commit_observers
+    }
+
+    /// Get the per-database replay observer registry.
+    ///
+    /// Observers are notified after each fully-applied follower replay record.
+    pub fn replay_observers(&self) -> &ReplayObserverRegistry {
+        &self.replay_observers
+    }
+
+    // =========================================================================
+    // Lifecycle State
+    // =========================================================================
+
+    /// Check if lifecycle hooks have completed.
+    ///
+    /// Returns true if initialize() and bootstrap() have run successfully.
+    /// Used by open_runtime to avoid re-running lifecycle on reuse.
+    pub fn is_lifecycle_complete(&self) -> bool {
+        self.lifecycle_state() == LifecycleState::Initialized
+    }
+
+    pub(crate) fn lifecycle_state(&self) -> LifecycleState {
+        LifecycleState::from_u8(
+            self.lifecycle_state
+                .load(std::sync::atomic::Ordering::Acquire),
+        )
+    }
+
+    pub(crate) fn set_lifecycle_initializing(&self) {
+        self.lifecycle_state.store(
+            LifecycleState::Initializing.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
+    }
+
+    /// Mark lifecycle as complete.
+    ///
+    /// Called after initialize() and bootstrap() succeed.
+    pub(crate) fn set_lifecycle_complete(&self) {
+        self.lifecycle_state.store(
+            LifecycleState::Initialized.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
+    }
+
+    pub(crate) fn set_lifecycle_failed(&self) {
+        self.lifecycle_state.store(
+            LifecycleState::Failed.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
+    }
+
+    pub(crate) fn wait_for_lifecycle_state(&self) -> LifecycleState {
+        let mut guard = self.lifecycle_state_mu.lock();
+        loop {
+            let state = self.lifecycle_state();
+            if state != LifecycleState::Initializing {
+                return state;
+            }
+            self.lifecycle_state_cv.wait(&mut guard);
+        }
+    }
+
+    pub(crate) fn set_runtime_signature(&self, signature: CompatibilitySignature) {
+        *self.runtime_signature.write() = Some(signature);
+    }
+
+    pub(crate) fn runtime_signature(&self) -> Option<CompatibilitySignature> {
+        self.runtime_signature.read().clone()
+    }
+
+    // =========================================================================
+    // Merge Handler Registry
+    // =========================================================================
+
+    /// Get the per-database merge handler registry.
+    ///
+    /// Used by subsystems to register merge callbacks and by `merge_branches`
+    /// to look them up. Replaces the process-global OnceCell patterns.
+    pub fn merge_registry(&self) -> &MergeHandlerRegistry {
+        &self.merge_registry
+    }
+
+    // =========================================================================
+    // Branch Service
+    // =========================================================================
+
+    /// Get the branch service facade for this database.
+    ///
+    /// This is the canonical entry point for all branch operations:
+    /// create, delete, fork, merge, revert, cherry-pick, tag, etc.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// let branches = db.branches();
+    /// branches.create("feature")?;
+    /// branches.fork("main", "experiment")?;
+    /// branches.merge("experiment", "main")?;
+    /// ```
+    pub fn branches(self: &Arc<Self>) -> BranchService {
+        BranchService::new(self.clone())
     }
 
     /// Run freeze hooks on all registered subsystems.

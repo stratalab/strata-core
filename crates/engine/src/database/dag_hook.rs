@@ -54,6 +54,8 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
+use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -117,7 +119,10 @@ impl BranchDagError {
     pub fn no_hook(operation: &str) -> Self {
         Self::new(
             BranchDagErrorKind::NoDagHook,
-            format!("operation '{}' requires a DAG hook but none is installed", operation),
+            format!(
+                "operation '{}' requires a DAG hook but none is installed",
+                operation
+            ),
         )
     }
 
@@ -204,10 +209,20 @@ pub struct DagEvent {
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+    /// Merge strategy (for Merge events).
+    pub strategy: Option<String>,
+    /// Merge info (for Merge events).
+    pub merge_info: Option<MergeInfo>,
+    /// Revert info (for Revert events).
+    pub revert_info: Option<RevertInfo>,
+    /// Cherry-pick info (for CherryPick events).
+    pub cherry_pick_info: Option<CherryPickInfo>,
 }
 
 impl DagEvent {
     /// Create a branch create event.
+    ///
+    /// Use `create()` for the simpler version without commit version.
     pub fn branch_create(
         branch_id: BranchId,
         branch_name: impl Into<String>,
@@ -222,10 +237,23 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
+    /// Create a simple branch create event (no commit version).
+    ///
+    /// Used by `BranchService::create()` where no commit has occurred yet.
+    pub fn create(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+        Self::branch_create(branch_id, branch_name, CommitVersion(0))
+    }
+
     /// Create a branch delete event.
+    ///
+    /// Use `delete()` for the simpler version without commit version.
     pub fn branch_delete(
         branch_id: BranchId,
         branch_name: impl Into<String>,
@@ -240,7 +268,18 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
+    }
+
+    /// Create a simple branch delete event (no commit version).
+    ///
+    /// Used by `BranchService::delete()`.
+    pub fn delete(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+        Self::branch_delete(branch_id, branch_name, CommitVersion(0))
     }
 
     /// Create a fork event.
@@ -260,6 +299,10 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
@@ -270,7 +313,13 @@ impl DagEvent {
         source_branch_id: BranchId,
         source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
+        info: MergeInfo,
+        strategy: MergeStrategy,
     ) -> Self {
+        let strategy_str = match strategy {
+            MergeStrategy::LastWriterWins => "last_writer_wins",
+            MergeStrategy::Strict => "strict",
+        };
         Self {
             kind: DagEventKind::Merge,
             branch_id: target_branch_id,
@@ -280,6 +329,58 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: Some(strategy_str.to_string()),
+            merge_info: Some(info),
+            revert_info: None,
+            cherry_pick_info: None,
+        }
+    }
+
+    /// Create a revert event.
+    pub fn revert(
+        branch_id: BranchId,
+        branch_name: impl Into<String>,
+        commit_version: CommitVersion,
+        info: RevertInfo,
+    ) -> Self {
+        Self {
+            kind: DagEventKind::Revert,
+            branch_id,
+            branch_name: branch_name.into(),
+            source_branch_id: None,
+            source_branch_name: Some(format!("v{}..v{}", info.from_version.0, info.to_version.0)),
+            commit_version,
+            message: None,
+            creator: None,
+            strategy: None,
+            merge_info: None,
+            revert_info: Some(info),
+            cherry_pick_info: None,
+        }
+    }
+
+    /// Create a cherry-pick event.
+    pub fn cherry_pick(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        commit_version: CommitVersion,
+        info: CherryPickInfo,
+    ) -> Self {
+        Self {
+            kind: DagEventKind::CherryPick,
+            branch_id: target_branch_id,
+            branch_name: target_branch_name.into(),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version,
+            message: None,
+            creator: None,
+            strategy: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: Some(info),
         }
     }
 
@@ -351,22 +452,25 @@ pub trait BranchDagHook: Send + Sync + 'static {
 
     /// Find the merge base (common ancestor) of two branches.
     ///
+    /// Accepts branch names (not BranchId) because the DAG is keyed by name.
     /// Returns `None` if no common ancestor exists.
     fn find_merge_base(
         &self,
-        branch_a: &BranchId,
-        branch_b: &BranchId,
+        branch_a: &str,
+        branch_b: &str,
     ) -> Result<Option<MergeBaseResult>, BranchDagError>;
 
     /// Get the history log for a branch.
     ///
+    /// Accepts branch name (not BranchId) because the DAG is keyed by name.
     /// Returns events in reverse chronological order (newest first).
-    fn log(&self, branch_id: &BranchId, limit: usize) -> Result<Vec<DagEvent>, BranchDagError>;
+    fn log(&self, branch: &str, limit: usize) -> Result<Vec<DagEvent>, BranchDagError>;
 
     /// Get the ancestry chain for a branch.
     ///
+    /// Accepts branch name (not BranchId) because the DAG is keyed by name.
     /// Returns the chain from the branch back to its root.
-    fn ancestors(&self, branch_id: &BranchId) -> Result<Vec<AncestryEntry>, BranchDagError>;
+    fn ancestors(&self, branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError>;
 }
 
 // =============================================================================
@@ -460,17 +564,17 @@ mod tests {
 
         fn find_merge_base(
             &self,
-            _a: &BranchId,
-            _b: &BranchId,
+            _branch_a: &str,
+            _branch_b: &str,
         ) -> Result<Option<MergeBaseResult>, BranchDagError> {
             Ok(None)
         }
 
-        fn log(&self, _branch_id: &BranchId, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
+        fn log(&self, _branch: &str, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
             Ok(Vec::new())
         }
 
-        fn ancestors(&self, _branch_id: &BranchId) -> Result<Vec<AncestryEntry>, BranchDagError> {
+        fn ancestors(&self, _branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
             Ok(Vec::new())
         }
     }

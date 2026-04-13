@@ -75,7 +75,11 @@ pub struct ObserverError {
 
 impl ObserverError {
     /// Create a new observer error.
-    pub fn new(observer_name: impl Into<String>, kind: ObserverErrorKind, message: impl Into<String>) -> Self {
+    pub fn new(
+        observer_name: impl Into<String>,
+        kind: ObserverErrorKind,
+        message: impl Into<String>,
+    ) -> Self {
         Self {
             observer_name: observer_name.into(),
             kind,
@@ -96,7 +100,11 @@ impl ObserverError {
 
 impl fmt::Display for ObserverError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "observer '{}' {}: {}", self.observer_name, self.kind, self.message)
+        write!(
+            f,
+            "observer '{}' {}: {}",
+            self.observer_name, self.kind, self.message
+        )
     }
 }
 
@@ -478,7 +486,9 @@ mod tests {
 
     impl CountingCommitObserver {
         fn new() -> Self {
-            Self { count: AtomicUsize::new(0) }
+            Self {
+                count: AtomicUsize::new(0),
+            }
         }
 
         fn count(&self) -> usize {

@@ -59,54 +59,25 @@ use std::path::Path;
 use std::sync::Arc;
 
 use strata_engine::{Database, DatabaseBuilder, SearchSubsystem};
+use strata_graph::GraphSubsystem;
 use strata_security::{AccessMode, OpenOptions};
 use strata_vector::VectorSubsystem;
-
-use std::sync::Once;
 
 use crate::ipc::{Backend, IpcClient};
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result, Session};
-
-/// Register the per-process primitive merge handlers and branch DAG hooks.
-///
-/// These are global, idempotent registrations — merge handlers and DAG
-/// event hooks — and are unrelated to per-database recovery state. Recovery
-/// is driven by `DatabaseBuilder`'s subsystem list (see `strata_db_builder`
-/// below).
-static MERGE_HANDLERS_INIT: Once = Once::new();
-
-fn ensure_merge_handlers_registered() {
-    MERGE_HANDLERS_INIT.call_once(|| {
-        // Register the semantic graph merge implementation. Without this,
-        // `merge_branches` falls back to a tactical refusal and rejects
-        // all divergent graph merges, even disjoint ones that the
-        // semantic merge would handle correctly.
-        strata_graph::register_graph_semantic_merge();
-        // Register the vector merge precheck (dimension/metric mismatch
-        // refusal) and post-commit (per-collection HNSW rebuild) hooks.
-        // Without this, the engine's VectorMergeHandler is a no-op and
-        // the legacy full-branch rebuild applies.
-        strata_vector::register_vector_semantic_merge();
-        // Register the branch DAG hooks. Without this, fork / merge /
-        // revert / cherry-pick / create / delete operations do not
-        // record events in the `_branch_dag` graph on the `_system_`
-        // branch — and `compute_merge_base_from_dag` cannot advance the
-        // merge base across repeated merges of the same source/target
-        // pair.
-        strata_graph::register_branch_dag_hook_implementation();
-    });
-}
 
 /// Construct a `DatabaseBuilder` pre-loaded with the standard production
 /// subsystem set. The same ordered list drives recovery on open and
 /// freeze-on-drop, so production opens cannot diverge from the test path
 /// validated by `crates/engine/tests/recovery_tests.rs`.
 ///
-/// Order: `VectorSubsystem` then `SearchSubsystem` (recovery runs in this
-/// order; freeze runs in reverse).
+/// Order: `GraphSubsystem` first (installs DAG hook and merge handler),
+/// then `VectorSubsystem`, then `SearchSubsystem`. Recovery runs in this
+/// order; freeze runs in reverse.
 fn strata_db_builder() -> DatabaseBuilder {
     DatabaseBuilder::new()
+        .with_subsystem(GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
 }
@@ -162,8 +133,6 @@ impl Strata {
     /// let db = Strata::open_with("/var/data/myapp", OpenOptions::new().access_mode(AccessMode::ReadOnly))?;
     /// ```
     pub fn open_with<P: AsRef<Path>>(path: P, opts: OpenOptions) -> Result<Self> {
-        ensure_merge_handlers_registered();
-
         let data_dir = path.as_ref().to_path_buf();
 
         if opts.follower {
@@ -216,7 +185,6 @@ impl Strata {
         // Try to open the database directly
         match strata_db_builder().open_with_config(&data_dir, cfg) {
             Ok(db) => {
-                strata_graph::branch_dag::init_system_branch(&db);
                 // Seed built-in recipes if not already present
                 if let Err(e) = strata_engine::recipe_store::seed_builtin_recipes(&db) {
                     tracing::warn!(error = %e, "Failed to seed built-in recipes");
@@ -333,12 +301,10 @@ impl Strata {
     /// db.kv_put("key", Value::Int(42))?;
     /// ```
     pub fn cache() -> Result<Self> {
-        ensure_merge_handlers_registered();
         let db = strata_db_builder().cache().map_err(|e| Error::Internal {
             reason: format!("Failed to open cache database: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
-        strata_graph::branch_dag::init_system_branch(&db);
         let executor = Executor::new(db);
 
         // Ensure the default branch exists
@@ -431,8 +397,6 @@ impl Strata {
     /// Create a new Strata instance from an existing database with a
     /// specific access mode.
     fn from_database_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Result<Self> {
-        ensure_merge_handlers_registered();
-
         // Mixed-opener detection (audit follow-up to #2354 Finding 2).
         // A caller wrapping a bare `Database::open` / plain-builder
         // result loses vector recovery + drop-freeze guarantees

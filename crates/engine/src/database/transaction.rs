@@ -789,6 +789,7 @@ impl Database {
     /// - WAL writing (when WAL reference is provided)
     /// - Storage application
     /// - Fsync (WAL::append handles fsync based on its DurabilityMode)
+    /// - Observer notification (best-effort, errors logged not propagated)
     fn commit_internal(
         &self,
         txn: &mut TransactionContext,
@@ -800,13 +801,32 @@ impl Database {
             ));
         }
 
+        // Capture info needed for observer notification before commit
+        // (txn state may be modified during commit)
+        let branch_id = txn.branch_id;
+        let entry_count = txn.write_set.len() + txn.delete_set.len() + txn.cas_set.len();
+
         let wal_arc = if durability.requires_wal() {
             self.wal_writer.as_ref()
         } else {
             None
         };
 
-        self.coordinator
-            .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)
+        let commit_version =
+            self.coordinator
+                .commit_with_wal_arc(txn, self.storage.as_ref(), wal_arc)?;
+
+        // Notify commit observers (best-effort, errors logged not propagated)
+        if entry_count > 0 {
+            let info = super::CommitInfo {
+                branch_id,
+                commit_version,
+                entry_count,
+                is_merge: false, // Regular commits are not merges
+            };
+            self.commit_observers().notify(&info);
+        }
+
+        Ok(commit_version)
     }
 }

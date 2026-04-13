@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Once};
+use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
@@ -24,43 +24,16 @@ pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
-// ============================================================================
-// Initialization
-// ============================================================================
-
-static INIT_HANDLERS: Once = Once::new();
-
-/// Register process-global merge handlers and DAG event hooks. These are
-/// idempotent and installed once per test binary. Recovery, by contrast,
-/// is driven per-open through `test_db_builder()` / `DatabaseBuilder`.
-fn ensure_test_handlers_registered() {
-    INIT_HANDLERS.call_once(|| {
-        // Register the graph semantic merge plan with the engine's
-        // GraphMergeHandler. Without this call, the engine falls back to
-        // a tactical refusal of divergent graph merges (which still
-        // works, just refuses safely-mergeable cases).
-        strata_graph::register_graph_semantic_merge();
-        // Register the vector merge precheck/post-commit callbacks with
-        // the engine's VectorMergeHandler. Without this, the handler
-        // is a pass-through and the legacy full-branch rebuild fallback
-        // applies.
-        strata_vector::register_vector_semantic_merge();
-        // Register the branch DAG hooks with the engine. Without this,
-        // engine-direct branch operations (fork, merge, revert,
-        // cherry-pick, create, delete) do not record events in the
-        // `_branch_dag` graph on the `_system_` branch. Tests that
-        // assert on DAG state need this to fire.
-        strata_graph::register_branch_dag_hook_implementation();
-    });
-}
-
-/// Fresh `DatabaseBuilder` wired with the two production subsystems
-/// (`VectorSubsystem` + `SearchSubsystem`), used by all test-helper open
-/// paths so integration tests exercise the same recovery pipeline the
-/// executor uses in production.
+/// Fresh `DatabaseBuilder` wired with the production subsystems
+/// (`GraphSubsystem` + `VectorSubsystem` + `SearchSubsystem`), used by
+/// all test-helper open paths so integration tests exercise the same
+/// recovery pipeline the executor uses in production.
+///
+/// `GraphSubsystem` must be first because its `initialize()` method
+/// registers the per-database graph merge handler and DAG hook.
 fn test_db_builder() -> DatabaseBuilder {
-    ensure_test_handlers_registered();
     DatabaseBuilder::new()
+        .with_subsystem(strata_graph::GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
 }

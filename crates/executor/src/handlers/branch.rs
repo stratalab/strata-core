@@ -1,13 +1,13 @@
 //! Branch command handlers (MVP)
 //!
 //! This module implements handlers for MVP Branch commands by dispatching
-//! directly to engine primitives via `bridge::Primitives`.
+//! to the engine's `BranchService` via `db.branches()`.
 
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_engine::BranchMetadata;
-use strata_graph::branch_dag;
+use strata_engine::{ForkOptions, MergeOptions};
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
 use crate::convert::convert_result;
@@ -137,10 +137,11 @@ pub fn branch_create(
         None => uuid::Uuid::new_v4().to_string(),
     };
 
-    // MVP: ignore metadata, use simple create_branch.
-    // The branch DAG entry is recorded automatically by the engine via
-    // the `on_create` hook fired from `BranchIndex::create_branch`.
-    let versioned = convert_result(p.branch.create_branch(&branch_str))?;
+    // Use BranchService for canonical path with DAG integration.
+    let metadata = p.db.branches().create(&branch_str).map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    })?;
 
     emit_audit_event(
         p,
@@ -151,8 +152,8 @@ pub fn branch_create(
     );
 
     Ok(Output::BranchWithVersion {
-        info: metadata_to_branch_info(&versioned.value),
-        version: extract_version(&versioned.version),
+        info: metadata_to_branch_info(&metadata),
+        version: metadata.version,
     })
 }
 
@@ -214,7 +215,12 @@ pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     reject_default_branch(&branch, "delete")?;
     crate::handlers::reject_system_branch(&branch)?;
-    convert_result(p.branch.delete_branch(branch.as_str()))?;
+
+    // Use BranchService for canonical path with DAG integration.
+    p.db.branches().delete(branch.as_str()).map_err(|e| Error::Internal {
+        reason: e.to_string(),
+        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    })?;
 
     // Cleanup: remove per-branch commit lock (#944)
     // Convert the executor BranchId to core BranchId for the lock cleanup
@@ -239,10 +245,6 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         }
     }
 
-    // The DAG `on_delete` hook fires automatically from
-    // `BranchIndex::delete_branch` (which p.branch.delete_branch calls
-    // above).
-
     emit_audit_event(
         p,
         "branch.delete",
@@ -252,40 +254,6 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     );
 
     Ok(Output::Unit)
-}
-
-// =============================================================================
-// Shared Helpers
-// =============================================================================
-
-/// Compute merge base override from DAG for two branches.
-///
-/// Checks for previous merge first (takes priority over fork), then falls
-/// back to fork relationship in the DAG.
-fn compute_merge_base_from_dag(
-    db: &Arc<strata_engine::Database>,
-    source: &str,
-    target: &str,
-) -> Option<(strata_core::types::BranchId, u64)> {
-    // Check for previous merge first (takes priority over fork)
-    match branch_dag::find_last_merge_version(db, source, target) {
-        Ok(Some(v)) => {
-            let target_id = strata_engine::primitives::branch::resolve_branch_name(target);
-            Some((target_id, v))
-        }
-        _ => {
-            // No previous merge — check for fork relationship in DAG
-            // (covers materialized branches where storage lost fork info)
-            match branch_dag::find_fork_version(db, source, target) {
-                Ok(Some((child_name, fork_version))) => {
-                    let child_id =
-                        strata_engine::primitives::branch::resolve_branch_name(&child_name);
-                    Some((child_id, fork_version))
-                }
-                _ => None, // Let engine try storage-level fork info
-            }
-        }
-    }
 }
 
 // =============================================================================
@@ -307,20 +275,25 @@ pub fn branch_fork(
         });
     }
     validate_branch_name(&destination)?;
-    // The DAG `on_fork` hook fires automatically from inside
-    // `fork_branch_with_metadata`. We pass message/creator through so the
-    // hook can record them on the fork event node.
-    let info = strata_engine::branch_ops::fork_branch_with_metadata(
-        &p.db,
-        &source,
-        &destination,
-        message.as_deref(),
-        creator.as_deref(),
-    )
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+
+    // Use BranchService for canonical path with DAG integration.
+    let options = ForkOptions::default()
+        .with_message(message.clone().unwrap_or_default())
+        .with_creator(creator.clone().unwrap_or_default());
+    // Only set message/creator if they were provided
+    let options = match (&message, &creator) {
+        (Some(m), Some(c)) => ForkOptions::default()
+            .with_message(m.clone())
+            .with_creator(c.clone()),
+        (Some(m), None) => ForkOptions::default().with_message(m.clone()),
+        (None, Some(c)) => ForkOptions::default().with_creator(c.clone()),
+        (None, None) => ForkOptions::default(),
+    };
+    let info = p.db.branches().fork_with_options(&source, &destination, options)
+        .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        })?;
 
     emit_audit_event(
         p,
@@ -381,25 +354,19 @@ pub fn branch_merge(
         });
     }
 
-    // Compute merge base override from DAG (for repeated merges and materialized branches)
-    let merge_base_override = compute_merge_base_from_dag(&p.db, &source, &target);
-
-    // The DAG `on_merge` hook fires automatically from inside
-    // `merge_branches_with_metadata`. We pass message/creator through so
-    // the hook can record them on the merge event node.
-    let info = strata_engine::branch_ops::merge_branches_with_metadata(
-        &p.db,
-        &source,
-        &target,
-        strategy,
-        merge_base_override,
-        message.as_deref(),
-        creator.as_deref(),
-    )
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+    // Use BranchService for canonical path with DAG integration.
+    let mut options = MergeOptions::with_strategy(strategy);
+    if let Some(m) = &message {
+        options = options.with_message(m.clone());
+    }
+    if let Some(c) = &creator {
+        options = options.with_creator(c.clone());
+    }
+    let info = p.db.branches().merge_with_options(&source, &target, options)
+        .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        })?;
 
     let strategy_str = match strategy {
         strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
@@ -428,14 +395,14 @@ pub fn branch_diff_three_way(
     branch_a: String,
     branch_b: String,
 ) -> Result<Output> {
-    let merge_base_override = compute_merge_base_from_dag(&p.db, &branch_a, &branch_b);
-
-    let result =
-        strata_engine::branch_ops::diff_three_way(&p.db, &branch_a, &branch_b, merge_base_override)
-            .map_err(|e| Error::Internal {
-                reason: e.to_string(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+    // Route through BranchService — it resolves DAG-backed merge bases when
+    // the graph subsystem is installed and falls back to storage-level fork
+    // info otherwise.
+    let result = p.db.branches().diff3(&branch_a, &branch_b, None)
+        .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        })?;
 
     Ok(Output::ThreeWayDiff(result))
 }
@@ -446,14 +413,18 @@ pub fn branch_merge_base(
     branch_a: String,
     branch_b: String,
 ) -> Result<Output> {
-    let merge_base_override = compute_merge_base_from_dag(&p.db, &branch_a, &branch_b);
+    // Route through BranchService — it queries merge_base from DAG internally.
+    let merge_base = p.db.branches().merge_base(&branch_a, &branch_b)
+        .map_err(|e| Error::Internal {
+            reason: e.to_string(),
+            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        })?;
 
-    let result =
-        strata_engine::branch_ops::get_merge_base(&p.db, &branch_a, &branch_b, merge_base_override)
-            .map_err(|e| Error::Internal {
-                reason: e.to_string(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+    // Convert MergeBaseResult to MergeBaseInfo for output compatibility
+    let result = merge_base.map(|mb| strata_engine::branch_ops::MergeBaseInfo {
+        branch: mb.branch_name,
+        version: mb.commit_version,
+    });
 
     Ok(Output::MergeBaseInfo(result))
 }
@@ -470,16 +441,19 @@ pub fn branch_revert(
     to_version: u64,
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let info = strata_engine::branch_ops::revert_version_range(
-        &p.db,
-        &branch,
-        CommitVersion(from_version),
-        CommitVersion(to_version),
-    )
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
-    })?;
+
+    // Use BranchService for canonical path with DAG integration.
+    let info =
+        p.db.branches()
+            .revert(
+                &branch,
+                CommitVersion(from_version),
+                CommitVersion(to_version),
+            )
+            .map_err(|e| Error::Internal {
+                reason: e.to_string(),
+                hint: None,
+            })?;
 
     emit_audit_event(
         p,
@@ -511,24 +485,19 @@ pub fn branch_cherry_pick(
 ) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(source.as_str()))?;
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(target.as_str()))?;
+
+    // Use BranchService for canonical path with DAG integration.
     let info = if let Some(keys) = keys {
         // Direct key pick
-        strata_engine::branch_ops::cherry_pick_keys(&p.db, &source, &target, &keys)
+        p.db.branches().cherry_pick(&source, &target, &keys)
     } else {
-        // Diff-based pick with filter
-        let merge_base_override = compute_merge_base_from_dag(&p.db, &source, &target);
         let filter = strata_engine::branch_ops::CherryPickFilter {
             spaces: filter_spaces,
             keys: filter_keys,
             primitives: filter_primitives,
         };
-        strata_engine::branch_ops::cherry_pick_from_diff(
-            &p.db,
-            &source,
-            &target,
-            filter,
-            merge_base_override,
-        )
+        p.db.branches()
+            .cherry_pick_from_diff(&source, &target, filter, None)
     }
     .map_err(|e| Error::Internal {
         reason: e.to_string(),

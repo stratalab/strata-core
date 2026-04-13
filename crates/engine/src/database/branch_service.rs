@@ -23,13 +23,14 @@ use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult};
 
+use crate::branch_ops::with_branch_dag_hooks_suppressed;
 use crate::branch_ops::{
-    self, BranchDiffResult, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo, MergeStrategy,
-    RevertInfo, TagInfo, ThreeWayDiffResult,
+    self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
+    MergeStrategy, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
-use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot};
-use crate::database::observers::{BranchOpEvent, BranchOpKind, BranchOpObserverRegistry};
+use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
+use crate::database::observers::{BranchOpEvent, BranchOpKind};
 use crate::database::Database;
 use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
 
@@ -176,37 +177,62 @@ impl BranchService {
     }
 
     // =========================================================================
-    // Core Operations (no DAG required)
+    // Core Operations (DAG optional)
     // =========================================================================
 
     /// Create a new branch.
+    ///
+    /// Emits a DAG create event if a DAG hook is installed.
     pub fn create(&self, name: &str) -> StrataResult<BranchMetadata> {
         validate_branch_name(name)?;
 
-        let index = BranchIndex::new(self.db.clone());
-        let versioned = index.create_branch(name)?;
+        let mut mutation = BranchMutation::new(&self.db);
+        let branch_id = resolve_branch_name(name);
 
-        self.notify_branch_op(BranchOpEvent::create(
-            resolve_branch_name(name),
-            name,
-        ));
+        let index = BranchIndex::new(self.db.clone());
+        let versioned = with_branch_dag_hooks_suppressed(|| index.create_branch(name))?;
+
+        // Rollback: delete the branch on DAG failure
+        mutation.on_rollback_delete_branch(name, false);
+
+        // Record to DAG if hook installed (optional, not required)
+        let event = DagEvent::create(branch_id, name);
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        mutation.commit(BranchOpEvent::create(branch_id, name));
 
         Ok(versioned.value)
     }
 
     /// Delete a branch.
+    ///
+    /// Emits a DAG delete event if a DAG hook is installed.
     pub fn delete(&self, name: &str) -> StrataResult<()> {
         if name.starts_with(SYSTEM_PREFIX) {
-            return Err(StrataError::invalid_input(
-                "cannot delete system branches",
-            ));
+            return Err(StrataError::invalid_input("cannot delete system branches"));
         }
 
-        let index = BranchIndex::new(self.db.clone());
+        let mut mutation = BranchMutation::new(&self.db);
         let branch_id = resolve_branch_name(name);
-        index.delete_branch(name)?;
 
-        self.notify_branch_op(BranchOpEvent::delete(branch_id, name));
+        let index = BranchIndex::new(self.db.clone());
+
+        if mutation.has_dag_hook() {
+            mutation.on_rollback_restore_branch(name)?;
+        }
+
+        if let Err(e) = with_branch_dag_hooks_suppressed(|| index.delete_branch(name)) {
+            mutation.cancel();
+            return Err(e);
+        }
+
+        // Record to DAG if hook installed (optional, not required)
+        let event = DagEvent::delete(branch_id, name);
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        mutation.commit(BranchOpEvent::delete(branch_id, name));
 
         Ok(())
     }
@@ -251,6 +277,13 @@ impl BranchService {
         target: &str,
         merge_base: Option<(BranchId, u64)>,
     ) -> StrataResult<ThreeWayDiffResult> {
+        let merge_base = match merge_base {
+            Some(merge_base) => Some(merge_base),
+            None if self.dag_hook().get().is_some() => self
+                .merge_base(source, target)?
+                .map(|mb| (mb.branch_id, mb.commit_version.0)),
+            None => None,
+        };
         branch_ops::diff_three_way(&self.db, source, target, merge_base)
     }
 
@@ -267,6 +300,9 @@ impl BranchService {
     ///
     /// Uses `BranchMutation` for atomicity: if DAG recording fails, the branch
     /// fork is rolled back (the new branch is deleted).
+    ///
+    /// Requires a DAG hook to be installed — forks without DAG recording would
+    /// create orphan branches with no lineage tracking.
     pub fn fork_with_options(
         &self,
         source: &str,
@@ -278,14 +314,19 @@ impl BranchService {
         // Create mutation context for atomicity
         let mut mutation = BranchMutation::new(&self.db);
 
+        // Fork requires DAG — without it, lineage is lost
+        mutation.require_dag_hook("fork")?;
+
         // Execute the fork
-        let info = branch_ops::fork_branch_with_metadata(
-            &self.db,
-            source,
-            destination,
-            options.message.as_deref(),
-            options.creator.as_deref(),
-        )?;
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::fork_branch_with_metadata(
+                &self.db,
+                source,
+                destination,
+                options.message.as_deref(),
+                options.creator.as_deref(),
+            )
+        })?;
 
         // Register rollback: if DAG write fails, delete the forked branch
         // We set clear_storage=true because fork_branch creates storage state
@@ -334,81 +375,265 @@ impl BranchService {
 
     /// Merge one branch into another with options.
     ///
-    /// Uses `BranchMutation` for atomicity: DAG failures propagate as errors.
-    /// Note: merge rollback is not implemented (the merge data is already
-    /// committed). If DAG write fails, the merge data remains but the error
-    /// is surfaced to the caller.
+    /// Uses `BranchMutation` for atomicity: if DAG recording fails after the
+    /// merge commit, the exact merge commit is reverted before returning.
+    ///
+    /// Requires a DAG hook to be installed — merges without DAG recording would
+    /// lose merge provenance and break merge-base computation.
     pub fn merge_with_options(
         &self,
         source: &str,
         target: &str,
         options: MergeOptions,
     ) -> StrataResult<MergeInfo> {
-        // Create mutation context for atomicity
-        // Note: we don't register rollback for merge because it's complex
-        // (would need to revert all the changes). The mutation still ensures
-        // DAG failures propagate and observers only fire on success.
         let mut mutation = BranchMutation::new(&self.db);
 
-        let info = branch_ops::merge_branches_with_metadata(
-            &self.db,
-            source,
-            target,
-            options.strategy,
-            options.merge_base,
-            options.message.as_deref(),
-            options.creator.as_deref(),
-        )?;
+        // Merge requires DAG — without it, merge provenance is lost
+        mutation.require_dag_hook("merge")?;
 
-        // Record to DAG — failures propagate
+        let merge_base = match options.merge_base {
+            Some(merge_base) => Some(merge_base),
+            None => self
+                .merge_base(source, target)?
+                .map(|mb| (mb.branch_id, mb.commit_version.0)),
+        };
+
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::merge_branches_with_metadata(
+                &self.db,
+                source,
+                target,
+                options.strategy,
+                merge_base,
+                options.message.as_deref(),
+                options.creator.as_deref(),
+            )
+        })?;
+
+        // Record to DAG — only if merge actually committed changes
         let source_id = resolve_branch_name(source);
         let target_id = resolve_branch_name(target);
-        let commit_version = info
-            .merge_version
-            .map(CommitVersion)
-            .unwrap_or(CommitVersion::ZERO);
-        let mut event = DagEvent::merge(target_id, target, source_id, source, commit_version);
-        if let Some(msg) = &options.message {
-            event = event.with_message(msg.clone());
-        }
-        if let Some(creator) = &options.creator {
-            event = event.with_creator(creator.clone());
-        }
-        mutation.record_dag_event(&event)?;
+        if let Some(merge_version) = info.merge_version {
+            mutation.on_rollback_revert_range(
+                target,
+                CommitVersion(merge_version),
+                CommitVersion(merge_version),
+            );
+            let mut event = DagEvent::merge(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(merge_version),
+                info.clone(),
+                options.strategy,
+            );
+            if let Some(msg) = &options.message {
+                event = event.with_message(msg.clone());
+            }
+            if let Some(creator) = &options.creator {
+                event = event.with_creator(creator.clone());
+            }
+            mutation.record_dag_event(&event)?;
 
-        // Commit: fires observers
-        let observer_event = BranchOpEvent {
-            kind: BranchOpKind::Merge,
-            branch_id: target_id,
-            branch_name: Some(target.to_string()),
-            source_branch_id: Some(source_id),
-            commit_version: info.merge_version.map(CommitVersion),
-            message: options.message.clone(),
-            creator: options.creator.clone(),
-        };
-        mutation.commit(observer_event);
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::Merge,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(merge_version)),
+                message: options.message.clone(),
+                creator: options.creator.clone(),
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op merge: skip DAG recording but still commit silently
+            mutation.commit_silent();
+        }
 
         Ok(info)
     }
 
     /// Revert a version range on a branch.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG revert event and
+    /// reverts the revert commit if DAG recording fails.
+    ///
+    /// Requires a DAG hook to be installed — reverts without DAG recording
+    /// would lose revert provenance and break history queries.
     pub fn revert(
         &self,
         branch: &str,
         from_version: CommitVersion,
         to_version: CommitVersion,
     ) -> StrataResult<RevertInfo> {
-        branch_ops::revert_version_range(&self.db, branch, from_version, to_version)
+        let mut mutation = BranchMutation::new(&self.db);
+
+        // Revert requires DAG — without it, revert history is lost
+        mutation.require_dag_hook("revert")?;
+
+        let branch_id = resolve_branch_name(branch);
+
+        // Execute the revert
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::revert_version_range(&self.db, branch, from_version, to_version)
+        })?;
+
+        // Record to DAG — only if revert actually committed changes
+        if let Some(revert_version) = info.revert_version {
+            mutation.on_rollback_revert_range(branch, revert_version, revert_version);
+            let event = DagEvent::revert(branch_id, branch, revert_version, info.clone());
+            mutation.record_dag_event(&event)?;
+
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::Revert,
+                branch_id,
+                branch_name: Some(branch.to_string()),
+                source_branch_id: None,
+                commit_version: Some(revert_version),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op revert: skip DAG recording
+            mutation.commit_silent();
+        }
+
+        Ok(info)
     }
 
     /// Cherry-pick specific keys from one branch to another.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event and
+    /// reverts the cherry-pick commit if DAG recording fails.
+    ///
+    /// Requires a DAG hook to be installed — cherry-picks without DAG recording
+    /// would lose cherry-pick provenance and break history queries.
     pub fn cherry_pick(
         &self,
         source: &str,
         target: &str,
         keys: &[(String, String)],
     ) -> StrataResult<CherryPickInfo> {
-        branch_ops::cherry_pick_keys(&self.db, source, target, keys)
+        let mut mutation = BranchMutation::new(&self.db);
+
+        // Cherry-pick requires DAG — without it, cherry-pick history is lost
+        mutation.require_dag_hook("cherry_pick")?;
+
+        let source_id = resolve_branch_name(source);
+        let target_id = resolve_branch_name(target);
+
+        // Execute the cherry-pick
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::cherry_pick_keys(&self.db, source, target, keys)
+        })?;
+
+        // Record to DAG — only if cherry-pick actually committed changes
+        if let Some(cp_version) = info.cherry_pick_version {
+            mutation.on_rollback_revert_range(
+                target,
+                CommitVersion(cp_version),
+                CommitVersion(cp_version),
+            );
+            let event = DagEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(cp_version),
+                info.clone(),
+            );
+            mutation.record_dag_event(&event)?;
+
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::CherryPick,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(cp_version)),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op cherry-pick: skip DAG recording
+            mutation.commit_silent();
+        }
+
+        Ok(info)
+    }
+
+    /// Cherry-pick changes from one branch to another using diff-based filtering.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event and
+    /// reverts the cherry-pick commit if DAG recording fails.
+    ///
+    /// Requires a DAG hook to be installed — cherry-picks without DAG recording
+    /// would lose cherry-pick provenance and break history queries.
+    pub fn cherry_pick_from_diff(
+        &self,
+        source: &str,
+        target: &str,
+        filter: CherryPickFilter,
+        merge_base: Option<(BranchId, u64)>,
+    ) -> StrataResult<CherryPickInfo> {
+        let mut mutation = BranchMutation::new(&self.db);
+
+        // Cherry-pick requires DAG — without it, cherry-pick history is lost
+        mutation.require_dag_hook("cherry_pick")?;
+
+        let source_id = resolve_branch_name(source);
+        let target_id = resolve_branch_name(target);
+        let merge_base = match merge_base {
+            Some(merge_base) => Some(merge_base),
+            None => self
+                .merge_base(source, target)?
+                .map(|mb| (mb.branch_id, mb.commit_version.0)),
+        };
+
+        // Execute the cherry-pick
+        let info = with_branch_dag_hooks_suppressed(|| {
+            branch_ops::cherry_pick_from_diff(&self.db, source, target, filter, merge_base)
+        })?;
+
+        // Record to DAG — only if cherry-pick actually committed changes
+        if let Some(cp_version) = info.cherry_pick_version {
+            mutation.on_rollback_revert_range(
+                target,
+                CommitVersion(cp_version),
+                CommitVersion(cp_version),
+            );
+            let event = DagEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(cp_version),
+                info.clone(),
+            );
+            mutation.record_dag_event(&event)?;
+
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::CherryPick,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(cp_version)),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op cherry-pick: skip DAG recording
+            mutation.commit_silent();
+        }
+
+        Ok(info)
     }
 
     // =========================================================================
@@ -416,30 +641,45 @@ impl BranchService {
     // =========================================================================
 
     /// Find the merge base (common ancestor) of two branches.
-    pub fn merge_base(&self, branch_a: &str, branch_b: &str) -> StrataResult<Option<(BranchId, CommitVersion)>> {
-        let hook = self.dag_hook().require("merge_base").map_err(dag_to_strata)?;
-        let id_a = resolve_branch_name(branch_a);
-        let id_b = resolve_branch_name(branch_b);
+    ///
+    /// Returns `None` if no common ancestor exists (unrelated branches).
+    pub fn merge_base(
+        &self,
+        branch_a: &str,
+        branch_b: &str,
+    ) -> StrataResult<Option<MergeBaseResult>> {
+        let hook = self
+            .dag_hook()
+            .require("merge_base")
+            .map_err(dag_to_strata)?;
 
-        match hook.find_merge_base(&id_a, &id_b) {
-            Ok(Some(result)) => Ok(Some((result.branch_id, result.commit_version))),
-            Ok(None) => Ok(None),
-            Err(e) => Err(dag_to_strata(e)),
-        }
+        // Pass branch names directly — DAG is keyed by name, not BranchId UUID
+        hook.find_merge_base(branch_a, branch_b)
+            .map_err(dag_to_strata)
     }
 
     /// Get the history log for a branch.
-    pub fn log(&self, branch: &str, limit: usize) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
+    pub fn log(
+        &self,
+        branch: &str,
+        limit: usize,
+    ) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
-        let branch_id = resolve_branch_name(branch);
-        hook.log(&branch_id, limit).map_err(dag_to_strata)
+        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
+        hook.log(branch, limit).map_err(dag_to_strata)
     }
 
     /// Get the ancestry chain for a branch.
-    pub fn ancestors(&self, branch: &str) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
-        let hook = self.dag_hook().require("ancestors").map_err(dag_to_strata)?;
-        let branch_id = resolve_branch_name(branch);
-        hook.ancestors(&branch_id).map_err(dag_to_strata)
+    pub fn ancestors(
+        &self,
+        branch: &str,
+    ) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
+        let hook = self
+            .dag_hook()
+            .require("ancestors")
+            .map_err(dag_to_strata)?;
+        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
+        hook.ancestors(branch).map_err(dag_to_strata)
     }
 
     // =========================================================================
@@ -478,14 +718,6 @@ impl BranchService {
 
     fn dag_hook(&self) -> &DagHookSlot {
         self.db.dag_hook()
-    }
-
-    fn branch_op_registry(&self) -> &BranchOpObserverRegistry {
-        self.db.branch_op_observers()
-    }
-
-    fn notify_branch_op(&self, event: BranchOpEvent) {
-        self.branch_op_registry().notify(&event);
     }
 }
 

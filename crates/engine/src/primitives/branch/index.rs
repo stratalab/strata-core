@@ -17,6 +17,7 @@
 //! - Primary key format: `<global_namespace>:<TypeTag::Branch>:<branch_id>`
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
+use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -243,14 +244,11 @@ impl BranchIndex {
             Ok(branch_meta.into_versioned())
         })?;
 
-        // Fire the branch DAG `on_create` hook. Best-effort: the hook
-        // implementation logs warnings on failure and never propagates an
-        // error back. Hook implementations early-return for `_system*`
-        // names because `init_system_branch` calls this function during
-        // db open before the `_branch_dag` graph exists.
-        if let Some(hooks) = crate::branch_ops::branch_dag_hooks() {
-            (hooks.on_create)(&self.db, branch_id);
-        }
+        // Note: DAG recording is handled by BranchService.create(), which is
+        // the canonical branch creation path and suppresses this best-effort
+        // low-level dispatch so it can record through the load-bearing
+        // BranchMutation boundary instead.
+        dispatch_create_hook(&self.db, branch_id);
 
         Ok(result)
     }
@@ -407,13 +405,9 @@ impl BranchIndex {
         // this branch after deletion will be rejected (#1916).
         self.db.remove_branch_lock(&executor_branch_id);
 
-        // Fire the branch DAG `on_delete` hook. Best-effort: marks the
-        // branch's DAG node as `status = deleted` (the node itself stays
-        // so the historical lineage is preserved). Hook implementations
-        // early-return for `_system*` names.
-        if let Some(hooks) = crate::branch_ops::branch_dag_hooks() {
-            (hooks.on_delete)(&self.db, branch_id);
-        }
+        // BranchService.delete() suppresses this best-effort dispatch so it can
+        // record through the load-bearing BranchMutation boundary instead.
+        dispatch_delete_hook(&self.db, branch_id);
 
         Ok(())
     }
