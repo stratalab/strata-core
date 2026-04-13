@@ -57,7 +57,7 @@ pub fn register_graph_semantic_merge() {
 /// `expected_target` for each `MergeAction` is populated from the cell's
 /// target side, matching the OCC TOCTOU semantics of the existing
 /// `classify_typed_entries` path.
-fn graph_plan_fn(ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
+pub fn graph_plan_fn(ctx: &MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan> {
     let mut actions: Vec<MergeAction> = Vec::new();
     let mut conflicts: Vec<ConflictEntry> = Vec::new();
 

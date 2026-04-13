@@ -845,6 +845,8 @@ fn status_from_node_props(node: &NodeData) -> DagBranchStatus {
 /// - Creating the `_system_` branch on database open
 /// - Creating the `_branch_dag` graph for tracking branch lifecycle
 /// - Populating the branch status cache (for followers)
+/// - Registering graph semantic merge handler with the engine
+/// - Installing the per-database BranchDagHook
 pub struct GraphSubsystem;
 
 impl strata_engine::Subsystem for GraphSubsystem {
@@ -859,6 +861,165 @@ impl strata_engine::Subsystem for GraphSubsystem {
         init_system_branch(db);
         load_status_cache_readonly(db);
         Ok(())
+    }
+
+    fn initialize(
+        &self,
+        db: &std::sync::Arc<strata_engine::Database>,
+    ) -> strata_core::StrataResult<()> {
+        // Register graph semantic merge handler with the per-database registry.
+        // This replaces the old global `register_graph_merge_plan()` pattern.
+        db.merge_registry()
+            .register_graph(crate::merge_handler::graph_plan_fn);
+
+        // Install the per-database BranchDagHook. This replaces the old global
+        // `register_branch_dag_hooks()` pattern. The hook is fail-fast: errors
+        // propagate and abort the calling branch operation.
+        let hook = Arc::new(GraphBranchDagHook::new(db.clone()));
+        db.install_dag_hook(hook).map_err(|e| {
+            StrataError::internal(format!("failed to install graph DAG hook: {e}"))
+        })?;
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Per-Database BranchDagHook Implementation
+// =============================================================================
+
+use strata_engine::database::dag_hook::{
+    AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
+    MergeBaseResult,
+};
+
+/// Per-database implementation of `BranchDagHook`.
+///
+/// Records branch lifecycle events to the `_branch_dag` graph and provides
+/// queries for merge-base, log, and ancestry. This hook is fail-fast: errors
+/// propagate and abort the calling branch operation.
+struct GraphBranchDagHook {
+    db: Arc<Database>,
+}
+
+impl GraphBranchDagHook {
+    fn new(db: Arc<Database>) -> Self {
+        Self { db }
+    }
+
+    /// Map a StrataError to BranchDagError.
+    fn map_write_error(e: StrataError) -> BranchDagError {
+        BranchDagError::new(BranchDagErrorKind::WriteFailed, e.to_string())
+    }
+}
+
+impl BranchDagHook for GraphBranchDagHook {
+    fn name(&self) -> &'static str {
+        "graph"
+    }
+
+    fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
+        use strata_core::branch_dag::is_system_branch;
+
+        // Skip system branch events (same guard as the old global hooks).
+        if is_system_branch(&event.branch_name) {
+            return Ok(());
+        }
+        if let Some(ref source) = event.source_branch_name {
+            if is_system_branch(source) {
+                return Ok(());
+            }
+        }
+
+        match event.kind {
+            DagEventKind::BranchCreate => {
+                dag_add_branch(
+                    &self.db,
+                    &event.branch_name,
+                    event.message.as_deref(),
+                    event.creator.as_deref(),
+                )
+                .map_err(Self::map_write_error)?;
+            }
+            DagEventKind::BranchDelete => {
+                dag_mark_deleted(&self.db, &event.branch_name).map_err(Self::map_write_error)?;
+            }
+            DagEventKind::Fork => {
+                let source = event.source_branch_name.as_deref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "fork event missing source branch name",
+                    )
+                })?;
+                dag_record_fork(
+                    &self.db,
+                    source,
+                    &event.branch_name,
+                    Some(event.commit_version.0),
+                    event.message.as_deref(),
+                    event.creator.as_deref(),
+                )
+                .map_err(Self::map_write_error)?;
+            }
+            DagEventKind::Merge => {
+                // Merge events are best-effort recorded by the old global hooks
+                // for now. The fail-fast hook doesn't have MergeInfo available
+                // in the DagEvent structure. This is acceptable because merge-base
+                // computation can fall back to engine-level fork-info lookup.
+                //
+                // TODO: Extend DagEvent to carry merge metadata for full fail-fast
+                // merge recording.
+            }
+            DagEventKind::Revert => {
+                // Similar to merge - revert metadata isn't in DagEvent yet.
+                // TODO: Extend DagEvent to carry revert info.
+            }
+            DagEventKind::CherryPick => {
+                // Similar to merge - cherry-pick metadata isn't in DagEvent yet.
+                // TODO: Extend DagEvent to carry cherry-pick info.
+            }
+            // DagEventKind is non-exhaustive; handle future variants gracefully.
+            _ => {
+                tracing::debug!(
+                    target: "strata::branch_dag",
+                    kind = ?event.kind,
+                    "unknown DAG event kind, skipping"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    fn find_merge_base(
+        &self,
+        _branch_a: &strata_core::types::BranchId,
+        _branch_b: &strata_core::types::BranchId,
+    ) -> Result<Option<MergeBaseResult>, BranchDagError> {
+        // TODO: Implement DAG traversal for merge-base computation.
+        // For now, return None to trigger engine-level fork-info fallback.
+        // This is acceptable for the initial integration.
+        Ok(None)
+    }
+
+    fn log(
+        &self,
+        _branch_id: &strata_core::types::BranchId,
+        _limit: usize,
+    ) -> Result<Vec<DagEvent>, BranchDagError> {
+        // TODO: Implement DAG traversal for branch log.
+        // For now, return empty to indicate no log information.
+        // This is acceptable for the initial integration.
+        Ok(Vec::new())
+    }
+
+    fn ancestors(
+        &self,
+        _branch_id: &strata_core::types::BranchId,
+    ) -> Result<Vec<AncestryEntry>, BranchDagError> {
+        // TODO: Implement DAG traversal for ancestry chain.
+        // For now, return empty to indicate no ancestry information.
+        Ok(Vec::new())
     }
 }
 

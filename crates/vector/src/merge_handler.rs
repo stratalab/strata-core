@@ -73,7 +73,7 @@ pub fn register_vector_semantic_merge() {
 /// Walks every space the SpaceIndex knows about for the source and
 /// target branches (a collection in `tenant_a` on source vs the same
 /// name in `tenant_b` on target is unrelated and not validated).
-fn vector_precheck_fn(db: &Arc<Database>, source: BranchId, target: BranchId) -> StrataResult<()> {
+pub fn vector_precheck_fn(db: &Arc<Database>, source: BranchId, target: BranchId) -> StrataResult<()> {
     let space_index = strata_engine::SpaceIndex::new(db.clone());
     let source_spaces: Vec<String> = space_index.list(source)?;
     let target_spaces: Vec<String> = space_index.list(target)?;
@@ -193,7 +193,7 @@ fn decode_configs_for_space(
 /// branch open / full recovery will catch up via the existing recovery
 /// path. The merge `MergeInfo` returned to the caller still reflects
 /// success.
-fn vector_post_commit_fn(
+pub fn vector_post_commit_fn(
     db: &Arc<Database>,
     source: BranchId,
     target: BranchId,

@@ -367,48 +367,14 @@ impl Database {
         // populated subsystems vec for `Drop for Database` to freeze.
         db.set_subsystems(subsystems);
 
-        // Phase 2: Initialize — wire up hooks, observers, and handlers.
-        // This is write-free and runs for all modes.
-        {
-            let subsystems_ref = db.installed_subsystems();
-            for subsystem in subsystems_ref.iter() {
-                info!(
-                    target: "strata::recovery",
-                    subsystem = subsystem.name(),
-                    "Running subsystem initialize"
-                );
-                if let Err(e) = subsystem.initialize(&db) {
-                    drop(registry);
-                    return Err(e);
-                }
-            }
-        }
+        // NOTE: Lifecycle hooks (initialize, bootstrap) and registry insertion
+        // are handled by callers. This function only does recovery + subsystem
+        // installation. This allows callers to perform additional setup
+        // (e.g., default branch creation) before registry publication.
 
-        // Phase 3: Bootstrap — create initial state (primary/cache only).
-        // Followers read state from primary; they don't create it.
-        if !db.is_follower() {
-            let subsystems_ref = db.installed_subsystems();
-            for subsystem in subsystems_ref.iter() {
-                info!(
-                    target: "strata::recovery",
-                    subsystem = subsystem.name(),
-                    "Running subsystem bootstrap"
-                );
-                if let Err(e) = subsystem.bootstrap(&db) {
-                    drop(registry);
-                    return Err(e);
-                }
-            }
-        }
-
-        // Mark lifecycle complete before registry publication.
-        // This prevents re-running hooks on instance reuse.
-        db.set_lifecycle_complete();
-
-        // Publish the fully-initialized Arc. Concurrent openers that were
-        // waiting on the mutex will now see a Database with all lifecycle
-        // phases (recover → initialize → bootstrap) complete.
-        registry.insert(canonical_path, Arc::downgrade(&db));
+        // Drop the registry lock before returning — caller will re-acquire
+        // when ready to insert.
+        drop(registry);
 
         Ok(db)
     }
@@ -440,20 +406,35 @@ impl Database {
     /// canonical open path — both `DatabaseBuilder` and the `Database::open`
     /// convenience API route through here, so the supplied `subsystems` list
     /// is the sole driver of recovery.
-    ///
-    /// All the heavy lifting (directory prep, registry dedup, WAL replay,
-    /// `repair_space_metadata_on_open`, the `subsystem.recover(&db)` loop,
-    /// `set_subsystems`, and the final registry insert) happens inside
-    /// `acquire_primary_db` while it holds the `OPEN_DATABASES` mutex, so
-    /// concurrent openers for the same path cannot observe a half-
-    /// initialized instance.
     pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
         path: P,
         durability_mode: DurabilityMode,
         cfg: StrataConfig,
         subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
     ) -> StrataResult<Arc<Self>> {
-        Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems)
+        // Step 1: Recovery + subsystem installation (also creates directory)
+        let db = Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems)?;
+
+        // If lifecycle is already complete, this is an existing database from
+        // the registry — return it directly without re-running lifecycle hooks.
+        if db.is_lifecycle_complete() {
+            return Ok(db);
+        }
+
+        // Canonicalize AFTER acquire_primary_db because it creates the directory.
+        let canonical_path = path.as_ref().canonicalize().map_err(StrataError::from)?;
+
+        // Step 2: Lifecycle hooks (initialize + bootstrap)
+        Self::run_lifecycle_hooks(&db, true)?;
+
+        // Step 3: Mark lifecycle complete and insert into registry
+        db.set_lifecycle_complete();
+        {
+            let mut registry = super::OPEN_DATABASES.lock();
+            registry.insert(canonical_path, Arc::downgrade(&db));
+        }
+
+        Ok(db)
     }
 
     /// Repair space metadata at open time by reconciling registered metadata
@@ -645,11 +626,17 @@ impl Database {
         canonical_path: PathBuf,
         cfg: StrataConfig,
     ) -> StrataResult<Arc<Self>> {
-        Self::open_follower_internal_with_subsystems(
+        let db = Self::open_follower_internal_with_subsystems(
             canonical_path,
             cfg,
             vec![Box::new(crate::search::SearchSubsystem)],
-        )
+        )?;
+
+        // Lifecycle hooks: initialize only (no bootstrap for followers)
+        Self::run_lifecycle_hooks(&db, false)?;
+        db.set_lifecycle_complete();
+
+        Ok(db)
     }
 
     /// Open a follower database with an explicit subsystem list.
@@ -689,25 +676,8 @@ impl Database {
 
         db.set_subsystems(subsystems);
 
-        // Phase 2: Initialize — wire up hooks, observers, and handlers.
-        // This is write-free and runs for all modes including followers.
-        {
-            let subsystems_ref = db.installed_subsystems();
-            for subsystem in subsystems_ref.iter() {
-                info!(
-                    target: "strata::recovery",
-                    subsystem = subsystem.name(),
-                    "Running follower subsystem initialize"
-                );
-                subsystem.initialize(&db)?;
-            }
-        }
-
-        // Phase 3: Bootstrap is skipped for followers.
-        // Followers read state from the primary; they don't create it.
-
-        // Mark lifecycle complete
-        db.set_lifecycle_complete();
+        // NOTE: Lifecycle hooks (initialize) and lifecycle_complete are handled
+        // by callers. Followers skip bootstrap since they read from primary.
 
         Ok(db)
     }
@@ -1250,8 +1220,7 @@ impl Database {
 
         let durability_mode = cfg.durability_mode()?;
 
-        // Create new database — acquire_primary_db will insert into registry
-        // AFTER recover() completes
+        // Step 1: Recovery + subsystem installation (no registry insert yet)
         let db = Self::acquire_primary_db(
             &canonical_path,
             durability_mode,
@@ -1259,28 +1228,21 @@ impl Database {
             spec.subsystems,
         )?;
 
-        // Run lifecycle hooks (initialize and bootstrap)
-        // If this fails, the DB is in registry in a partial state.
-        // We need to remove it from registry on failure.
-        if let Err(e) = Self::run_lifecycle_hooks(&db, true) {
-            // Remove from registry on lifecycle failure
-            let mut registry = super::OPEN_DATABASES.lock();
-            registry.remove(&canonical_path);
-            return Err(e);
-        }
+        // Step 2: Lifecycle hooks (initialize and bootstrap)
+        Self::run_lifecycle_hooks(&db, true)?;
 
-        // Ensure default branch if specified
+        // Step 3: Ensure default branch if specified
         if let Some(branch_name) = &spec.default_branch {
-            if let Err(e) = Self::ensure_default_branch(&db, branch_name) {
-                // Remove from registry on failure
-                let mut registry = super::OPEN_DATABASES.lock();
-                registry.remove(&canonical_path);
-                return Err(e);
-            }
+            Self::ensure_default_branch(&db, branch_name)?;
         }
 
-        // Mark lifecycle complete AFTER all hooks succeed
+        // Step 4: Mark lifecycle complete and insert into registry
+        // This is the ONLY point where the DB becomes visible to other openers.
         db.set_lifecycle_complete();
+        {
+            let mut registry = super::OPEN_DATABASES.lock();
+            registry.insert(canonical_path, Arc::downgrade(&db));
+        }
 
         Ok(db)
     }
@@ -1356,13 +1318,10 @@ impl Database {
         )?;
 
         // Run lifecycle hooks (initialize only, no bootstrap for followers)
-        if let Err(e) = Self::run_lifecycle_hooks(&db, false) {
-            let mut registry = super::OPEN_DATABASES.lock();
-            registry.remove(&canonical_path);
-            return Err(e);
-        }
+        Self::run_lifecycle_hooks(&db, false)?;
 
         // Mark lifecycle complete
+        // Note: Followers are NOT inserted into registry
         db.set_lifecycle_complete();
 
         Ok(db)

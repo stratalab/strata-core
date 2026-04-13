@@ -54,13 +54,17 @@ fn ensure_test_handlers_registered() {
     });
 }
 
-/// Fresh `DatabaseBuilder` wired with the two production subsystems
-/// (`VectorSubsystem` + `SearchSubsystem`), used by all test-helper open
-/// paths so integration tests exercise the same recovery pipeline the
-/// executor uses in production.
+/// Fresh `DatabaseBuilder` wired with the production subsystems
+/// (`GraphSubsystem` + `VectorSubsystem` + `SearchSubsystem`), used by
+/// all test-helper open paths so integration tests exercise the same
+/// recovery pipeline the executor uses in production.
+///
+/// `GraphSubsystem` must be first because its `initialize()` method
+/// registers the per-database graph merge handler and DAG hook.
 fn test_db_builder() -> DatabaseBuilder {
     ensure_test_handlers_registered();
     DatabaseBuilder::new()
+        .with_subsystem(strata_graph::GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
 }

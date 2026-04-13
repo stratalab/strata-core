@@ -476,6 +476,20 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         recover_vector_state(db)
     }
 
+    fn initialize(
+        &self,
+        db: &std::sync::Arc<strata_engine::Database>,
+    ) -> strata_core::StrataResult<()> {
+        // Register vector merge handlers with the per-database registry.
+        // This enables dimension/metric validation during merge precheck
+        // and per-collection HNSW rebuilds after merge commit.
+        db.merge_registry().register_vector(
+            crate::merge_handler::vector_precheck_fn,
+            crate::merge_handler::vector_post_commit_fn,
+        );
+        Ok(())
+    }
+
     fn freeze(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
         db.freeze_vector_heaps()
     }
