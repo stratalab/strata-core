@@ -118,32 +118,18 @@ pub use branch_ops::{
     ThreeWayDiffEntry, ThreeWayDiffResult, TypedEntries, TypedEntryCell,
 };
 
-// Registration hook for the graph semantic merge. The graph crate
-// registers its `compute_graph_merge` adapter here at startup; engine's
-// `GraphMergeHandler::plan` dispatches to it.
+// Graph and vector merge handler types. Registration happens via per-database
+// `MergeHandlerRegistry` during subsystem `initialize()`.
 pub use branch_ops::primitive_merge::{
-    register_graph_merge_plan, GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan,
+    GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan, VectorMergePostCommitFn,
+    VectorMergePrecheckFn,
 };
 
-// Registration hook for vector semantic merge. The vector crate registers
-// its precheck (dimension/metric mismatch detection) and post-commit
-// (per-collection HNSW rebuild) implementations here at startup;
-// engine's `VectorMergeHandler` dispatches to them.
-pub use branch_ops::primitive_merge::{
-    register_vector_merge, VectorMergePostCommitFn, VectorMergePrecheckFn,
-};
-
-// Registration hook for branch DAG events. The graph crate registers its
-// `dag_record_*` adapters here at startup; engine functions
-// (`fork_branch`, `merge_branches`, `revert_version_range`,
-// `cherry_pick_*`, `BranchIndex::create_branch` / `delete_branch`,
-// `bundle::import_branch`) dispatch to them. This is what makes
-// engine-direct callers (tests, internal subsystems) record DAG events
-// uniformly with executor-driven callers — no one can bypass the DAG by
-// reaching into the engine API.
+// Branch DAG hook types (legacy). The canonical path is now per-database
+// `BranchDagHook` installed by `GraphSubsystem::initialize()`.
 pub use branch_ops::{
-    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
-    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
+    BranchCherryPickHook, BranchCreateHook, BranchDagHooks, BranchDeleteHook, BranchForkHook,
+    BranchMergeHook, BranchRevertHook,
 };
 
 // Re-export branch_dag types from core at crate root for convenience

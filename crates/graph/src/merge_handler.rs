@@ -2,11 +2,10 @@
 //!
 //! The graph crate's `merge` module is pure (no engine dispatch). This
 //! module wires the algorithm into the engine's `PrimitiveMergeHandler`
-//! dispatch via a registration callback. The engine has a slot for a
-//! "graph merge plan function" (`GraphMergePlanFn`); calling
-//! `register_graph_semantic_merge` populates that slot with the function
-//! defined here. Engine's `GraphMergeHandler::plan` then dispatches to
-//! it when called.
+//! dispatch via per-database registration. `GraphSubsystem::initialize()`
+//! calls `db.merge_registry().register_graph(graph_plan_fn)` to populate
+//! the per-database slot. Engine's `GraphMergeHandler::plan` then dispatches
+//! to it when called.
 //!
 //! ## Why this layering
 //!
@@ -14,14 +13,6 @@
 //! depends on engine — adding the reverse edge would be a cycle). The
 //! function-pointer registration pattern keeps graph-internal types out
 //! of the engine crate's public API.
-//!
-//! ## Lifecycle
-//!
-//! Test fixtures and application startup must call
-//! `register_graph_semantic_merge` before any `merge_branches` invocation.
-//! It is idempotent (the engine's `OnceCell`-backed slot ignores
-//! subsequent calls). If never called, the engine falls back to a
-//! tactical refusal of divergent graph merges.
 
 use std::collections::HashMap;
 
@@ -29,22 +20,11 @@ use strata_core::types::TypeTag;
 use strata_core::value::Value;
 use strata_core::{StrataError, StrataResult};
 use strata_engine::{
-    register_graph_merge_plan, ConflictEntry, MergeAction, MergeActionKind, MergePlanCtx,
-    PrimitiveMergePlan,
+    ConflictEntry, MergeAction, MergeActionKind, MergePlanCtx, PrimitiveMergePlan,
 };
 
 use crate::merge::{self, GraphMergeConflict};
 use crate::types::{EdgeData, NodeData};
-
-/// Register the graph semantic merge implementation with the engine.
-///
-/// Idempotent: the engine's `OnceCell` slot only accepts the first call.
-/// Test fixtures and application startup should call this exactly once,
-/// before any `merge_branches` call. The standard test fixtures register
-/// it alongside `register_vector_semantic_merge` and the branch DAG hook.
-pub fn register_graph_semantic_merge() {
-    register_graph_merge_plan(graph_plan_fn);
-}
 
 /// The function the engine's `GraphMergeHandler::plan` dispatches to.
 ///

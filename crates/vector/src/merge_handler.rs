@@ -2,19 +2,18 @@
 //!
 //! The vector crate cannot be a direct dependency of the engine crate
 //! (vector already depends on engine — adding the reverse edge would be a
-//! cycle). The engine has two callback slots for vector merge:
-//! `VectorMergePrecheckFn` and `VectorMergePostCommitFn`. Calling
-//! `register_vector_merge` populates both slots with the functions
-//! defined here. Engine's `VectorMergeHandler` then dispatches to them
-//! during `merge_branches`.
+//! cycle). The engine has two callback slots for vector merge in its
+//! per-database `MergeHandlerRegistry`: `VectorMergePrecheckFn` and
+//! `VectorMergePostCommitFn`. `VectorSubsystem::initialize()` registers
+//! both via `db.merge_registry().register_vector()`. Engine's
+//! `VectorMergeHandler` then dispatches to them during `merge_branches`.
 //!
 //! ## Why this layering
 //!
-//! Mirrors the `register_graph_semantic_merge` function-pointer
-//! registration pattern. Avoids exposing vector-internal types
-//! (`CollectionRecord`, `VectorConfig`) through the engine crate's public
-//! API while still letting per-primitive merge logic live in the
-//! primitive's own crate.
+//! Mirrors the graph semantic merge function-pointer registration pattern.
+//! Avoids exposing vector-internal types (`CollectionRecord`, `VectorConfig`)
+//! through the engine crate's public API while still letting per-primitive
+//! merge logic live in the primitive's own crate.
 //!
 //! ## What runs here
 //!
@@ -32,14 +31,6 @@
 //!   are left alone — this is the per-collection rebuild that replaces
 //!   the legacy "rebuild every collection in the branch on every merge"
 //!   behavior of `VectorRefreshHook::post_merge_reload`.
-//!
-//! ## Lifecycle
-//!
-//! Test fixtures and application startup must call
-//! `register_vector_merge` before any `merge_branches` invocation. The
-//! standard test fixtures register it alongside
-//! `register_graph_semantic_merge` and the branch DAG hook. Idempotent —
-//! the engine's `OnceCell`-backed slot ignores subsequent calls.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -49,18 +40,9 @@ use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::{StrataError, StrataResult};
-use strata_engine::{register_vector_merge, Database};
+use strata_engine::Database;
 
 use crate::{CollectionRecord, VectorStore};
-
-/// Register the vector semantic merge implementation with the engine.
-///
-/// Idempotent: the engine's `OnceCell` slot only accepts the first call.
-/// Test fixtures and application startup should call this exactly once,
-/// before any `merge_branches` call.
-pub fn register_vector_semantic_merge() {
-    register_vector_merge(vector_precheck_fn, vector_post_commit_fn);
-}
 
 /// Precheck callback: refuse merges that combine collections with
 /// incompatible configurations.
