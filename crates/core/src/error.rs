@@ -1425,12 +1425,38 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_not_found(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::NotFound { .. }
-                | StrataError::BranchNotFound { .. }
-                | StrataError::PathNotFound { .. }
-        )
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. } => true,
+
+            StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_not_found()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a conflict error (temporal failure)
@@ -1446,12 +1472,38 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_conflict(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::Conflict { .. }
-                | StrataError::VersionConflict { .. }
-                | StrataError::WriteConflict { .. }
-        )
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_conflict()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a wrong type error
@@ -1474,12 +1526,38 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_transaction_error(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::TransactionAborted { .. }
-                | StrataError::TransactionTimeout { .. }
-                | StrataError::TransactionNotActive { .. }
-        )
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_transaction_error()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a validation error
@@ -1497,12 +1575,38 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_validation_error(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::InvalidOperation { .. }
-                | StrataError::InvalidInput { .. }
-                | StrataError::DimensionMismatch { .. }
-        )
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_validation_error()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a storage error
@@ -1518,12 +1622,38 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_storage_error(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::Storage { .. }
-                | StrataError::Serialization { .. }
-                | StrataError::Corruption { .. }
-        )
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_storage_error()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this error is retryable
@@ -1549,13 +1679,38 @@ impl StrataError {
     /// # }
     /// ```
     pub fn is_retryable(&self) -> bool {
-        matches!(
-            self,
+        match self {
             StrataError::Conflict { .. }
-                | StrataError::VersionConflict { .. }
-                | StrataError::WriteConflict { .. }
-                | StrataError::TransactionAborted { .. }
-        )
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::TransactionAborted { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_retryable()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a serious/unrecoverable error
@@ -1576,10 +1731,37 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_serious(&self) -> bool {
-        matches!(
-            self,
-            StrataError::Corruption { .. } | StrataError::Internal { .. }
-        )
+        match self {
+            StrataError::Corruption { .. } | StrataError::Internal { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_serious()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a resource error
