@@ -15,30 +15,6 @@ use crate::types::{BranchId, BranchInfo, VersionedBranchInfo};
 use crate::{Error, Output, Result};
 
 // =============================================================================
-// Audit Log Helper
-// =============================================================================
-
-/// Emit an audit event on the `_system_` branch. Best-effort — failures are
-/// logged, never propagated.
-fn emit_audit_event(p: &Arc<Primitives>, event_type: &str, payload: serde_json::Value) {
-    let system_branch_id = strata_engine::primitives::branch::resolve_branch_name("_system_");
-    // Convert serde_json::Value (Object) to strata_core::Value (Object).
-    // Event payload must be a Value::Object for event log validation.
-    let core_value: strata_core::value::Value = payload.into();
-    if let Err(e) = p
-        .event
-        .append(&system_branch_id, "default", event_type, core_value)
-    {
-        tracing::warn!(
-            target: "strata::audit",
-            event_type,
-            error = %e,
-            "Failed to emit audit event"
-        );
-    }
-}
-
-// =============================================================================
 // Conversion Helpers
 // =============================================================================
 
@@ -157,14 +133,6 @@ pub fn branch_create(
         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
     })?;
 
-    emit_audit_event(
-        p,
-        "branch.create",
-        serde_json::json!({
-            "branch": branch_str,
-        }),
-    );
-
     Ok(Output::BranchWithVersion {
         info: metadata_to_branch_info(&metadata),
         version: metadata.version,
@@ -259,14 +227,6 @@ pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         }
     }
 
-    emit_audit_event(
-        p,
-        "branch.delete",
-        serde_json::json!({
-            "branch": branch.as_str(),
-        }),
-    );
-
     Ok(Output::Unit)
 }
 
@@ -308,16 +268,6 @@ pub fn branch_fork(
             reason: e.to_string(),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
-
-    emit_audit_event(
-        p,
-        "branch.fork",
-        serde_json::json!({
-            "parent": source,
-            "child": destination,
-            "fork_version": info.fork_version,
-        }),
-    );
 
     Ok(Output::BranchForked(info))
 }
@@ -381,24 +331,6 @@ pub fn branch_merge(
             reason: e.to_string(),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
-
-    let strategy_str = match strategy {
-        strata_engine::MergeStrategy::LastWriterWins => "last_writer_wins",
-        strata_engine::MergeStrategy::Strict => "strict",
-    };
-
-    emit_audit_event(
-        p,
-        "branch.merge",
-        serde_json::json!({
-            "source": source,
-            "target": target,
-            "strategy": strategy_str,
-            "keys_applied": info.keys_applied,
-            "keys_deleted": info.keys_deleted,
-            "merge_version": info.merge_version,
-        }),
-    );
 
     Ok(Output::BranchMerged(info))
 }
@@ -469,17 +401,6 @@ pub fn branch_revert(
                 hint: None,
             })?;
 
-    emit_audit_event(
-        p,
-        "branch.revert",
-        serde_json::json!({
-            "branch": branch,
-            "from_version": from_version,
-            "to_version": to_version,
-            "keys_reverted": info.keys_reverted,
-        }),
-    );
-
     Ok(Output::BranchReverted(info))
 }
 
@@ -517,17 +438,6 @@ pub fn branch_cherry_pick(
         reason: e.to_string(),
         hint: None,
     })?;
-
-    emit_audit_event(
-        p,
-        "branch.cherry_pick",
-        serde_json::json!({
-            "source": source,
-            "target": target,
-            "keys_applied": info.keys_applied,
-            "keys_deleted": info.keys_deleted,
-        }),
-    );
 
     Ok(Output::BranchCherryPicked(info))
 }
@@ -617,17 +527,6 @@ pub fn tag_create(
         hint: None,
     })?;
 
-    emit_audit_event(
-        p,
-        "branch.tag",
-        serde_json::json!({
-            "branch": branch,
-            "tag": name,
-            "version": info.version,
-            "message": message,
-        }),
-    );
-
     Ok(Output::TagCreated(info))
 }
 
@@ -692,16 +591,6 @@ pub fn note_add(
         reason: e.to_string(),
         hint: None,
     })?;
-
-    emit_audit_event(
-        p,
-        "branch.note",
-        serde_json::json!({
-            "branch": branch,
-            "version": version,
-            "message": message,
-        }),
-    );
 
     Ok(Output::NoteAdded(note))
 }

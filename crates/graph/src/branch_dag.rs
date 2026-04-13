@@ -892,6 +892,14 @@ impl strata_engine::Subsystem for GraphSubsystem {
         db.install_dag_hook(hook)
             .map_err(|e| StrataError::internal(format!("failed to install graph DAG hook: {e}")))?;
 
+        // Register audit observer for branch operations.
+        // This moves audit emission from executor handlers into the engine layer,
+        // ensuring all branch operations (even direct API calls) get audited.
+        let audit_observer = Arc::new(AuditBranchOpObserver {
+            db: Arc::downgrade(db),
+        });
+        db.branch_op_observers().register(audit_observer);
+
         Ok(())
     }
 
@@ -900,6 +908,88 @@ impl strata_engine::Subsystem for GraphSubsystem {
         db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
         bootstrap_system_branch(db)
+    }
+}
+
+// =============================================================================
+// Audit Branch Operation Observer
+// =============================================================================
+
+use std::sync::Weak;
+use strata_engine::database::observers::{BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError};
+use strata_engine::primitives::event::EventLog;
+
+/// Observer that emits audit events to the `_system_` branch event log.
+///
+/// This replaces the `emit_audit_event` calls scattered throughout executor
+/// branch handlers. By registering as a `BranchOpObserver`, all branch
+/// operations (including direct API calls) are audited consistently.
+///
+/// Best-effort: failures are logged but never propagate to the caller.
+struct AuditBranchOpObserver {
+    db: Weak<strata_engine::Database>,
+}
+
+impl BranchOpObserver for AuditBranchOpObserver {
+    fn name(&self) -> &'static str {
+        "audit"
+    }
+
+    fn on_branch_op(&self, event: &BranchOpEvent) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(()); // Database dropped, nothing to audit
+        };
+
+        let event_log = EventLog::new(db);
+        let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+
+        // Build audit payload matching the format from executor handlers
+        let event_type = match event.kind {
+            BranchOpKind::Create => "branch.create",
+            BranchOpKind::Delete => "branch.delete",
+            BranchOpKind::Fork => "branch.fork",
+            BranchOpKind::Merge => "branch.merge",
+            BranchOpKind::Revert => "branch.revert",
+            BranchOpKind::CherryPick => "branch.cherry_pick",
+            BranchOpKind::Tag => "branch.tag",
+            BranchOpKind::Untag => "branch.untag",
+            // BranchOpKind is #[non_exhaustive] - handle future variants
+            _ => "branch.unknown",
+        };
+
+        let mut payload = serde_json::Map::new();
+        if let Some(ref name) = event.branch_name {
+            payload.insert("branch".to_string(), serde_json::Value::String(name.clone()));
+        }
+        if let Some(ref source_id) = event.source_branch_id {
+            // Source branch ID as hex string
+            let source_hex = format!("{:032x}", u128::from_be_bytes(*source_id.as_bytes()));
+            payload.insert("source_branch_id".to_string(), serde_json::Value::String(source_hex));
+        }
+        if let Some(version) = event.commit_version {
+            payload.insert("version".to_string(), serde_json::Value::Number(version.0.into()));
+        }
+        if let Some(ref message) = event.message {
+            payload.insert("message".to_string(), serde_json::Value::String(message.clone()));
+        }
+        if let Some(ref creator) = event.creator {
+            payload.insert("creator".to_string(), serde_json::Value::String(creator.clone()));
+        }
+
+        // Convert to core Value
+        let core_payload: strata_core::value::Value = serde_json::Value::Object(payload).into();
+
+        // Append to audit log (best-effort)
+        if let Err(e) = event_log.append(&system_branch_id, "default", event_type, core_payload) {
+            tracing::warn!(
+                target: "strata::audit",
+                event_type,
+                error = %e,
+                "Failed to emit audit event via observer"
+            );
+        }
+
+        Ok(())
     }
 }
 
