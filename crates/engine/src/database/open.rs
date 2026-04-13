@@ -427,10 +427,12 @@ impl Database {
         // Step 2: Lifecycle hooks (initialize + bootstrap)
         Self::run_lifecycle_hooks(&db, true)?;
 
-        // Step 3: Mark lifecycle complete and insert into registry
-        db.set_lifecycle_complete();
+        // Step 3: Mark lifecycle complete and insert into registry ATOMICALLY.
+        // Both operations happen under the same lock to prevent a race where
+        // another thread sees lifecycle_complete but DB isn't in registry yet.
         {
             let mut registry = super::OPEN_DATABASES.lock();
+            db.set_lifecycle_complete();
             registry.insert(canonical_path, Arc::downgrade(&db));
         }
 
@@ -1242,11 +1244,12 @@ impl Database {
             Self::ensure_default_branch(&db, branch_name)?;
         }
 
-        // Step 4: Mark lifecycle complete and insert into registry
-        // This is the ONLY point where the DB becomes visible to other openers.
-        db.set_lifecycle_complete();
+        // Step 4: Mark lifecycle complete and insert into registry ATOMICALLY.
+        // Both operations happen under the same lock to prevent a race where
+        // another thread sees lifecycle_complete but DB isn't in registry yet.
         {
             let mut registry = super::OPEN_DATABASES.lock();
+            db.set_lifecycle_complete();
             registry.insert(canonical_path, Arc::downgrade(&db));
         }
 
