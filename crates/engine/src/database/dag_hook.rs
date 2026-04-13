@@ -208,6 +208,8 @@ pub struct DagEvent {
 
 impl DagEvent {
     /// Create a branch create event.
+    ///
+    /// Use `create()` for the simpler version without commit version.
     pub fn branch_create(
         branch_id: BranchId,
         branch_name: impl Into<String>,
@@ -225,7 +227,16 @@ impl DagEvent {
         }
     }
 
+    /// Create a simple branch create event (no commit version).
+    ///
+    /// Used by `BranchService::create()` where no commit has occurred yet.
+    pub fn create(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+        Self::branch_create(branch_id, branch_name, CommitVersion(0))
+    }
+
     /// Create a branch delete event.
+    ///
+    /// Use `delete()` for the simpler version without commit version.
     pub fn branch_delete(
         branch_id: BranchId,
         branch_name: impl Into<String>,
@@ -241,6 +252,13 @@ impl DagEvent {
             message: None,
             creator: None,
         }
+    }
+
+    /// Create a simple branch delete event (no commit version).
+    ///
+    /// Used by `BranchService::delete()`.
+    pub fn delete(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+        Self::branch_delete(branch_id, branch_name, CommitVersion(0))
     }
 
     /// Create a fork event.
@@ -273,6 +291,46 @@ impl DagEvent {
     ) -> Self {
         Self {
             kind: DagEventKind::Merge,
+            branch_id: target_branch_id,
+            branch_name: target_branch_name.into(),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version,
+            message: None,
+            creator: None,
+        }
+    }
+
+    /// Create a revert event.
+    pub fn revert(
+        branch_id: BranchId,
+        branch_name: impl Into<String>,
+        from_version: CommitVersion,
+        to_version: CommitVersion,
+        commit_version: CommitVersion,
+    ) -> Self {
+        Self {
+            kind: DagEventKind::Revert,
+            branch_id,
+            branch_name: branch_name.into(),
+            source_branch_id: None,
+            source_branch_name: Some(format!("v{}..v{}", from_version.0, to_version.0)),
+            commit_version,
+            message: None,
+            creator: None,
+        }
+    }
+
+    /// Create a cherry-pick event.
+    pub fn cherry_pick(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        commit_version: CommitVersion,
+    ) -> Self {
+        Self {
+            kind: DagEventKind::CherryPick,
             branch_id: target_branch_id,
             branch_name: target_branch_name.into(),
             source_branch_id: Some(source_branch_id),

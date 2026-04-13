@@ -588,6 +588,9 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_complete: AtomicBool::new(false),
         });
 
         Ok(db)
@@ -928,6 +931,9 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_complete: AtomicBool::new(false),
         });
 
         // Trigger compaction if any levels have accumulated segments from
@@ -1035,6 +1041,9 @@ impl Database {
             subsystems: parking_lot::RwLock::new(Vec::new()),
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
+            commit_observers: super::CommitObserverRegistry::new(),
+            replay_observers: super::ReplayObserverRegistry::new(),
+            lifecycle_complete: AtomicBool::new(false),
         });
 
         // Note: Ephemeral databases are NOT registered in the global registry
@@ -1110,46 +1119,163 @@ impl Database {
 
     /// Open a primary database from an `OpenSpec`.
     fn open_runtime_primary(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        use super::compat::{CompatibilitySignature, CURRENT_CODEC_ID};
+
         let data_dir = spec.path.clone();
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
+        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
 
-        // Resolve configuration
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
+        // Build compatibility signature BEFORE checking registry
+        let subsystem_names: Vec<&'static str> = spec.subsystems.iter().map(|s| s.name()).collect();
+        let requested_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Primary,
+            subsystem_names.clone(),
+            spec.config.as_ref()
+                .map(|c| c.durability_mode().unwrap_or_default())
+                .unwrap_or_default(),
+            spec.default_branch.clone(),
+        );
+
+        // Check for existing instance BEFORE writing config to disk
+        {
+            let registry = super::OPEN_DATABASES.lock();
+            if let Some(weak) = registry.get(&canonical_path) {
+                if let Some(existing_db) = weak.upgrade() {
+                    // Build signature for existing instance
+                    let existing_signature = CompatibilitySignature::from_spec(
+                        super::spec::DatabaseMode::Primary,
+                        existing_db.installed_subsystem_names(),
+                        existing_db.durability_mode,
+                        spec.default_branch.clone(), // Compare against requested default_branch
+                    );
+
+                    // Reject if incompatible
+                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
+                        return Err(StrataError::invalid_input(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
+                    }
+
+                    // Lifecycle already complete — return existing instance
+                    if existing_db.is_lifecycle_complete() {
+                        info!(
+                            target: "strata::db",
+                            path = ?canonical_path,
+                            "Returning existing database instance (lifecycle complete)"
+                        );
+                        return Ok(existing_db);
+                    }
+
+                    // Lifecycle not complete on existing instance is a bug
+                    // (should not be in registry before lifecycle completes)
+                    return Err(StrataError::internal(
+                        "existing database instance in registry but lifecycle not complete"
+                    ));
+                }
+            }
+        }
+
+        // No existing instance — proceed with creation
+        // NOW we can write config to disk
+        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
         let cfg = if let Some(cfg) = spec.config {
-            // Write supplied config to file
             cfg.write_to_file(&config_path)?;
             cfg
         } else {
-            // Read from file or create default
             config::StrataConfig::write_default_if_missing(&config_path)?;
             config::StrataConfig::from_file(&config_path)?
         };
 
         let durability_mode = cfg.durability_mode()?;
 
-        // Delegate to existing open path with subsystems
+        // Create new database — acquire_primary_db will insert into registry
+        // AFTER recover() completes
         let db = Self::acquire_primary_db(
-            &data_dir,
+            &canonical_path,
             durability_mode,
             cfg,
             spec.subsystems,
         )?;
 
-        // Run new lifecycle hooks (initialize and bootstrap)
-        Self::run_lifecycle_hooks(&db, true)?;
+        // Run lifecycle hooks (initialize and bootstrap)
+        // If this fails, the DB is in registry in a partial state.
+        // We need to remove it from registry on failure.
+        if let Err(e) = Self::run_lifecycle_hooks(&db, true) {
+            // Remove from registry on lifecycle failure
+            let mut registry = super::OPEN_DATABASES.lock();
+            registry.remove(&canonical_path);
+            return Err(e);
+        }
 
         // Ensure default branch if specified
         if let Some(branch_name) = &spec.default_branch {
-            Self::ensure_default_branch(&db, branch_name)?;
+            if let Err(e) = Self::ensure_default_branch(&db, branch_name) {
+                // Remove from registry on failure
+                let mut registry = super::OPEN_DATABASES.lock();
+                registry.remove(&canonical_path);
+                return Err(e);
+            }
         }
+
+        // Mark lifecycle complete AFTER all hooks succeed
+        db.set_lifecycle_complete();
 
         Ok(db)
     }
 
     /// Open a follower database from an `OpenSpec`.
     fn open_runtime_follower(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        use super::compat::CompatibilitySignature;
+
         let data_dir = spec.path.clone();
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
+
+        // Build compatibility signature
+        let subsystem_names: Vec<&'static str> = spec.subsystems.iter().map(|s| s.name()).collect();
+        let requested_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Follower,
+            subsystem_names.clone(),
+            spec.config.as_ref()
+                .map(|c| c.durability_mode().unwrap_or_default())
+                .unwrap_or_default(),
+            spec.default_branch.clone(),
+        );
+
+        // Check for existing instance
+        {
+            let registry = super::OPEN_DATABASES.lock();
+            if let Some(weak) = registry.get(&canonical_path) {
+                if let Some(existing_db) = weak.upgrade() {
+                    let existing_signature = CompatibilitySignature::from_spec(
+                        super::spec::DatabaseMode::Follower,
+                        existing_db.installed_subsystem_names(),
+                        existing_db.durability_mode,
+                        spec.default_branch.clone(),
+                    );
+
+                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
+                        return Err(StrataError::invalid_input(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
+                    }
+
+                    if existing_db.is_lifecycle_complete() {
+                        info!(
+                            target: "strata::db",
+                            path = ?canonical_path,
+                            "Returning existing follower instance (lifecycle complete)"
+                        );
+                        return Ok(existing_db);
+                    }
+
+                    return Err(StrataError::internal(
+                        "existing database instance in registry but lifecycle not complete"
+                    ));
+                }
+            }
+        }
 
         // Resolve configuration
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
@@ -1163,15 +1289,20 @@ impl Database {
 
         // Delegate to existing follower open path with subsystems
         let db = Self::open_follower_internal_with_subsystems(
-            canonical_path,
+            canonical_path.clone(),
             cfg,
             spec.subsystems,
         )?;
 
-        // Run new lifecycle hooks (initialize only, no bootstrap for followers)
-        Self::run_lifecycle_hooks(&db, false)?;
+        // Run lifecycle hooks (initialize only, no bootstrap for followers)
+        if let Err(e) = Self::run_lifecycle_hooks(&db, false) {
+            let mut registry = super::OPEN_DATABASES.lock();
+            registry.remove(&canonical_path);
+            return Err(e);
+        }
 
-        // Followers do not ensure default branch (read-only)
+        // Mark lifecycle complete
+        db.set_lifecycle_complete();
 
         Ok(db)
     }
@@ -1179,6 +1310,7 @@ impl Database {
     /// Open a cache database from an `OpenSpec`.
     fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
         // Create ephemeral database (config is applied internally by cache())
+        // Cache databases are not in the registry, so no reuse check needed.
         let db = Self::cache()?;
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
@@ -1196,13 +1328,16 @@ impl Database {
         }
         db.set_subsystems(spec.subsystems);
 
-        // Run new lifecycle hooks (initialize and bootstrap)
+        // Run lifecycle hooks (initialize and bootstrap)
         Self::run_lifecycle_hooks(&db, true)?;
 
         // Ensure default branch if specified
         if let Some(branch_name) = &spec.default_branch {
             Self::ensure_default_branch(&db, branch_name)?;
         }
+
+        // Mark lifecycle complete
+        db.set_lifecycle_complete();
 
         Ok(db)
     }

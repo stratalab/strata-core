@@ -398,6 +398,23 @@ pub struct Database {
     /// Observers are notified after branch operations complete (create, delete,
     /// fork, merge, etc.). Best-effort: failures are logged, not propagated.
     branch_op_observers: BranchOpObserverRegistry,
+
+    /// Per-database commit observer registry.
+    ///
+    /// Observers are notified after each successful WAL-backed commit.
+    /// Best-effort: failures are logged, not propagated.
+    commit_observers: CommitObserverRegistry,
+
+    /// Per-database replay observer registry.
+    ///
+    /// Observers are notified after each fully-applied follower replay record.
+    /// Best-effort: failures are logged, not propagated.
+    replay_observers: ReplayObserverRegistry,
+
+    /// Whether lifecycle hooks (initialize, bootstrap) have completed.
+    ///
+    /// Prevents re-running lifecycle on reuse via open_runtime.
+    lifecycle_complete: AtomicBool,
 }
 
 // Split impl blocks
@@ -536,6 +553,64 @@ impl Database {
     /// Used by `BranchService` to notify observers after branch operations.
     pub fn branch_op_observers(&self) -> &BranchOpObserverRegistry {
         &self.branch_op_observers
+    }
+
+    // =========================================================================
+    // Commit/Replay Observers
+    // =========================================================================
+
+    /// Get the per-database commit observer registry.
+    ///
+    /// Observers are notified after each successful WAL-backed commit.
+    pub fn commit_observers(&self) -> &CommitObserverRegistry {
+        &self.commit_observers
+    }
+
+    /// Get the per-database replay observer registry.
+    ///
+    /// Observers are notified after each fully-applied follower replay record.
+    pub fn replay_observers(&self) -> &ReplayObserverRegistry {
+        &self.replay_observers
+    }
+
+    // =========================================================================
+    // Lifecycle State
+    // =========================================================================
+
+    /// Check if lifecycle hooks have completed.
+    ///
+    /// Returns true if initialize() and bootstrap() have run successfully.
+    /// Used by open_runtime to avoid re-running lifecycle on reuse.
+    pub fn is_lifecycle_complete(&self) -> bool {
+        self.lifecycle_complete.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark lifecycle as complete.
+    ///
+    /// Called after initialize() and bootstrap() succeed.
+    pub(crate) fn set_lifecycle_complete(&self) {
+        self.lifecycle_complete.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    // =========================================================================
+    // Branch Service
+    // =========================================================================
+
+    /// Get the branch service facade for this database.
+    ///
+    /// This is the canonical entry point for all branch operations:
+    /// create, delete, fork, merge, revert, cherry-pick, tag, etc.
+    ///
+    /// ## Example
+    ///
+    /// ```text
+    /// let branches = db.branches();
+    /// branches.create("feature")?;
+    /// branches.fork("main", "experiment")?;
+    /// branches.merge("experiment", "main")?;
+    /// ```
+    pub fn branches(self: &Arc<Self>) -> BranchService {
+        BranchService::new(self.clone())
     }
 
     /// Run freeze hooks on all registered subsystems.

@@ -176,25 +176,37 @@ impl BranchService {
     }
 
     // =========================================================================
-    // Core Operations (no DAG required)
+    // Core Operations (DAG optional)
     // =========================================================================
 
     /// Create a new branch.
+    ///
+    /// Emits a DAG create event if a DAG hook is installed.
     pub fn create(&self, name: &str) -> StrataResult<BranchMetadata> {
         validate_branch_name(name)?;
+
+        let mut mutation = BranchMutation::new(&self.db);
+        let branch_id = resolve_branch_name(name);
 
         let index = BranchIndex::new(self.db.clone());
         let versioned = index.create_branch(name)?;
 
-        self.notify_branch_op(BranchOpEvent::create(
-            resolve_branch_name(name),
-            name,
-        ));
+        // Rollback: delete the branch on DAG failure
+        mutation.on_rollback_delete_branch(name, false);
+
+        // Record to DAG if hook installed (optional, not required)
+        let event = DagEvent::create(branch_id, name);
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        mutation.commit(BranchOpEvent::create(branch_id, name));
 
         Ok(versioned.value)
     }
 
     /// Delete a branch.
+    ///
+    /// Emits a DAG delete event if a DAG hook is installed.
     pub fn delete(&self, name: &str) -> StrataResult<()> {
         if name.starts_with(SYSTEM_PREFIX) {
             return Err(StrataError::invalid_input(
@@ -202,11 +214,19 @@ impl BranchService {
             ));
         }
 
-        let index = BranchIndex::new(self.db.clone());
+        let mut mutation = BranchMutation::new(&self.db);
         let branch_id = resolve_branch_name(name);
+
+        let index = BranchIndex::new(self.db.clone());
         index.delete_branch(name)?;
 
-        self.notify_branch_op(BranchOpEvent::delete(branch_id, name));
+        // Record to DAG if hook installed (optional, not required)
+        // Note: no rollback for delete - branch is already gone
+        let event = DagEvent::delete(branch_id, name);
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        mutation.commit(BranchOpEvent::delete(branch_id, name));
 
         Ok(())
     }
@@ -392,23 +412,87 @@ impl BranchService {
     }
 
     /// Revert a version range on a branch.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG revert event if a
+    /// DAG hook is installed.
     pub fn revert(
         &self,
         branch: &str,
         from_version: CommitVersion,
         to_version: CommitVersion,
     ) -> StrataResult<RevertInfo> {
-        branch_ops::revert_version_range(&self.db, branch, from_version, to_version)
+        let mut mutation = BranchMutation::new(&self.db);
+        let branch_id = resolve_branch_name(branch);
+
+        // Execute the revert
+        let info = branch_ops::revert_version_range(&self.db, branch, from_version, to_version)?;
+
+        // Record to DAG if hook installed (optional)
+        // Note: revert has no source branch, just a version range
+        let event = DagEvent::revert(
+            branch_id,
+            branch,
+            from_version,
+            to_version,
+            info.revert_version.unwrap_or(CommitVersion(0)),
+        );
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        let observer_event = BranchOpEvent {
+            kind: BranchOpKind::Revert,
+            branch_id,
+            branch_name: Some(branch.to_string()),
+            source_branch_id: None,
+            commit_version: info.revert_version,
+            message: None,
+            creator: None,
+        };
+        mutation.commit(observer_event);
+
+        Ok(info)
     }
 
     /// Cherry-pick specific keys from one branch to another.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event
+    /// if a DAG hook is installed.
     pub fn cherry_pick(
         &self,
         source: &str,
         target: &str,
         keys: &[(String, String)],
     ) -> StrataResult<CherryPickInfo> {
-        branch_ops::cherry_pick_keys(&self.db, source, target, keys)
+        let mut mutation = BranchMutation::new(&self.db);
+        let source_id = resolve_branch_name(source);
+        let target_id = resolve_branch_name(target);
+
+        // Execute the cherry-pick
+        let info = branch_ops::cherry_pick_keys(&self.db, source, target, keys)?;
+
+        // Record to DAG if hook installed (optional)
+        let event = DagEvent::cherry_pick(
+            target_id,
+            target,
+            source_id,
+            source,
+            CommitVersion(info.cherry_pick_version.unwrap_or(0)),
+        );
+        mutation.record_dag_event(&event)?;
+
+        // Commit: fires observers
+        let observer_event = BranchOpEvent {
+            kind: BranchOpKind::CherryPick,
+            branch_id: target_id,
+            branch_name: Some(target.to_string()),
+            source_branch_id: Some(source_id),
+            commit_version: info.cherry_pick_version.map(CommitVersion),
+            message: None,
+            creator: None,
+        };
+        mutation.commit(observer_event);
+
+        Ok(info)
     }
 
     // =========================================================================
