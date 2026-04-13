@@ -39,6 +39,7 @@ pub use database::{
     CacheMetrics, Database, DatabaseDiskUsage, HealthReport, ModelConfig, StorageConfig,
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
 };
+pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;
 pub use strata_concurrency::TransactionContext;

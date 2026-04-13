@@ -893,10 +893,64 @@ impl strata_engine::Subsystem for GraphSubsystem {
 // Per-Database BranchDagHook Implementation
 // =============================================================================
 
+use strata_core::id::CommitVersion;
 use strata_engine::database::dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
     MergeBaseResult,
 };
+
+/// Convert a DAG graph node to a DagEvent for the log() method.
+fn node_to_dag_event(node: &NodeData, branch_name: &str) -> Option<DagEvent> {
+    let props = node.properties.as_ref()?;
+    let object_type = node.object_type.as_deref()?;
+
+    let kind = match object_type {
+        "fork" => DagEventKind::Fork,
+        "merge" => DagEventKind::Merge,
+        "revert" => DagEventKind::Revert,
+        "cherry_pick" => DagEventKind::CherryPick,
+        "branch" => DagEventKind::BranchCreate,
+        _ => return None,
+    };
+
+    let commit_version = props
+        .get("fork_version")
+        .or_else(|| props.get("merge_version"))
+        .or_else(|| props.get("revert_version"))
+        .or_else(|| props.get("cherry_pick_version"))
+        .and_then(|v| v.as_u64())
+        .map(CommitVersion)
+        .unwrap_or(CommitVersion(0));
+
+    let message = props
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let creator = props
+        .get("creator")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // For a full implementation, we'd extract source_branch info too
+    // This is a simplified version that returns minimal DagEvent info
+    let branch_id = resolve_branch_name(branch_name);
+    let mut event = match kind {
+        DagEventKind::BranchCreate => DagEvent::branch_create(branch_id, branch_name, commit_version),
+        DagEventKind::BranchDelete => DagEvent::branch_delete(branch_id, branch_name, commit_version),
+        _ => {
+            // For fork/merge/revert/cherry_pick, we need source info
+            // Return a basic create event with the kind overridden
+            let mut e = DagEvent::branch_create(branch_id, branch_name, commit_version);
+            e.kind = kind;
+            e
+        }
+    };
+
+    event.message = message;
+    event.creator = creator;
+    Some(event)
+}
 
 /// Per-database implementation of `BranchDagHook`.
 ///
@@ -984,7 +1038,7 @@ impl BranchDagHook for GraphBranchDagHook {
                     source,
                     &event.branch_name,
                     merge_info,
-                    None, // strategy is captured in merge_info, not separately
+                    event.strategy.as_deref(),
                     event.message.as_deref(),
                     event.creator.as_deref(),
                 )
@@ -1036,33 +1090,109 @@ impl BranchDagHook for GraphBranchDagHook {
 
     fn find_merge_base(
         &self,
-        _branch_a: &strata_core::types::BranchId,
-        _branch_b: &strata_core::types::BranchId,
+        branch_a: &strata_core::types::BranchId,
+        branch_b: &strata_core::types::BranchId,
     ) -> Result<Option<MergeBaseResult>, BranchDagError> {
-        // TODO: Implement DAG traversal for merge-base computation.
-        // For now, return None to trigger engine-level fork-info fallback.
-        // This is acceptable for the initial integration.
+        // BranchId is a UUID, but DAG stores branch names. We need to convert.
+        // The branch name is typically the UUID string representation.
+        let name_a = branch_a.to_string();
+        let name_b = branch_b.to_string();
+
+        // Check for previous merge first (takes priority over fork)
+        if let Ok(Some(merge_version)) = find_last_merge_version(&self.db, &name_a, &name_b) {
+            // The merge was into the target branch, so that's the merge base
+            return Ok(Some(MergeBaseResult {
+                branch_id: branch_b.clone(),
+                branch_name: name_b,
+                commit_version: CommitVersion(merge_version),
+            }));
+        }
+
+        // Check for fork relationship
+        if let Ok(Some((child_name, fork_version))) = find_fork_version(&self.db, &name_a, &name_b)
+        {
+            // Return the forked-from branch as the merge base
+            let (base_branch, base_name) = if child_name == name_a {
+                (branch_b.clone(), name_b) // a was forked from b
+            } else {
+                (branch_a.clone(), name_a) // b was forked from a
+            };
+            return Ok(Some(MergeBaseResult {
+                branch_id: base_branch,
+                branch_name: base_name,
+                commit_version: CommitVersion(fork_version),
+            }));
+        }
+
+        // No merge base found
         Ok(None)
     }
 
     fn log(
         &self,
-        _branch_id: &strata_core::types::BranchId,
-        _limit: usize,
+        branch_id: &strata_core::types::BranchId,
+        limit: usize,
     ) -> Result<Vec<DagEvent>, BranchDagError> {
-        // TODO: Implement DAG traversal for branch log.
-        // For now, return empty to indicate no log information.
-        // This is acceptable for the initial integration.
-        Ok(Vec::new())
+        let branch_name = branch_id.to_string();
+        let graph_store = GraphStore::new(self.db.clone());
+        let system_id = resolve_branch_name(SYSTEM_BRANCH);
+        let mut events = Vec::new();
+
+        // Get events where this branch was the target (incoming edges)
+        // Look for merge events targeting this branch
+        let neighbors = graph_store
+            .neighbors(
+                system_id,
+                GRAPH_SPACE,
+                BRANCH_DAG_GRAPH,
+                &branch_name,
+                crate::types::Direction::Incoming,
+                None,
+            )
+            .map_err(|e| BranchDagError::new(BranchDagErrorKind::ReadFailed, e.to_string()))?;
+
+        for neighbor in neighbors.into_iter().take(limit) {
+            if let Ok(Some(node)) = graph_store.get_node(
+                system_id,
+                GRAPH_SPACE,
+                BRANCH_DAG_GRAPH,
+                &neighbor.node_id,
+            ) {
+                if let Some(event) = node_to_dag_event(&node, &branch_name) {
+                    events.push(event);
+                }
+            }
+        }
+
+        Ok(events)
     }
 
     fn ancestors(
         &self,
-        _branch_id: &strata_core::types::BranchId,
+        branch_id: &strata_core::types::BranchId,
     ) -> Result<Vec<AncestryEntry>, BranchDagError> {
-        // TODO: Implement DAG traversal for ancestry chain.
-        // For now, return empty to indicate no ancestry information.
-        Ok(Vec::new())
+        let mut ancestors = Vec::new();
+        let mut current = branch_id.to_string();
+        let mut visited = std::collections::HashSet::new();
+
+        // Walk up the parent chain via fork relationships
+        while let Ok(Some(fork)) = find_fork_origin(&self.db, &current) {
+            if visited.contains(&fork.parent) {
+                break; // Avoid infinite loop
+            }
+            visited.insert(fork.parent.clone());
+
+            let parent_id = resolve_branch_name(&fork.parent);
+            ancestors.push(AncestryEntry {
+                branch_id: parent_id,
+                branch_name: fork.parent.clone(),
+                relation: DagEventKind::Fork,
+                commit_version: fork.fork_version.map(CommitVersion).unwrap_or(CommitVersion(0)),
+            });
+            current = fork.parent;
+        }
+
+        Ok(ancestors)
     }
 }
 

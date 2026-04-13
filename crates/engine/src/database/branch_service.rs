@@ -24,8 +24,8 @@ use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult};
 
 use crate::branch_ops::{
-    self, BranchDiffResult, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo, MergeStrategy,
-    RevertInfo, TagInfo, ThreeWayDiffResult,
+    self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
+    MergeStrategy, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot};
@@ -392,34 +392,42 @@ impl BranchService {
             options.creator.as_deref(),
         )?;
 
-        // Record to DAG — failures propagate
+        // Record to DAG — only if merge actually committed changes
         let source_id = resolve_branch_name(source);
         let target_id = resolve_branch_name(target);
-        let commit_version = info
-            .merge_version
-            .map(CommitVersion)
-            .unwrap_or(CommitVersion::ZERO);
-        let mut event =
-            DagEvent::merge(target_id, target, source_id, source, commit_version, info.clone());
-        if let Some(msg) = &options.message {
-            event = event.with_message(msg.clone());
-        }
-        if let Some(creator) = &options.creator {
-            event = event.with_creator(creator.clone());
-        }
-        mutation.record_dag_event(&event)?;
+        if let Some(merge_version) = info.merge_version {
+            let mut event = DagEvent::merge(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(merge_version),
+                info.clone(),
+                options.strategy,
+            );
+            if let Some(msg) = &options.message {
+                event = event.with_message(msg.clone());
+            }
+            if let Some(creator) = &options.creator {
+                event = event.with_creator(creator.clone());
+            }
+            mutation.record_dag_event(&event)?;
 
-        // Commit: fires observers
-        let observer_event = BranchOpEvent {
-            kind: BranchOpKind::Merge,
-            branch_id: target_id,
-            branch_name: Some(target.to_string()),
-            source_branch_id: Some(source_id),
-            commit_version: info.merge_version.map(CommitVersion),
-            message: options.message.clone(),
-            creator: options.creator.clone(),
-        };
-        mutation.commit(observer_event);
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::Merge,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(merge_version)),
+                message: options.message.clone(),
+                creator: options.creator.clone(),
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op merge: skip DAG recording but still commit silently
+            mutation.commit_silent();
+        }
 
         Ok(info)
     }
@@ -446,26 +454,26 @@ impl BranchService {
         // Execute the revert
         let info = branch_ops::revert_version_range(&self.db, branch, from_version, to_version)?;
 
-        // Record to DAG — failures propagate
-        let event = DagEvent::revert(
-            branch_id,
-            branch,
-            info.revert_version.unwrap_or(CommitVersion(0)),
-            info.clone(),
-        );
-        mutation.record_dag_event(&event)?;
+        // Record to DAG — only if revert actually committed changes
+        if let Some(revert_version) = info.revert_version {
+            let event = DagEvent::revert(branch_id, branch, revert_version, info.clone());
+            mutation.record_dag_event(&event)?;
 
-        // Commit: fires observers
-        let observer_event = BranchOpEvent {
-            kind: BranchOpKind::Revert,
-            branch_id,
-            branch_name: Some(branch.to_string()),
-            source_branch_id: None,
-            commit_version: info.revert_version,
-            message: None,
-            creator: None,
-        };
-        mutation.commit(observer_event);
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::Revert,
+                branch_id,
+                branch_name: Some(branch.to_string()),
+                source_branch_id: None,
+                commit_version: Some(revert_version),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op revert: skip DAG recording
+            mutation.commit_silent();
+        }
 
         Ok(info)
     }
@@ -493,28 +501,88 @@ impl BranchService {
         // Execute the cherry-pick
         let info = branch_ops::cherry_pick_keys(&self.db, source, target, keys)?;
 
-        // Record to DAG — failures propagate
-        let event = DagEvent::cherry_pick(
-            target_id,
-            target,
-            source_id,
-            source,
-            CommitVersion(info.cherry_pick_version.unwrap_or(0)),
-            info.clone(),
-        );
-        mutation.record_dag_event(&event)?;
+        // Record to DAG — only if cherry-pick actually committed changes
+        if let Some(cp_version) = info.cherry_pick_version {
+            let event = DagEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(cp_version),
+                info.clone(),
+            );
+            mutation.record_dag_event(&event)?;
 
-        // Commit: fires observers
-        let observer_event = BranchOpEvent {
-            kind: BranchOpKind::CherryPick,
-            branch_id: target_id,
-            branch_name: Some(target.to_string()),
-            source_branch_id: Some(source_id),
-            commit_version: info.cherry_pick_version.map(CommitVersion),
-            message: None,
-            creator: None,
-        };
-        mutation.commit(observer_event);
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::CherryPick,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(cp_version)),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op cherry-pick: skip DAG recording
+            mutation.commit_silent();
+        }
+
+        Ok(info)
+    }
+
+    /// Cherry-pick changes from one branch to another using diff-based filtering.
+    ///
+    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event.
+    ///
+    /// Requires a DAG hook to be installed — cherry-picks without DAG recording
+    /// would lose cherry-pick provenance and break history queries.
+    pub fn cherry_pick_from_diff(
+        &self,
+        source: &str,
+        target: &str,
+        filter: CherryPickFilter,
+        merge_base: Option<(BranchId, u64)>,
+    ) -> StrataResult<CherryPickInfo> {
+        let mut mutation = BranchMutation::new(&self.db);
+
+        // Cherry-pick requires DAG — without it, cherry-pick history is lost
+        mutation.require_dag_hook("cherry_pick")?;
+
+        let source_id = resolve_branch_name(source);
+        let target_id = resolve_branch_name(target);
+
+        // Execute the cherry-pick
+        let info = branch_ops::cherry_pick_from_diff(&self.db, source, target, filter, merge_base)?;
+
+        // Record to DAG — only if cherry-pick actually committed changes
+        if let Some(cp_version) = info.cherry_pick_version {
+            let event = DagEvent::cherry_pick(
+                target_id,
+                target,
+                source_id,
+                source,
+                CommitVersion(cp_version),
+                info.clone(),
+            );
+            mutation.record_dag_event(&event)?;
+
+            // Commit: fires observers
+            let observer_event = BranchOpEvent {
+                kind: BranchOpKind::CherryPick,
+                branch_id: target_id,
+                branch_name: Some(target.to_string()),
+                source_branch_id: Some(source_id),
+                commit_version: Some(CommitVersion(cp_version)),
+                message: None,
+                creator: None,
+            };
+            mutation.commit(observer_event);
+        } else {
+            // No-op cherry-pick: skip DAG recording
+            mutation.commit_silent();
+        }
 
         Ok(info)
     }

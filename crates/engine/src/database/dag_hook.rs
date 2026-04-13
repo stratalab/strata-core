@@ -54,7 +54,7 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
-use crate::branch_ops::{CherryPickInfo, MergeInfo, RevertInfo};
+use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
 
 // =============================================================================
 // Error Types
@@ -206,6 +206,8 @@ pub struct DagEvent {
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+    /// Merge strategy (for Merge events).
+    pub strategy: Option<String>,
     /// Merge info (for Merge events).
     pub merge_info: Option<MergeInfo>,
     /// Revert info (for Revert events).
@@ -232,6 +234,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
             merge_info: None,
             revert_info: None,
             cherry_pick_info: None,
@@ -262,6 +265,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
             merge_info: None,
             revert_info: None,
             cherry_pick_info: None,
@@ -292,6 +296,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
             merge_info: None,
             revert_info: None,
             cherry_pick_info: None,
@@ -306,7 +311,12 @@ impl DagEvent {
         source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
         info: MergeInfo,
+        strategy: MergeStrategy,
     ) -> Self {
+        let strategy_str = match strategy {
+            MergeStrategy::LastWriterWins => "last_writer_wins",
+            MergeStrategy::Strict => "strict",
+        };
         Self {
             kind: DagEventKind::Merge,
             branch_id: target_branch_id,
@@ -316,6 +326,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: Some(strategy_str.to_string()),
             merge_info: Some(info),
             revert_info: None,
             cherry_pick_info: None,
@@ -338,6 +349,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
             merge_info: None,
             revert_info: Some(info),
             cherry_pick_info: None,
@@ -362,6 +374,7 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            strategy: None,
             merge_info: None,
             revert_info: None,
             cherry_pick_info: Some(info),
