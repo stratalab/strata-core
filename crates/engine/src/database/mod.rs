@@ -520,6 +520,16 @@ impl Database {
         self.subsystems.read().iter().map(|s| s.name()).collect()
     }
 
+    /// Return a read guard to the subsystems list.
+    ///
+    /// Used by `acquire_primary_db` to iterate subsystems for lifecycle
+    /// hooks (initialize, bootstrap) after recovery completes.
+    pub(crate) fn installed_subsystems(
+        &self,
+    ) -> parking_lot::RwLockReadGuard<'_, Vec<Box<dyn crate::recovery::Subsystem>>> {
+        self.subsystems.read()
+    }
+
     // =========================================================================
     // DAG Hook
     // =========================================================================

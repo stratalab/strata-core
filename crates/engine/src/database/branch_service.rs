@@ -287,6 +287,9 @@ impl BranchService {
     ///
     /// Uses `BranchMutation` for atomicity: if DAG recording fails, the branch
     /// fork is rolled back (the new branch is deleted).
+    ///
+    /// Requires a DAG hook to be installed — forks without DAG recording would
+    /// create orphan branches with no lineage tracking.
     pub fn fork_with_options(
         &self,
         source: &str,
@@ -297,6 +300,9 @@ impl BranchService {
 
         // Create mutation context for atomicity
         let mut mutation = BranchMutation::new(&self.db);
+
+        // Fork requires DAG — without it, lineage is lost
+        mutation.require_dag_hook("fork")?;
 
         // Execute the fork
         let info = branch_ops::fork_branch_with_metadata(
@@ -358,6 +364,9 @@ impl BranchService {
     /// Note: merge rollback is not implemented (the merge data is already
     /// committed). If DAG write fails, the merge data remains but the error
     /// is surfaced to the caller.
+    ///
+    /// Requires a DAG hook to be installed — merges without DAG recording would
+    /// lose merge provenance and break merge-base computation.
     pub fn merge_with_options(
         &self,
         source: &str,
@@ -369,6 +378,9 @@ impl BranchService {
         // (would need to revert all the changes). The mutation still ensures
         // DAG failures propagate and observers only fire on success.
         let mut mutation = BranchMutation::new(&self.db);
+
+        // Merge requires DAG — without it, merge provenance is lost
+        mutation.require_dag_hook("merge")?;
 
         let info = branch_ops::merge_branches_with_metadata(
             &self.db,
@@ -413,8 +425,10 @@ impl BranchService {
 
     /// Revert a version range on a branch.
     ///
-    /// Uses `BranchMutation` for atomicity. Emits a DAG revert event if a
-    /// DAG hook is installed.
+    /// Uses `BranchMutation` for atomicity. Emits a DAG revert event.
+    ///
+    /// Requires a DAG hook to be installed — reverts without DAG recording
+    /// would lose revert provenance and break history queries.
     pub fn revert(
         &self,
         branch: &str,
@@ -422,6 +436,10 @@ impl BranchService {
         to_version: CommitVersion,
     ) -> StrataResult<RevertInfo> {
         let mut mutation = BranchMutation::new(&self.db);
+
+        // Revert requires DAG — without it, revert history is lost
+        mutation.require_dag_hook("revert")?;
+
         let branch_id = resolve_branch_name(branch);
 
         // Execute the revert
@@ -455,8 +473,10 @@ impl BranchService {
 
     /// Cherry-pick specific keys from one branch to another.
     ///
-    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event
-    /// if a DAG hook is installed.
+    /// Uses `BranchMutation` for atomicity. Emits a DAG cherry-pick event.
+    ///
+    /// Requires a DAG hook to be installed — cherry-picks without DAG recording
+    /// would lose cherry-pick provenance and break history queries.
     pub fn cherry_pick(
         &self,
         source: &str,
@@ -464,6 +484,10 @@ impl BranchService {
         keys: &[(String, String)],
     ) -> StrataResult<CherryPickInfo> {
         let mut mutation = BranchMutation::new(&self.db);
+
+        // Cherry-pick requires DAG — without it, cherry-pick history is lost
+        mutation.require_dag_hook("cherry_pick")?;
+
         let source_id = resolve_branch_name(source);
         let target_id = resolve_branch_name(target);
 

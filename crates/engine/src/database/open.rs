@@ -367,9 +367,47 @@ impl Database {
         // populated subsystems vec for `Drop for Database` to freeze.
         db.set_subsystems(subsystems);
 
-        // Publish the fully-recovered Arc. Concurrent openers that were
-        // waiting on the mutex will now see a Database with recovery
-        // complete and subsystems installed.
+        // Phase 2: Initialize — wire up hooks, observers, and handlers.
+        // This is write-free and runs for all modes.
+        {
+            let subsystems_ref = db.installed_subsystems();
+            for subsystem in subsystems_ref.iter() {
+                info!(
+                    target: "strata::recovery",
+                    subsystem = subsystem.name(),
+                    "Running subsystem initialize"
+                );
+                if let Err(e) = subsystem.initialize(&db) {
+                    drop(registry);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Phase 3: Bootstrap — create initial state (primary/cache only).
+        // Followers read state from primary; they don't create it.
+        if !db.is_follower() {
+            let subsystems_ref = db.installed_subsystems();
+            for subsystem in subsystems_ref.iter() {
+                info!(
+                    target: "strata::recovery",
+                    subsystem = subsystem.name(),
+                    "Running subsystem bootstrap"
+                );
+                if let Err(e) = subsystem.bootstrap(&db) {
+                    drop(registry);
+                    return Err(e);
+                }
+            }
+        }
+
+        // Mark lifecycle complete before registry publication.
+        // This prevents re-running hooks on instance reuse.
+        db.set_lifecycle_complete();
+
+        // Publish the fully-initialized Arc. Concurrent openers that were
+        // waiting on the mutex will now see a Database with all lifecycle
+        // phases (recover → initialize → bootstrap) complete.
         registry.insert(canonical_path, Arc::downgrade(&db));
 
         Ok(db)
@@ -650,6 +688,26 @@ impl Database {
         }
 
         db.set_subsystems(subsystems);
+
+        // Phase 2: Initialize — wire up hooks, observers, and handlers.
+        // This is write-free and runs for all modes including followers.
+        {
+            let subsystems_ref = db.installed_subsystems();
+            for subsystem in subsystems_ref.iter() {
+                info!(
+                    target: "strata::recovery",
+                    subsystem = subsystem.name(),
+                    "Running follower subsystem initialize"
+                );
+                subsystem.initialize(&db)?;
+            }
+        }
+
+        // Phase 3: Bootstrap is skipped for followers.
+        // Followers read state from the primary; they don't create it.
+
+        // Mark lifecycle complete
+        db.set_lifecycle_complete();
 
         Ok(db)
     }
