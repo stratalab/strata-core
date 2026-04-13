@@ -133,7 +133,7 @@ fn pick_and_run_one(storage: &SegmentedStore, write_stall_cv: &parking_lot::Cond
     }
 
     if let Some(branch_id) = best_branch {
-        match storage.pick_and_compact(&branch_id, 0) {
+        match storage.pick_and_compact(&branch_id, CommitVersion::ZERO) {
             Ok(Some(_result)) => {
                 write_stall_cv.notify_all();
                 true
@@ -461,18 +461,18 @@ impl Database {
         // that participate in the flush pipeline (have segments).
         // Branches with no segments (e.g. _system_) are excluded — their
         // data is small and replayed from WAL on recovery.
-        let mut watermark = u64::MAX;
+        let mut watermark = CommitVersion::MAX;
         let mut has_any_segments = false;
         for bid in &branch_ids {
             if let Some(commit) = storage.max_flushed_commit(bid) {
-                if commit > 0 {
+                if commit > CommitVersion::ZERO {
                     watermark = watermark.min(commit);
                     has_any_segments = true;
                 }
             }
             // Branches with no segments are intentionally excluded
         }
-        if !has_any_segments || watermark == u64::MAX {
+        if !has_any_segments || watermark == CommitVersion::MAX {
             return;
         }
 
@@ -490,11 +490,11 @@ impl Database {
             }
         };
 
-        if let Err(e) = mgr.set_flush_watermark(CommitVersion(watermark)) {
+        if let Err(e) = mgr.set_flush_watermark(watermark) {
             tracing::warn!(
                 target: "strata::flush",
                 error = %e,
-                watermark,
+                watermark = watermark.as_u64(),
                 "Failed to update flush watermark in MANIFEST"
             );
             return; // Don't truncate WAL if watermark wasn't persisted
@@ -510,7 +510,7 @@ impl Database {
                         target: "strata::wal",
                         segments_removed = info.wal_segments_removed,
                         bytes_reclaimed = info.reclaimed_bytes,
-                        watermark,
+                        watermark = watermark.as_u64(),
                         "WAL segments truncated after flush"
                     );
                 }

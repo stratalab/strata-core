@@ -221,7 +221,7 @@ mod tests {
         // Fill with data to grow capacity
         for i in 0..100 {
             let key = create_test_key(&ns, format!("key{}", i).as_bytes());
-            ctx.read_set.insert(key.clone(), i as u64);
+            ctx.read_set.insert(key.clone(), CommitVersion(i as u64));
             ctx.write_set.insert(key, Value::Bytes(vec![i as u8]));
         }
 
@@ -375,7 +375,7 @@ mod tests {
         let mut ctx = TransactionPool::acquire(TxnId(1), branch_id, None);
         for i in 0..50 {
             let key = create_test_key(&ns, format!("key{}", i).as_bytes());
-            ctx.read_set.insert(key.clone(), i as u64);
+            ctx.read_set.insert(key.clone(), CommitVersion(i as u64));
         }
         TransactionPool::release(ctx);
 

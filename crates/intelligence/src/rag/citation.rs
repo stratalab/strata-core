@@ -8,7 +8,9 @@
 //! Manual byte-walk parser — no `regex` dependency. The grammar this
 //! parser accepts inside the brackets is:
 //!
-//!     digits ( (',' | space)+ digits )*
+//! ```text
+//! digits ( (',' | space)+ digits )*
+//! ```
 //!
 //! Anything that doesn't match is silently dropped.
 

@@ -51,7 +51,7 @@ fn cas_succeeds_when_version_matches() {
     // CAS with correct version
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: version,
+        expected_version: CommitVersion(version),
         new_value: Value::Int(200),
     }];
 
@@ -70,7 +70,7 @@ fn cas_create_succeeds_when_key_absent() {
     // CAS with expected_version=0 (create)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 0,
+        expected_version: CommitVersion::ZERO,
         new_value: Value::Int(42),
     }];
 
@@ -122,7 +122,7 @@ fn cas_fails_when_version_stale() {
     // CAS with stale version (1)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 1, // Stale!
+        expected_version: CommitVersion(1), // Stale!
         new_value: Value::Int(3),
     }];
 
@@ -135,8 +135,8 @@ fn cas_fails_when_version_stale() {
             current_version: cv,
             ..
         } => {
-            assert_eq!(*expected_version, 1);
-            assert_eq!(*cv, current_version);
+            assert_eq!(*expected_version, CommitVersion(1));
+            assert_eq!(*cv, CommitVersion(current_version));
         }
         _ => panic!("Expected CASConflict"),
     }
@@ -162,7 +162,7 @@ fn cas_create_fails_when_key_exists() {
     // CAS with expected_version=0 (expects key doesn't exist)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 0,
+        expected_version: CommitVersion::ZERO,
         new_value: Value::Int(200),
     }];
 
@@ -197,7 +197,7 @@ fn cas_fails_when_key_deleted() {
     // CAS with old version (before delete)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: version,
+        expected_version: CommitVersion(version),
         new_value: Value::Int(200),
     }];
 
@@ -219,7 +219,7 @@ fn cas_not_added_to_read_set() {
     // Add CAS operation
     txn.cas_set.push(CASOperation {
         key: key.clone(),
-        expected_version: 1,
+        expected_version: CommitVersion(1),
         new_value: Value::Int(42),
     });
 
@@ -269,10 +269,10 @@ fn cas_validated_separately_from_reads() {
 
     // Transaction reads one key, CAS on another
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(read_key.clone(), read_version);
+    txn.read_set.insert(read_key.clone(), CommitVersion(read_version));
     txn.cas_set.push(CASOperation {
         key: cas_key.clone(),
-        expected_version: cas_version,
+        expected_version: CommitVersion(cas_version),
         new_value: Value::Int(20),
     });
 
@@ -340,7 +340,7 @@ fn multiple_cas_all_succeed() {
         .enumerate()
         .map(|(i, (key, version))| CASOperation {
             key: key.clone(),
-            expected_version: *version,
+            expected_version: CommitVersion(*version),
             new_value: Value::Int((i * 10) as i64),
         })
         .collect();
@@ -415,17 +415,17 @@ fn multiple_cas_one_fails() {
     let cas_set = vec![
         CASOperation {
             key: key1.clone(),
-            expected_version: v1,
+            expected_version: CommitVersion(v1),
             new_value: Value::Int(10),
         },
         CASOperation {
             key: key2.clone(),
-            expected_version: 1, // Stale - was updated
+            expected_version: CommitVersion(1), // Stale - was updated
             new_value: Value::Int(200),
         },
         CASOperation {
             key: key3.clone(),
-            expected_version: v3,
+            expected_version: CommitVersion(v3),
             new_value: Value::Int(30),
         },
     ];
@@ -466,7 +466,7 @@ fn cas_in_full_transaction() {
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
     txn.cas_set.push(CASOperation {
         key: key.clone(),
-        expected_version: version,
+        expected_version: CommitVersion(version),
         new_value: Value::Int(200),
     });
 
@@ -500,10 +500,10 @@ fn cas_with_read_of_same_key() {
 
     // Transaction reads and CAS same key
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(key.clone(), version);
+    txn.read_set.insert(key.clone(), CommitVersion(version));
     txn.cas_set.push(CASOperation {
         key: key.clone(),
-        expected_version: version,
+        expected_version: CommitVersion(version),
         new_value: Value::Int(200),
     });
 
@@ -532,12 +532,12 @@ fn cas_operation_fields_accessible() {
 
     let cas = CASOperation {
         key: key.clone(),
-        expected_version: 42,
+        expected_version: CommitVersion(42),
         new_value: Value::Int(100),
     };
 
     assert_eq!(cas.key, key);
-    assert_eq!(cas.expected_version, 42);
+    assert_eq!(cas.expected_version, CommitVersion(42));
     assert_eq!(cas.new_value, Value::Int(100));
 }
 
@@ -568,7 +568,7 @@ fn cas_conflict_reports_correct_key() {
 
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 1,
+        expected_version: CommitVersion(1),
         new_value: Value::Int(100),
     }];
 

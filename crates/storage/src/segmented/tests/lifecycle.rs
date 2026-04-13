@@ -206,7 +206,7 @@ fn concurrent_fork_and_compaction_no_data_loss() {
     let barrier_compact = Arc::clone(&barrier);
     let compact_handle = std::thread::spawn(move || {
         barrier_compact.wait();
-        store_compact.compact_branch(&parent_branch(), 0)
+        store_compact.compact_branch(&parent_branch(), CommitVersion(0))
     });
 
     let (_fork_ver, segments_shared) = fork_handle.join().unwrap();
@@ -279,7 +279,7 @@ fn concurrent_fork_and_compaction_stress() {
         let b2 = Arc::clone(&barrier);
         let t2 = std::thread::spawn(move || {
             b2.wait();
-            s2.compact_branch(&parent_branch(), 0)
+            s2.compact_branch(&parent_branch(), CommitVersion(0))
         });
 
         let fork_result = t1.join().unwrap().unwrap();
@@ -416,7 +416,7 @@ fn bench_100_branch_fanout() {
     );
 
     // Compact parent — should NOT delete shared segments
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
 
     // Verify all 100 children can still read
     let start = std::time::Instant::now();
@@ -625,7 +625,7 @@ fn test_issue_1701_recovery_inherited_layer_finds_orphan_segments() {
 
     // 3. Compact parent L0 → L1. Old segments kept on disk (refcount > 0).
     store
-        .compact_l0_to_l1(&parent_branch(), 0)
+        .compact_l0_to_l1(&parent_branch(), CommitVersion(0))
         .unwrap()
         .expect("compaction should produce output");
 
@@ -968,7 +968,7 @@ fn gc_orphan_segments_cleans_leaked_files() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),
@@ -1052,7 +1052,7 @@ fn test_issue_1705_materialize_layer_gc_orphan_segments() {
     );
 
     // Parent compacts: S1 + S2 → S3. Old segments kept (refcount > 0).
-    store.compact_branch(&parent_branch(), 0).unwrap();
+    store.compact_branch(&parent_branch(), CommitVersion(0)).unwrap();
     for path in &inherited_paths {
         assert!(
             path.exists(),
@@ -1213,7 +1213,7 @@ fn test_issue_1677_compaction_aborts_on_corrupt_segment() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Compaction must return an error, not silently drop entries
-    let result = store.compact_branch(&bid, 0);
+    let result = store.compact_branch(&bid, CommitVersion(0));
     assert!(
         result.is_err(),
         "compaction must abort on corrupt segment, not silently drop entries"

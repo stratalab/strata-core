@@ -728,8 +728,8 @@ impl Database {
                         errors_skipped = seg_info.errors_skipped,
                         "Recovered segments from disk");
                 }
-                if seg_info.max_commit_id > 0 {
-                    coordinator.bump_version_floor(CommitVersion(seg_info.max_commit_id));
+                if seg_info.max_commit_id > CommitVersion::ZERO {
+                    coordinator.bump_version_floor(seg_info.max_commit_id);
                 }
             }
             Err(e) => {

@@ -74,7 +74,7 @@ fn stress_concurrent_read_write() {
                         let txn_id = manager.next_txn_id().unwrap();
                         let mut txn =
                             TransactionContext::new(txn_id, branch_id, CommitVersion(version));
-                        txn.read_set.insert(key.clone(), version);
+                        txn.read_set.insert(key.clone(), CommitVersion(version));
                         txn.write_set
                             .insert(key.clone(), Value::Int((thread_id * 1000 + iter) as i64));
 
@@ -152,7 +152,7 @@ fn stress_transaction_throughput() {
 
         let txn_id = manager.next_txn_id().unwrap();
         let mut txn = TransactionContext::new(txn_id, branch_id, CommitVersion(version));
-        txn.read_set.insert(key.clone(), version);
+        txn.read_set.insert(key.clone(), CommitVersion(version));
 
         if let Value::Int(v) = current.value {
             txn.write_set.insert(key.clone(), Value::Int(v + 1));
@@ -313,7 +313,7 @@ fn stress_long_running_transaction() {
 
     // Start a long-running transaction
     let mut long_txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(initial_version));
-    long_txn.read_set.insert(key.clone(), initial_version);
+    long_txn.read_set.insert(key.clone(), CommitVersion(initial_version));
 
     // Spawn concurrent writers
     let store_clone = Arc::clone(&store);
@@ -403,7 +403,7 @@ fn stress_sustained_workload() {
                         let txn_id = manager.next_txn_id().unwrap();
                         let mut txn =
                             TransactionContext::new(txn_id, branch_id, CommitVersion(version));
-                        txn.read_set.insert(key.clone(), version);
+                        txn.read_set.insert(key.clone(), CommitVersion(version));
                         txn.write_set
                             .insert(key.clone(), Value::Int(thread_id as i64));
 

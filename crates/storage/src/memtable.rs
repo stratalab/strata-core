@@ -203,7 +203,7 @@ impl Memtable {
                 break;
             }
             // Check MVCC visibility
-            if ik.commit_id() <= snapshot_commit.as_u64() {
+            if ik.commit_id() <= snapshot_commit {
                 return Some(entry.value().clone());
             }
         }
@@ -218,8 +218,8 @@ impl Memtable {
     pub fn get_versioned_with_commit(
         &self,
         key: &Key,
-        snapshot_commit: u64,
-    ) -> Option<(u64, MemtableEntry)> {
+        snapshot_commit: CommitVersion,
+    ) -> Option<(CommitVersion, MemtableEntry)> {
         let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
         self.get_versioned_preencoded(&typed_prefix, seek_key.as_bytes(), snapshot_commit)
@@ -231,8 +231,8 @@ impl Memtable {
         &self,
         typed_key: &[u8],
         seek_bytes: &[u8],
-        snapshot_commit: u64,
-    ) -> Option<(u64, MemtableEntry)> {
+        snapshot_commit: CommitVersion,
+    ) -> Option<(CommitVersion, MemtableEntry)> {
         // For frozen memtables, check the bloom filter first to skip
         // skiplist probes for keys that are definitely absent (#1755).
         if self.frozen.load(Ordering::Acquire) {
@@ -258,7 +258,7 @@ impl Memtable {
     /// Get only the latest commit_id for a key (no value clone).
     ///
     /// Used by OCC validation — needs only the version number, not the value.
-    pub fn get_version_only(&self, key: &Key) -> Option<u64> {
+    pub fn get_version_only(&self, key: &Key) -> Option<CommitVersion> {
         let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
 
@@ -275,7 +275,7 @@ impl Memtable {
     ///
     /// Results are in descending commit_id order (newest first), matching the
     /// InternalKey sort order.
-    pub fn get_all_versions(&self, key: &Key) -> Vec<(u64, MemtableEntry)> {
+    pub fn get_all_versions(&self, key: &Key) -> Vec<(CommitVersion, MemtableEntry)> {
         let seek_key = InternalKey::encode(key, CommitVersion::MAX);
         let typed_prefix = encode_typed_key(key);
 
@@ -520,7 +520,7 @@ mod tests {
         let mt = Memtable::new(0);
         mt.put(&key("k1"), CommitVersion(5), Value::Int(50), false);
         mt.put(&key("k1"), CommitVersion(10), Value::Int(100), false);
-        assert_eq!(mt.get_version_only(&key("k1")), Some(10));
+        assert_eq!(mt.get_version_only(&key("k1")), Some(CommitVersion(10)));
     }
 
     #[test]
@@ -770,7 +770,11 @@ mod tests {
         // Read a key that exists — must be found (no false negatives).
         let typed_hit = encode_typed_key(&key("present_0500"));
         let seek_hit = InternalKey::from_typed_key_bytes(&typed_hit, CommitVersion::MAX);
-        let hit = mt.get_versioned_preencoded(&typed_hit, seek_hit.as_bytes(), CommitVersion::MAX);
+        let hit = mt.get_versioned_preencoded(
+            &typed_hit,
+            seek_hit.as_bytes(),
+            CommitVersion::MAX,
+        );
         assert!(
             hit.is_some(),
             "existing key must be found in frozen memtable"
@@ -835,7 +839,8 @@ mod tests {
 
         let typed = encode_typed_key(&key("deleted"));
         let seek = InternalKey::from_typed_key_bytes(&typed, CommitVersion::MAX);
-        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX);
+        let result =
+            mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::MAX);
         assert!(result.is_some(), "tombstone must be visible through bloom");
         assert!(result.unwrap().1.is_tombstone);
     }
@@ -858,7 +863,7 @@ mod tests {
         assert_eq!(result.unwrap().1.value, Value::Int(20));
 
         // Snapshot at version 0 should see nothing.
-        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion(0));
+        let result = mt.get_versioned_preencoded(&typed, seek.as_bytes(), CommitVersion::ZERO);
         assert!(result.is_none());
     }
 

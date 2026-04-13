@@ -44,12 +44,12 @@ fn read_write_conflict_version_increased() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = store
+    let v1 = CommitVersion(store
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
-        .as_u64();
+        .as_u64());
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -91,12 +91,12 @@ fn read_write_conflict_key_deleted() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = store
+    let v1 = CommitVersion(store
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
-        .as_u64();
+        .as_u64());
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -118,7 +118,7 @@ fn read_write_conflict_key_created() {
 
     // Read set at v0 (nonexistent)
     let mut read_set = HashMap::new();
-    read_set.insert(key.clone(), 0);
+    read_set.insert(key.clone(), CommitVersion::ZERO);
 
     // Create key
     store
@@ -152,12 +152,12 @@ fn no_read_write_conflict_version_same() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = store
+    let v1 = CommitVersion(store
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
-        .as_u64();
+        .as_u64());
 
     // Read set at v1
     let mut read_set = HashMap::new();
@@ -201,17 +201,17 @@ fn cas_conflict_version_mismatch() {
             WriteMode::Append,
         )
         .unwrap();
-    let v2 = store
+    let v2 = CommitVersion(store
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
-        .as_u64();
+        .as_u64());
 
     // CAS with stale expected_version (1, but current is 2)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 1, // Stale!
+        expected_version: CommitVersion(1), // Stale!
         new_value: Value::Int(300),
     }];
 
@@ -223,7 +223,7 @@ fn cas_conflict_version_mismatch() {
             current_version,
             ..
         } => {
-            assert_eq!(*expected_version, 1);
+            assert_eq!(*expected_version, CommitVersion(1));
             assert_eq!(*current_version, v2);
         }
         _ => panic!("Expected CASConflict"),
@@ -250,7 +250,7 @@ fn cas_create_conflict_key_exists() {
     // CAS with expected_version=0 (key must not exist)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 0, // Expects key doesn't exist
+        expected_version: CommitVersion::ZERO, // Expects key doesn't exist
         new_value: Value::Int(200),
     }];
 
@@ -260,7 +260,7 @@ fn cas_create_conflict_key_exists() {
         ConflictType::CASConflict {
             expected_version, ..
         } => {
-            assert_eq!(*expected_version, 0);
+            assert_eq!(*expected_version, CommitVersion::ZERO);
         }
         _ => panic!("Expected CASConflict"),
     }
@@ -282,12 +282,12 @@ fn cas_success_version_matches() {
             WriteMode::Append,
         )
         .unwrap();
-    let v1 = store
+    let v1 = CommitVersion(store
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap()
         .version
-        .as_u64();
+        .as_u64());
 
     // CAS with correct expected_version
     let cas_set = vec![CASOperation {
@@ -311,7 +311,7 @@ fn cas_create_success_key_not_exists() {
     // CAS with expected_version=0 (create)
     let cas_set = vec![CASOperation {
         key: key.clone(),
-        expected_version: 0,
+        expected_version: CommitVersion::ZERO,
         new_value: Value::Int(100),
     }];
 
@@ -367,12 +367,12 @@ fn multiple_cas_operations() {
     let cas_set = vec![
         CASOperation {
             key: key1.clone(),
-            expected_version: v1,
+            expected_version: CommitVersion(v1),
             new_value: Value::Int(10),
         },
         CASOperation {
             key: key2.clone(),
-            expected_version: 1, // Stale
+            expected_version: CommitVersion(1), // Stale
             new_value: Value::Int(200),
         },
     ];
@@ -421,10 +421,10 @@ fn transaction_validation_combines_all_checks() {
 
     // Transaction with read and CAS
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(key1.clone(), v1);
+    txn.read_set.insert(key1.clone(), CommitVersion(v1));
     txn.cas_set.push(CASOperation {
         key: key2.clone(),
-        expected_version: 1, // Stale
+        expected_version: CommitVersion(1), // Stale
         new_value: Value::Int(20),
     });
 
@@ -484,8 +484,8 @@ fn conflict_type_debug_formatting() {
 
     let conflict = ConflictType::ReadWriteConflict {
         key: key.clone(),
-        read_version: 1,
-        current_version: 2,
+        read_version: CommitVersion(1),
+        current_version: CommitVersion(2),
     };
 
     let debug_str = format!("{:?}", conflict);
@@ -517,7 +517,7 @@ fn large_read_set_validation() {
             .unwrap()
             .version
             .as_u64();
-        read_set.insert(key, v);
+        read_set.insert(key, CommitVersion(v));
     }
 
     // All versions match - should validate
@@ -549,7 +549,7 @@ fn large_read_set_with_one_conflict() {
             .unwrap()
             .version
             .as_u64();
-        read_set.insert(key, v);
+        read_set.insert(key, CommitVersion(v));
     }
 
     // Modify one key

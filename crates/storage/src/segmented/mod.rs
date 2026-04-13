@@ -206,7 +206,7 @@ pub struct VersionedEntry {
     /// Whether this entry is a deletion tombstone.
     pub is_tombstone: bool,
     /// The MVCC commit version that wrote this entry.
-    pub commit_id: u64,
+    pub commit_id: CommitVersion,
 }
 
 /// Entry from a branch's own sources (excluding inherited layers).
@@ -220,7 +220,7 @@ pub struct OwnEntry {
     /// Whether this entry is a deletion tombstone.
     pub is_tombstone: bool,
     /// The MVCC commit version that wrote this entry.
-    pub commit_id: u64,
+    pub commit_id: CommitVersion,
 }
 
 // ---------------------------------------------------------------------------
@@ -293,7 +293,7 @@ pub(crate) struct InheritedLayer {
     /// Branch ID of the source (parent) branch.
     source_branch_id: BranchId,
     /// Version counter of the source branch at fork time.
-    fork_version: u64,
+    fork_version: CommitVersion,
     /// Snapshot of the parent's segments at fork time.
     segments: Arc<SegmentVersion>,
     /// Current materialization status.
@@ -419,7 +419,7 @@ pub(crate) struct BranchSnapshot {
 pub struct StorageIterator {
     snapshot: BranchSnapshot,
     prefix: Key,
-    snapshot_version: u64,
+    snapshot_version: CommitVersion,
     /// Seekable pipeline: built on first seek, re-seeked on subsequent seeks.
     pipeline: Option<seekable::MvccSeekableIter>,
     /// Current decoded entry (tombstone/expiry filtering applied).
@@ -427,7 +427,7 @@ pub struct StorageIterator {
 }
 
 impl StorageIterator {
-    fn new(snapshot: BranchSnapshot, prefix: Key, snapshot_version: u64) -> Self {
+    fn new(snapshot: BranchSnapshot, prefix: Key, snapshot_version: CommitVersion) -> Self {
         Self {
             snapshot,
             prefix,
@@ -606,7 +606,7 @@ impl StorageIterator {
 
             if let Some((key, commit_id)) = ik.decode() {
                 if &key >= target {
-                    self.current = Some((key, entry.to_versioned(commit_id.into())));
+                    self.current = Some((key, entry.to_versioned(commit_id)));
                     pipeline.advance();
                     return;
                 }
@@ -638,7 +638,7 @@ impl StorageIterator {
             }
 
             if let Some((key, commit_id)) = ik.decode() {
-                self.current = Some((key, entry.to_versioned(commit_id.into())));
+                self.current = Some((key, entry.to_versioned(commit_id)));
                 pipeline.advance();
                 break;
             }
@@ -1101,7 +1101,7 @@ impl SegmentedStore {
     /// Returns the `(source_branch_id, fork_version)` of the first non-materialized
     /// inherited layer, or `None` if the branch has no inherited layers (was never
     /// forked, or all layers have been fully materialized).
-    pub fn get_fork_info(&self, branch_id: &BranchId) -> Option<(BranchId, u64)> {
+    pub fn get_fork_info(&self, branch_id: &BranchId) -> Option<(BranchId, CommitVersion)> {
         let branch = self.branches.get(branch_id)?;
         // Find first non-materialized layer (nearest ancestor with live data).
         // Layers are ordered nearest-ancestor-first; skip any that have been
@@ -1224,7 +1224,7 @@ impl SegmentedStore {
             let own_version = branch.version.load_full();
 
             // Snapshot closer inherited layers (indices 0..layer_index)
-            let closer_layers: Vec<(Arc<SegmentVersion>, BranchId, u64)> = branch.inherited_layers
+            let closer_layers: Vec<(Arc<SegmentVersion>, BranchId, CommitVersion)> = branch.inherited_layers
                 [..layer_index]
                 .iter()
                 .map(|l| (Arc::clone(&l.segments), l.source_branch_id, l.fork_version))
@@ -1356,9 +1356,9 @@ impl SegmentedStore {
     fn collect_unshadowed_entries(
         layer_segments: &SegmentVersion,
         child_branch_id: &BranchId,
-        fork_version: u64,
+        fork_version: CommitVersion,
         own_version: &SegmentVersion,
-        closer_layers: &[(Arc<SegmentVersion>, BranchId, u64)],
+        closer_layers: &[(Arc<SegmentVersion>, BranchId, CommitVersion)],
     ) -> Vec<(InternalKey, MemtableEntry)> {
         let mut entries = Vec::new();
         let mut last_shadow_key: Option<Vec<u8>> = None;
@@ -1421,7 +1421,7 @@ impl SegmentedStore {
 
         // L0 segments (linear scan)
         for seg in own_version.l0_segments() {
-            match seg.point_lookup_preencoded(typed_key, seek_bytes, u64::MAX) {
+            match seg.point_lookup_preencoded(typed_key, seek_bytes, CommitVersion::MAX) {
                 Ok(Some(_)) => return true,
                 Ok(None) => {}
                 Err(e) => {
@@ -1437,7 +1437,7 @@ impl SegmentedStore {
                 &own_version.levels[level_idx],
                 typed_key,
                 seek_bytes,
-                u64::MAX,
+                CommitVersion::MAX,
             ) {
                 Ok(Some(_)) => return true,
                 Ok(None) => {}
@@ -1456,7 +1456,7 @@ impl SegmentedStore {
         layer_segments: &SegmentVersion,
         source_branch_id: BranchId,
         child_typed_key: &[u8], // in child namespace
-        fork_version: u64,
+        fork_version: CommitVersion,
     ) -> bool {
         // Rewrite typed_key from child → source namespace
         let Some(src_typed_key) = rewrite_branch_id_bytes(child_typed_key, &source_branch_id)
@@ -1599,7 +1599,7 @@ impl SegmentedStore {
             // allocated by concurrent writers (via next_version()) that haven't
             // applied their writes yet. Using the global counter would claim
             // the fork includes data that isn't actually in the snapshot.
-            let fork_version = source.max_version.load(Ordering::Acquire);
+            let fork_version = CommitVersion(source.max_version.load(Ordering::Acquire));
 
             let source_segments = source.version.load_full();
             let source_inherited: Vec<InheritedLayer> = source
@@ -1674,13 +1674,13 @@ impl SegmentedStore {
         dest.inherited_layers = dest_layers;
         // Propagate fork_version so subsequent forks from this child
         // correctly report the inherited data's version range.
-        dest.max_version.fetch_max(fork_version, Ordering::Release);
+        dest.max_version.fetch_max(fork_version.as_u64(), Ordering::Release);
         drop(dest);
 
         // 7. Write manifest
         self.write_branch_manifest(dest_id);
 
-        Ok((CommitVersion(fork_version), segments_shared))
+        Ok((fork_version, segments_shared))
     }
 
     /// Count distinct live (non-tombstone, non-expired) logical keys in a branch.
@@ -1755,14 +1755,14 @@ impl SegmentedStore {
         }
 
         let merge = MergeIterator::new(sources);
-        let mvcc = MvccIterator::new(merge, u64::MAX);
+        let mvcc = MvccIterator::new(merge, CommitVersion::MAX);
 
         mvcc.filter_map(|(ik, entry)| {
             if entry.is_tombstone || entry.is_expired() {
                 return None;
             }
             let (key, commit_id) = ik.decode()?;
-            Some((key, entry.to_versioned(commit_id.into())))
+            Some((key, entry.to_versioned(commit_id)))
         })
         .collect()
     }
@@ -1812,14 +1812,14 @@ impl SegmentedStore {
         }
 
         let merge = MergeIterator::new(sources);
-        let mvcc = MvccIterator::new(merge, u64::MAX);
+        let mvcc = MvccIterator::new(merge, CommitVersion::MAX);
 
         mvcc.filter_map(|(ik, entry)| {
             if entry.is_tombstone || entry.is_expired() {
                 return None;
             }
             let (key, commit_id) = ik.decode()?;
-            Some((key, entry.to_versioned(commit_id.into())))
+            Some((key, entry.to_versioned(commit_id)))
         })
         .collect()
     }
@@ -1872,7 +1872,7 @@ impl SegmentedStore {
             Some(s) => s,
             None => return Ok(None),
         };
-        match Self::get_versioned_from_snapshot(&snapshot, key, u64::MAX)? {
+        match Self::get_versioned_from_snapshot(&snapshot, key, CommitVersion::MAX)? {
             Some((_commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
@@ -1897,12 +1897,12 @@ impl SegmentedStore {
             Some(s) => s,
             None => return Ok(None),
         };
-        match Self::get_versioned_from_snapshot(&snapshot, key, u64::MAX)? {
+        match Self::get_versioned_from_snapshot(&snapshot, key, CommitVersion::MAX)? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
                 } else {
-                    Ok(Some(entry.into_versioned(commit_id.into())))
+                    Ok(Some(entry.into_versioned(commit_id)))
                 }
             }
             None => Ok(None),
@@ -1934,7 +1934,7 @@ impl SegmentedStore {
     pub fn list_own_entries(
         &self,
         branch_id: &BranchId,
-        min_commit_id: Option<u64>,
+        min_commit_id: Option<CommitVersion>,
     ) -> Vec<OwnEntry> {
         let snapshot = match self.snapshot_branch(branch_id) {
             Some(s) => s,
@@ -1967,7 +1967,7 @@ impl SegmentedStore {
         // NOTE: inherited layers intentionally excluded — this is the whole point.
 
         let merge = MergeIterator::new(sources);
-        let mvcc = MvccIterator::new(merge, u64::MAX);
+        let mvcc = MvccIterator::new(merge, CommitVersion::MAX);
 
         mvcc.filter_map(|(ik, entry)| {
             let (key, commit_id) = ik.decode()?;
@@ -1998,7 +1998,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         type_tag: TypeTag,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> Vec<VersionedEntry> {
         let snapshot = match self.snapshot_branch(branch_id) {
             Some(s) => s,
@@ -2142,7 +2142,7 @@ impl SegmentedStore {
             }
             if let Some((key, commit_id)) = ik.decode() {
                 if key.type_tag == type_tag {
-                    results.push((key, entry.to_versioned(commit_id.into())));
+                    results.push((key, entry.to_versioned(commit_id)));
                 }
             }
         }
@@ -2173,7 +2173,7 @@ impl SegmentedStore {
                 if entry.is_tombstone {
                     return Ok(None);
                 }
-                return Ok(Some(entry.to_versioned(commit_id.into())));
+                return Ok(Some(entry.to_versioned(commit_id)));
             }
         }
         Ok(None)
@@ -2224,7 +2224,7 @@ impl SegmentedStore {
                 continue;
             }
             if let Some((key, commit_id)) = ik.decode() {
-                results.push((key, entry.to_versioned(commit_id.into())));
+                results.push((key, entry.to_versioned(commit_id)));
             }
         }
         check_corruption(&flags)?;
@@ -2728,7 +2728,7 @@ impl SegmentedStore {
     /// Return the maximum commit_id across all flushed segments for a branch.
     ///
     /// Returns `None` if the branch has no segments.
-    pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<u64> {
+    pub fn max_flushed_commit(&self, branch_id: &BranchId) -> Option<CommitVersion> {
         let branch = self.branches.get(branch_id)?;
         let ver = branch.version.load();
         ver.levels
@@ -3008,7 +3008,7 @@ impl SegmentedStore {
 
                 inherited_layers.push(InheritedLayer {
                     source_branch_id: ml.source_branch_id,
-                    fork_version: ml.fork_version,
+                    fork_version: CommitVersion(ml.fork_version),
                     segments: Arc::new(SegmentVersion {
                         levels: layer_levels,
                     }),
@@ -3168,8 +3168,8 @@ impl SegmentedStore {
     fn get_versioned_from_branch(
         branch: &BranchState,
         key: &Key,
-        max_version: u64,
-    ) -> StrataResult<Option<(u64, MemtableEntry)>> {
+        max_version: CommitVersion,
+    ) -> StrataResult<Option<(CommitVersion, MemtableEntry)>> {
         // Encode once, reuse everywhere.
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
@@ -3261,7 +3261,7 @@ impl SegmentedStore {
     fn get_all_versions_from_branch(
         branch: &BranchState,
         key: &Key,
-    ) -> StrataResult<Vec<(u64, MemtableEntry)>> {
+    ) -> StrataResult<Vec<(CommitVersion, MemtableEntry)>> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -3335,8 +3335,8 @@ impl SegmentedStore {
     fn get_versioned_from_snapshot(
         snapshot: &BranchSnapshot,
         key: &Key,
-        max_version: u64,
-    ) -> StrataResult<Option<(u64, MemtableEntry)>> {
+        max_version: CommitVersion,
+    ) -> StrataResult<Option<(CommitVersion, MemtableEntry)>> {
         let profiling = read_profile_enabled();
         let t_total = if profiling {
             Some(Instant::now())
@@ -3622,7 +3622,7 @@ impl SegmentedStore {
     fn get_all_versions_from_snapshot(
         snapshot: &BranchSnapshot,
         key: &Key,
-    ) -> StrataResult<Vec<(u64, MemtableEntry)>> {
+    ) -> StrataResult<Vec<(CommitVersion, MemtableEntry)>> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -3880,7 +3880,7 @@ impl SegmentedStore {
     fn scan_prefix_from_branch(
         branch: &BranchState,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
@@ -3890,7 +3890,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id.into())))
+                Some((key, entry.to_versioned(commit_id)))
             })
             .collect();
         check_corruption(&flags)?;
@@ -3901,7 +3901,7 @@ impl SegmentedStore {
     fn scan_prefix_from_snapshot(
         snapshot: &BranchSnapshot,
         prefix: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
@@ -3911,7 +3911,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id.into())))
+                Some((key, entry.to_versioned(commit_id)))
             })
             .collect();
         check_corruption(&flags)?;
@@ -3923,7 +3923,7 @@ impl SegmentedStore {
         snapshot: &BranchSnapshot,
         prefix: &Key,
         start_key: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, start_key)?;
@@ -3934,7 +3934,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id.into())))
+                Some((key, entry.to_versioned(commit_id)))
             })
             .filter(|(key, _)| key >= start_key);
         let results: Vec<_> = match limit {
@@ -3952,7 +3952,7 @@ impl SegmentedStore {
         max_version: CommitVersion,
     ) -> StrataResult<u64> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, prefix)?;
-        let mvcc = MvccIterator::new(merge, max_version.as_u64());
+        let mvcc = MvccIterator::new(merge, max_version);
         let count = mvcc
             .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
             .filter(|(ik, _)| ik.decode().is_some())
@@ -3990,7 +3990,7 @@ impl SegmentedStore {
         Some(StorageIterator::new(
             snapshot,
             prefix,
-            snapshot_version.as_u64(),
+            snapshot_version,
         ))
     }
 
@@ -4004,7 +4004,7 @@ impl SegmentedStore {
         &self,
         prefix: &Key,
         start_key: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let snapshot = match self.snapshot_branch(&prefix.namespace.branch_id) {
@@ -4020,7 +4020,7 @@ impl SegmentedStore {
         branch: &BranchState,
         prefix: &Key,
         start_key: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, start_key)?;
@@ -4031,7 +4031,7 @@ impl SegmentedStore {
                     return None;
                 }
                 let (key, commit_id) = ik.decode()?;
-                Some((key, entry.to_versioned(commit_id.into())))
+                Some((key, entry.to_versioned(commit_id)))
             })
             .filter(|(key, _)| key >= start_key); // block seek imprecision
         let results: Vec<_> = match limit {
@@ -4075,7 +4075,7 @@ impl SegmentedStore {
         max_version: CommitVersion,
     ) -> StrataResult<u64> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
-        let mvcc = MvccIterator::new(merge, max_version.as_u64());
+        let mvcc = MvccIterator::new(merge, max_version);
         let count = mvcc
             .filter(|(_, entry)| !entry.is_tombstone && !entry.is_expired())
             .filter(|(ik, _)| ik.decode().is_some())
@@ -4153,7 +4153,7 @@ impl SegmentedStore {
 
                 crate::manifest::ManifestInheritedLayer {
                     source_branch_id: layer.source_branch_id,
-                    fork_version: layer.fork_version,
+                    fork_version: layer.fork_version.as_u64(),
                     status,
                     entries: layer_entries,
                 }
@@ -4195,7 +4195,7 @@ pub struct RecoverSegmentsInfo {
     /// Maximum commit_id seen across all loaded segments (#1726).
     /// Used to bump the version counter so new transactions don't collide
     /// with data already persisted in segments.
-    pub max_commit_id: u64,
+    pub max_commit_id: CommitVersion,
 }
 
 impl Default for SegmentedStore {
@@ -4228,12 +4228,12 @@ impl Storage for SegmentedStore {
             None => return Ok(None),
         };
 
-        match Self::get_versioned_from_snapshot(&snapshot, key, max_version.as_u64())? {
+        match Self::get_versioned_from_snapshot(&snapshot, key, max_version)? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
                 } else {
-                    Ok(Some(entry.to_versioned(commit_id.into())))
+                    Ok(Some(entry.to_versioned(commit_id)))
                 }
             }
             None => Ok(None),
@@ -4257,13 +4257,13 @@ impl Storage for SegmentedStore {
             .into_iter()
             .filter(|(commit_id, entry)| {
                 if let Some(bv) = before_version {
-                    if *commit_id >= bv.as_u64() {
+                    if *commit_id >= bv {
                         return false;
                     }
                 }
                 !entry.is_expired()
             })
-            .map(|(commit_id, entry)| entry.to_versioned(commit_id.into()))
+            .map(|(commit_id, entry)| entry.to_versioned(commit_id))
             .collect();
 
         match limit {
@@ -4282,7 +4282,7 @@ impl Storage for SegmentedStore {
             None => return Ok(Vec::new()),
         };
 
-        Self::scan_prefix_from_snapshot(&snapshot, prefix, max_version.as_u64())
+        Self::scan_prefix_from_snapshot(&snapshot, prefix, max_version)
     }
 
     fn current_version(&self) -> CommitVersion {
@@ -4539,13 +4539,13 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<CommitVersion>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
         };
 
-        match Self::get_versioned_from_snapshot(&snapshot, key, u64::MAX)? {
+        match Self::get_versioned_from_snapshot(&snapshot, key, CommitVersion::MAX)? {
             Some((commit_id, entry)) => {
                 if entry.is_tombstone || entry.is_expired() {
                     Ok(None)
@@ -4596,7 +4596,7 @@ fn hex_decode_branch(hex: &str) -> Option<BranchId> {
 fn point_lookup_level(
     l1_segments: &[Arc<KVSegment>],
     key: &Key,
-    max_version: u64,
+    max_version: CommitVersion,
 ) -> StrataResult<Option<SegmentEntry>> {
     let typed_key = encode_typed_key(key);
     let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
@@ -4607,7 +4607,7 @@ fn point_lookup_level_preencoded(
     l1_segments: &[Arc<KVSegment>],
     typed_key: &[u8],
     seek_bytes: &[u8],
-    max_version: u64,
+    max_version: CommitVersion,
 ) -> StrataResult<Option<SegmentEntry>> {
     if l1_segments.is_empty() {
         return Ok(None);

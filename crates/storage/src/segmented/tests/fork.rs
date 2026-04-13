@@ -49,7 +49,7 @@ fn compaction_deletes_when_unreferenced() {
     assert!(sst_before.len() >= 2);
 
     // Compact — segments are unreferenced, so they should be deleted
-    store.compact_branch(&bid, 0).unwrap();
+    store.compact_branch(&bid, CommitVersion(0)).unwrap();
 
     // Old .sst files should be gone, only the compacted output remains
     let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
@@ -112,7 +112,7 @@ fn compaction_preserves_when_referenced() {
     assert!(sst_before.len() >= 2);
 
     // Compact — uses is_referenced() (not decrement) so refcount stays at 2
-    store.compact_branch(&bid, 0).unwrap();
+    store.compact_branch(&bid, CommitVersion(0)).unwrap();
 
     // The referenced segment file should still exist on disk
     assert!(
@@ -395,7 +395,7 @@ fn inherited_layer_two_levels() {
         let mut child_state = store.branches.get_mut(&child).unwrap();
         child_state.inherited_layers.push(InheritedLayer {
             source_branch_id: grandparent,
-            fork_version: 10,
+            fork_version: CommitVersion(10),
             segments: gp_snapshot,
             status: LayerStatus::Active,
         });
@@ -545,7 +545,7 @@ fn inherited_layer_materialized_skipped() {
     let mut child = store.branches.get_mut(&child_branch()).unwrap();
     child.inherited_layers.push(InheritedLayer {
         source_branch_id: parent_branch(),
-        fork_version: 10,
+        fork_version: CommitVersion(10),
         segments: snapshot,
         status: LayerStatus::Materialized,
     });
@@ -766,7 +766,7 @@ fn fork_creates_inherited_layer() {
     assert_eq!(child.inherited_layers[0].source_branch_id, parent_branch());
     assert_eq!(
         child.inherited_layers[0].fork_version,
-        fork_version.as_u64()
+        fork_version
     );
     assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
     assert!(segments_shared > 0);
@@ -1134,7 +1134,7 @@ fn fork_manifest_roundtrip() {
         assert_eq!(child.inherited_layers.len(), 1);
         assert_eq!(
             child.inherited_layers[0].fork_version,
-            fork_version.as_u64()
+            fork_version
         );
     }
 
@@ -1156,7 +1156,7 @@ fn fork_manifest_roundtrip() {
     );
     assert_eq!(
         child2.inherited_layers[0].fork_version,
-        fork_version.as_u64()
+        fork_version
     );
 
     // Verify data is readable through inherited layers after recovery
@@ -1371,7 +1371,7 @@ fn list_own_entries_since_version() {
     seed(&store, parent_kv("post_fork_2"), Value::Int(4), 4);
 
     // list_own_entries with min_commit_id=2 should return only post-fork entries
-    let own = store.list_own_entries(&pid, Some(2));
+    let own = store.list_own_entries(&pid, Some(CommitVersion(2)));
     assert_eq!(own.len(), 2);
     let keys: HashSet<String> = own
         .iter()
@@ -1398,5 +1398,5 @@ fn list_own_entries_mvcc_dedup() {
     let own = store.list_own_entries(&pid, None);
     assert_eq!(own.len(), 1);
     assert_eq!(own[0].value, Value::Int(3));
-    assert_eq!(own[0].commit_id, 3);
+    assert_eq!(own[0].commit_id, CommitVersion(3));
 }

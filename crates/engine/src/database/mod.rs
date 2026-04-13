@@ -561,7 +561,7 @@ impl Database {
         &self,
         prefix: &Key,
         start_key: &Key,
-        max_version: u64,
+        max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
         self.storage

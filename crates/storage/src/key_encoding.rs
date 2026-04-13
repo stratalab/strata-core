@@ -219,14 +219,14 @@ impl InternalKey {
     }
 
     /// Extract the commit_id from the trailing 8 bytes.
-    pub fn commit_id(&self) -> u64 {
+    pub fn commit_id(&self) -> CommitVersion {
         let len = self.0.len();
         let bytes: [u8; 8] = self.0[len - 8..].try_into().unwrap();
-        !u64::from_be_bytes(bytes)
+        CommitVersion(!u64::from_be_bytes(bytes))
     }
 
     /// Decode the full `(Key, commit_id)` pair.
-    pub fn decode(&self) -> Option<(Key, u64)> {
+    pub fn decode(&self) -> Option<(Key, CommitVersion)> {
         let buf = &self.0;
         if buf.len() < 16 + 1 + 1 + 2 + COMMIT_ID_SUFFIX_LEN {
             // minimum: 16 (branch) + 1 (space NUL) + 1 (tag) + 2 (user_key terminator) + commit_id
@@ -235,7 +235,7 @@ impl InternalKey {
 
         let commit_id_start = buf.len() - COMMIT_ID_SUFFIX_LEN;
         let commit_id_bytes: [u8; COMMIT_ID_SUFFIX_LEN] = buf[commit_id_start..].try_into().ok()?;
-        let commit_id = !u64::from_be_bytes(commit_id_bytes);
+        let commit_id = CommitVersion(!u64::from_be_bytes(commit_id_bytes));
 
         let typed = &buf[..commit_id_start];
         let mut pos = 0;
@@ -415,7 +415,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion(42));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
-        assert_eq!(decoded_commit, 42);
+        assert_eq!(decoded_commit, CommitVersion(42));
     }
 
     #[test]
@@ -424,7 +424,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion::MAX);
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
-        assert_eq!(decoded_commit, u64::MAX);
+        assert_eq!(decoded_commit, CommitVersion::MAX);
     }
 
     #[test]
@@ -433,7 +433,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion(0));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
-        assert_eq!(decoded_commit, 0);
+        assert_eq!(decoded_commit, CommitVersion(0));
     }
 
     #[test]
@@ -442,7 +442,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion(5));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
-        assert_eq!(decoded_commit, 5);
+        assert_eq!(decoded_commit, CommitVersion(5));
     }
 
     #[test]
@@ -452,7 +452,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion(99));
         let (decoded_key, decoded_commit) = ik.decode().unwrap();
         assert_eq!(decoded_key, key);
-        assert_eq!(decoded_commit, 99);
+        assert_eq!(decoded_commit, CommitVersion(99));
     }
 
     #[test]
@@ -541,7 +541,7 @@ mod tests {
         let key = make_key("default", TypeTag::KV, "hello");
         for commit_id in [0u64, 1, 42, 1000, u64::MAX / 2, u64::MAX] {
             let ik = InternalKey::encode(&key, CommitVersion(commit_id));
-            assert_eq!(ik.commit_id(), commit_id);
+            assert_eq!(ik.commit_id(), CommitVersion(commit_id));
         }
     }
 
@@ -612,7 +612,7 @@ mod tests {
         let ik = InternalKey::encode(&key, CommitVersion(42));
         let bytes = ik.into_bytes();
         let recovered = InternalKey::try_from_bytes(bytes).unwrap();
-        assert_eq!(recovered.commit_id(), 42);
+        assert_eq!(recovered.commit_id(), CommitVersion(42));
     }
 
     #[test]
@@ -687,7 +687,7 @@ mod tests {
                 let ik = InternalKey::encode(&key, CommitVersion(commit_id));
                 let (decoded_key, decoded_commit) = ik.decode().unwrap();
                 prop_assert_eq!(&decoded_key, &key);
-                prop_assert_eq!(decoded_commit, commit_id);
+                prop_assert_eq!(decoded_commit, CommitVersion(commit_id));
             }
 
             #[test]

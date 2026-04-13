@@ -115,7 +115,7 @@ fn live_entries_from_versioned(
         .map(|e| {
             let vv = VersionedValue {
                 value: e.value,
-                version: Version::Txn(e.commit_id),
+                version: Version::Txn(e.commit_id.as_u64()),
                 timestamp: strata_core::Timestamp::from_micros(0),
             };
             (e.key, vv)
@@ -567,7 +567,7 @@ pub struct ThreeWayDiffResult {
     /// Merge base branch name
     pub merge_base_branch: String,
     /// Merge base version
-    pub merge_base_version: u64,
+    pub merge_base_version: CommitVersion,
     /// Entries that differ (excludes Unchanged)
     pub entries: Vec<ThreeWayDiffEntry>,
 }
@@ -578,7 +578,7 @@ pub struct MergeBaseInfo {
     /// Branch name at the merge base
     pub branch: String,
     /// MVCC version at the merge base
-    pub version: u64,
+    pub version: CommitVersion,
 }
 
 /// Options for filtering and time-scoping a branch diff.
@@ -934,7 +934,7 @@ pub fn diff_branches_with_options(
     let storage = db.storage();
 
     // Capture snapshot version for consistent reads (#1920)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // COW fast path: if one branch is a direct child of the other and no
     // as_of timestamp, use O(W) diff instead of O(N) full scan.
@@ -1084,11 +1084,11 @@ fn cow_diff_branches(
     id_b: BranchId,
     child_id: BranchId,
     parent_id: BranchId,
-    fork_version: u64,
+    fork_version: CommitVersion,
     branch_a_name: &str,
     branch_b_name: &str,
     options: &DiffOptions,
-    snapshot_version: u64,
+    snapshot_version: CommitVersion,
 ) -> StrataResult<BranchDiffResult> {
     use strata_core::Storage;
     let space_index = SpaceIndex::new(db.clone());
@@ -1146,7 +1146,7 @@ fn cow_diff_branches(
             .clone();
         let key_a = Key::new(ns_a, *type_tag, user_key.clone());
         let val_a = storage
-            .get_versioned(&key_a, CommitVersion(snapshot_version))?
+            .get_versioned(&key_a, snapshot_version)?
             .map(|vv| vv.value);
 
         let ns_b = ns_cache
@@ -1155,7 +1155,7 @@ fn cow_diff_branches(
             .clone();
         let key_b = Key::new(ns_b, *type_tag, user_key.clone());
         let val_b = storage
-            .get_versioned(&key_b, CommitVersion(snapshot_version))?
+            .get_versioned(&key_b, snapshot_version)?
             .map(|vv| vv.value);
 
         let diff_entry = match (&val_a, &val_b) {
@@ -1233,7 +1233,7 @@ pub struct MergeBase {
     /// reads at `version` return the inherited (pre-fork) view.
     pub branch_id: BranchId,
     /// MVCC version to read ancestor state at.
-    pub version: u64,
+    pub version: CommitVersion,
 }
 
 /// Classification of a key in a three-way merge.
@@ -1452,7 +1452,7 @@ fn compute_merge_base(
 ) -> Option<MergeBase> {
     // 1. Executor-provided override (from DAG)
     if let Some((branch_id, version)) = merge_base_override {
-        return Some(MergeBase { branch_id, version });
+        return Some(MergeBase { branch_id, version: CommitVersion(version) });
     }
 
     // 2. Check storage for fork relationship
@@ -1544,7 +1544,7 @@ pub(crate) fn gather_typed_entries(
     target_id: BranchId,
     merge_base: &MergeBase,
     spaces: &[String],
-    snapshot_version: u64,
+    snapshot_version: CommitVersion,
 ) -> StrataResult<TypedEntries> {
     let storage = db.storage();
     let space_set: HashSet<&str> = spaces.iter().map(|s| s.as_str()).collect();
@@ -1920,7 +1920,7 @@ pub fn merge_branches_with_metadata(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot version for consistent reads during diff (#1917)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // Gather typed entries once, then route through the
     // PrimitiveMergeHandler registry. The registry's `precheck` step is
@@ -2746,11 +2746,11 @@ pub fn revert_version_range_with_metadata(
         // 1. "before" state: what the branch looked like at (from_version - 1)
         //    WITH tombstones, so we can distinguish "key existed" from "key absent"
         let before_entries =
-            storage.list_by_type_at_version(&branch_id, type_tag, from_version.saturating_sub(1));
+            storage.list_by_type_at_version(&branch_id, type_tag, CommitVersion(from_version.saturating_sub(1)));
 
         // 2. "after" state: what the branch looked like at to_version
         //    WITH tombstones
-        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, to_version);
+        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, CommitVersion(to_version));
 
         // 3. Current live state
         let current_entries = storage.list_by_type(&branch_id, type_tag);
@@ -3076,7 +3076,7 @@ pub fn cherry_pick_from_diff(
     let all_spaces: Vec<String> = source_spaces.union(&target_spaces).cloned().collect();
 
     // Capture snapshot for consistent reads (#1917)
-    let snapshot_version = db.current_version().as_u64();
+    let snapshot_version = db.current_version();
 
     // Cherry-pick uses the same per-handler `precheck` + `plan` dispatch
     // as `merge_branches`, so it inherits the semantic graph merge and
@@ -5094,7 +5094,7 @@ mod tests {
         let base = get_merge_base(&db, "child", "parent", None).unwrap();
         assert!(base.is_some());
         let base = base.unwrap();
-        assert_eq!(base.version, fork_info.fork_version.unwrap());
+        assert_eq!(base.version, CommitVersion(fork_info.fork_version.unwrap()));
     }
 
     #[test]

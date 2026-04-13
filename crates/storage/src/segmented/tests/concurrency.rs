@@ -315,7 +315,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount() {
     let b2 = Arc::clone(&barrier);
     let compact_handle = std::thread::spawn(move || {
         b2.wait();
-        s2.compact_branch(&parent_branch(), 0)
+        s2.compact_branch(&parent_branch(), CommitVersion(0))
     });
 
     let fork_result = fork_handle.join().unwrap().unwrap();
@@ -407,7 +407,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
         let b2 = Arc::clone(&barrier);
         let t2 = std::thread::spawn(move || {
             b2.wait();
-            s2.compact_branch(&parent_branch(), 0)
+            s2.compact_branch(&parent_branch(), CommitVersion(0))
         });
 
         let fork_result = t1.join().unwrap().unwrap();
@@ -659,7 +659,7 @@ fn test_issue_1716_compact_branch_cleans_up_on_failure() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Attempt compaction — should fail due to corruption
-    let result = store.compact_branch(&bid, 0);
+    let result = store.compact_branch(&bid, CommitVersion(0));
     assert!(result.is_err(), "compaction must fail on corrupt segment");
 
     // After failed compaction, no new .sst or .tmp files should remain
@@ -728,7 +728,7 @@ fn test_issue_1716_compact_l0_to_l1_cleans_up_on_failure() {
     std::fs::write(target, &corrupt).unwrap();
 
     // Attempt compact_l0_to_l1 — should fail due to corruption
-    let result = store.compact_l0_to_l1(&bid, 0);
+    let result = store.compact_l0_to_l1(&bid, CommitVersion(0));
     assert!(
         result.is_err(),
         "compact_l0_to_l1 must fail on corrupt segment"

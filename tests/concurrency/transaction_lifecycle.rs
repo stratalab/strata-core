@@ -147,7 +147,7 @@ fn validation_failure_leads_to_abort() {
 
     // Transaction reads key
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(key.clone(), version);
+    txn.read_set.insert(key.clone(), CommitVersion(version));
     txn.write_set.insert(key.clone(), Value::Int(10));
 
     // Concurrent modification
@@ -184,7 +184,7 @@ fn reset_clears_all_sets() {
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
 
     // Add some data
-    txn.read_set.insert(key.clone(), 1);
+    txn.read_set.insert(key.clone(), CommitVersion(1));
     txn.write_set.insert(key.clone(), Value::Int(42));
     txn.delete_set.insert(create_test_key(branch_id, "deleted"));
 
@@ -215,7 +215,7 @@ fn reset_preserves_capacity() {
     // Add many items to force allocation
     for i in 0..100 {
         let key = create_test_key(branch_id, &format!("key_{}", i));
-        txn.read_set.insert(key.clone(), i as u64);
+        txn.read_set.insert(key.clone(), CommitVersion(i as u64));
         txn.write_set.insert(key, Value::Int(i));
     }
 
@@ -298,7 +298,7 @@ fn read_modify_write_workflow() {
         .get_versioned(&key, CommitVersion::MAX)
         .unwrap()
         .unwrap();
-    txn.read_set.insert(key.clone(), current.version.as_u64());
+    txn.read_set.insert(key.clone(), CommitVersion(current.version.as_u64()));
 
     // Modify
     if let Value::Int(v) = current.value {
@@ -377,8 +377,8 @@ fn multi_key_transaction_workflow() {
 
     // Transaction: read k1, write k2, create k3
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(key1.clone(), v1);
-    txn.read_set.insert(key2.clone(), v2);
+    txn.read_set.insert(key1.clone(), CommitVersion(v1));
+    txn.read_set.insert(key2.clone(), CommitVersion(v2));
     txn.write_set.insert(key2.clone(), Value::Int(20));
     txn.write_set.insert(key3.clone(), Value::Int(3));
 
@@ -453,7 +453,7 @@ fn delete_workflow() {
 
     // Transaction: read then delete
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(1));
-    txn.read_set.insert(key.clone(), version);
+    txn.read_set.insert(key.clone(), CommitVersion(version));
     txn.delete_set.insert(key.clone());
 
     // Validate
@@ -517,7 +517,7 @@ fn many_sequential_transactions() {
             .as_u64();
 
         let mut txn = TransactionContext::new(TxnId(i as u64), branch_id, CommitVersion(version));
-        txn.read_set.insert(key.clone(), version);
+        txn.read_set.insert(key.clone(), CommitVersion(version));
         txn.write_set.insert(key.clone(), Value::Int(i));
 
         txn.mark_validating().unwrap();

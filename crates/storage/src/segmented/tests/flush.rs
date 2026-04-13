@@ -524,12 +524,12 @@ fn max_flushed_commit_returns_correct_value() {
     seed(&store, kv_key("k2"), Value::Int(2), 10);
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
-    assert_eq!(store.max_flushed_commit(&branch()), Some(10));
+    assert_eq!(store.max_flushed_commit(&branch()), Some(CommitVersion(10)));
 
     seed(&store, kv_key("k3"), Value::Int(3), 20);
     store.rotate_memtable(&branch());
     store.flush_oldest_frozen(&branch()).unwrap();
-    assert_eq!(store.max_flushed_commit(&branch()), Some(20));
+    assert_eq!(store.max_flushed_commit(&branch()), Some(CommitVersion(20)));
 }
 
 #[test]

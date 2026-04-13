@@ -245,10 +245,10 @@ pub trait Storage: Send + Sync {
     /// # Errors
     ///
     /// Returns an error if the storage operation fails.
-    fn get_version_only(&self, key: &Key) -> StrataResult<Option<u64>> {
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<CommitVersion>> {
         Ok(self
             .get_versioned(key, CommitVersion::MAX)?
-            .map(|vv| vv.version.as_u64()))
+            .map(|vv| CommitVersion(vv.version.as_u64())))
     }
 }
 

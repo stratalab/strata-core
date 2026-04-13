@@ -276,7 +276,12 @@ impl WalWriter {
     ///
     /// Handles segment rotation, writing, metadata tracking, and counter updates.
     /// Callers are responsible for encoding and post-write sync behavior.
-    fn append_inner(&mut self, encoded: &[u8], txn_id: TxnId, timestamp: u64) -> std::io::Result<()> {
+    fn append_inner(
+        &mut self,
+        encoded: &[u8],
+        txn_id: TxnId,
+        timestamp: u64,
+    ) -> std::io::Result<()> {
         let segment = self
             .segment
             .as_mut()
@@ -1402,7 +1407,12 @@ mod tests {
         // Write some records
         for i in 1..=5 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
 
@@ -1434,7 +1444,12 @@ mod tests {
         // Write initial records and flush meta
         for i in 1..=3 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
         writer.flush_active_meta();
@@ -1451,7 +1466,12 @@ mod tests {
         // Write more records and flush again
         for i in 4..=7 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
         writer.flush_active_meta();
@@ -1491,7 +1511,12 @@ mod tests {
         // Write records
         for i in 1..=3 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![i as u8],
+                ))
                 .unwrap();
         }
 

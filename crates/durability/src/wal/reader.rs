@@ -288,7 +288,11 @@ impl WalReader {
             }
             // Active segment (no .meta) or closed segment that may have records above watermark
             let (records, _, _, _) = self.read_segment(wal_dir, segment_number)?;
-            result.extend(records.into_iter().filter(|r| r.txn_id.as_u64() > watermark));
+            result.extend(
+                records
+                    .into_iter()
+                    .filter(|r| r.txn_id.as_u64() > watermark),
+            );
         }
 
         Ok(result)
@@ -1599,7 +1603,12 @@ mod tests {
         // Write 10 records with large enough payloads to spread across segments
         for i in 1..=10u64 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0xAA; 40]))
+                .append(&WalRecord::new(
+                    TxnId(i),
+                    [1u8; 16],
+                    i * 1000,
+                    vec![0xAA; 40],
+                ))
                 .unwrap();
         }
         writer.close().unwrap();

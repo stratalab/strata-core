@@ -16,6 +16,7 @@ use crate::memtable::MemtableEntry;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::iter::Peekable;
+use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
 /// Source count threshold: use linear scan at or below this, heap above.
@@ -163,14 +164,14 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for MergeIterato
 /// Remaining versions of the same key are skipped.
 pub struct MvccIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> {
     inner: MergeIterator<I>,
-    max_version: u64,
+    max_version: CommitVersion,
     /// Typed key prefix of the last emitted key — used to skip duplicates.
     last_emitted_prefix: Option<Vec<u8>>,
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> MvccIterator<I> {
     /// Create a new MVCC iterator with the given snapshot version.
-    pub fn new(inner: MergeIterator<I>, max_version: u64) -> Self {
+    pub fn new(inner: MergeIterator<I>, max_version: CommitVersion) -> Self {
         Self {
             inner,
             max_version,
@@ -219,7 +220,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for MvccIterator
 pub struct RewritingIterator<I> {
     inner: I,
     target_branch_id: BranchId,
-    fork_version: u64,
+    fork_version: CommitVersion,
 }
 
 impl<I> RewritingIterator<I> {
@@ -228,7 +229,7 @@ impl<I> RewritingIterator<I> {
     /// - `inner`: iterator over source branch entries
     /// - `target_branch_id`: child branch's ID (rewrite TO)
     /// - `fork_version`: maximum visible commit_id from source
-    pub fn new(inner: I, target_branch_id: BranchId, fork_version: u64) -> Self {
+    pub fn new(inner: I, target_branch_id: BranchId, fork_version: CommitVersion) -> Self {
         Self {
             inner,
             target_branch_id,
@@ -358,7 +359,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let results: Vec<_> = MvccIterator::new(merge, 2).collect();
+        let results: Vec<_> = MvccIterator::new(merge, CommitVersion(2)).collect();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].1.value, Value::Int(20));
     }
@@ -372,7 +373,7 @@ mod tests {
             (InternalKey::encode(&key("b"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let results: Vec<_> = MvccIterator::new(merge, u64::MAX).collect();
+        let results: Vec<_> = MvccIterator::new(merge, CommitVersion::MAX).collect();
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].1.value, Value::Int(20)); // a@2
         assert_eq!(results[1].1.value, Value::Int(30)); // b@3
@@ -389,7 +390,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let results: Vec<_> = MvccIterator::new(merge, u64::MAX).collect();
+        let results: Vec<_> = MvccIterator::new(merge, CommitVersion::MAX).collect();
         assert_eq!(results.len(), 1);
         assert!(results[0].1.is_tombstone);
     }
@@ -454,13 +455,13 @@ mod tests {
         let mut sources: Vec<Vec<(InternalKey, MemtableEntry)>> = Vec::new();
         for i in 0..6 {
             let commit_id = 6 - i as u64; // source 0 → commit 6, source 5 → commit 1
-            let ik = InternalKey::encode(&k, commit_id);
+            let ik = InternalKey::encode(&k, CommitVersion(commit_id));
             sources.push(vec![(ik, entry(commit_id as i64 * 10))]);
         }
 
         let iters: Vec<_> = sources.into_iter().map(|s| s.into_iter()).collect();
         let merge = MergeIterator::new(iters);
-        let results: Vec<_> = MvccIterator::new(merge, 4).collect();
+        let results: Vec<_> = MvccIterator::new(merge, CommitVersion(4)).collect();
 
         assert_eq!(results.len(), 1);
         // commit_id=4 → value=40
@@ -474,7 +475,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let results: Vec<_> = MvccIterator::new(merge, 2).collect();
+        let results: Vec<_> = MvccIterator::new(merge, CommitVersion(2)).collect();
         assert!(results.is_empty());
     }
 }

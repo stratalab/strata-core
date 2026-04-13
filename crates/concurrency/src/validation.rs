@@ -39,6 +39,7 @@
 
 use crate::transaction::{CASOperation, TransactionContext};
 use std::collections::HashMap;
+use strata_core::id::CommitVersion;
 use strata_core::traits::Storage;
 use strata_core::types::Key;
 
@@ -56,9 +57,9 @@ pub enum ConflictType {
         /// The key that has a conflict
         key: Key,
         /// Version recorded in read_set when read
-        read_version: u64,
+        read_version: CommitVersion,
         /// Current version in storage at validation time
-        current_version: u64,
+        current_version: CommitVersion,
     },
 
     /// CAS conflict: expected version doesn't match current version
@@ -70,9 +71,9 @@ pub enum ConflictType {
         /// The key that has a CAS conflict
         key: Key,
         /// Expected version specified in CAS operation
-        expected_version: u64,
+        expected_version: CommitVersion,
         /// Current version in storage at validation time
-        current_version: u64,
+        current_version: CommitVersion,
     },
 
     /// JSON document conflict: document version changed since read
@@ -84,9 +85,9 @@ pub enum ConflictType {
         /// The key of the JSON document with a conflict
         key: Key,
         /// Document version when read (snapshot version)
-        snapshot_version: u64,
+        snapshot_version: CommitVersion,
         /// Current document version at validation time
-        current_version: u64,
+        current_version: CommitVersion,
     },
 
     /// JSON path write-write conflict: two writes to overlapping paths
@@ -160,7 +161,7 @@ impl ValidationResult {
 /// # Returns
 /// ValidationResult with any ReadWriteConflicts found
 pub fn validate_read_set<S: Storage>(
-    read_set: &HashMap<Key, u64>,
+    read_set: &HashMap<Key, CommitVersion>,
     store: &S,
 ) -> strata_core::StrataResult<ValidationResult> {
     let mut result = ValidationResult::ok();
@@ -169,7 +170,7 @@ pub fn validate_read_set<S: Storage>(
         // Get current version from storage (as u64 for comparison)
         let current_version = match store.get_version_only(key) {
             Ok(Some(v)) => v,
-            Ok(None) => 0, // Key doesn't exist = version 0
+            Ok(None) => CommitVersion::ZERO, // Key doesn't exist = version 0
             Err(e) => {
                 // Storage error - abort validation to prevent incorrect commit
                 return Err(strata_core::StrataError::internal(format!(
@@ -218,7 +219,7 @@ pub fn validate_cas_set<S: Storage>(
         // Get current version from storage (as u64 for comparison)
         let current_version = match store.get_version_only(&cas_op.key) {
             Ok(Some(v)) => v,
-            Ok(None) => 0, // Key doesn't exist = version 0
+            Ok(None) => CommitVersion::ZERO, // Key doesn't exist = version 0
             Err(e) => {
                 return Err(strata_core::StrataError::internal(format!(
                     "Storage error during CAS validation for key {:?}: {}",
@@ -266,7 +267,7 @@ pub fn validate_cas_set<S: Storage>(
 /// # Returns
 /// ValidationResult with any JsonDocConflicts found
 pub fn validate_json_set<S: Storage>(
-    json_snapshot_versions: Option<&HashMap<Key, u64>>,
+    json_snapshot_versions: Option<&HashMap<Key, CommitVersion>>,
     store: &S,
 ) -> strata_core::StrataResult<ValidationResult> {
     let mut result = ValidationResult::ok();
@@ -279,7 +280,7 @@ pub fn validate_json_set<S: Storage>(
         // Get current version from storage
         let current_version = match store.get_version_only(key) {
             Ok(Some(v)) => v,
-            Ok(None) => 0, // Document deleted = version 0
+            Ok(None) => CommitVersion::ZERO, // Document deleted = version 0
             Err(e) => {
                 return Err(strata_core::StrataError::internal(format!(
                     "Storage error during JSON validation for key {:?}: {}",

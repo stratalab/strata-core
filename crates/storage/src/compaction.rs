@@ -11,6 +11,7 @@
 
 use crate::key_encoding::InternalKey;
 use crate::memtable::MemtableEntry;
+use strata_core::id::CommitVersion;
 use strata_core::types::TypeTag;
 
 /// Pruning iterator for segment compaction.
@@ -25,7 +26,7 @@ use strata_core::types::TypeTag;
 ///   - Skip all remaining older versions
 pub struct CompactionIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> {
     inner: I,
-    prune_floor: u64,
+    prune_floor: CommitVersion,
     current_prefix: Option<Vec<u8>>,
     emitted_floor_entry: bool,
     /// Maximum versions to keep per logical key (0 = unlimited).
@@ -46,16 +47,16 @@ pub struct CompactionIterator<I: Iterator<Item = (InternalKey, MemtableEntry)>> 
     is_bottommost: bool,
     /// Snapshot-safe floor (#1697): versions with `commit_id >= snapshot_floor`
     /// are protected from `max_versions` pruning because an active snapshot
-    /// might need them. When 0, no snapshot protection is applied.
-    snapshot_floor: u64,
+    /// might need them. When CommitVersion::ZERO, no snapshot protection is applied.
+    snapshot_floor: CommitVersion,
 }
 
 impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
     /// Create a new compaction iterator with the given prune floor.
     ///
     /// Versions with `commit_id < prune_floor` are pruned (at most one
-    /// surviving per logical key). When `prune_floor == 0`, nothing is pruned.
-    pub fn new(inner: I, prune_floor: u64) -> Self {
+    /// surviving per logical key). When `prune_floor == CommitVersion::ZERO`, nothing is pruned.
+    pub fn new(inner: I, prune_floor: CommitVersion) -> Self {
         Self {
             inner,
             prune_floor,
@@ -65,7 +66,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
             versions_emitted: 0,
             drop_expired: false,
             is_bottommost: true,
-            snapshot_floor: 0,
+            snapshot_floor: CommitVersion::ZERO,
         }
     }
 
@@ -101,10 +102,10 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> CompactionIterator<I> {
 
     /// Set the snapshot-safe floor (#1697).
     ///
-    /// When `snapshot_floor > 0`, versions with `commit_id >= snapshot_floor`
+    /// When `snapshot_floor > CommitVersion::ZERO`, versions with `commit_id >= snapshot_floor`
     /// are protected from `max_versions` pruning because an active snapshot
-    /// may need them. When 0 (default), no snapshot protection is applied.
-    pub fn with_snapshot_floor(mut self, floor: u64) -> Self {
+    /// may need them. When ZERO (default), no snapshot protection is applied.
+    pub fn with_snapshot_floor(mut self, floor: CommitVersion) -> Self {
         self.snapshot_floor = floor;
         self
     }
@@ -158,7 +159,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 // max_versions pruning because an active snapshot may need them.
                 if self.max_versions > 0
                     && self.versions_emitted >= self.max_versions
-                    && (self.snapshot_floor == 0 || commit_id < self.snapshot_floor)
+                    && (self.snapshot_floor == CommitVersion::ZERO || commit_id < self.snapshot_floor)
                 {
                     continue; // Safe to skip — no snapshot needs this version
                 }
@@ -181,7 +182,7 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for CompactionIt
                 // Keep one floor entry, but respect max_versions (with snapshot safety #1697)
                 if self.max_versions > 0
                     && self.versions_emitted >= self.max_versions
-                    && (self.snapshot_floor == 0 || commit_id < self.snapshot_floor)
+                    && (self.snapshot_floor == CommitVersion::ZERO || commit_id < self.snapshot_floor)
                 {
                     continue;
                 }
@@ -311,7 +312,7 @@ mod tests {
     /// Helper: run compaction on a single sorted source.
     fn compact(
         items: Vec<(InternalKey, MemtableEntry)>,
-        prune_floor: u64,
+        prune_floor: CommitVersion,
     ) -> Vec<(InternalKey, MemtableEntry)> {
         let merge = MergeIterator::new(vec![items.into_iter()]);
         CompactionIterator::new(merge, prune_floor).collect()
@@ -325,11 +326,11 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 2);
+        let result = compact(items, CommitVersion(2));
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].0.commit_id(), 5);
-        assert_eq!(result[1].0.commit_id(), 3);
-        assert_eq!(result[2].0.commit_id(), 1);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(5));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3));
+        assert_eq!(result[2].0.commit_id(), CommitVersion(1));
     }
 
     #[test]
@@ -340,10 +341,10 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 4);
+        let result = compact(items, CommitVersion(4));
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0.commit_id(), 5);
-        assert_eq!(result[1].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(5));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -353,7 +354,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 0);
+        let result = compact(items, CommitVersion(0));
         assert_eq!(result.len(), 3);
     }
 
@@ -367,7 +368,7 @@ mod tests {
             ),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 5);
+        let result = compact(items, CommitVersion(5));
         assert!(result.is_empty());
     }
 
@@ -382,11 +383,11 @@ mod tests {
             ),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 2);
+        let result = compact(items, CommitVersion(2));
         assert_eq!(result.len(), 2);
         assert!(result[0].1.is_tombstone);
-        assert_eq!(result[0].0.commit_id(), 3);
-        assert_eq!(result[1].0.commit_id(), 1);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(3));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(1));
     }
 
     #[test]
@@ -399,19 +400,19 @@ mod tests {
             (InternalKey::encode(&key("b"), CommitVersion(4)), entry(40)),
             (InternalKey::encode(&key("b"), CommitVersion(2)), entry(20)),
         ];
-        let result = compact(items, 4);
+        let result = compact(items, CommitVersion(4));
         // key "a": 5 (above), 3 (newest below) → 2 entries
         // key "b": 4 (above), 2 (newest below) → 2 entries
         assert_eq!(result.len(), 4);
-        assert_eq!(result[0].0.commit_id(), 5); // a@5
-        assert_eq!(result[1].0.commit_id(), 3); // a@3
-        assert_eq!(result[2].0.commit_id(), 4); // b@4
-        assert_eq!(result[3].0.commit_id(), 2); // b@2
+        assert_eq!(result[0].0.commit_id(), CommitVersion(5)); // a@5
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3)); // a@3
+        assert_eq!(result[2].0.commit_id(), CommitVersion(4)); // b@4
+        assert_eq!(result[3].0.commit_id(), CommitVersion(2)); // b@2
     }
 
     #[test]
     fn compaction_empty_input() {
-        let result = compact(vec![], 10);
+        let result = compact(vec![], CommitVersion(10));
         assert!(result.is_empty());
     }
 
@@ -422,9 +423,9 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
-        let result = compact(items, 10);
+        let result = compact(items, CommitVersion(10));
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(3));
         assert_eq!(result[0].1.value, Value::Int(30));
     }
 
@@ -435,7 +436,7 @@ mod tests {
             InternalKey::encode(&key("k"), CommitVersion(3)),
             tombstone(),
         )];
-        let result = compact(items, 10);
+        let result = compact(items, CommitVersion(10));
         assert!(result.is_empty());
     }
 
@@ -458,13 +459,13 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(3)
             .collect();
         assert_eq!(result.len(), 3);
-        assert_eq!(result[0].0.commit_id(), 10);
-        assert_eq!(result[1].0.commit_id(), 8);
-        assert_eq!(result[2].0.commit_id(), 6);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(8));
+        assert_eq!(result[2].0.commit_id(), CommitVersion(6));
     }
 
     #[test]
@@ -475,7 +476,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(0)
             .collect();
         assert_eq!(result.len(), 3);
@@ -497,12 +498,12 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_max_versions(2)
             .collect();
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0.commit_id(), 10);
-        assert_eq!(result[1].0.commit_id(), 8);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(8));
     }
 
     #[test]
@@ -517,16 +518,16 @@ mod tests {
             (InternalKey::encode(&key("b"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(2)
             .collect();
         // key "a": 5, 3 (2 versions)
         // key "b": 4, 2 (2 versions)
         assert_eq!(result.len(), 4);
-        assert_eq!(result[0].0.commit_id(), 5); // a@5
-        assert_eq!(result[1].0.commit_id(), 3); // a@3
-        assert_eq!(result[2].0.commit_id(), 4); // b@4
-        assert_eq!(result[3].0.commit_id(), 2); // b@2
+        assert_eq!(result[0].0.commit_id(), CommitVersion(5)); // a@5
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3)); // a@3
+        assert_eq!(result[2].0.commit_id(), CommitVersion(4)); // b@4
+        assert_eq!(result[3].0.commit_id(), CommitVersion(2)); // b@2
     }
 
     #[test]
@@ -538,11 +539,11 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(1)
             .collect();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0.commit_id(), 5);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(5));
     }
 
     #[test]
@@ -560,13 +561,13 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(2)), entry(20)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 3)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(3))
             .with_max_versions(2)
             .collect();
         assert_eq!(result.len(), 2);
         assert!(result[0].1.is_tombstone);
-        assert_eq!(result[0].0.commit_id(), 10);
-        assert_eq!(result[1].0.commit_id(), 8);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(8));
     }
 
     #[test]
@@ -581,7 +582,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_max_versions(10)
             .collect();
         assert!(result.is_empty());
@@ -608,7 +609,7 @@ mod tests {
             tombstone(),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_is_bottommost(false)
             .collect();
         // Non-bottommost: tombstone must survive to shadow lower-level puts
@@ -618,7 +619,7 @@ mod tests {
             "below-floor tombstone must be kept in non-bottommost compaction"
         );
         assert!(result[0].1.is_tombstone);
-        assert_eq!(result[0].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -630,7 +631,7 @@ mod tests {
             tombstone(),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_is_bottommost(true)
             .collect();
         // Bottommost: tombstone can be safely elided
@@ -653,13 +654,13 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(1)), entry(10)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_is_bottommost(false)
             .collect();
         // Tombstone kept as floor entry, older value pruned
         assert_eq!(result.len(), 1);
         assert!(result[0].1.is_tombstone);
-        assert_eq!(result[0].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -680,7 +681,7 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 5)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(5))
             .with_max_versions(2)
             .with_is_bottommost(false)
             .collect();
@@ -690,10 +691,10 @@ mod tests {
             3,
             "tombstone must survive even when max_versions exhausted"
         );
-        assert_eq!(result[0].0.commit_id(), 10);
-        assert_eq!(result[1].0.commit_id(), 8);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(8));
         assert!(result[2].1.is_tombstone);
-        assert_eq!(result[2].0.commit_id(), 2);
+        assert_eq!(result[2].0.commit_id(), CommitVersion(2));
     }
 
     // -----------------------------------------------------------------------
@@ -720,7 +721,7 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 2) // floor=2, both above
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(2)) // floor=2, both above
             .with_max_versions(1)
             .with_is_bottommost(false)
             .collect();
@@ -729,9 +730,9 @@ mod tests {
             2,
             "above-floor tombstone must survive max_versions cap in non-bottommost compaction"
         );
-        assert_eq!(result[0].0.commit_id(), 7);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(7));
         assert!(result[1].1.is_tombstone);
-        assert_eq!(result[1].0.commit_id(), 3);
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -753,7 +754,7 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 2)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(2))
             .with_max_versions(2)
             .with_is_bottommost(false)
             .collect();
@@ -762,10 +763,10 @@ mod tests {
             3,
             "tombstone must not count against max_versions, displacing value@v5"
         );
-        assert_eq!(result[0].0.commit_id(), 10);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
         assert!(result[1].1.is_tombstone);
-        assert_eq!(result[1].0.commit_id(), 7);
-        assert_eq!(result[2].0.commit_id(), 5);
+        assert_eq!(result[1].0.commit_id(), CommitVersion(7));
+        assert_eq!(result[2].0.commit_id(), CommitVersion(5));
     }
 
     #[test]
@@ -780,7 +781,7 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 2)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(2))
             .with_max_versions(1)
             .with_is_bottommost(true)
             .collect();
@@ -789,7 +790,7 @@ mod tests {
             1,
             "bottommost compaction can drop above-floor tombstone via max_versions"
         );
-        assert_eq!(result[0].0.commit_id(), 7);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(7));
     }
 
     // -----------------------------------------------------------------------
@@ -806,17 +807,17 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(1)
-            .with_snapshot_floor(5)
+            .with_snapshot_floor(CommitVersion(5))
             .collect();
         assert_eq!(
             result.len(),
             2,
             "version 5 must survive: active snapshot at version 5 needs it"
         );
-        assert_eq!(result[0].0.commit_id(), 6);
-        assert_eq!(result[1].0.commit_id(), 5);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(6));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(5));
 
         // snapshot_floor=6: version 5 (commit_id 5 < 6) is NOT protected.
         // max_versions=1 drops it normally.
@@ -825,16 +826,16 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge2 = MergeIterator::new(vec![items2.into_iter()]);
-        let result2: Vec<_> = CompactionIterator::new(merge2, 0)
+        let result2: Vec<_> = CompactionIterator::new(merge2, CommitVersion::ZERO)
             .with_max_versions(1)
-            .with_snapshot_floor(6)
+            .with_snapshot_floor(CommitVersion(6))
             .collect();
         assert_eq!(
             result2.len(),
             1,
             "version 5 is below snapshot_floor=6, not protected"
         );
-        assert_eq!(result2[0].0.commit_id(), 6);
+        assert_eq!(result2[0].0.commit_id(), CommitVersion(6));
     }
 
     #[test]
@@ -853,15 +854,15 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(2)
-            .with_snapshot_floor(6)
+            .with_snapshot_floor(CommitVersion(6))
             .collect();
         // max_versions=2, and we already emitted 2 (versions 10, 8).
         // Versions 5 and 3 are below snapshot_floor, so max_versions can drop them.
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0.commit_id(), 10);
-        assert_eq!(result[1].0.commit_id(), 8);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(10));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(8));
     }
 
     #[test]
@@ -872,16 +873,16 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(1)
-            .with_snapshot_floor(0)
+            .with_snapshot_floor(CommitVersion(0))
             .collect();
         assert_eq!(
             result.len(),
             1,
             "no snapshot protection, max_versions=1 keeps only newest"
         );
-        assert_eq!(result[0].0.commit_id(), 6);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(6));
     }
 
     #[test]
@@ -895,13 +896,13 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 4)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(4))
             .with_max_versions(1)
-            .with_snapshot_floor(3)
+            .with_snapshot_floor(CommitVersion(3))
             .collect();
         assert_eq!(result.len(), 2, "floor entry protected by snapshot_floor");
-        assert_eq!(result[0].0.commit_id(), 6);
-        assert_eq!(result[1].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(6));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -917,14 +918,14 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(1)
-            .with_snapshot_floor(5)
+            .with_snapshot_floor(CommitVersion(5))
             .collect();
         assert_eq!(result.len(), 2, "tombstone at snapshot_floor must survive");
-        assert_eq!(result[0].0.commit_id(), 8);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(8));
         assert!(result[1].1.is_tombstone);
-        assert_eq!(result[1].0.commit_id(), 5);
+        assert_eq!(result[1].0.commit_id(), CommitVersion(5));
     }
 
     // -----------------------------------------------------------------------
@@ -954,7 +955,7 @@ mod tests {
             expired_entry(500),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10))
             .with_drop_expired(true)
             .collect();
         // Entry is above prune_floor — must survive even though expired
@@ -963,7 +964,7 @@ mod tests {
             1,
             "expired entry above prune_floor must NOT be dropped (snapshot may need it)"
         );
-        assert_eq!(result[0].0.commit_id(), 50);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(50));
     }
 
     #[test]
@@ -974,7 +975,7 @@ mod tests {
             expired_entry(50),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10))
             .with_drop_expired(true)
             .collect();
         // Entry is below prune_floor and expired — should be dropped
@@ -1004,13 +1005,13 @@ mod tests {
             (InternalKey::encode(&key("k"), CommitVersion(3)), entry(30)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10))
             .with_drop_expired(true)
             .collect();
         // v50 kept (above floor), v8 dropped (expired below floor), v3 kept (floor entry)
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].0.commit_id(), 50);
-        assert_eq!(result[1].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(50));
+        assert_eq!(result[1].0.commit_id(), CommitVersion(3));
     }
 
     #[test]
@@ -1022,7 +1023,7 @@ mod tests {
             expired_entry(50),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_drop_expired(true)
             .collect();
         assert_eq!(
@@ -1051,12 +1052,12 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10))
             .with_drop_expired(true)
             .collect();
         // Only v50 survives; both below-floor expired entries are dropped
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].0.commit_id(), 50);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(50));
     }
 
     // -----------------------------------------------------------------------
@@ -1169,7 +1170,7 @@ mod tests {
             ),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10).collect();
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10)).collect();
         assert_eq!(
             result.len(),
             3,
@@ -1195,7 +1196,7 @@ mod tests {
             (InternalKey::encode(&meta_key, CommitVersion(5)), entry(50)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 0)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(0))
             .with_max_versions(1)
             .collect();
         assert_eq!(
@@ -1214,7 +1215,7 @@ mod tests {
             expired_entry(100),
         )];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10)
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10))
             .with_drop_expired(true)
             .collect();
         assert_eq!(
@@ -1238,13 +1239,13 @@ mod tests {
             (InternalKey::encode(&ev, CommitVersion(2)), entry(200)),
         ];
         let merge = MergeIterator::new(vec![items.into_iter()]);
-        let result: Vec<_> = CompactionIterator::new(merge, 10).collect();
+        let result: Vec<_> = CompactionIterator::new(merge, CommitVersion(10)).collect();
         // KV: keeps only floor entry (v3), prunes v1
         // Event: keeps v2 (exempt from pruning)
         assert_eq!(result.len(), 2, "KV pruned normally, Event exempt");
         // The KV floor entry
-        assert_eq!(result[0].0.commit_id(), 3);
+        assert_eq!(result[0].0.commit_id(), CommitVersion(3));
         // The Event entry
-        assert_eq!(result[1].0.commit_id(), 2);
+        assert_eq!(result[1].0.commit_id(), CommitVersion(2));
     }
 }

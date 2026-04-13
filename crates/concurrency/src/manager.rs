@@ -501,11 +501,7 @@ impl TransactionManager {
                                 wal_serialize_ns = ts.elapsed().as_nanos() as u64;
                                 // Direct mode: no separate mutex
                                 let tw = Instant::now();
-                                let r = wal.append_pre_serialized(
-                                    &rec_buf,
-                                    wal_txn_id,
-                                    timestamp,
-                                );
+                                let r = wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp);
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -542,11 +538,7 @@ impl TransactionManager {
                                 let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
                                 wal_mutex_ns = tm.elapsed().as_nanos() as u64;
                                 let tw = Instant::now();
-                                let r = wal.append_pre_serialized(
-                                    &rec_buf,
-                                    wal_txn_id,
-                                    timestamp,
-                                );
+                                let r = wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp);
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
                                 r
                             })
@@ -1369,7 +1361,7 @@ mod tests {
 
         // CAS operation → not a blind write, should validate
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
-        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
         assert!(!txn.cas_set.is_empty());
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
@@ -1391,7 +1383,7 @@ mod tests {
         // Use version 0 (key doesn't exist) so validation passes
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key.clone(), Value::Int(1)).unwrap();
-        txn.record_json_snapshot_version(key.clone(), 0);
+        txn.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
@@ -2016,7 +2008,8 @@ mod tests {
 
         // T2's record (written first): txn_id should be commit_version=1
         assert_eq!(
-            records[0].txn_id, TxnId(1),
+            records[0].txn_id,
+            TxnId(1),
             "T2's WAL record should carry commit_version=1 (not txn_id=2)"
         );
 
@@ -2024,7 +2017,8 @@ mod tests {
         // BUG (pre-fix): would carry txn_id=1 (start-time ID)
         // This would be skipped by any watermark >= 1, losing T1's data
         assert_eq!(
-            records[1].txn_id, TxnId(2),
+            records[1].txn_id,
+            TxnId(2),
             "T1's WAL record must carry commit_version=2 (not start-time txn_id=1)"
         );
     }
@@ -2629,7 +2623,7 @@ mod tests {
         // First: put(K, v1)
         txn.put(key.clone(), Value::Int(1)).unwrap();
         // Then: cas(K, ...) on the same key — must be rejected
-        let result = txn.cas(key.clone(), 0, Value::Int(2));
+        let result = txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(2));
         assert!(
             result.is_err(),
             "cas() must reject a key already in write_set"
@@ -2650,7 +2644,7 @@ mod tests {
             Arc::clone(&store),
         );
         // First: cas(K, 0, v1)
-        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
         // Then: put(K, v2) on the same key — must be rejected
         let result = txn.put(key.clone(), Value::Int(2));
         assert!(
@@ -2673,7 +2667,7 @@ mod tests {
             Arc::clone(&store),
         );
         // First: cas(K, 0, v1)
-        txn.cas(key.clone(), 0, Value::Int(1)).unwrap();
+        txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
         // Then: delete(K) on the same key — must be rejected
         let result = txn.delete(key.clone());
         assert!(
@@ -2698,7 +2692,7 @@ mod tests {
         // First: delete(K)
         txn.delete(key.clone()).unwrap();
         // Then: cas(K, ...) on the same key — must be rejected
-        let result = txn.cas(key.clone(), 0, Value::Int(2));
+        let result = txn.cas(key.clone(), CommitVersion::ZERO, Value::Int(2));
         assert!(
             result.is_err(),
             "cas() must reject a key already in delete_set"
@@ -2719,7 +2713,7 @@ mod tests {
             Arc::clone(&store),
         );
         txn.put(key.clone(), Value::Int(1)).unwrap();
-        let result = txn.cas_with_read(key.clone(), 0, Value::Int(2));
+        let result = txn.cas_with_read(key.clone(), CommitVersion::ZERO, Value::Int(2));
         assert!(
             result.is_err(),
             "cas_with_read() must reject a key already in write_set"

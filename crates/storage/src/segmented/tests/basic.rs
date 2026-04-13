@@ -367,7 +367,7 @@ fn compaction_does_not_cross_branches() {
     assert_eq!(store.l0_segment_count(&b2), 1);
 
     // Compact only branch 1 L0→L1
-    store.compact_l0_to_l1(&b1, 0).unwrap();
+    store.compact_l0_to_l1(&b1, CommitVersion(0)).unwrap();
 
     // Branch 1: compacted to L1
     assert_eq!(store.l0_segment_count(&b1), 0);
@@ -489,7 +489,7 @@ fn get_version_only_existing() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 5);
     seed(&store, kv_key("k"), Value::Int(2), 10);
-    assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), Some(10));
+    assert_eq!(store.get_version_only(&kv_key("k")).unwrap(), Some(CommitVersion(10)));
 }
 
 #[test]
@@ -836,7 +836,7 @@ fn snapshot_survives_rotation() {
     let prefix = Key::new(ns(), TypeTag::KV, vec![]);
     let (merge, flags) =
         SegmentedStore::build_snapshot_merge_iter(&snapshot, &prefix, &prefix).unwrap();
-    let mvcc = MvccIterator::new(merge, 3); // snapshot at version 3
+    let mvcc = MvccIterator::new(merge, CommitVersion(3)); // snapshot at version 3
     let count = mvcc
         .filter(|(_, entry)| !entry.is_tombstone)
         .filter(|(ik, _)| ik.decode().is_some())

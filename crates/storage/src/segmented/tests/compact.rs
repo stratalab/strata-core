@@ -18,7 +18,7 @@ fn compact_merges_two_segments() {
 
     assert_eq!(store.branch_segment_count(&b), 2);
 
-    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2);
     assert_eq!(result.output_entries, 2);
     assert_eq!(result.entries_pruned, 0);
@@ -56,7 +56,7 @@ fn compact_merges_overlapping_versions() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.output_entries, 2);
     assert_eq!(result.entries_pruned, 0);
 
@@ -92,7 +92,7 @@ fn compact_prunes_old_versions() {
     assert_eq!(store.branch_segment_count(&b), 3);
 
     // floor=3: commit 3 (above floor) + commit 2 (newest below floor) survive, commit 1 pruned
-    let result = store.compact_branch(&b, 3).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 3);
     assert_eq!(result.output_entries, 2);
     assert_eq!(result.entries_pruned, 1);
@@ -137,7 +137,7 @@ fn compact_removes_dead_tombstones() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    let result = store.compact_branch(&b, 5).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(5)).unwrap().unwrap();
     assert_eq!(result.output_entries, 0);
     assert_eq!(result.entries_pruned, 2);
 }
@@ -158,7 +158,7 @@ fn compact_preserves_tombstone_above_floor() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    let result = store.compact_branch(&b, 2).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(2)).unwrap().unwrap();
     assert_eq!(result.output_entries, 2);
     assert_eq!(result.entries_pruned, 0);
 }
@@ -169,7 +169,7 @@ fn compact_noop_zero_segments() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -181,7 +181,7 @@ fn compact_noop_one_segment() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
-    assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -189,7 +189,7 @@ fn compact_noop_ephemeral() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_branch(&b, 0).unwrap().is_none());
+    assert!(store.compact_branch(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn compact_deletes_old_files() {
         .collect();
     assert_eq!(files_before.len(), 3);
 
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
 
     let files_after: Vec<_> = std::fs::read_dir(&branch_dir)
         .unwrap()
@@ -238,7 +238,7 @@ fn compact_reads_correct_after() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
 
     assert_eq!(
         store
@@ -295,7 +295,7 @@ fn compact_result_counts() {
 
     // 4 total entries: a@3, a@2, a@1, b@1
     // floor=3: a keeps 3 (above) + 2 (floor entry), prunes 1. b keeps 1 (floor entry).
-    let result = store.compact_branch(&b, 3).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 3);
     assert_eq!(result.output_entries, 3); // a@3, a@2, b@1
     assert_eq!(result.entries_pruned, 1); // a@1
@@ -585,7 +585,7 @@ fn compact_after_flush_integration() {
 
     assert!(store.should_compact(&b, 3));
 
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
     assert!(!store.should_compact(&b, 2));
 
@@ -623,7 +623,7 @@ fn compact_with_active_memtable_data() {
     seed(&store, kv_key("a"), Value::Int(10), 4);
 
     // Compact segments — memtable data must survive
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
 
     // Memtable data visible
@@ -682,7 +682,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     store.flush_oldest_frozen(&b).unwrap();
 
     // Compact — this merges the 2 segments into 1
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
 
     // Now create 2 more segments and write a frozen memtable
@@ -698,7 +698,7 @@ fn compact_concurrent_flush_preserves_new_segment() {
     assert_eq!(store.branch_segment_count(&b), 3);
 
     // Compact again
-    store.compact_branch(&b, 0).unwrap();
+    store.compact_branch(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.branch_segment_count(&b), 1);
 
     // All data still readable

@@ -211,8 +211,8 @@ pub enum TransactionStatus {
 pub struct CASOperation {
     /// Key to CAS
     pub key: Key,
-    /// Expected version (0 = key must not exist)
-    pub expected_version: u64,
+    /// Expected version (ZERO = key must not exist)
+    pub expected_version: CommitVersion,
     /// New value to write if version matches
     pub new_value: Value,
 }
@@ -232,12 +232,12 @@ pub struct JsonPathRead {
     /// Path that was read
     pub path: JsonPath,
     /// Version of the document when read
-    pub version: u64,
+    pub version: CommitVersion,
 }
 
 impl JsonPathRead {
     /// Create a new JSON path read record
-    pub fn new(key: Key, path: JsonPath, version: u64) -> Self {
+    pub fn new(key: Key, path: JsonPath, version: CommitVersion) -> Self {
         Self { key, path, version }
     }
 }
@@ -426,7 +426,7 @@ pub struct TransactionContext {
     /// the version we read. If not, there's a read-write conflict.
     ///
     /// Version 0 means the key did not exist when read.
-    pub read_set: HashMap<Key, u64>,
+    pub read_set: HashMap<Key, CommitVersion>,
 
     /// Keys written with their new values (buffered)
     ///
@@ -470,7 +470,7 @@ pub struct TransactionContext {
     ///
     /// Maps document key to the version observed during read.
     /// Only allocated when JSON operations are performed.
-    json_snapshot_versions: Option<HashMap<Key, u64>>,
+    json_snapshot_versions: Option<HashMap<Key, CommitVersion>>,
 
     // State
     /// Current transaction status
@@ -676,7 +676,7 @@ impl TransactionContext {
             Some(vv) => {
                 // Key exists - track its version for conflict detection
                 if !self.read_only {
-                    self.read_set.insert(key.clone(), vv.version.as_u64());
+                    self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
                 }
                 Ok(Some(vv.value))
             }
@@ -685,7 +685,7 @@ impl TransactionContext {
                 // This is important: if someone creates this key before we commit,
                 // we have a conflict (we assumed it didn't exist)
                 if !self.read_only {
-                    self.read_set.insert(key.clone(), 0);
+                    self.read_set.insert(key.clone(), CommitVersion::ZERO);
                 }
                 Ok(None)
             }
@@ -734,9 +734,9 @@ impl TransactionContext {
         // Track in read_set for conflict detection (skip in read-only mode)
         if !self.read_only {
             if let Some(ref vv) = versioned {
-                self.read_set.insert(key.clone(), vv.version.as_u64());
+                self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
             } else {
-                self.read_set.insert(key.clone(), 0);
+                self.read_set.insert(key.clone(), CommitVersion::ZERO);
             }
         }
 
@@ -802,7 +802,7 @@ impl TransactionContext {
         let mut snapshot_filtered: Vec<(Key, Value)> = Vec::with_capacity(snapshot_results.len());
         for (key, vv) in snapshot_results {
             if !self.read_only {
-                self.read_set.insert(key.clone(), vv.version.as_u64());
+                self.read_set.insert(key.clone(), CommitVersion(vv.version.as_u64()));
             }
             if !self.delete_set.contains(&key) {
                 snapshot_filtered.push((key, vv.value));
@@ -852,8 +852,8 @@ impl TransactionContext {
     /// Get the version that was read for a key (from read_set)
     ///
     /// Returns None if the key hasn't been read from snapshot.
-    /// Returns Some(0) if the key was read but didn't exist.
-    pub fn get_read_version(&self, key: &Key) -> Option<u64> {
+    /// Returns Some(CommitVersion::ZERO) if the key was read but didn't exist.
+    pub fn get_read_version(&self, key: &Key) -> Option<CommitVersion> {
         self.read_set.get(key).copied()
     }
 
@@ -1066,6 +1066,7 @@ impl TransactionContext {
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
     /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::id::CommitVersion;
     /// # use strata_core::value::Value;
     /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
@@ -1073,14 +1074,14 @@ impl TransactionContext {
     /// # let key = Key::new_kv(ns.clone(), "key");
     /// # let other_key = Key::new_kv(ns, "other");
     /// // Create key only if it doesn't exist (expected_version = 0)
-    /// txn.cas(key, 0, Value::Bytes(b"initial".to_vec()))?;
+    /// txn.cas(key, CommitVersion::ZERO, Value::Bytes(b"initial".to_vec()))?;
     ///
     /// // Update key only if at version 5
-    /// txn.cas(other_key, 5, Value::Bytes(b"updated".to_vec()))?;
+    /// txn.cas(other_key, CommitVersion(5), Value::Bytes(b"updated".to_vec()))?;
     /// # Ok(())
     /// # }
     /// ```
-    pub fn cas(&mut self, key: Key, expected_version: u64, new_value: Value) -> StrataResult<()> {
+    pub fn cas(&mut self, key: Key, expected_version: CommitVersion, new_value: Value) -> StrataResult<()> {
         self.guard(&key)?;
         if self.read_only {
             return Err(StrataError::invalid_input(
@@ -1107,7 +1108,7 @@ impl TransactionContext {
     pub fn cas_with_read(
         &mut self,
         key: Key,
-        expected_version: u64,
+        expected_version: CommitVersion,
         new_value: Value,
     ) -> StrataResult<()> {
         self.guard(&key)?;
@@ -1176,7 +1177,7 @@ impl TransactionContext {
     /// Get JSON snapshot versions (immutable)
     ///
     /// Returns None if no JSON snapshot versions have been recorded.
-    pub fn json_snapshot_versions(&self) -> Option<&HashMap<Key, u64>> {
+    pub fn json_snapshot_versions(&self) -> Option<&HashMap<Key, CommitVersion>> {
         self.json_snapshot_versions.as_ref()
     }
 
@@ -1197,7 +1198,7 @@ impl TransactionContext {
     /// Ensure json_snapshot_versions is initialized and return mutable reference
     ///
     /// Lazily allocates the HashMap on first use.
-    pub fn ensure_json_snapshot_versions(&mut self) -> &mut HashMap<Key, u64> {
+    pub fn ensure_json_snapshot_versions(&mut self) -> &mut HashMap<Key, CommitVersion> {
         self.json_snapshot_versions.get_or_insert_with(HashMap::new)
     }
 
@@ -1205,7 +1206,7 @@ impl TransactionContext {
     ///
     /// This should be called when reading a specific path from a JSON document.
     /// The read will be validated at commit time to detect conflicts.
-    pub fn record_json_read(&mut self, key: Key, path: JsonPath, version: u64) {
+    pub fn record_json_read(&mut self, key: Key, path: JsonPath, version: CommitVersion) {
         self.ensure_json_reads()
             .push(JsonPathRead::new(key, path, version));
     }
@@ -1223,7 +1224,7 @@ impl TransactionContext {
     ///
     /// Tracks the version of a JSON document when it was first read.
     /// Used for document-level conflict detection.
-    pub fn record_json_snapshot_version(&mut self, key: Key, version: u64) {
+    pub fn record_json_snapshot_version(&mut self, key: Key, version: CommitVersion) {
         self.ensure_json_snapshot_versions().insert(key, version);
     }
 
@@ -1240,10 +1241,10 @@ impl TransactionContext {
             if let Some(store) = &self.store {
                 match store.get_versioned(key, self.start_version) {
                     Ok(Some(vv)) => {
-                        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                        self.record_json_snapshot_version(key.clone(), CommitVersion(vv.version.as_u64()));
                     }
                     Ok(None) => {
-                        self.record_json_snapshot_version(key.clone(), 0);
+                        self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
                     }
                     Err(_) => {}
                 }
@@ -1939,15 +1940,16 @@ impl JsonStoreExt for TransactionContext {
         // Get the document from store (bounded by start_version)
         let versioned = store.get_versioned(key, self.start_version)?;
         let Some(vv) = versioned else {
-            // Document doesn't exist — record version 0 so OCC detects
+            // Document doesn't exist — record version ZERO so OCC detects
             // concurrent creation (mirrors KV get() behavior for missing keys)
-            self.record_json_snapshot_version(key.clone(), 0);
+            self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
             return Ok(None);
         };
 
-        // Track the document version for conflict detection (as u64 for comparison)
-        self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
-        self.record_json_read(key.clone(), path.clone(), vv.version.as_u64());
+        // Track the document version for conflict detection
+        let doc_version = CommitVersion(vv.version.as_u64());
+        self.record_json_snapshot_version(key.clone(), doc_version);
+        self.record_json_read(key.clone(), path.clone(), doc_version);
 
         // Deserialize the document
         let doc_bytes = match &vv.value {
@@ -2029,11 +2031,11 @@ impl JsonStoreExt for TransactionContext {
 
         match store.get_versioned(key, self.start_version)? {
             Some(vv) => {
-                self.record_json_snapshot_version(key.clone(), vv.version.as_u64());
+                self.record_json_snapshot_version(key.clone(), CommitVersion(vv.version.as_u64()));
                 Ok(true)
             }
             None => {
-                self.record_json_snapshot_version(key.clone(), 0);
+                self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
                 Ok(false)
             }
         }
@@ -2131,7 +2133,7 @@ mod tests {
         let result = txn.get_versioned(&key).unwrap();
         assert!(result.is_none());
         // Tracks version 0 in read_set for conflict detection
-        assert_eq!(txn.read_set.get(&key), Some(&0));
+        assert_eq!(txn.read_set.get(&key), Some(&CommitVersion::ZERO));
     }
 
     #[test]
@@ -2144,7 +2146,7 @@ mod tests {
 
         let _ = txn.get_versioned(&key).unwrap();
         // Verify version tracked for conflict detection
-        assert_eq!(txn.read_set.get(&key), Some(&15));
+        assert_eq!(txn.read_set.get(&key), Some(&CommitVersion(15)));
     }
 
     // ========================================================================
@@ -2238,7 +2240,7 @@ mod tests {
 
         // 1 put + 1 CAS = 2
         txn.put(test_key(&ns, "k1"), Value::Int(1)).unwrap();
-        txn.cas(test_key(&ns, "k2"), 0, Value::Int(2)).unwrap();
+        txn.cas(test_key(&ns, "k2"), CommitVersion::ZERO, Value::Int(2)).unwrap();
 
         // 3rd operation should fail (total = 2 >= limit of 2)
         let err = txn.put(test_key(&ns, "k3"), Value::Int(3)).unwrap_err();
@@ -2483,7 +2485,7 @@ mod tests {
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
-        let result = txn.cas(key, 0, Value::Int(1));
+        let result = txn.cas(key, CommitVersion::ZERO, Value::Int(1));
         assert!(result.is_err());
     }
 
@@ -2513,13 +2515,13 @@ mod tests {
         let store = store_with_key(&key, Value::Int(10), 5);
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
-        txn.cas_with_read(key.clone(), 5, Value::Int(20)).unwrap();
+        txn.cas_with_read(key.clone(), CommitVersion(5), Value::Int(20)).unwrap();
 
         // read_set should contain the key (from the read)
-        assert_eq!(txn.read_set.get(&key), Some(&5));
+        assert_eq!(txn.read_set.get(&key), Some(&CommitVersion(5)));
         // cas_set should have the CAS operation
         assert_eq!(txn.cas_set.len(), 1);
-        assert_eq!(txn.cas_set[0].expected_version, 5);
+        assert_eq!(txn.cas_set[0].expected_version, CommitVersion(5));
     }
 
     #[test]
@@ -2530,10 +2532,10 @@ mod tests {
         let store = empty_store();
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
 
-        txn.cas_with_read(key.clone(), 0, Value::Int(1)).unwrap();
+        txn.cas_with_read(key.clone(), CommitVersion::ZERO, Value::Int(1)).unwrap();
 
         // Non-existent key should be tracked with version 0
-        assert_eq!(txn.read_set.get(&key), Some(&0));
+        assert_eq!(txn.read_set.get(&key), Some(&CommitVersion::ZERO));
         assert_eq!(txn.cas_set.len(), 1);
     }
 
@@ -2546,7 +2548,7 @@ mod tests {
         txn.set_read_only(true);
 
         let key = test_key(&ns, "k1");
-        let result = txn.cas_with_read(key, 0, Value::Int(1));
+        let result = txn.cas_with_read(key, CommitVersion::ZERO, Value::Int(1));
         assert!(result.is_err());
         assert!(
             format!("{}", result.unwrap_err()).contains("read-only"),
@@ -2694,7 +2696,7 @@ mod tests {
         let mut txn = TransactionContext::new(TxnId(1), branch_a, CommitVersion(100));
 
         // CAS on a key from branch B inside a branch A transaction must fail
-        let err = txn.cas(cross_key, 1, Value::Int(2)).unwrap_err();
+        let err = txn.cas(cross_key, CommitVersion(1), Value::Int(2)).unwrap_err();
         assert!(
             format!("{}", err).contains("branch"),
             "Error should mention branch mismatch: {}",
@@ -2713,7 +2715,7 @@ mod tests {
         let mut txn = TransactionContext::with_store(TxnId(1), branch_a, store);
 
         // cas_with_read on a key from branch B must fail
-        let err = txn.cas_with_read(cross_key, 0, Value::Int(2)).unwrap_err();
+        let err = txn.cas_with_read(cross_key, CommitVersion::ZERO, Value::Int(2)).unwrap_err();
         assert!(
             format!("{}", err).contains("branch"),
             "Error should mention branch mismatch: {}",

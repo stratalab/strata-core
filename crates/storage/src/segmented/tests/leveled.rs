@@ -53,7 +53,7 @@ fn compact_tier_merges_subset() {
     assert_eq!(store.branch_segment_count(&b), 6);
 
     // Compact first 4 segments (indices 0..4)
-    let result = store.compact_tier(&b, &[0, 1, 2, 3], 0).unwrap().unwrap();
+    let result = store.compact_tier(&b, &[0, 1, 2, 3], CommitVersion::ZERO).unwrap().unwrap();
     assert_eq!(result.segments_merged, 4);
     assert_eq!(result.output_entries, 4);
     assert_eq!(result.entries_pruned, 0);
@@ -82,10 +82,10 @@ fn compact_tier_too_few_returns_none() {
     store.flush_oldest_frozen(&b).unwrap();
 
     // Only 1 index → Ok(None)
-    assert!(store.compact_tier(&b, &[0], 0).unwrap().is_none());
+    assert!(store.compact_tier(&b, &[0], CommitVersion(0)).unwrap().is_none());
 
     // Empty indices → Ok(None)
-    assert!(store.compact_tier(&b, &[], 0).unwrap().is_none());
+    assert!(store.compact_tier(&b, &[], CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -93,7 +93,7 @@ fn compact_tier_ephemeral_returns_none() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_tier(&b, &[0, 1], 0).unwrap().is_none());
+    assert!(store.compact_tier(&b, &[0, 1], CommitVersion::ZERO).unwrap().is_none());
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn compact_tier_missing_branch_returns_none() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = BranchId::from_bytes([99; 16]);
-    assert!(store.compact_tier(&b, &[0, 1], 0).unwrap().is_none());
+    assert!(store.compact_tier(&b, &[0, 1], CommitVersion::ZERO).unwrap().is_none());
 }
 
 #[test]
@@ -119,7 +119,7 @@ fn compact_tier_prunes_versions() {
 
     // Compact all 3 with prune_floor=3
     // Above floor: commit 3. Below floor: commit 2 (newest below), commit 1 (pruned).
-    let result = store.compact_tier(&b, &[0, 1, 2], 3).unwrap().unwrap();
+    let result = store.compact_tier(&b, &[0, 1, 2], CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 3);
     assert_eq!(result.output_entries, 2); // commit 3 + commit 2
     assert_eq!(result.entries_pruned, 1); // commit 1
@@ -208,7 +208,7 @@ fn compact_tier_deletes_old_segment_files() {
     let scheduler = crate::compaction::CompactionScheduler::default();
     let candidates = scheduler.pick_candidates(&sizes);
     store
-        .compact_tier(&b, &candidates[0].segment_indices, 0)
+        .compact_tier(&b, &candidates[0].segment_indices, CommitVersion(0))
         .unwrap();
 
     // SST files on disk should match in-memory segment count (no orphans)
@@ -270,7 +270,7 @@ fn diagnostic_segment_layout_at_scale() {
     // Run tier compaction if available
     if let Some(candidate) = candidates.first() {
         let result = store
-            .compact_tier(&b, &candidate.segment_indices, 0)
+            .compact_tier(&b, &candidate.segment_indices, CommitVersion(0))
             .unwrap();
         eprintln!(
             "After tier compaction: segments={}, result={:?}",
@@ -370,7 +370,7 @@ fn compact_l0_to_l1_basic() {
     assert_eq!(store.l0_segment_count(&b), 3);
     assert_eq!(store.l1_segment_count(&b), 0);
 
-    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 3);
     assert_eq!(result.output_entries, 5);
     assert_eq!(result.entries_pruned, 0);
@@ -388,12 +388,12 @@ fn compact_l0_to_l1_merges_overlapping_l1() {
 
     // First L0→L1: keys a,b
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l1_segment_count(&b), 1);
 
     // New L0 with overlapping keys
     flush_data(&store, &b, &[("a", 10, 2), ("c", 3, 2)]);
-    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().unwrap();
 
     // 1 L0 + 1 overlapping L1 merged; prune_floor=0 keeps all versions
     assert_eq!(result.segments_merged, 2);
@@ -439,12 +439,12 @@ fn compact_l0_to_l1_preserves_non_overlapping_l1() {
 
     // First L0→L1: keys x, y, z (high range)
     flush_data(&store, &b, &[("x", 1, 1), ("y", 2, 1), ("z", 3, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l1_segment_count(&b), 1);
 
     // New L0 with disjoint keys a, b (low range, no overlap with x-z)
     flush_data(&store, &b, &[("a", 10, 2), ("b", 20, 2)]);
-    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().unwrap();
 
     // Only 1 L0 segment merged (no overlapping L1)
     assert_eq!(result.segments_merged, 1);
@@ -480,7 +480,7 @@ fn compact_l0_to_l1_prunes_versions() {
     flush_data(&store, &b, &[("k", 3, 3)]);
 
     // prune_floor=3: keep v3 (above floor) + v2 (floor entry), prune v1
-    let result = store.compact_l0_to_l1(&b, 3).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.output_entries, 2);
     assert_eq!(result.entries_pruned, 1);
 
@@ -513,7 +513,7 @@ fn compact_l0_to_l1_empty_l0_returns_none() {
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
     // No rotation/flush → L0 is empty
-    assert!(store.compact_l0_to_l1(&b, 0).unwrap().is_none());
+    assert!(store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -521,7 +521,7 @@ fn compact_l0_to_l1_ephemeral_returns_none() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    assert!(store.compact_l0_to_l1(&b, 0).unwrap().is_none());
+    assert!(store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -543,7 +543,7 @@ fn compact_l0_to_l1_deletes_old_files() {
     };
     assert_eq!(count_sst(), 2);
 
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(count_sst(), 1); // 2 old deleted, 1 new created
 }
 
@@ -557,7 +557,7 @@ fn compact_l0_to_l1_concurrent_flush_preserves_new_l0() {
     flush_data(&store, &b, &[("b", 2, 2)]);
 
     // Compact L0→L1
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.l1_segment_count(&b), 1);
 
@@ -589,7 +589,7 @@ fn compact_l0_to_l1_data_correct_after() {
     flush_data(&store, &b, &[("a", 1, 1), ("b", 10, 1)]);
     flush_data(&store, &b, &[("a", 2, 2), ("c", 20, 2)]);
 
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     // Point lookups
     assert_eq!(
@@ -643,10 +643,10 @@ fn compact_l0_to_l1_l1_sorted_invariant() {
 
     // Create two non-overlapping L1 segments
     flush_data(&store, &b, &[("x", 1, 1), ("y", 2, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     flush_data(&store, &b, &[("a", 3, 2), ("b", 4, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     assert_eq!(store.l1_segment_count(&b), 2);
 
@@ -671,18 +671,18 @@ fn compact_l0_to_l1_repeated() {
 
     // First round
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l1_segment_count(&b), 1);
 
     // Second round — new L0 overlaps L1
     flush_data(&store, &b, &[("a", 10, 2), ("c", 3, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.l1_segment_count(&b), 1);
 
     // Third round — new disjoint L0
     flush_data(&store, &b, &[("z", 99, 3)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.l1_segment_count(&b), 2);
 
@@ -713,7 +713,7 @@ fn compact_l0_to_l1_writes_manifest() {
 
     flush_data(&store, &b, &[("a", 1, 1)]);
     flush_data(&store, &b, &[("b", 2, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     let branch_dir = dir.path().join(hex_encode_branch(&b));
     let manifest = crate::manifest::read_manifest(&branch_dir).unwrap();
@@ -738,7 +738,7 @@ fn point_lookup_reads_l1_segments() {
     let b = branch();
 
     flush_data(&store, &b, &[("k1", 1, 1), ("k2", 2, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.l1_segment_count(&b), 1);
 
@@ -772,7 +772,7 @@ fn scan_prefix_includes_l1() {
     let b = branch();
 
     flush_data(&store, &b, &[("item/a", 1, 1), ("item/b", 2, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     // Add to memtable (L0)
     seed(&store, kv_key("item/c"), Value::Int(3), 2);
@@ -789,7 +789,7 @@ fn list_branch_includes_l1() {
     let b = branch();
 
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     let entries = store.list_branch(&b);
     assert_eq!(entries.len(), 2);
@@ -803,13 +803,13 @@ fn l1_binary_search_correct_segment() {
 
     // Create 3 non-overlapping L1 segments
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     flush_data(&store, &b, &[("m", 3, 2), ("n", 4, 2)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     flush_data(&store, &b, &[("x", 5, 3), ("y", 6, 3)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     assert_eq!(store.l1_segment_count(&b), 3);
 
@@ -848,11 +848,11 @@ fn max_flushed_commit_includes_l1() {
     let b = branch();
 
     flush_data(&store, &b, &[("a", 1, 5), ("b", 2, 10)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
 
     // max_flushed_commit should still work with L1 only
-    assert_eq!(store.max_flushed_commit(&b), Some(10));
+    assert_eq!(store.max_flushed_commit(&b), Some(CommitVersion(10)));
 }
 
 #[test]
@@ -862,7 +862,7 @@ fn shard_stats_includes_l1() {
     let b = branch();
 
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2), ("c", 3, 3)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     let (entry_count, total_versions, _) = store.shard_stats_detailed(&b).unwrap();
     assert_eq!(entry_count, 3); // 3 live entries
@@ -882,7 +882,7 @@ fn recover_with_manifest_restores_levels() {
     // Create L0 and compact to L1
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2)]);
     flush_data(&store, &b, &[("c", 3, 3)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     // Add another L0 segment
     flush_data(&store, &b, &[("d", 4, 4)]);
@@ -954,7 +954,7 @@ fn recover_manifest_corrupt_returns_error() {
     let b = branch();
 
     flush_data(&store, &b, &[("a", 1, 1)]);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
 
     // Corrupt the manifest
     let branch_dir = dir.path().join(hex_encode_branch(&b));
@@ -1007,7 +1007,7 @@ fn compact_l0_to_l1_streaming_correctness() {
     }
 
     assert_eq!(store.l0_segment_count(&b), 5);
-    store.compact_l0_to_l1(&b, 0).unwrap();
+    store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert!(store.l1_segment_count(&b) >= 1);
 
@@ -1051,7 +1051,7 @@ fn compact_l0_to_l1_with_splitting_builder() {
 
     assert_eq!(store.l0_segment_count(&b), 4);
 
-    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.output_entries, 400);
     assert_eq!(store.l0_segment_count(&b), 0);
     assert_eq!(store.l1_segment_count(&b), 1);
@@ -1085,7 +1085,7 @@ fn compact_level_0_equivalent_to_compact_l0_to_l1() {
 
     assert_eq!(store.l0_segment_count(&b), 3);
 
-    let result = store.compact_level(&b, 0, 0).unwrap().unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 3);
     assert_eq!(result.output_entries, 5);
     assert_eq!(result.entries_pruned, 0);
@@ -1113,12 +1113,12 @@ fn compact_level_1_moves_to_l2() {
     // Create data in L1 via compact_level(0)
     flush_data(&store, &b, &[("a", 1, 1), ("b", 2, 2)]);
     flush_data(&store, &b, &[("c", 3, 3), ("d", 4, 4)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert_eq!(store.l0_segment_count(&b), 0);
     assert!(store.l1_segment_count(&b) >= 1);
 
     // Now compact L1 → L2
-    let result = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let result = store.compact_level(&b, 1, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.output_entries, 4);
 
     // L1 should be empty, L2 should have data
@@ -1144,35 +1144,35 @@ fn compact_level_picks_round_robin() {
 
     // Create 3 L1 segments with distinct key ranges
     flush_data(&store, &b, &[("aaa", 1, 1)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     flush_data(&store, &b, &[("mmm", 2, 2)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     flush_data(&store, &b, &[("zzz", 3, 3)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
 
     assert_eq!(store.level_segment_count(&b, 1), 3);
     assert_eq!(store.level_segment_count(&b, 2), 0);
 
     // First compaction: picks file 0 (trivial move), pointer advances past "aaa"
-    let r1 = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let r1 = store.compact_level(&b, 1, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(r1.segments_merged, 1);
     assert_eq!(store.level_segment_count(&b, 1), 2);
     assert_eq!(store.level_segment_count(&b, 2), 1);
 
     // Second compaction: picks file after pointer (should be "mmm")
-    let r2 = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let r2 = store.compact_level(&b, 1, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(r2.segments_merged, 1);
     assert_eq!(store.level_segment_count(&b, 1), 1);
     assert_eq!(store.level_segment_count(&b, 2), 2);
 
     // Third compaction: picks remaining file ("zzz")
-    let r3 = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let r3 = store.compact_level(&b, 1, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(r3.segments_merged, 1);
     assert_eq!(store.level_segment_count(&b, 1), 0);
     assert_eq!(store.level_segment_count(&b, 2), 3);
 
     // L1 empty, nothing to compact
-    assert!(store.compact_level(&b, 1, 0).unwrap().is_none());
+    assert!(store.compact_level(&b, 1, CommitVersion(0)).unwrap().is_none());
 
     // All data still findable
     for key_name in &["aaa", "mmm", "zzz"] {
@@ -1195,7 +1195,7 @@ fn compact_level_trivial_move() {
 
     // Create 1 L1 segment with no overlap in L2
     flush_data(&store, &b, &[("x", 1, 1)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert_eq!(store.level_segment_count(&b, 1), 1);
     assert_eq!(store.level_segment_count(&b, 2), 0);
 
@@ -1204,7 +1204,7 @@ fn compact_level_trivial_move() {
     assert!(l1_bytes_before > 0);
 
     // Compact L1 → L2: should be a trivial move (1 input, 0 overlap)
-    let result = store.compact_level(&b, 1, 0).unwrap().unwrap();
+    let result = store.compact_level(&b, 1, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 1);
     assert_eq!(result.entries_pruned, 0);
     // Trivial move: output size equals input (no rewrite)
@@ -1236,7 +1236,7 @@ fn compact_level_expands_l0_overlap() {
     assert_eq!(store.l0_segment_count(&b), 2);
 
     // compact_level(0) should expand to both L0 files
-    let result = store.compact_level(&b, 0, 0).unwrap().unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2); // both L0 segments included
     assert_eq!(result.output_entries, 4);
     assert_eq!(store.l0_segment_count(&b), 0);
@@ -1254,14 +1254,14 @@ fn compact_level_finds_overlapping_next() {
         &b,
         &[("a", 1, 1), ("b", 2, 1), ("c", 3, 1), ("d", 4, 1)],
     );
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
 
     // Flush new L0 data that overlaps with part of L1
     flush_data(&store, &b, &[("b", 20, 2)]);
     assert_eq!(store.l0_segment_count(&b), 1);
 
     // compact_level(0) should merge L0 with overlapping L1 segment
-    let result = store.compact_level(&b, 0, 0).unwrap().unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2); // 1 L0 + 1 L1
     assert_eq!(store.l0_segment_count(&b), 0);
 
@@ -1291,9 +1291,9 @@ fn point_lookup_finds_data_in_l3() {
 
     // Push data down to L3: flush → L0→L1 → L1→L2 → L2→L3
     flush_data(&store, &b, &[("deep", 42, 1)]);
-    store.compact_level(&b, 0, 0).unwrap(); // L0 → L1
-    store.compact_level(&b, 1, 0).unwrap(); // L1 → L2
-    store.compact_level(&b, 2, 0).unwrap(); // L2 → L3
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap(); // L0 → L1
+    store.compact_level(&b, 1, CommitVersion(0)).unwrap(); // L1 → L2
+    store.compact_level(&b, 2, CommitVersion(0)).unwrap(); // L2 → L3
 
     assert_eq!(store.level_segment_count(&b, 0), 0);
     assert_eq!(store.level_segment_count(&b, 1), 0);
@@ -1317,13 +1317,13 @@ fn scan_includes_all_levels() {
     // Put data at different levels
     // L2: "p/a"
     flush_data(&store, &b, &[("p/a", 1, 1)]);
-    store.compact_level(&b, 0, 0).unwrap();
-    store.compact_level(&b, 1, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
+    store.compact_level(&b, 1, CommitVersion(0)).unwrap();
     assert!(store.level_segment_count(&b, 2) >= 1);
 
     // L1: "p/b"
     flush_data(&store, &b, &[("p/b", 2, 2)]);
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert!(store.level_segment_count(&b, 1) >= 1);
 
     // L0: "p/c"
@@ -1348,12 +1348,12 @@ fn recover_restores_multi_level() {
 
     // Create data across multiple levels
     flush_data(&store, &b, &[("a", 1, 1)]);
-    store.compact_level(&b, 0, 0).unwrap(); // L1
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap(); // L1
     flush_data(&store, &b, &[("b", 2, 2)]);
-    store.compact_level(&b, 0, 0).unwrap(); // L1
-    store.compact_level(&b, 1, 0).unwrap(); // L1 → L2
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap(); // L1
+    store.compact_level(&b, 1, CommitVersion(0)).unwrap(); // L1 → L2
     flush_data(&store, &b, &[("c", 3, 3)]);
-    store.compact_level(&b, 0, 0).unwrap(); // L1
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap(); // L1
 
     // Record exact level counts before recovery
     let l1_before = store.level_segment_count(&b, 1);
@@ -1394,7 +1394,7 @@ fn level_bytes_reports_correct_sizes() {
     let l0_bytes = store.level_bytes(&b, 0);
     assert!(l0_bytes > 0, "L0 should have bytes after flush");
 
-    store.compact_level(&b, 0, 0).unwrap();
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert_eq!(store.level_bytes(&b, 0), 0);
     let l1_bytes = store.level_bytes(&b, 1);
     assert!(l1_bytes > 0, "L1 should have bytes after compaction");
@@ -1407,7 +1407,7 @@ fn compact_level_last_level_returns_none() {
     let b = branch();
 
     // Can't compact past the last level
-    let result = store.compact_level(&b, NUM_LEVELS - 1, 0).unwrap();
+    let result = store.compact_level(&b, NUM_LEVELS - 1, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -1418,7 +1418,7 @@ fn compact_level_empty_returns_none() {
     let b = branch();
 
     // No data at level 0
-    let result = store.compact_level(&b, 0, 0).unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -1440,7 +1440,7 @@ fn compact_level_prunes_old_versions() {
     assert_eq!(store.l0_segment_count(&b), 1);
 
     // Compact L0 → L1 with prune_floor = 3 (prunes commits < 3, keeping 1 survivor)
-    let result = store.compact_level(&b, 0, 3).unwrap().unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(3)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 1);
     assert_eq!(
         result.entries_pruned, 1,
@@ -1468,7 +1468,7 @@ fn compact_level_ephemeral_returns_none() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    let result = store.compact_level(&b, 0, 0).unwrap();
+    let result = store.compact_level(&b, 0, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -1864,7 +1864,7 @@ fn pick_and_compact_no_work() {
     // 1 L0 segment — below trigger
     flush_data(&store, &b, &[("a", 1, 1)]);
 
-    let result = store.pick_and_compact(&b, 0).unwrap();
+    let result = store.pick_and_compact(&b, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -1880,13 +1880,13 @@ fn pick_and_compact_triggers_l0() {
     flush_data(&store, &b, &[("c", 3, 3)]);
     flush_data(&store, &b, &[("d", 4, 4)]);
 
-    let result = store.pick_and_compact(&b, 0).unwrap().unwrap();
+    let result = store.pick_and_compact(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.level, 0);
     assert_eq!(result.compaction.segments_merged, 4);
 
     // After compaction, no more work
     assert_eq!(store.l0_segment_count(&b), 0);
-    assert!(store.pick_and_compact(&b, 0).unwrap().is_none());
+    assert!(store.pick_and_compact(&b, CommitVersion(0)).unwrap().is_none());
 }
 
 #[test]
@@ -1894,7 +1894,7 @@ fn pick_and_compact_ephemeral_noop() {
     let store = SegmentedStore::new();
     let b = branch();
     seed(&store, kv_key("k"), Value::Int(1), 1);
-    let result = store.pick_and_compact(&b, 0).unwrap();
+    let result = store.pick_and_compact(&b, CommitVersion(0)).unwrap();
     assert!(result.is_none());
 }
 
@@ -1992,7 +1992,7 @@ fn compaction_with_rate_limiter_multi_block() {
 
     assert_eq!(store.branch_segment_count(&b), 2);
 
-    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2);
     assert_eq!(result.output_entries, 400);
     assert_eq!(result.entries_pruned, 0);
@@ -2032,7 +2032,7 @@ fn rate_limiter_disabled_by_default() {
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
 
-    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2);
     assert_eq!(result.output_entries, 200);
 
@@ -2065,7 +2065,7 @@ fn set_compaction_rate_limit_zero_disables() {
     store.flush_oldest_frozen(&b).unwrap();
 
     // Compaction with no limiter should complete quickly and correctly
-    let result = store.compact_branch(&b, 0).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2);
     assert_eq!(result.output_entries, 200);
 }
@@ -2085,7 +2085,7 @@ fn rate_limiter_l0_to_l1_compaction() {
         store.flush_oldest_frozen(&b).unwrap();
     }
 
-    let result = store.compact_l0_to_l1(&b, 0).unwrap().unwrap();
+    let result = store.compact_l0_to_l1(&b, CommitVersion(0)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 4);
     assert_eq!(result.output_entries, 200);
 
@@ -2120,7 +2120,7 @@ fn rate_limited_compaction_preserves_prune_semantics() {
 
     // prune_floor=6: both v1 and v5 are below floor.
     // Only the newest below-floor version (v5) survives per key; v1 is pruned.
-    let result = store.compact_branch(&b, 6).unwrap().unwrap();
+    let result = store.compact_branch(&b, CommitVersion(6)).unwrap().unwrap();
     assert_eq!(result.segments_merged, 2);
     assert_eq!(result.output_entries, 100); // only v5 per key survives
     assert_eq!(result.entries_pruned, 100);
