@@ -54,6 +54,8 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
+use crate::branch_ops::{CherryPickInfo, MergeInfo, RevertInfo};
+
 // =============================================================================
 // Error Types
 // =============================================================================
@@ -204,6 +206,12 @@ pub struct DagEvent {
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+    /// Merge info (for Merge events).
+    pub merge_info: Option<MergeInfo>,
+    /// Revert info (for Revert events).
+    pub revert_info: Option<RevertInfo>,
+    /// Cherry-pick info (for CherryPick events).
+    pub cherry_pick_info: Option<CherryPickInfo>,
 }
 
 impl DagEvent {
@@ -224,6 +232,9 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
@@ -251,6 +262,9 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
@@ -278,6 +292,9 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
@@ -288,6 +305,7 @@ impl DagEvent {
         source_branch_id: BranchId,
         source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
+        info: MergeInfo,
     ) -> Self {
         Self {
             kind: DagEventKind::Merge,
@@ -298,6 +316,9 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            merge_info: Some(info),
+            revert_info: None,
+            cherry_pick_info: None,
         }
     }
 
@@ -305,19 +326,21 @@ impl DagEvent {
     pub fn revert(
         branch_id: BranchId,
         branch_name: impl Into<String>,
-        from_version: CommitVersion,
-        to_version: CommitVersion,
         commit_version: CommitVersion,
+        info: RevertInfo,
     ) -> Self {
         Self {
             kind: DagEventKind::Revert,
             branch_id,
             branch_name: branch_name.into(),
             source_branch_id: None,
-            source_branch_name: Some(format!("v{}..v{}", from_version.0, to_version.0)),
+            source_branch_name: Some(format!("v{}..v{}", info.from_version.0, info.to_version.0)),
             commit_version,
             message: None,
             creator: None,
+            merge_info: None,
+            revert_info: Some(info),
+            cherry_pick_info: None,
         }
     }
 
@@ -328,6 +351,7 @@ impl DagEvent {
         source_branch_id: BranchId,
         source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
+        info: CherryPickInfo,
     ) -> Self {
         Self {
             kind: DagEventKind::CherryPick,
@@ -338,6 +362,9 @@ impl DagEvent {
             commit_version,
             message: None,
             creator: None,
+            merge_info: None,
+            revert_info: None,
+            cherry_pick_info: Some(info),
         }
     }
 

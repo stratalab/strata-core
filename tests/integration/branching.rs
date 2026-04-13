@@ -7115,10 +7115,10 @@ fn dag_records_cherry_pick() {
 #[test]
 fn dag_records_branch_create_and_delete() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_lifecycle").unwrap();
+    // Use BranchService for DAG-integrated branch operations
+    test_db.db.branches().create("dag_lifecycle").unwrap();
 
     // After create, branch should exist in DAG with status=active and a
     // populated created_at timestamp.
@@ -7132,7 +7132,7 @@ fn dag_records_branch_create_and_delete() {
         .expect("created_at should be set on the branch node");
     assert!(created_at > 0, "created_at should be a real timestamp");
 
-    branch_index.delete_branch("dag_lifecycle").unwrap();
+    test_db.db.branches().delete("dag_lifecycle").unwrap();
 
     // After delete, the same node should still exist (lineage is preserved)
     // but with status flipped to deleted and a deleted_at marker.
@@ -7237,7 +7237,6 @@ fn dag_skips_system_branch() {
     use strata_core::branch_dag::SYSTEM_BRANCH;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
     let p = test_db.all_primitives();
 
     // The DAG must NOT contain a node literally named `_system_`. The hook
@@ -7254,7 +7253,7 @@ fn dag_skips_system_branch() {
     // Prove the guard is *selective* — non-system branches DO get recorded.
     // If `is_system_branch` were too broad (e.g. matching everything), this
     // assertion would catch it.
-    branch_index.create_branch("dag_guard_check").unwrap();
+    test_db.db.branches().create("dag_guard_check").unwrap();
     assert!(
         dag_query_node(&p, "dag_guard_check").is_some(),
         "non-system branches must still be recorded in the DAG"

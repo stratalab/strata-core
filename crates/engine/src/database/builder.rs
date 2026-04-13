@@ -101,6 +101,7 @@ impl DatabaseBuilder {
     pub fn cache(self) -> StrataResult<Arc<Database>> {
         let db = Database::cache()?;
 
+        // Phase 1: Recovery
         for subsystem in &self.subsystems {
             info!(
                 target: "strata::recovery",
@@ -116,6 +117,28 @@ impl DatabaseBuilder {
         }
 
         db.set_subsystems(self.subsystems);
+
+        // Phase 2: Initialize (write-free wiring of hooks/handlers)
+        for subsystem in db.installed_subsystems().iter() {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running cache subsystem initialize"
+            );
+            subsystem.initialize(&db)?;
+        }
+
+        // Phase 3: Bootstrap (idempotent first-time writes; cache = not follower)
+        for subsystem in db.installed_subsystems().iter() {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running cache subsystem bootstrap"
+            );
+            subsystem.bootstrap(&db)?;
+        }
+
+        db.set_lifecycle_complete();
 
         Ok(db)
     }

@@ -504,7 +504,13 @@ impl Database {
             config::StrataConfig::default()
         };
 
-        Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)
+        let db = Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)?;
+
+        // Lifecycle hooks: initialize only (no bootstrap for followers)
+        Self::run_lifecycle_hooks(&db, false)?;
+        db.set_lifecycle_complete();
+
+        Ok(db)
     }
 
     /// Open a follower `Database` at the given canonicalized path.

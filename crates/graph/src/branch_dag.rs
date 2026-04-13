@@ -858,7 +858,12 @@ impl strata_engine::Subsystem for GraphSubsystem {
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
+        // Create system branch infrastructure before the DAG hook is installed.
+        // This is idempotent and runs on all modes. On followers, the writes
+        // fail silently (transactions reject commits), which is correct because
+        // followers read the system branch from primary's shared storage.
         init_system_branch(db);
+        // Load existing branch status into cache (read-only, safe for followers).
         load_status_cache_readonly(db);
         Ok(())
     }
@@ -962,21 +967,59 @@ impl BranchDagHook for GraphBranchDagHook {
                 .map_err(Self::map_write_error)?;
             }
             DagEventKind::Merge => {
-                // Merge events are best-effort recorded by the old global hooks
-                // for now. The fail-fast hook doesn't have MergeInfo available
-                // in the DagEvent structure. This is acceptable because merge-base
-                // computation can fall back to engine-level fork-info lookup.
-                //
-                // TODO: Extend DagEvent to carry merge metadata for full fail-fast
-                // merge recording.
+                let merge_info = event.merge_info.as_ref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "merge event missing MergeInfo",
+                    )
+                })?;
+                let source = event.source_branch_name.as_deref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "merge event missing source branch name",
+                    )
+                })?;
+                dag_record_merge(
+                    &self.db,
+                    source,
+                    &event.branch_name,
+                    merge_info,
+                    None, // strategy is captured in merge_info, not separately
+                    event.message.as_deref(),
+                    event.creator.as_deref(),
+                )
+                .map_err(Self::map_write_error)?;
             }
             DagEventKind::Revert => {
-                // Similar to merge - revert metadata isn't in DagEvent yet.
-                // TODO: Extend DagEvent to carry revert info.
+                let revert_info = event.revert_info.as_ref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "revert event missing RevertInfo",
+                    )
+                })?;
+                dag_record_revert(
+                    &self.db,
+                    revert_info,
+                    event.message.as_deref(),
+                    event.creator.as_deref(),
+                )
+                .map_err(Self::map_write_error)?;
             }
             DagEventKind::CherryPick => {
-                // Similar to merge - cherry-pick metadata isn't in DagEvent yet.
-                // TODO: Extend DagEvent to carry cherry-pick info.
+                let cherry_pick_info = event.cherry_pick_info.as_ref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "cherry-pick event missing CherryPickInfo",
+                    )
+                })?;
+                let source = event.source_branch_name.as_deref().ok_or_else(|| {
+                    BranchDagError::new(
+                        BranchDagErrorKind::Other,
+                        "cherry-pick event missing source branch name",
+                    )
+                })?;
+                dag_record_cherry_pick(&self.db, source, &event.branch_name, cherry_pick_info)
+                    .map_err(Self::map_write_error)?;
             }
             // DagEventKind is non-exhaustive; handle future variants gracefully.
             _ => {

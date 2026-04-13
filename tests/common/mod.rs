@@ -30,26 +30,18 @@ use tempfile::TempDir;
 
 static INIT_HANDLERS: Once = Once::new();
 
-/// Register process-global merge handlers and DAG event hooks. These are
-/// idempotent and installed once per test binary. Recovery, by contrast,
-/// is driven per-open through `test_db_builder()` / `DatabaseBuilder`.
+/// Register process-global merge handlers and DAG event hooks.
+///
+/// These are idempotent and installed once per test binary. They serve as a
+/// fallback for code that calls `branch_ops` functions directly (bypassing
+/// `BranchService`). The canonical path for new code is `BranchService` which
+/// uses per-database hooks installed by `GraphSubsystem::initialize()`.
 fn ensure_test_handlers_registered() {
     INIT_HANDLERS.call_once(|| {
-        // Register the graph semantic merge plan with the engine's
-        // GraphMergeHandler. Without this call, the engine falls back to
-        // a tactical refusal of divergent graph merges (which still
-        // works, just refuses safely-mergeable cases).
-        strata_graph::register_graph_semantic_merge();
-        // Register the vector merge precheck/post-commit callbacks with
-        // the engine's VectorMergeHandler. Without this, the handler
-        // is a pass-through and the legacy full-branch rebuild fallback
-        // applies.
-        strata_vector::register_vector_semantic_merge();
-        // Register the branch DAG hooks with the engine. Without this,
-        // engine-direct branch operations (fork, merge, revert,
-        // cherry-pick, create, delete) do not record events in the
-        // `_branch_dag` graph on the `_system_` branch. Tests that
-        // assert on DAG state need this to fire.
+        // Register global hooks for direct branch_ops calls (legacy path).
+        // Per-db hooks via GraphSubsystem are the canonical path, but these
+        // globals remain for backward compatibility with tests that call
+        // branch_ops::fork_branch, branch_ops::merge_branches, etc. directly.
         strata_graph::register_branch_dag_hook_implementation();
     });
 }

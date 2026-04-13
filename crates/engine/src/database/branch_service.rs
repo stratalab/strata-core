@@ -399,7 +399,8 @@ impl BranchService {
             .merge_version
             .map(CommitVersion)
             .unwrap_or(CommitVersion::ZERO);
-        let mut event = DagEvent::merge(target_id, target, source_id, source, commit_version);
+        let mut event =
+            DagEvent::merge(target_id, target, source_id, source, commit_version, info.clone());
         if let Some(msg) = &options.message {
             event = event.with_message(msg.clone());
         }
@@ -445,14 +446,12 @@ impl BranchService {
         // Execute the revert
         let info = branch_ops::revert_version_range(&self.db, branch, from_version, to_version)?;
 
-        // Record to DAG if hook installed (optional)
-        // Note: revert has no source branch, just a version range
+        // Record to DAG — failures propagate
         let event = DagEvent::revert(
             branch_id,
             branch,
-            from_version,
-            to_version,
             info.revert_version.unwrap_or(CommitVersion(0)),
+            info.clone(),
         );
         mutation.record_dag_event(&event)?;
 
@@ -494,13 +493,14 @@ impl BranchService {
         // Execute the cherry-pick
         let info = branch_ops::cherry_pick_keys(&self.db, source, target, keys)?;
 
-        // Record to DAG if hook installed (optional)
+        // Record to DAG — failures propagate
         let event = DagEvent::cherry_pick(
             target_id,
             target,
             source_id,
             source,
             CommitVersion(info.cherry_pick_version.unwrap_or(0)),
+            info.clone(),
         );
         mutation.record_dag_event(&event)?;
 
