@@ -68,7 +68,9 @@ impl Database {
 
         let mut total_pruned = 0;
         for branch_id in self.storage.branch_ids() {
-            total_pruned += self.storage.gc_branch(&branch_id, CommitVersion(safe_point));
+            total_pruned += self
+                .storage
+                .gc_branch(&branch_id, CommitVersion(safe_point));
         }
 
         if total_pruned > 0 {

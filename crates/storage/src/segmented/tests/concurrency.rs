@@ -1032,7 +1032,13 @@ fn test_issue_1740_put_recovery_entry_preserves_ttl() {
     let now_us = Timestamp::now().as_micros();
 
     store
-        .put_recovery_entry(key.clone(), Value::Int(42), CommitVersion(1), now_us, ttl_ms)
+        .put_recovery_entry(
+            key.clone(),
+            Value::Int(42),
+            CommitVersion(1),
+            now_us,
+            ttl_ms,
+        )
         .unwrap();
 
     // Read the entry via store (filters expired) — should still be alive

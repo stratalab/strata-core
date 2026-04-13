@@ -5037,7 +5037,15 @@ mod tests {
         let (_temp, db) = setup_with_branch("main");
         write_kv(&db, "main", "default", "k", Value::Int(1));
 
-        let note = add_note(&db, "main", CommitVersion(1), "initial state", Some("ai"), None).unwrap();
+        let note = add_note(
+            &db,
+            "main",
+            CommitVersion(1),
+            "initial state",
+            Some("ai"),
+            None,
+        )
+        .unwrap();
         assert_eq!(note.message, "initial state");
         assert_eq!(note.version, 1);
 
@@ -5186,7 +5194,8 @@ mod tests {
         assert_eq!(read_kv(&db, "main", "default", "a"), None);
 
         // Revert the deletion
-        let info = revert_version_range(&db, "main", CommitVersion(v_before + 1), v_delete).unwrap();
+        let info =
+            revert_version_range(&db, "main", CommitVersion(v_before + 1), v_delete).unwrap();
         assert_eq!(info.keys_reverted, 1);
 
         // Key should be restored

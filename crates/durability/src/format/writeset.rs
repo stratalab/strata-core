@@ -596,10 +596,22 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", "key1"), vec![1], CommitVersion(1));
-        ws.put(EntityRef::kv(branch_id, "default", "key2"), vec![2], CommitVersion(2));
+        ws.put(
+            EntityRef::kv(branch_id, "default", "key1"),
+            vec![1],
+            CommitVersion(1),
+        );
+        ws.put(
+            EntityRef::kv(branch_id, "default", "key2"),
+            vec![2],
+            CommitVersion(2),
+        );
         ws.delete(EntityRef::kv(branch_id, "default", "key3"));
-        ws.append(EntityRef::event(branch_id, "default", 1), vec![3], CommitVersion(3));
+        ws.append(
+            EntityRef::event(branch_id, "default", 1),
+            vec![3],
+            CommitVersion(3),
+        );
 
         assert_eq!(ws.len(), 4);
 
@@ -669,7 +681,11 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", "键值对"), vec![1], CommitVersion(1));
+        ws.put(
+            EntityRef::kv(branch_id, "default", "键值对"),
+            vec![1],
+            CommitVersion(1),
+        );
         ws.put(
             EntityRef::vector(branch_id, "default", "коллекция", "κλειδί"),
             vec![3],
@@ -697,8 +713,16 @@ mod tests {
         let branch_id = test_branch_id();
 
         let mut ws = Writeset::new();
-        ws.put(EntityRef::kv(branch_id, "default", ""), vec![1], CommitVersion(1));
-        ws.put(EntityRef::vector(branch_id, "default", "", ""), vec![2], CommitVersion(2));
+        ws.put(
+            EntityRef::kv(branch_id, "default", ""),
+            vec![1],
+            CommitVersion(1),
+        );
+        ws.put(
+            EntityRef::vector(branch_id, "default", "", ""),
+            vec![2],
+            CommitVersion(2),
+        );
 
         let bytes = ws.to_bytes();
         let restored = Writeset::from_bytes(&bytes).unwrap();

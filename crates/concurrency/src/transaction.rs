@@ -1223,7 +1223,12 @@ impl TransactionContext {
     ///
     /// This should be called when modifying a JSON document via patch.
     /// The patch will be applied at commit time.
-    pub fn record_json_write(&mut self, key: Key, patch: JsonPatch, resulting_version: CommitVersion) {
+    pub fn record_json_write(
+        &mut self,
+        key: Key,
+        patch: JsonPatch,
+        resulting_version: CommitVersion,
+    ) {
         self.ensure_json_writes()
             .push(JsonPatchEntry::new(key, patch, resulting_version));
     }

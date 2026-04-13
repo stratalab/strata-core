@@ -505,13 +505,31 @@ fn inherited_layer_scan_prefix_at_timestamp() {
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
     store
-        .put_recovery_entry(parent_kv("user:a"), Value::Int(1), CommitVersion(1), 1000, 0)
+        .put_recovery_entry(
+            parent_kv("user:a"),
+            Value::Int(1),
+            CommitVersion(1),
+            1000,
+            0,
+        )
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:b"), Value::Int(2), CommitVersion(2), 2000, 0)
+        .put_recovery_entry(
+            parent_kv("user:b"),
+            Value::Int(2),
+            CommitVersion(2),
+            2000,
+            0,
+        )
         .unwrap();
     store
-        .put_recovery_entry(parent_kv("user:c"), Value::Int(3), CommitVersion(3), 3000, 0)
+        .put_recovery_entry(
+            parent_kv("user:c"),
+            Value::Int(3),
+            CommitVersion(3),
+            3000,
+            0,
+        )
         .unwrap();
     store.rotate_memtable(&parent_branch());
     store.flush_oldest_frozen(&parent_branch()).unwrap();

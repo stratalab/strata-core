@@ -383,7 +383,8 @@ impl BranchState {
     /// Update max applied version for this branch.
     #[inline]
     fn track_version(&self, version: CommitVersion) {
-        self.max_version.fetch_max(version.as_u64(), Ordering::Release);
+        self.max_version
+            .fetch_max(version.as_u64(), Ordering::Release);
     }
 }
 

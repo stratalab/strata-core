@@ -210,7 +210,11 @@ impl RecoveryCoordinator {
 
             // Apply deletes with original timestamp (#1619)
             for key in &payload.deletes {
-                storage.delete_recovery_entry(key, CommitVersion(payload.version), record.timestamp)?;
+                storage.delete_recovery_entry(
+                    key,
+                    CommitVersion(payload.version),
+                    record.timestamp,
+                )?;
                 stats.deletes_applied += 1;
             }
 

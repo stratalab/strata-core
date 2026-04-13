@@ -738,12 +738,11 @@ pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Re
 /// Handle NoteDelete command.
 pub fn note_delete(p: &Arc<Primitives>, branch: String, version: u64) -> Result<Output> {
     crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, CommitVersion(version)).map_err(|e| {
-        Error::Internal {
+    let deleted = strata_engine::branch_ops::delete_note(&p.db, &branch, CommitVersion(version))
+        .map_err(|e| Error::Internal {
             reason: e.to_string(),
             hint: None,
-        }
-    })?;
+        })?;
     Ok(Output::Bool(deleted))
 }
 
