@@ -18,6 +18,7 @@
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
 use crate::database::Database;
+use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
@@ -244,9 +245,10 @@ impl BranchIndex {
         })?;
 
         // Note: DAG recording is handled by BranchService.create(), which is
-        // the canonical branch creation path. BranchIndex.create_branch() is
-        // the low-level primitive; callers that need DAG integration should
-        // use BranchService instead.
+        // the canonical branch creation path and suppresses this best-effort
+        // low-level dispatch so it can record through the load-bearing
+        // BranchMutation boundary instead.
+        dispatch_create_hook(&self.db, branch_id);
 
         Ok(result)
     }
@@ -403,10 +405,9 @@ impl BranchIndex {
         // this branch after deletion will be rejected (#1916).
         self.db.remove_branch_lock(&executor_branch_id);
 
-        // Note: DAG recording is handled by BranchService.delete(), which is
-        // the canonical branch deletion path. BranchIndex.delete_branch() is
-        // the low-level primitive; callers that need DAG integration should
-        // use BranchService instead.
+        // BranchService.delete() suppresses this best-effort dispatch so it can
+        // record through the load-bearing BranchMutation boundary instead.
+        dispatch_delete_hook(&self.db, branch_id);
 
         Ok(())
     }

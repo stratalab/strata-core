@@ -12,7 +12,7 @@ use std::hash::{Hash, Hasher};
 use std::io::{Seek, SeekFrom, Write as IoWrite};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Barrier, Once};
+use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
@@ -24,28 +24,6 @@ pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
-// ============================================================================
-// Initialization
-// ============================================================================
-
-static INIT_HANDLERS: Once = Once::new();
-
-/// Register process-global merge handlers and DAG event hooks.
-///
-/// These are idempotent and installed once per test binary. They serve as a
-/// fallback for code that calls `branch_ops` functions directly (bypassing
-/// `BranchService`). The canonical path for new code is `BranchService` which
-/// uses per-database hooks installed by `GraphSubsystem::initialize()`.
-fn ensure_test_handlers_registered() {
-    INIT_HANDLERS.call_once(|| {
-        // Register global hooks for direct branch_ops calls (legacy path).
-        // Per-db hooks via GraphSubsystem are the canonical path, but these
-        // globals remain for backward compatibility with tests that call
-        // branch_ops::fork_branch, branch_ops::merge_branches, etc. directly.
-        strata_graph::register_branch_dag_hook_implementation();
-    });
-}
-
 /// Fresh `DatabaseBuilder` wired with the production subsystems
 /// (`GraphSubsystem` + `VectorSubsystem` + `SearchSubsystem`), used by
 /// all test-helper open paths so integration tests exercise the same
@@ -54,7 +32,6 @@ fn ensure_test_handlers_registered() {
 /// `GraphSubsystem` must be first because its `initialize()` method
 /// registers the per-database graph merge handler and DAG hook.
 fn test_db_builder() -> DatabaseBuilder {
-    ensure_test_handlers_registered();
     DatabaseBuilder::new()
         .with_subsystem(strata_graph::GraphSubsystem)
         .with_subsystem(VectorSubsystem)

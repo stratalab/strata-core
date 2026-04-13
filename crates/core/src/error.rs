@@ -690,6 +690,16 @@ pub enum StrataError {
         message: String,
     },
 
+    /// Incompatible instance reuse
+    ///
+    /// The caller attempted to reuse an already-open database instance with
+    /// a runtime signature that does not match the existing instance.
+    #[error("incompatible reuse: {message}")]
+    IncompatibleReuse {
+        /// Description of the incompatibility.
+        message: String,
+    },
+
     /// Dimension mismatch (Vector-specific)
     ///
     /// The vector dimension doesn't match the collection's configured dimension.
@@ -1028,6 +1038,13 @@ impl StrataError {
         }
     }
 
+    /// Create an IncompatibleReuse error
+    pub fn incompatible_reuse(message: impl Into<String>) -> Self {
+        StrataError::IncompatibleReuse {
+            message: message.into(),
+        }
+    }
+
     /// Create a DimensionMismatch error
     ///
     /// ## Example
@@ -1266,6 +1283,7 @@ impl StrataError {
             // ConstraintViolation errors (structural failures)
             StrataError::InvalidOperation { .. } => ErrorCode::ConstraintViolation,
             StrataError::InvalidInput { .. } => ErrorCode::ConstraintViolation,
+            StrataError::IncompatibleReuse { .. } => ErrorCode::ConstraintViolation,
             StrataError::DimensionMismatch { .. } => ErrorCode::ConstraintViolation,
             StrataError::CapacityExceeded { .. } => ErrorCode::ConstraintViolation,
             StrataError::BudgetExceeded { .. } => ErrorCode::ConstraintViolation,
@@ -1361,6 +1379,9 @@ impl StrataError {
             StrataError::InvalidInput { message } => {
                 ErrorDetails::new().with_string("message", message)
             }
+            StrataError::IncompatibleReuse { message } => {
+                ErrorDetails::new().with_string("message", message)
+            }
             StrataError::DimensionMismatch { expected, got } => ErrorDetails::new()
                 .with_int("expected", *expected as i64)
                 .with_int("got", *got as i64),
@@ -1439,6 +1460,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1486,6 +1508,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1524,6 +1547,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1571,6 +1595,7 @@ impl StrataError {
             | StrataError::WrongType { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1609,6 +1634,7 @@ impl StrataError {
         match self {
             StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. } => true,
 
             StrataError::NotFound { .. }
@@ -1670,6 +1696,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
@@ -1724,6 +1751,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1777,6 +1805,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
@@ -1823,6 +1852,7 @@ impl StrataError {
             | StrataError::TransactionNotActive { .. }
             | StrataError::InvalidOperation { .. }
             | StrataError::InvalidInput { .. }
+            | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }

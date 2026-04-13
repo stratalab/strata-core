@@ -56,15 +56,21 @@
 //! via `inject_failure()`. This allows tests to simulate failures at specific
 //! points and verify correct rollback behavior.
 
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
-use strata_core::{StrataError, StrataResult};
+use strata_core::id::CommitVersion;
+use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::value::Value;
+use strata_core::{StrataError, StrataResult, VersionedValue};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};
 use super::observers::BranchOpEvent;
 use super::Database;
-use crate::primitives::branch::BranchIndex;
+use crate::branch_ops::{is_user_visible_space, DATA_TYPE_TAGS};
+use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
+use crate::SpaceIndex;
 
 // =============================================================================
 // Failure Injection (Test Support)
@@ -96,6 +102,17 @@ enum RollbackAction {
         /// Whether to clear storage-layer data (segments, manifests).
         clear_storage: bool,
     },
+    /// Revert the exact branch version range written by a failed mutation.
+    RevertBranchRange {
+        /// Branch name to revert.
+        name: String,
+        /// First version written by the failed mutation.
+        from_version: CommitVersion,
+        /// Last version written by the failed mutation.
+        to_version: CommitVersion,
+    },
+    /// Restore a branch snapshot captured before delete.
+    RestoreBranchSnapshot(BranchSnapshot),
 }
 
 impl RollbackAction {
@@ -132,8 +149,254 @@ impl RollbackAction {
 
                 Ok(())
             }
+            Self::RevertBranchRange {
+                name,
+                from_version,
+                to_version,
+            } => {
+                info!(
+                    target: "strata::branch_mutation",
+                    branch = %name,
+                    from_version = from_version.as_u64(),
+                    to_version = to_version.as_u64(),
+                    "Executing rollback: revert branch version range"
+                );
+                rollback_branch_range(db, &name, from_version, to_version)
+            }
+            Self::RestoreBranchSnapshot(snapshot) => {
+                info!(
+                    target: "strata::branch_mutation",
+                    branch = %snapshot.name,
+                    entry_count = snapshot.entries.len(),
+                    "Executing rollback: restore deleted branch snapshot"
+                );
+                snapshot.restore(db)
+            }
         }
     }
+}
+
+#[derive(Debug)]
+struct BranchSnapshot {
+    name: String,
+    metadata: BranchMetadata,
+    executor_branch_id: BranchId,
+    metadata_branch_id: Option<BranchId>,
+    entries: Vec<(Key, Value)>,
+    spaces: Vec<(BranchId, String)>,
+}
+
+impl BranchSnapshot {
+    fn capture(db: &Arc<Database>, name: &str) -> StrataResult<Self> {
+        let branch_index = BranchIndex::new(db.clone());
+        let metadata = branch_index
+            .get_branch(name)?
+            .ok_or_else(|| StrataError::invalid_input(format!("Branch '{}' not found", name)))?
+            .value;
+
+        let executor_branch_id = resolve_branch_name(name);
+        let metadata_branch_id = BranchId::from_string(&metadata.branch_id)
+            .filter(|meta_id| *meta_id != executor_branch_id);
+
+        let mut entries = collect_branch_entries(db, executor_branch_id);
+        if let Some(meta_id) = metadata_branch_id {
+            entries.extend(collect_branch_entries(db, meta_id));
+        }
+
+        let mut spaces = collect_branch_spaces(db, executor_branch_id)?;
+        if let Some(meta_id) = metadata_branch_id {
+            spaces.extend(collect_branch_spaces(db, meta_id)?);
+        }
+
+        Ok(Self {
+            name: name.to_string(),
+            metadata,
+            executor_branch_id,
+            metadata_branch_id,
+            entries,
+            spaces,
+        })
+    }
+
+    fn restore(self, db: &Arc<Database>) -> StrataResult<()> {
+        let meta_key = Key::new_branch_with_id(global_namespace(), &self.name);
+        let metadata_value = stored_branch_metadata_value(&self.metadata)?;
+
+        db.transaction(global_branch_id(), |txn| {
+            txn.set_allow_cross_branch(true);
+            txn.put(meta_key.clone(), metadata_value.clone())?;
+            for (key, value) in &self.entries {
+                txn.put(key.clone(), value.clone())?;
+            }
+            Ok(())
+        })?;
+
+        let space_index = SpaceIndex::new(db.clone());
+        for (branch_id, space) in &self.spaces {
+            space_index.register(*branch_id, space)?;
+        }
+
+        db.unmark_branch_deleting(&self.executor_branch_id);
+        if let Some(meta_id) = self.metadata_branch_id {
+            db.unmark_branch_deleting(&meta_id);
+        }
+
+        crate::primitives::kv::invalidate_kv_namespace_cache(&self.executor_branch_id);
+        crate::system_space::invalidate_cache(&self.executor_branch_id);
+        if let Some(meta_id) = self.metadata_branch_id {
+            crate::primitives::kv::invalidate_kv_namespace_cache(&meta_id);
+            crate::system_space::invalidate_cache(&meta_id);
+        }
+
+        Ok(())
+    }
+}
+
+fn collect_branch_entries(db: &Arc<Database>, branch_id: BranchId) -> Vec<(Key, Value)> {
+    let storage = db.storage();
+    let mut entries = Vec::new();
+    for &type_tag in &DATA_TYPE_TAGS {
+        entries.extend(
+            storage
+                .list_by_type(&branch_id, type_tag)
+                .into_iter()
+                .map(|(key, vv)| (key, vv.value)),
+        );
+    }
+    entries
+}
+
+fn collect_branch_spaces(
+    db: &Arc<Database>,
+    branch_id: BranchId,
+) -> StrataResult<Vec<(BranchId, String)>> {
+    let space_index = SpaceIndex::new(db.clone());
+    let spaces = space_index
+        .list(branch_id)?
+        .into_iter()
+        .filter(|space| space != "default" && is_user_visible_space(space))
+        .collect::<BTreeSet<_>>();
+    Ok(spaces.into_iter().map(|space| (branch_id, space)).collect())
+}
+
+fn global_branch_id() -> BranchId {
+    BranchId::from_bytes([0; 16])
+}
+
+fn global_namespace() -> Arc<Namespace> {
+    Arc::new(Namespace::for_branch(global_branch_id()))
+}
+
+fn stored_branch_metadata_value(metadata: &BranchMetadata) -> StrataResult<Value> {
+    serde_json::to_string(metadata)
+        .map(Value::String)
+        .map_err(|e| StrataError::serialization(e.to_string()))
+}
+
+fn build_versioned_space_map(
+    entries: &[strata_storage::VersionedEntry],
+) -> HashMap<(String, Vec<u8>), Option<Value>> {
+    let mut map = HashMap::new();
+    for entry in entries {
+        let key = (
+            entry.key.namespace.space.clone(),
+            entry.key.user_key.to_vec(),
+        );
+        if entry.is_tombstone {
+            map.insert(key, None);
+        } else {
+            map.insert(key, Some(entry.value.clone()));
+        }
+    }
+    map
+}
+
+fn build_live_space_map(entries: &[(Key, VersionedValue)]) -> HashMap<(String, Vec<u8>), Value> {
+    let mut map = HashMap::new();
+    for (key, vv) in entries {
+        map.insert(
+            (key.namespace.space.clone(), key.user_key.to_vec()),
+            vv.value.clone(),
+        );
+    }
+    map
+}
+
+fn rollback_branch_range(
+    db: &Arc<Database>,
+    branch: &str,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
+) -> StrataResult<()> {
+    let branch_id = resolve_branch_name(branch);
+    let branch_index = BranchIndex::new(db.clone());
+    branch_index
+        .get_branch(branch)?
+        .ok_or_else(|| StrataError::invalid_input(format!("Branch '{}' not found", branch)))?;
+
+    let storage = db.storage();
+    let mut puts: Vec<(Key, Value)> = Vec::new();
+    let mut deletes: Vec<Key> = Vec::new();
+
+    for &type_tag in &DATA_TYPE_TAGS {
+        let before_entries = storage.list_by_type_at_version(
+            &branch_id,
+            type_tag,
+            CommitVersion(from_version.as_u64().saturating_sub(1)),
+        );
+        let after_entries = storage.list_by_type_at_version(&branch_id, type_tag, to_version);
+        let current_entries = storage.list_by_type(&branch_id, type_tag);
+
+        let before_map = build_versioned_space_map(&before_entries);
+        let after_map = build_versioned_space_map(&after_entries);
+        let current_map = build_live_space_map(&current_entries);
+
+        let all_keys: BTreeSet<(String, Vec<u8>)> =
+            before_map.keys().chain(after_map.keys()).cloned().collect();
+
+        for compound_key in &all_keys {
+            let before_state = before_map.get(compound_key).cloned().flatten();
+            let after_state = after_map.get(compound_key).cloned().flatten();
+            let current_state = current_map.get(compound_key).cloned();
+
+            if before_state == after_state {
+                continue;
+            }
+
+            if current_state != after_state {
+                return Err(StrataError::conflict(format!(
+                    "rollback of branch '{}' failed: key changed after failed mutation",
+                    branch
+                )));
+            }
+
+            let (space, user_key) = compound_key;
+            let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
+            let key = Key::new(ns, type_tag, user_key.clone());
+
+            match before_state {
+                Some(value) => puts.push((key, value)),
+                None => deletes.push(key),
+            }
+        }
+    }
+
+    if puts.is_empty() && deletes.is_empty() {
+        return Ok(());
+    }
+
+    db.transaction(global_branch_id(), |txn| {
+        txn.set_allow_cross_branch(true);
+        for (key, value) in &puts {
+            txn.put(key.clone(), value.clone())?;
+        }
+        for key in &deletes {
+            txn.delete(key.clone())?;
+        }
+        Ok(())
+    })?;
+
+    Ok(())
 }
 
 // =============================================================================
@@ -230,6 +493,28 @@ impl<'a> BranchMutation<'a> {
             name: name.into(),
             clear_storage,
         });
+    }
+
+    /// Register a rollback action to revert an exact branch version range.
+    pub fn on_rollback_revert_range(
+        &mut self,
+        name: impl Into<String>,
+        from_version: CommitVersion,
+        to_version: CommitVersion,
+    ) {
+        self.rollback_actions.push(RollbackAction::RevertBranchRange {
+            name: name.into(),
+            from_version,
+            to_version,
+        });
+    }
+
+    /// Capture a branch snapshot and register it for restore-on-rollback.
+    pub fn on_rollback_restore_branch(&mut self, name: &str) -> StrataResult<()> {
+        let snapshot = BranchSnapshot::capture(self.db, name)?;
+        self.rollback_actions
+            .push(RollbackAction::RestoreBranchSnapshot(snapshot));
+        Ok(())
     }
 
     // =========================================================================
@@ -380,6 +665,15 @@ impl<'a> BranchMutation<'a> {
         result
     }
 
+    /// Cancel the mutation without running rollback actions.
+    ///
+    /// Use this when rollback actions were registered proactively but the
+    /// low-level branch mutation itself returned an error and preserved state.
+    pub fn cancel(mut self) {
+        self.rollback_actions.clear();
+        self.state = MutationState::RolledBack;
+    }
+
     // =========================================================================
     // Failure Injection (Testing)
     // =========================================================================
@@ -414,7 +708,7 @@ impl Drop for BranchMutation<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::database::dag_hook::{AncestryEntry, DagEventKind, MergeBaseResult};
+    use crate::database::dag_hook::{AncestryEntry, MergeBaseResult};
     use crate::Database;
     use strata_core::id::CommitVersion;
     use strata_core::types::BranchId;

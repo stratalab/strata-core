@@ -24,9 +24,10 @@ pub use dag_hooks::{
     register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
     BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
 };
-// Crate-internal accessor: not re-exported, used directly via
-// `dag_hooks::branch_dag_hooks()` from inside the engine.
-pub(crate) use dag_hooks::branch_dag_hooks;
+pub(crate) use dag_hooks::{
+    dispatch_cherry_pick_hook, dispatch_fork_hook, dispatch_merge_hook, dispatch_revert_hook,
+    with_branch_dag_hooks_suppressed,
+};
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
@@ -876,13 +877,7 @@ pub fn fork_branch_with_metadata(
         fork_version: Some(fork_version.as_u64()),
     };
 
-    // Fire the branch DAG hook. Best-effort: the hook implementation
-    // logs warnings on failure and never propagates an error back.
-    // Engine-direct callers and executor-driven callers go through the
-    // same hook dispatch — no one can bypass the DAG.
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_fork)(db, &info, message, creator);
-    }
+    dispatch_fork_hook(db, &info, message, creator);
 
     Ok(info)
 }
@@ -2109,11 +2104,7 @@ pub fn merge_branches_with_metadata(
         merge_version,
     };
 
-    // Fire the branch DAG hook. Best-effort: the hook implementation
-    // logs warnings on failure and never propagates an error back.
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_merge)(db, &info, strategy, message, creator);
-    }
+    dispatch_merge_hook(db, &info, strategy, message, creator);
 
     Ok(info)
 }
@@ -2836,10 +2827,7 @@ pub fn revert_version_range_with_metadata(
         revert_version,
     };
 
-    // Fire the branch DAG hook. Best-effort.
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_revert)(db, &info, message, creator);
-    }
+    dispatch_revert_hook(db, &info, message, creator);
 
     Ok(info)
 }
@@ -2941,9 +2929,7 @@ pub fn cherry_pick_keys(
         cherry_pick_version,
     };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_cherry_pick)(db, source, target, &info);
-    }
+    dispatch_cherry_pick_hook(db, source, target, &info);
 
     Ok(info)
 }
@@ -3293,9 +3279,7 @@ pub fn cherry_pick_from_diff(
         cherry_pick_version,
     };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_cherry_pick)(db, source, target, &info);
-    }
+    dispatch_cherry_pick_hook(db, source, target, &info);
 
     Ok(info)
 }

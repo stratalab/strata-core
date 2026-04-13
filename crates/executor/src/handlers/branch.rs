@@ -352,15 +352,8 @@ pub fn branch_merge(
         });
     }
 
-    // Query merge base from DAG via BranchService (for repeated merges and materialized branches).
-    // Failures are OK — engine falls back to storage-level fork info.
-    let merge_base_override = p.db.branches().merge_base(&source, &target).ok().flatten();
-
     // Use BranchService for canonical path with DAG integration.
     let mut options = MergeOptions::with_strategy(strategy);
-    if let Some(mb) = merge_base_override {
-        options = options.with_merge_base(mb.branch_id, mb.commit_version.0);
-    }
     if let Some(m) = &message {
         options = options.with_message(m.clone());
     }
@@ -400,9 +393,9 @@ pub fn branch_diff_three_way(
     branch_a: String,
     branch_b: String,
 ) -> Result<Output> {
-    // Route through BranchService — it queries merge_base from DAG internally.
-    // Pass None for merge_base; if the caller wants an override, BranchService
-    // already handles querying the DAG hook.
+    // Route through BranchService — it resolves DAG-backed merge bases when
+    // the graph subsystem is installed and falls back to storage-level fork
+    // info otherwise.
     let result = p.db.branches().diff3(&branch_a, &branch_b, None)
         .map_err(|e| Error::Internal {
             reason: e.to_string(),
@@ -490,19 +483,12 @@ pub fn branch_cherry_pick(
         // Direct key pick
         p.db.branches().cherry_pick(&source, &target, &keys)
     } else {
-        // Diff-based pick with filter — query merge base from DAG via BranchService.
-        // Failures are OK — engine falls back to storage-level fork info.
-        let merge_base_override = p.db.branches()
-            .merge_base(&source, &target)
-            .ok()
-            .flatten()
-            .map(|mb| (mb.branch_id, mb.commit_version.0));
         let filter = strata_engine::branch_ops::CherryPickFilter {
             spaces: filter_spaces,
             keys: filter_keys,
             primitives: filter_primitives,
         };
-        p.db.branches().cherry_pick_from_diff(&source, &target, filter, merge_base_override)
+        p.db.branches().cherry_pick_from_diff(&source, &target, filter, None)
     }
     .map_err(|e| Error::Internal {
         reason: e.to_string(),

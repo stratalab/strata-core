@@ -61,7 +61,7 @@ use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::any::{Any, TypeId};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -174,6 +174,38 @@ pub struct DatabaseDiskUsage {
     pub wal: strata_durability::WalDiskUsage,
     /// Snapshot directory usage in bytes.
     pub snapshot_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleState {
+    Uninitialized,
+    Initializing,
+    Initialized,
+    Failed,
+}
+
+impl LifecycleState {
+    const fn as_u8(self) -> u8 {
+        match self {
+            Self::Uninitialized => 0,
+            Self::Initializing => 1,
+            Self::Initialized => 2,
+            Self::Failed => 3,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            0 => Self::Uninitialized,
+            1 => Self::Initializing,
+            2 => Self::Initialized,
+            3 => Self::Failed,
+            _ => {
+                debug_assert!(false, "invalid lifecycle state value: {}", value);
+                Self::Failed
+            }
+        }
+    }
 }
 
 // ============================================================================
@@ -416,10 +448,18 @@ pub struct Database {
     /// Best-effort: failures are logged, not propagated.
     replay_observers: ReplayObserverRegistry,
 
-    /// Whether lifecycle hooks (initialize, bootstrap) have completed.
+    /// Lifecycle state for `open_runtime` and registry reuse.
     ///
-    /// Prevents re-running lifecycle on reuse via open_runtime.
-    lifecycle_complete: AtomicBool,
+    /// Tracks whether this instance is uninitialized, currently initializing,
+    /// fully initialized, or failed during lifecycle.
+    lifecycle_state: AtomicU8,
+
+    /// Wait primitive for lifecycle transitions.
+    lifecycle_state_mu: parking_lot::Mutex<()>,
+    lifecycle_state_cv: parking_lot::Condvar,
+
+    /// Runtime compatibility signature, when opened via `open_runtime`.
+    runtime_signature: parking_lot::RwLock<Option<CompatibilitySignature>>,
 
     /// Per-database merge handler registry.
     ///
@@ -603,14 +643,57 @@ impl Database {
     /// Returns true if initialize() and bootstrap() have run successfully.
     /// Used by open_runtime to avoid re-running lifecycle on reuse.
     pub fn is_lifecycle_complete(&self) -> bool {
-        self.lifecycle_complete.load(std::sync::atomic::Ordering::Acquire)
+        self.lifecycle_state() == LifecycleState::Initialized
+    }
+
+    pub(crate) fn lifecycle_state(&self) -> LifecycleState {
+        LifecycleState::from_u8(self.lifecycle_state.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    pub(crate) fn set_lifecycle_initializing(&self) {
+        self.lifecycle_state.store(
+            LifecycleState::Initializing.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
     }
 
     /// Mark lifecycle as complete.
     ///
     /// Called after initialize() and bootstrap() succeed.
     pub(crate) fn set_lifecycle_complete(&self) {
-        self.lifecycle_complete.store(true, std::sync::atomic::Ordering::Release);
+        self.lifecycle_state.store(
+            LifecycleState::Initialized.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
+    }
+
+    pub(crate) fn set_lifecycle_failed(&self) {
+        self.lifecycle_state.store(
+            LifecycleState::Failed.as_u8(),
+            std::sync::atomic::Ordering::Release,
+        );
+        self.lifecycle_state_cv.notify_all();
+    }
+
+    pub(crate) fn wait_for_lifecycle_state(&self) -> LifecycleState {
+        let mut guard = self.lifecycle_state_mu.lock();
+        loop {
+            let state = self.lifecycle_state();
+            if state != LifecycleState::Initializing {
+                return state;
+            }
+            self.lifecycle_state_cv.wait(&mut guard);
+        }
+    }
+
+    pub(crate) fn set_runtime_signature(&self, signature: CompatibilitySignature) {
+        *self.runtime_signature.write() = Some(signature);
+    }
+
+    pub(crate) fn runtime_signature(&self) -> Option<CompatibilitySignature> {
+        self.runtime_signature.read().clone()
     }
 
     // =========================================================================

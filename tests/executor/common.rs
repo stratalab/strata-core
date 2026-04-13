@@ -1,18 +1,22 @@
 //! Common test utilities for executor tests
 
 use std::sync::Arc;
-use strata_engine::Database;
+use strata_engine::{Database, DatabaseBuilder, SearchSubsystem};
 use strata_executor::{Executor, Output, Session, Strata};
+use strata_vector::VectorSubsystem;
+
+fn test_cache_db() -> Arc<Database> {
+    DatabaseBuilder::new()
+        .with_subsystem(strata_graph::GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
+        .cache()
+        .unwrap()
+}
 
 /// Create an executor with an in-memory database
 pub fn create_executor() -> Executor {
-    let db = Database::cache().unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
-    // Register the branch DAG hook so that fork / merge / revert /
-    // cherry-pick / create / delete operations through this executor
-    // record events in the `_branch_dag` graph. Idempotent via OnceCell.
-    strata_graph::register_branch_dag_hook_implementation();
-    Executor::new(db)
+    Executor::new(test_cache_db())
 }
 
 /// Create a Strata API wrapper with an in-memory database
@@ -22,18 +26,12 @@ pub fn create_strata() -> Strata {
 
 /// Create a Session with an in-memory database
 pub fn create_session() -> Session {
-    let db = Database::cache().unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
-    strata_graph::register_branch_dag_hook_implementation();
-    Session::new(db)
+    Session::new(test_cache_db())
 }
 
 /// Create a database for shared use
 pub fn create_db() -> Arc<Database> {
-    let db = Database::cache().unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
-    strata_graph::register_branch_dag_hook_implementation();
-    db
+    test_cache_db()
 }
 
 /// Helper to create an event payload (must be an Object)
