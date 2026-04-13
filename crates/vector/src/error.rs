@@ -119,24 +119,69 @@ pub enum VectorError {
 impl VectorError {
     /// Check if this error indicates the vector/collection was not found
     pub fn is_not_found(&self) -> bool {
-        matches!(
-            self,
-            VectorError::CollectionNotFound { .. } | VectorError::VectorNotFound { .. }
-        )
+        match self {
+            VectorError::CollectionNotFound { .. } | VectorError::VectorNotFound { .. } => true,
+
+            VectorError::CollectionAlreadyExists { .. }
+            | VectorError::DimensionMismatch { .. }
+            | VectorError::InvalidDimension { .. }
+            | VectorError::EmptyEmbedding
+            | VectorError::InvalidEmbedding { .. }
+            | VectorError::InvalidCollectionName { .. }
+            | VectorError::InvalidKey { .. }
+            | VectorError::ConfigMismatch { .. }
+            | VectorError::SearchLimitExceeded { .. }
+            | VectorError::Storage(_)
+            | VectorError::Transaction(_)
+            | VectorError::Serialization(_)
+            | VectorError::Internal(_)
+            | VectorError::Io(_)
+            | VectorError::Database(_) => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped VectorError variant in is_not_found()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this error is a validation error
     pub fn is_validation_error(&self) -> bool {
-        matches!(
-            self,
+        match self {
             VectorError::DimensionMismatch { .. }
-                | VectorError::InvalidDimension { .. }
-                | VectorError::EmptyEmbedding
-                | VectorError::InvalidEmbedding { .. }
-                | VectorError::InvalidCollectionName { .. }
-                | VectorError::InvalidKey { .. }
-                | VectorError::ConfigMismatch { .. }
-        )
+            | VectorError::InvalidDimension { .. }
+            | VectorError::EmptyEmbedding
+            | VectorError::InvalidEmbedding { .. }
+            | VectorError::InvalidCollectionName { .. }
+            | VectorError::InvalidKey { .. }
+            | VectorError::ConfigMismatch { .. } => true,
+
+            VectorError::CollectionNotFound { .. }
+            | VectorError::CollectionAlreadyExists { .. }
+            | VectorError::VectorNotFound { .. }
+            | VectorError::SearchLimitExceeded { .. }
+            | VectorError::Storage(_)
+            | VectorError::Transaction(_)
+            | VectorError::Serialization(_)
+            | VectorError::Internal(_)
+            | VectorError::Io(_)
+            | VectorError::Database(_) => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped VectorError variant in is_validation_error()"
+                );
+                false
+            }
+        }
     }
 }
 

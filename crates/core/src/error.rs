@@ -1510,7 +1510,38 @@ impl StrataError {
     ///
     /// Returns true for: `WrongType`
     pub fn is_wrong_type(&self) -> bool {
-        matches!(self, StrataError::WrongType { .. })
+        match self {
+            StrataError::WrongType { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::CapacityExceeded { .. }
+            | StrataError::BudgetExceeded { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_wrong_type()"
+                );
+                false
+            }
+        }
     }
 
     /// Check if this is a transaction error
@@ -1777,10 +1808,37 @@ impl StrataError {
     /// }
     /// ```
     pub fn is_resource_error(&self) -> bool {
-        matches!(
-            self,
-            StrataError::CapacityExceeded { .. } | StrataError::BudgetExceeded { .. }
-        )
+        match self {
+            StrataError::CapacityExceeded { .. } | StrataError::BudgetExceeded { .. } => true,
+
+            StrataError::NotFound { .. }
+            | StrataError::BranchNotFound { .. }
+            | StrataError::PathNotFound { .. }
+            | StrataError::Conflict { .. }
+            | StrataError::VersionConflict { .. }
+            | StrataError::WriteConflict { .. }
+            | StrataError::WrongType { .. }
+            | StrataError::TransactionAborted { .. }
+            | StrataError::TransactionTimeout { .. }
+            | StrataError::TransactionNotActive { .. }
+            | StrataError::InvalidOperation { .. }
+            | StrataError::InvalidInput { .. }
+            | StrataError::DimensionMismatch { .. }
+            | StrataError::Storage { .. }
+            | StrataError::Serialization { .. }
+            | StrataError::Corruption { .. }
+            | StrataError::Internal { .. } => false,
+
+            // Catch-all for future variants (due to #[non_exhaustive])
+            #[allow(unreachable_patterns)]
+            _ => {
+                tracing::warn!(
+                    target: "strata::error::exhaustive",
+                    "unmapped StrataError variant in is_resource_error()"
+                );
+                false
+            }
+        }
     }
 
     /// Get the entity reference if this error is about a specific entity
