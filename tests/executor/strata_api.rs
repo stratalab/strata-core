@@ -243,12 +243,14 @@ fn branch_create_and_get() {
     let db = create_strata();
 
     // Users can name branches like git branches
-    let (info, _version) = db
-        .branch_create(Some("my-agent-branch".to_string()), None)
+    let (info, version) = db
+        .branches()
+        .create_with_options(Some("my-agent-branch".to_string()), None)
         .unwrap();
     assert_eq!(info.id.as_str(), "my-agent-branch");
+    assert!(version > 0);
 
-    let branch_info = db.branch_get(info.id.as_str()).unwrap();
+    let branch_info = db.branches().info(info.id.as_str()).unwrap();
     assert!(branch_info.is_some());
     assert_eq!(branch_info.unwrap().info.id.as_str(), "my-agent-branch");
 }
@@ -257,10 +259,10 @@ fn branch_create_and_get() {
 fn branch_list() {
     let db = create_strata();
 
-    db.branch_create(Some("dev".to_string()), None).unwrap();
-    db.branch_create(Some("prod".to_string()), None).unwrap();
+    db.branches().create("dev").unwrap();
+    db.branches().create("prod").unwrap();
 
-    let branches = db.branch_list(None, None, None).unwrap();
+    let branches = db.branches().list_with_options(None, None, None).unwrap();
     // At least our two branches plus default
     assert!(
         branches.len() >= 2,
@@ -353,9 +355,7 @@ fn use_all_primitives() {
     db.json_set("doc1", "$", doc).unwrap();
 
     // Branch
-    let (branch_info, _) = db
-        .branch_create(Some("integration-test".to_string()), None)
-        .unwrap();
+    db.branches().create("integration-test").unwrap();
 
     // Verify all data
     assert_eq!(
@@ -366,7 +366,7 @@ fn use_all_primitives() {
     let collections = db.vector_list_collections().unwrap();
     assert!(collections.iter().any(|c| c.name == "embeddings"));
     assert!(db.json_get("doc1", "$").unwrap().is_some());
-    assert!(db.branch_get(branch_info.id.as_str()).unwrap().is_some());
+    assert!(db.branches().info("integration-test").unwrap().is_some());
 }
 
 // ============================================================================

@@ -215,7 +215,7 @@ Client               Handler             Engine (BranchIndex)  Transaction      
 
 **Steps:**
 
-1. **Handler**: Calls `primitives.branch.list_branches()` to get all branch names. Then calls `get_branch()` for each name to get full metadata. Applies `limit` if specified. `state` and `offset` are MVP-ignored.
+1. **Handler**: Calls `primitives.branch.list_branches()` to get all branch names. Then calls `get_branch()` for each name to get full metadata. Applies `offset` and `limit` if specified. `state` is currently a no-op because the executor only exposes `Active`.
 2. **Engine (BranchIndex)**: Opens transaction on global namespace. Scans all branch keys via `scan_prefix`. Filters out internal `__idx_` keys (legacy data). Returns list of branch name strings.
 
 **Two-phase approach**: List first gets all names (lightweight scan), then fetches full metadata per branch. This is N+1 reads but keeps the scan lock short.
@@ -346,5 +346,6 @@ All data for a branch is scoped under its `Namespace::for_branch(branch_id)`. Di
 - Branch `delete` is the **only cascading operation** in the system - it deletes all data across all primitive types (KV, Event, State, JSON, Vector).
 - Branch `delete` is **not atomic** across TypeTags. A crash during deletion could leave partial data. However, the branch metadata is deleted last, so a partial deletion would leave orphaned data but not a corrupt branch index.
 - The `list` operation is **two-phase** (scan names, then fetch metadata per name), unlike KV/JSON list which scan and collect in one pass.
-- `BranchList`'s `state` and `offset` parameters are MVP-ignored. Only `limit` is functional.
+- `BranchList` applies `offset` and `limit`. `state` is currently a no-op because the executor only exposes `Active`.
 - The handler for `BranchCreate` generates a UUID v4 if no name is provided, making it possible to create anonymous branches.
+- `BranchCreate` still accepts a `metadata` field for command parity, but the current executor handler ignores it.

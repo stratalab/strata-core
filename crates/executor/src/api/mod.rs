@@ -36,7 +36,6 @@
 //! assert_eq!(db.kv_get("key")?, Some(Value::String("hello".into())));
 //! ```
 
-mod branch;
 mod branches;
 mod db;
 mod event;
@@ -44,7 +43,6 @@ mod graph;
 mod inference;
 mod json;
 mod kv;
-mod space;
 mod system;
 mod vector;
 
@@ -721,6 +719,20 @@ impl Strata {
         Ok(())
     }
 
+    /// Create a space in the current branch.
+    pub fn create_space(&self, space: &str) -> Result<()> {
+        match self.execute_cmd(Command::SpaceCreate {
+            branch: self.branch_id(),
+            space: space.to_string(),
+        })? {
+            Output::Unit => Ok(()),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for SpaceCreate".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
     /// List all spaces in the current branch.
     pub fn list_spaces(&self) -> Result<Vec<String>> {
         match self.execute_cmd(Command::SpaceList {
@@ -729,6 +741,20 @@ impl Strata {
             Output::SpaceList(spaces) => Ok(spaces),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for SpaceList".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
+    /// Check whether a space exists in the current branch.
+    pub fn space_exists(&self, space: &str) -> Result<bool> {
+        match self.execute_cmd(Command::SpaceExists {
+            branch: self.branch_id(),
+            space: space.to_string(),
+        })? {
+            Output::Bool(exists) => Ok(exists),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for SpaceExists".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             }),
         }
@@ -890,16 +916,50 @@ mod tests {
     fn test_branch_create_list() {
         let db = create_strata();
 
-        let (info, _version) = db
-            .branch_create(
+        let (info, version) = db
+            .branches()
+            .create_with_options(
                 Some("550e8400-e29b-41d4-a716-446655440099".to_string()),
                 None,
             )
             .unwrap();
         assert_eq!(info.id.as_str(), "550e8400-e29b-41d4-a716-446655440099");
+        assert!(version > 0);
 
-        let branches = db.branch_list(None, None, None).unwrap();
+        let branches = db.branches().list().unwrap();
         assert!(!branches.is_empty());
+    }
+
+    #[test]
+    fn test_branch_create_generated_returns_info_and_version() {
+        let db = create_strata();
+
+        let (info, version) = db.branches().create_with_options(None, None).unwrap();
+        assert!(!info.id.as_str().is_empty());
+        assert!(version > 0);
+
+        let fetched = db.branches().info(info.id.as_str()).unwrap();
+        assert!(fetched.is_some());
+    }
+
+    #[test]
+    fn test_branch_list_with_options_preserves_info_and_offset() {
+        let db = create_strata();
+
+        db.branches().create("branch-a").unwrap();
+        db.branches().create("branch-b").unwrap();
+        db.branches().create("branch-c").unwrap();
+
+        let all = db.branches().list_with_options(None, None, None).unwrap();
+        assert!(all.len() >= 4);
+        assert!(all.iter().all(|branch| branch.version > 0));
+
+        let paged = db
+            .branches()
+            .list_with_options(None, Some(1), Some(1))
+            .unwrap();
+        assert_eq!(paged.len(), 1);
+        assert_eq!(paged[0], all[1]);
     }
 
     // =========================================================================
@@ -923,7 +983,7 @@ mod tests {
         assert_eq!(db.current_branch(), "default");
 
         // But the branch exists
-        assert!(db.branch_exists("experiment-1").unwrap());
+        assert!(db.branches().exists("experiment-1").unwrap());
     }
 
     #[test]
@@ -973,7 +1033,7 @@ mod tests {
         db.delete_branch("to-delete").unwrap();
 
         // Verify it's gone
-        assert!(!db.branch_exists("to-delete").unwrap());
+        assert!(!db.branches().exists("to-delete").unwrap());
     }
 
     #[test]
@@ -2187,7 +2247,7 @@ mod tests {
     #[test]
     fn test_space_list() {
         let db = create_strata();
-        let spaces = db.space_list().unwrap();
+        let spaces = db.list_spaces().unwrap();
         assert!(spaces.contains(&"default".to_string()));
     }
 
@@ -2196,27 +2256,27 @@ mod tests {
         let db = create_strata();
 
         assert!(!db.space_exists("myspace").unwrap());
-        db.space_create("myspace").unwrap();
+        db.create_space("myspace").unwrap();
         assert!(db.space_exists("myspace").unwrap());
 
-        let spaces = db.space_list().unwrap();
+        let spaces = db.list_spaces().unwrap();
         assert!(spaces.contains(&"myspace".to_string()));
     }
 
     #[test]
     fn test_space_delete() {
         let db = create_strata();
-        db.space_create("todelete").unwrap();
+        db.create_space("todelete").unwrap();
         assert!(db.space_exists("todelete").unwrap());
 
-        db.space_delete("todelete", false).unwrap();
+        db.delete_space("todelete").unwrap();
         assert!(!db.space_exists("todelete").unwrap());
     }
 
     #[test]
     fn test_space_delete_default_rejected() {
         let db = create_strata();
-        let result = db.space_delete("default", false);
+        let result = db.delete_space("default");
         assert!(result.is_err());
     }
 
