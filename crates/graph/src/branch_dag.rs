@@ -2342,7 +2342,7 @@ mod tests {
         )
         .unwrap();
 
-        let hook = GraphBranchDagHook::new(db);
+        let hook = GraphBranchDagHook::new(db.clone());
         let log = hook.log("log-target", usize::MAX).unwrap();
         assert_eq!(log.len(), 3);
         assert_eq!(log[0].kind, DagEventKind::Merge);
@@ -2361,7 +2361,7 @@ mod tests {
         dag_record_fork(&db, "root", "mid", Some(5), None, None).unwrap();
         dag_record_fork(&db, "mid", "leaf", Some(9), None, None).unwrap();
 
-        let hook = GraphBranchDagHook::new(db);
+        let hook = GraphBranchDagHook::new(db.clone());
         let ancestors = hook.ancestors("leaf").unwrap();
         assert_eq!(ancestors.len(), 2);
         assert_eq!(ancestors[0].branch_name, "mid");
