@@ -674,65 +674,30 @@ impl Session {
                     properties: props,
                     object_type,
                 };
-                let created =
-                    convert_result(ctx.graph_add_node(branch_id, space, &graph, &node_id, &data))?;
-                // Queue for GraphCommitObserver (subsystem-owned maintenance).
-                // T2-E5: replaces executor-owned PostCommitOp pattern.
-                match executor.primitives().graph.state() {
-                    Ok(state) => {
-                        state.queue_pending_op(
-                            ctx.txn_id,
-                            strata_graph::StagedGraphOp::IndexNode {
-                                branch_id,
-                                space: space.to_string(),
-                                graph: graph.clone(),
-                                node_id: node_id.clone(),
-                                data,
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        // Best-effort: log but don't fail the operation.
-                        // Search index can be rebuilt from committed data.
-                        tracing::warn!(
-                            target: "strata::graph",
-                            graph = %graph,
-                            node_id = %node_id,
-                            error = %e,
-                            "Failed to queue graph index op; search index may be stale"
-                        );
-                    }
-                }
+                // Get backend state for subsystem-owned index maintenance.
+                // T2-E5: graph_add_node queues ops that CommitObserver applies after commit.
+                let backend_state = convert_result(executor.primitives().graph.state())?;
+                let created = convert_result(ctx.graph_add_node(
+                    branch_id,
+                    space,
+                    &graph,
+                    &node_id,
+                    &data,
+                    &backend_state,
+                ))?;
                 Ok(Output::GraphWriteResult { node_id, created })
             }
             Command::GraphRemoveNode { graph, node_id, .. } => {
-                convert_result(ctx.graph_remove_node(branch_id, space, &graph, &node_id))?;
-                // Queue for GraphCommitObserver (subsystem-owned maintenance).
-                // T2-E5: replaces executor-owned PostCommitOp pattern.
-                match executor.primitives().graph.state() {
-                    Ok(state) => {
-                        state.queue_pending_op(
-                            ctx.txn_id,
-                            strata_graph::StagedGraphOp::DeindexNode {
-                                branch_id,
-                                space: space.to_string(),
-                                graph: graph.clone(),
-                                node_id: node_id.clone(),
-                            },
-                        );
-                    }
-                    Err(e) => {
-                        // Best-effort: log but don't fail the operation.
-                        // Search index can be rebuilt from committed data.
-                        tracing::warn!(
-                            target: "strata::graph",
-                            graph = %graph,
-                            node_id = %node_id,
-                            error = %e,
-                            "Failed to queue graph deindex op; search index may be stale"
-                        );
-                    }
-                }
+                // Get backend state for subsystem-owned index maintenance.
+                // T2-E5: graph_remove_node queues ops that CommitObserver applies after commit.
+                let backend_state = convert_result(executor.primitives().graph.state())?;
+                convert_result(ctx.graph_remove_node(
+                    branch_id,
+                    space,
+                    &graph,
+                    &node_id,
+                    &backend_state,
+                ))?;
                 Ok(Output::Unit)
             }
             Command::GraphAddEdge {

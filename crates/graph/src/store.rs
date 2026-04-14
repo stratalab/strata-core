@@ -159,9 +159,9 @@ use strata_engine::Database;
 
 /// Ensure runtime hooks are wired for this database instance.
 ///
-/// This is called lazily from `GraphStore::state()`. It registers the
-/// commit and replay observers if they haven't been registered yet.
-pub(crate) fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>) {
+/// This is called from `GraphSubsystem::initialize()` to register commit and
+/// replay observers. Uses atomic flag to ensure idempotent registration.
+pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>) {
     use std::sync::atomic::Ordering;
 
     if state.runtime_wired.swap(true, Ordering::AcqRel) {
@@ -266,8 +266,8 @@ fn apply_replayed_graph_changes(
 
     // Index new/updated graph nodes
     for (key, value) in puts {
-        // Graph nodes are stored with TypeTag::KV with key format: "{graph}/n/{node_id}"
-        if key.type_tag != TypeTag::KV {
+        // Graph nodes are stored with TypeTag::Graph with key format: "{graph}/n/{node_id}"
+        if key.type_tag != TypeTag::Graph {
             continue;
         }
 
@@ -285,12 +285,12 @@ fn apply_replayed_graph_changes(
         let graph = parts[0];
         let node_id = parts[2];
 
-        // Deserialize node data
-        let bytes = match value {
-            Value::Bytes(b) => b,
+        // Deserialize node data from JSON string
+        let json_str = match value {
+            Value::String(s) => s,
             _ => continue,
         };
-        let data: crate::types::NodeData = match serde_json::from_slice(bytes) {
+        let data: crate::types::NodeData = match serde_json::from_str(json_str) {
             Ok(d) => d,
             Err(_) => continue,
         };
@@ -302,7 +302,7 @@ fn apply_replayed_graph_changes(
 
     // Deindex deleted graph nodes
     for (key, _value) in deleted_values {
-        if key.type_tag != TypeTag::KV {
+        if key.type_tag != TypeTag::Graph {
             continue;
         }
 

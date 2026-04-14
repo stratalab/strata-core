@@ -27,14 +27,13 @@ impl GraphStore {
             }
         }
 
-        let result = self.db.transaction(branch_id, |txn| {
-            txn.graph_add_node(branch_id, space, graph, node_id, &data)
-        })?;
+        // Get backend state for subsystem-owned index maintenance.
+        // T2-E5: graph_add_node queues ops that CommitObserver applies after commit.
+        let backend_state = self.state()?;
 
-        // Post-commit: update search index
-        self.index_node_for_search(branch_id, space, graph, node_id, &data);
-
-        Ok(result)
+        self.db.transaction(branch_id, |txn| {
+            txn.graph_add_node(branch_id, space, graph, node_id, &data, &backend_state)
+        })
     }
 
     /// Get node data, or None if node doesn't exist.
@@ -114,14 +113,13 @@ impl GraphStore {
         graph: &str,
         node_id: &str,
     ) -> StrataResult<()> {
+        // Get backend state for subsystem-owned index maintenance.
+        // T2-E5: graph_remove_node queues ops that CommitObserver applies after commit.
+        let backend_state = self.state()?;
+
         self.db.transaction(branch_id, |txn| {
-            txn.graph_remove_node(branch_id, space, graph, node_id)
-        })?;
-
-        // Post-commit: remove from search index
-        self.deindex_node_for_search(branch_id, space, graph, node_id);
-
-        Ok(())
+            txn.graph_remove_node(branch_id, space, graph, node_id, &backend_state)
+        })
     }
 
     /// Get all nodes with their data in a graph (for snapshot).

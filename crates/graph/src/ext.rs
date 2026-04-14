@@ -1,9 +1,14 @@
 //! Extension trait for graph operations on TransactionContext.
 //!
-//! Follows the same pattern as `KVStoreExt`, `EventLogExt`, and `JsonStoreExt`
-//! in `strata-engine`. By implementing graph operations directly on
+//! Follows the same pattern as `KVStoreExt`, `EventLogExt`, `JsonStoreExt`,
+//! and `VectorStoreExt`. By implementing graph operations directly on
 //! `TransactionContext`, both the standalone `GraphStore` methods and the
 //! Session's `dispatch_in_txn` can share one implementation.
+//!
+//! Graph index updates (BM25 search) cannot participate in OCC (they're
+//! in-memory and not rollback-safe), so write methods queue `StagedGraphOp`s
+//! in the `GraphBackendState` for the `GraphCommitObserver` to apply after
+//! successful commit.
 
 use std::collections::HashMap;
 
@@ -14,6 +19,7 @@ use strata_core::{StrataError, StrataResult};
 
 use crate::keys;
 use crate::packed;
+use crate::store::{GraphBackendState, StagedGraphOp};
 use crate::types::*;
 
 // ============================================================================
@@ -78,6 +84,9 @@ pub trait GraphStoreExt {
     // --- Nodes ---
 
     /// Add or update a node. Returns true if created, false if updated.
+    ///
+    /// Queues a `StagedGraphOp::IndexNode` in the backend state for the
+    /// `GraphCommitObserver` to apply after successful commit.
     fn graph_add_node(
         &mut self,
         branch_id: BranchId,
@@ -85,6 +94,7 @@ pub trait GraphStoreExt {
         graph: &str,
         node_id: &str,
         data: &NodeData,
+        backend_state: &GraphBackendState,
     ) -> StrataResult<bool>;
 
     /// Get node data, or None if not found.
@@ -97,12 +107,16 @@ pub trait GraphStoreExt {
     ) -> StrataResult<Option<NodeData>>;
 
     /// Remove a node and all its incident edges.
+    ///
+    /// Queues a `StagedGraphOp::DeindexNode` in the backend state for the
+    /// `GraphCommitObserver` to apply after successful commit.
     fn graph_remove_node(
         &mut self,
         branch_id: BranchId,
         space: &str,
         graph: &str,
         node_id: &str,
+        backend_state: &GraphBackendState,
     ) -> StrataResult<()>;
 
     /// List all node IDs in a graph.
@@ -276,6 +290,7 @@ impl GraphStoreExt for TransactionContext {
         graph: &str,
         node_id: &str,
         data: &NodeData,
+        backend_state: &GraphBackendState,
     ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
@@ -327,6 +342,19 @@ impl GraphStoreExt for TransactionContext {
             self.put(tk, Value::Null)?;
         }
 
+        // Queue for GraphCommitObserver (subsystem-owned maintenance).
+        // T2-E5: replaces executor-owned PostCommitOp pattern.
+        backend_state.queue_pending_op(
+            self.txn_id,
+            StagedGraphOp::IndexNode {
+                branch_id,
+                space: space.to_string(),
+                graph: graph.to_string(),
+                node_id: node_id.to_string(),
+                data: data.clone(),
+            },
+        );
+
         Ok(created)
     }
 
@@ -359,6 +387,7 @@ impl GraphStoreExt for TransactionContext {
         space: &str,
         graph: &str,
         node_id: &str,
+        backend_state: &GraphBackendState,
     ) -> StrataResult<()> {
         let node_user_key = keys::node_key(graph, node_id);
         let node_storage_key = keys::storage_key(branch_id, space, &node_user_key);
@@ -447,6 +476,19 @@ impl GraphStoreExt for TransactionContext {
         self.delete(fwd_adj_sk)?;
         self.delete(rev_adj_sk)?;
         self.delete(node_storage_key)?;
+
+        // Queue for GraphCommitObserver (subsystem-owned maintenance).
+        // T2-E5: replaces executor-owned PostCommitOp pattern.
+        backend_state.queue_pending_op(
+            self.txn_id,
+            StagedGraphOp::DeindexNode {
+                branch_id,
+                space: space.to_string(),
+                graph: graph.to_string(),
+                node_id: node_id.to_string(),
+            },
+        );
+
         Ok(())
     }
 
