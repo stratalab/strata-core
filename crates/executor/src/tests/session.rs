@@ -8,7 +8,6 @@ use strata_engine::Database;
 
 /// Create a test session with a cache in-memory database.
 fn create_test_session() -> Session {
-    
     let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Session::new(db)
 }

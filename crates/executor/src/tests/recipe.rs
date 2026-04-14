@@ -5,7 +5,6 @@ use strata_engine::database::search_only_cache_spec;
 use strata_engine::Database;
 
 fn create_test_executor() -> Executor {
-    
     let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Executor::new(db)
 }
