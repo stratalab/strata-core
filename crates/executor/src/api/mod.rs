@@ -536,8 +536,8 @@ impl Strata {
             Backend::Local { .. } => Session::new_with_mode(self.database(), self.access_mode),
             Backend::Ipc {
                 client,
-                access_mode,
                 data_dir: _,
+                ..
             } => {
                 // For IPC, each session is a new connection (server creates
                 // a per-connection Session automatically)
@@ -552,7 +552,7 @@ impl Strata {
                         e
                     );
                 });
-                Session::new_ipc(new_client, *access_mode)
+                Session::new_ipc(new_client)
             }
         }
     }

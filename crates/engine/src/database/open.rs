@@ -506,6 +506,7 @@ impl Database {
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
             commit_observers: super::CommitObserverRegistry::new(),
+            abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),
@@ -797,6 +798,7 @@ impl Database {
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
             commit_observers: super::CommitObserverRegistry::new(),
+            abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),
@@ -929,6 +931,7 @@ impl Database {
             dag_hook_slot: super::DagHookSlot::new(),
             branch_op_observers: super::BranchOpObserverRegistry::new(),
             commit_observers: super::CommitObserverRegistry::new(),
+            abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),

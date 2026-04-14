@@ -22,32 +22,25 @@
 //! session.execute(Command::TxnCommit)?;
 //! ```
 //!
-//! # Deferred Operations
+//! # Post-Commit Work
 //!
-//! The session maintains two distinct deferred operation mechanisms:
+//! Post-commit work (derived index updates) is handled by subsystem-owned
+//! observers registered with the Database:
 //!
-//! ## PostCommitOp (Executor Layer)
+//! - `VectorCommitObserver` (T2-E2): applies queued HNSW operations
+//! - `GraphCommitObserver` (T2-E5): applies queued BM25 index operations
 //!
-//! Command-specific side effects requiring data staged during execution.
-//! Applied by `run_post_commit_ops()` after successful commit. Examples:
-//! - Graph node indexing for BM25 search
-//! - Vector HNSW index updates
-//!
-//! ## CommitObserver (Engine Layer)
-//!
-//! Generic commit notifications via `db.commit_observers().notify()`.
-//! Receives only `CommitInfo` (branch_id, commit_version, entry_count).
-//! Used for audit, metrics, and other cross-cutting concerns.
-//!
-//! These are complementary, not competing patterns. `PostCommitOp` handles
-//! operations requiring command-specific data (embeddings, node properties),
-//! while `CommitObserver` handles generic notifications.
+//! During transactions, operations are queued in `VectorBackendState` and
+//! `GraphBackendState` (stored as Database extensions). After commit, the
+//! corresponding observers apply the queued operations. On abort or commit
+//! failure, engine-owned abort observers clear the queued operations without
+//! executor/session cleanup.
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId as CoreBranchId, Key, Namespace, TypeTag};
-use strata_engine::database::{search_only_cache_spec, OpenSpec};
-use strata_engine::{Database, SearchSubsystem, Transaction, TransactionContext, TransactionOps};
+use strata_core::types::{Key, Namespace, TypeTag};
+use strata_engine::transaction::context::Transaction as ScopedTransaction;
+use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
@@ -62,96 +55,55 @@ use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
 
-/// Deferred operations executed after a successful transaction commit.
-///
-/// ## Why PostCommitOp Exists
-///
-/// These operations update derived indices (graph search index, vector HNSW)
-/// that cannot participate in OCC (Optimistic Concurrency Control):
-/// - HNSW index updates are in-memory and not rollback-safe
-/// - Graph search index updates depend on committed node data
-///
-/// ## Why Not CommitObserver?
-///
-/// Engine's `CommitObserver` receives only `CommitInfo` (branch_id,
-/// commit_version, entry_count). `PostCommitOp` variants require
-/// operation-specific data captured during command execution:
-/// - `GraphIndexNode` needs `NodeData` (properties, entity_ref)
-/// - `VectorBackendOp` needs `StagedVectorOp` (embedding, vector_id)
-///
-/// This data cannot be reconstructed from generic commit info without
-/// re-reading and parsing committed data, making `CommitObserver` unsuitable.
-///
-/// ## Failure Model
-///
-/// Best-effort: failures are logged but never propagate back to the caller.
-/// The primary data is already committed to KV; derived indices will catch
-/// up on next recovery if an update fails.
-///
-/// Note: VectorBackendOp was removed in T2-E2. Vector HNSW maintenance is now
-/// subsystem-owned via VectorCommitObserver in VectorSubsystem.
-enum PostCommitOp {
-    GraphIndexNode {
-        branch_id: CoreBranchId,
-        space: String,
-        graph: String,
-        node_id: String,
-        data: NodeData,
-    },
-    GraphDeindexNode {
-        branch_id: CoreBranchId,
-        space: String,
-        graph: String,
-        node_id: String,
-    },
-}
-
 /// A stateful session that wraps an [`Executor`] and manages an optional
 /// open transaction with read-your-writes semantics.
 ///
 /// When no transaction is active, commands delegate to the inner `Executor`.
 /// When a transaction is active, data commands (KV, Event, JSON)
-/// route through the engine's `Transaction<'a>` / `TransactionOps` trait,
+/// route through the engine's `ScopedTransaction<'a>` / `TransactionOps` trait,
 /// while non-transactional commands (Branch, Vector, DB) still delegate to
 /// the `Executor`.
 ///
 /// For IPC mode, the session delegates all commands (including transactions)
 /// to the server via a dedicated IPC connection. The server creates a
 /// per-connection Session, so transaction state is managed server-side.
-pub struct Session {
+pub enum Session {
+    /// Database-backed local session state.
+    Local(LocalSession),
+    /// IPC-backed remote session state.
+    Ipc(IpcSession),
+}
+
+#[doc(hidden)]
+pub struct LocalSession {
     executor: Executor,
     db: Arc<Database>,
-    txn_ctx: Option<TransactionContext>,
-    txn_branch_id: Option<strata_core::types::BranchId>,
-    /// Optional IPC client for remote sessions.
-    ipc_client: Option<IpcClient>,
-    /// Deferred operations executed after a successful commit.
-    post_commit_ops: Vec<PostCommitOp>,
+    txn: Option<Transaction>,
+}
+
+#[doc(hidden)]
+pub struct IpcSession {
+    client: IpcClient,
+    txn_active: bool,
 }
 
 impl Session {
     /// Create a new session.
     pub fn new(db: Arc<Database>) -> Self {
-        Self {
+        Self::Local(LocalSession {
             executor: Executor::new(db.clone()),
             db,
-            txn_ctx: None,
-            txn_branch_id: None,
-            ipc_client: None,
-            post_commit_ops: Vec::new(),
-        }
+            txn: None,
+        })
     }
 
     /// Create a new session with an explicit access mode.
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
-        Self {
+        Self::Local(LocalSession {
             executor: Executor::new_with_mode(db.clone(), access_mode),
             db,
-            txn_ctx: None,
-            txn_branch_id: None,
-            ipc_client: None,
-            post_commit_ops: Vec::new(),
-        }
+            txn: None,
+        })
     }
 
     /// Create a new IPC-backed session.
@@ -159,34 +111,83 @@ impl Session {
     /// All commands (including transaction lifecycle) are sent over the IPC
     /// connection. The server creates a per-connection Session, so transaction
     /// state is managed server-side.
-    pub fn new_ipc(client: IpcClient, access_mode: AccessMode) -> Self {
-        // We need a dummy Database for the executor, but for IPC sessions
-        // the executor is never used — all commands go through the IPC client.
-        // Use an in-memory cache DB as a placeholder.
-        let db = Database::open_runtime(search_only_cache_spec())
-            .expect("failed to create in-memory placeholder DB (out of memory?)");
-        Self {
-            executor: Executor::new_with_mode(db.clone(), access_mode),
-            db,
-            txn_ctx: None,
-            txn_branch_id: None,
-            ipc_client: Some(client),
-            post_commit_ops: Vec::new(),
-        }
+    pub fn new_ipc(client: IpcClient) -> Self {
+        Self::Ipc(IpcSession {
+            client,
+            txn_active: false,
+        })
     }
 
     /// Returns whether a transaction is currently active.
+    ///
+    /// For IPC sessions, this reflects the last transaction state confirmed
+    /// by the remote server on this connection.
     pub fn in_transaction(&self) -> bool {
-        self.txn_ctx.is_some()
+        match self {
+            Self::Local(session) => session.txn.is_some(),
+            Self::Ipc(session) => session.txn_active,
+        }
     }
 
     /// Execute a command, routing through the active transaction when appropriate.
-    pub fn execute(&mut self, mut cmd: Command) -> Result<Output> {
-        // IPC sessions delegate everything to the server
-        if let Some(ref mut client) = self.ipc_client {
-            return client.execute(cmd);
+    pub fn execute(&mut self, cmd: Command) -> Result<Output> {
+        match self {
+            Self::Local(session) => session.execute(cmd),
+            Self::Ipc(session) => session.execute(cmd),
+        }
+    }
+
+    /// Get a reference to the underlying executor for local sessions.
+    pub fn executor(&self) -> Option<&Executor> {
+        match self {
+            Self::Local(session) => Some(&session.executor),
+            Self::Ipc(_) => None,
+        }
+    }
+}
+
+impl IpcSession {
+    fn execute(&mut self, cmd: Command) -> Result<Output> {
+        enum TxnCommand {
+            Begin,
+            Commit,
+            Rollback,
+            IsActive,
         }
 
+        let txn_cmd = match &cmd {
+            Command::TxnBegin { .. } => Some(TxnCommand::Begin),
+            Command::TxnCommit => Some(TxnCommand::Commit),
+            Command::TxnRollback => Some(TxnCommand::Rollback),
+            Command::TxnIsActive => Some(TxnCommand::IsActive),
+            _ => None,
+        };
+
+        let result = self.client.execute(cmd);
+
+        match (txn_cmd, &result) {
+            (Some(TxnCommand::Begin), Ok(Output::TxnBegun))
+            | (Some(TxnCommand::Begin), Err(Error::TransactionAlreadyActive { .. })) => {
+                self.txn_active = true;
+            }
+            (Some(TxnCommand::Commit), _)
+            | (Some(TxnCommand::Rollback), _)
+            | (Some(TxnCommand::IsActive), Ok(Output::Bool(false))) => {
+                self.txn_active = false;
+            }
+            (Some(TxnCommand::IsActive), Ok(Output::Bool(true))) => {
+                self.txn_active = true;
+            }
+            _ => {}
+        }
+
+        result
+    }
+}
+
+impl LocalSession {
+    /// Execute a command, routing through the active transaction when appropriate.
+    fn execute(&mut self, mut cmd: Command) -> Result<Output> {
         if self.executor.access_mode() == AccessMode::ReadOnly && cmd.is_write() {
             let hint = if self.db.is_follower() {
                 Some("This database is a read-only follower. Writes must go through the primary instance.".to_string())
@@ -207,13 +208,13 @@ impl Session {
             Command::TxnCommit => self.handle_commit(),
             Command::TxnRollback => self.handle_abort(),
             Command::TxnInfo => self.handle_txn_info(),
-            Command::TxnIsActive => Ok(Output::Bool(self.in_transaction())),
+            Command::TxnIsActive => Ok(Output::Bool(self.txn.is_some())),
 
             // Vector collection DDL modifies in-memory backend state (DashMap)
             // and is not rollback-safe, so it's rejected inside transactions.
             // Vector upsert/delete now participate in OCC via VectorStoreExt.
             Command::VectorCreateCollection { .. } | Command::VectorDeleteCollection { .. }
-                if self.txn_ctx.is_some() =>
+                if self.txn.is_some() =>
             {
                 Err(Error::InvalidInput {
                     reason:
@@ -226,7 +227,7 @@ impl Session {
             // Branch create/delete modify global state outside the transaction
             // scope and are not supported inside a transaction.
             Command::BranchCreate { .. } | Command::BranchDelete { .. }
-                if self.txn_ctx.is_some() =>
+                if self.txn.is_some() =>
             {
                 Err(Error::InvalidInput {
                     reason: "Branch create/delete operations are not supported inside a transaction"
@@ -245,7 +246,7 @@ impl Session {
             | Command::GraphDeleteLinkType { .. }
             | Command::GraphFreezeOntology { .. }
             | Command::GraphBulkInsert { .. }
-                if self.txn_ctx.is_some() =>
+                if self.txn.is_some() =>
             {
                 Err(Error::InvalidInput {
                     reason: "Graph delete, bulk insert, and ontology operations are not supported inside a transaction"
@@ -297,7 +298,7 @@ impl Session {
 
             // Data commands: route through txn if active, else delegate
             _ => {
-                if self.txn_ctx.is_some() {
+                if self.txn.is_some() {
                     self.execute_in_txn(cmd)
                 } else {
                     self.executor.execute(cmd)
@@ -306,17 +307,8 @@ impl Session {
         }
     }
 
-    /// Get a reference to the underlying executor.
-    pub fn executor(&self) -> &Executor {
-        &self.executor
-    }
-
-    // =========================================================================
-    // Transaction lifecycle handlers
-    // =========================================================================
-
     fn handle_begin(&mut self, cmd: &Command) -> Result<Output> {
-        if self.txn_ctx.is_some() {
+        if self.txn.is_some() {
             return Err(Error::TransactionAlreadyActive {
                 hint: Some("Commit or rollback before starting a new one.".to_string()),
             });
@@ -328,33 +320,19 @@ impl Session {
         };
 
         let core_branch_id = to_core_branch_id(&branch)?;
-        let ctx = self.db.begin_transaction(core_branch_id)?;
-        self.txn_ctx = Some(ctx);
-        self.txn_branch_id = Some(core_branch_id);
+        let txn = self.db.begin_transaction(core_branch_id)?;
+        self.txn = Some(txn);
 
         Ok(Output::TxnBegun)
     }
 
     fn handle_commit(&mut self) -> Result<Output> {
-        let mut ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
+        let mut txn = self.txn.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
-        let txn_id = ctx.txn_id;
-        self.txn_branch_id = None;
-
-        match self.db.commit_transaction(&mut ctx) {
-            Ok(version) => {
-                self.db.end_transaction(ctx);
-                self.run_post_commit_ops();
-                Ok(Output::TxnCommitted { version })
-            }
+        match txn.commit() {
+            Ok(version) => Ok(Output::TxnCommitted { version }),
             Err(e) => {
-                // Return context to pool even on failure
-                self.db.end_transaction(ctx);
-                self.post_commit_ops.clear();
-                if let Ok(state) = self.executor.primitives().vector.state() {
-                    state.clear_pending_ops(txn_id);
-                }
                 // Discriminate error types: only OCC validation failures
                 // become TransactionConflict; storage/WAL errors become Io;
                 // other errors become Internal.
@@ -386,27 +364,17 @@ impl Session {
     }
 
     fn handle_abort(&mut self) -> Result<Output> {
-        let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
+        let mut txn = self.txn.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
-        let txn_id = ctx.txn_id;
-        self.txn_branch_id.take();
-        self.post_commit_ops.clear();
-
-        // Clear pending vector ops for this transaction (T2-E2: subsystem-owned cleanup).
-        // These ops were queued by VectorStoreExt but will not be committed.
-        if let Ok(state) = self.executor.primitives().vector.state() {
-            state.clear_pending_ops(txn_id);
-        }
-
-        self.db.end_transaction(ctx);
+        txn.abort();
         Ok(Output::TxnAborted)
     }
 
     fn handle_txn_info(&self) -> Result<Output> {
-        if let Some(ctx) = &self.txn_ctx {
+        if let Some(txn) = &self.txn {
             Ok(Output::TxnInfo(Some(crate::types::TransactionInfo {
-                id: ctx.txn_id.to_string(),
+                id: txn.txn_id.to_string(),
                 status: crate::types::TxnStatus::Active,
                 started_at: 0,
             })))
@@ -416,48 +384,15 @@ impl Session {
     }
 
     // =========================================================================
-    // Post-commit hooks
-    // =========================================================================
-
-    fn run_post_commit_ops(&mut self) {
-        let ops = std::mem::take(&mut self.post_commit_ops);
-        let primitives = self.executor.primitives();
-
-        for op in ops {
-            match op {
-                PostCommitOp::GraphIndexNode {
-                    branch_id,
-                    space,
-                    graph,
-                    node_id,
-                    data,
-                } => {
-                    primitives
-                        .graph
-                        .index_node_for_search(branch_id, &space, &graph, &node_id, &data);
-                }
-                PostCommitOp::GraphDeindexNode {
-                    branch_id,
-                    space,
-                    graph,
-                    node_id,
-                } => {
-                    primitives
-                        .graph
-                        .deindex_node_for_search(branch_id, &space, &graph, &node_id);
-                }
-            }
-        }
-    }
-
-    // =========================================================================
     // In-transaction command execution
     // =========================================================================
 
     fn execute_in_txn(&mut self, cmd: Command) -> Result<Output> {
         let branch_id = self
-            .txn_branch_id
-            .expect("txn_branch_id set when txn_ctx is Some");
+            .txn
+            .as_ref()
+            .expect("txn set when transaction is active")
+            .branch_id();
 
         // Extract space from the command being executed
         let space = match &cmd {
@@ -518,21 +453,15 @@ impl Session {
             _ => "default".to_string(),
         };
         let ns = Arc::new(Namespace::for_branch_space(branch_id, &space));
-
-        // Temporarily take the context to create a Transaction
-        let mut ctx = self.txn_ctx.take().unwrap();
-        let result = Self::dispatch_in_txn(
-            &self.executor,
-            &mut ctx,
-            ns,
-            branch_id,
-            &space,
-            cmd,
-            &mut self.post_commit_ops,
-        );
-        self.txn_ctx = Some(ctx);
-
-        result
+        let executor = &self.executor;
+        let txn = self
+            .txn
+            .as_mut()
+            .expect("txn set when transaction is active");
+        let ctx = txn
+            .context_mut()
+            .expect("transaction context available until commit/abort");
+        Self::dispatch_in_txn(executor, ctx, ns, branch_id, &space, cmd)
     }
 
     fn dispatch_in_txn(
@@ -542,7 +471,6 @@ impl Session {
         branch_id: strata_core::types::BranchId,
         space: &str,
         cmd: Command,
-        post_commit_ops: &mut Vec<PostCommitOp>,
     ) -> Result<Output> {
         // Read commands use ctx.get() / ctx.scan_prefix() directly so they
         // fall through to the snapshot when the key isn't in the write-set.
@@ -643,7 +571,7 @@ impl Session {
                     }
                 } else {
                     // Path-based get still needs Transaction for JSON patch logic
-                    let mut txn = Transaction::new(ctx, ns);
+                    let mut txn = ScopedTransaction::new(ctx, ns);
                     let json_path = convert_result(parse_path(&path))?;
                     let result = txn.json_get_path(&key, &json_path).map_err(Error::from)?;
                     match result {
@@ -658,7 +586,7 @@ impl Session {
 
             // === Write commands — use Transaction ===
             Command::KvPut { key, value, .. } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let version = txn.kv_put(&key, value).map_err(Error::from)?;
                 Ok(Output::WriteResult {
                     key,
@@ -688,7 +616,7 @@ impl Session {
                 payload,
                 ..
             } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let version = txn
                     .event_append(&event_type, payload)
                     .map_err(Error::from)?;
@@ -698,7 +626,7 @@ impl Session {
                 })
             }
             Command::EventGet { sequence, .. } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let result = txn.event_get(sequence).map_err(Error::from)?;
                 Ok(Output::MaybeVersioned(result.map(|v| {
                     to_versioned_value(strata_core::Versioned::new(
@@ -708,7 +636,7 @@ impl Session {
                 })))
             }
             Command::EventLen { .. } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let len = txn.event_len().map_err(Error::from)?;
                 Ok(Output::Uint(len))
             }
@@ -717,7 +645,7 @@ impl Session {
             Command::JsonSet {
                 key, path, value, ..
             } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let json_path = convert_result(parse_path(&path))?;
                 let json_value = convert_result(value_to_json(value))?;
                 let version = txn
@@ -729,7 +657,7 @@ impl Session {
                 })
             }
             Command::JsonDelete { key, .. } => {
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 let deleted = txn.json_delete(&key).map_err(Error::from)?;
                 Ok(Output::DeleteResult { key, deleted })
             }
@@ -769,25 +697,30 @@ impl Session {
                     properties: props,
                     object_type,
                 };
-                let created =
-                    convert_result(ctx.graph_add_node(branch_id, space, &graph, &node_id, &data))?;
-                post_commit_ops.push(PostCommitOp::GraphIndexNode {
+                // Get backend state for subsystem-owned index maintenance.
+                // T2-E5: graph_add_node queues ops that CommitObserver applies after commit.
+                let backend_state = convert_result(executor.primitives().graph.state())?;
+                let created = convert_result(ctx.graph_add_node(
                     branch_id,
-                    space: space.to_string(),
-                    graph,
-                    node_id: node_id.clone(),
-                    data,
-                });
+                    space,
+                    &graph,
+                    &node_id,
+                    &data,
+                    &backend_state,
+                ))?;
                 Ok(Output::GraphWriteResult { node_id, created })
             }
             Command::GraphRemoveNode { graph, node_id, .. } => {
-                convert_result(ctx.graph_remove_node(branch_id, space, &graph, &node_id))?;
-                post_commit_ops.push(PostCommitOp::GraphDeindexNode {
+                // Get backend state for subsystem-owned index maintenance.
+                // T2-E5: graph_remove_node queues ops that CommitObserver applies after commit.
+                let backend_state = convert_result(executor.primitives().graph.state())?;
+                convert_result(ctx.graph_remove_node(
                     branch_id,
-                    space: space.to_string(),
-                    graph,
-                    node_id: node_id.clone(),
-                });
+                    space,
+                    &graph,
+                    &node_id,
+                    &backend_state,
+                ))?;
                 Ok(Output::Unit)
             }
             Command::GraphAddEdge {
@@ -1136,7 +1069,7 @@ impl Session {
                     };
                     entries.len()
                 ];
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 for (i, entry) in entries.into_iter().enumerate() {
                     match txn.kv_put(&entry.key, entry.value) {
                         Ok(_) => {} // version assigned at commit time
@@ -1186,7 +1119,7 @@ impl Session {
                     };
                     entries.len()
                 ];
-                let mut txn = Transaction::new(ctx, ns);
+                let mut txn = ScopedTransaction::new(ctx, ns);
                 for (i, entry) in entries.into_iter().enumerate() {
                     match txn.event_append(&entry.event_type, entry.payload) {
                         Ok(version) => results[i].version = Some(extract_version(&version)),
@@ -1199,19 +1132,6 @@ impl Session {
             // Commands not directly mapped — delegate to executor.
             // This includes version history, graph analytics, search, etc.
             other => executor.execute(other),
-        }
-    }
-}
-
-impl Drop for Session {
-    fn drop(&mut self) {
-        self.post_commit_ops.clear();
-        if let Some(ctx) = self.txn_ctx.take() {
-            if let Ok(state) = self.executor.primitives().vector.state() {
-                state.clear_pending_ops(ctx.txn_id);
-            }
-            self.txn_branch_id = None;
-            self.db.end_transaction(ctx);
         }
     }
 }
