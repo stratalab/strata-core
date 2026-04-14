@@ -22,7 +22,7 @@
 //! ## Usage
 //!
 //! ```text
-//! use strata_engine::{DatabaseBuilder, Subsystem};
+//! use strata_engine::{Database, OpenSpec, Subsystem};
 //!
 //! struct MySubsystem;
 //! impl Subsystem for MySubsystem {
@@ -30,9 +30,9 @@
 //!     fn recover(&self, db: &Arc<Database>) -> StrataResult<()> { Ok(()) }
 //! }
 //!
-//! let db = DatabaseBuilder::new()
-//!     .with_subsystem(MySubsystem)
-//!     .open("/path/to/data")?;
+//! let db = Database::open_runtime(
+//!     OpenSpec::primary("/path/to/data").with_subsystem(MySubsystem)
+//! )?;
 //! ```
 
 use crate::database::Database;
@@ -41,8 +41,8 @@ use strata_core::StrataResult;
 
 /// Trait for subsystems that need recovery on open and cleanup on shutdown.
 ///
-/// Each subsystem registers itself with the `DatabaseBuilder` before the
-/// database is opened. The lifecycle methods are called in this order:
+/// Each subsystem is added to the `OpenSpec` via `with_subsystem()` before
+/// the database is opened. The lifecycle methods are called in this order:
 ///
 /// 1. `recover()` — after WAL replay, rebuild in-memory state
 /// 2. `initialize()` — install hooks, observers, handlers (no writes)

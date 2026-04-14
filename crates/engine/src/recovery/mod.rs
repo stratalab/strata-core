@@ -4,7 +4,7 @@
 //! graph adjacency cache, …) that owns runtime state outside
 //! `SegmentedStore` and needs to rebuild that state on database open and
 //! optionally persist it on drop. Each `Database` holds a
-//! `Vec<Box<dyn Subsystem>>` supplied at open time via [`DatabaseBuilder`];
+//! `Vec<Box<dyn Subsystem>>` supplied at open time via [`OpenSpec`];
 //! the **same ordered list** drives recovery (in registration order) and
 //! freeze (in reverse order), so callers cannot accidentally recover one
 //! set of subsystems while freezing a different set — the guarantee the
@@ -13,23 +13,22 @@
 //!
 //! ## Composition lives above the engine
 //!
-//! The engine crate declares the trait and the builder but does not
+//! The engine crate declares the trait and the spec but does not
 //! compose the production subsystem list itself, because it cannot
 //! depend on `strata-vector` (adding that edge would cycle —
 //! `strata-vector → strata-engine`). The executor owns composition:
-//! [`crates::executor::src::api::mod::strata_db_builder`] returns a
-//! `DatabaseBuilder` preloaded with `[VectorSubsystem, SearchSubsystem]`
+//! [`crates::executor::src::api::mod::default_product_spec`] returns an
+//! `OpenSpec` preloaded with `[VectorSubsystem, SearchSubsystem]`
 //! and every `Strata::open` / `open_with` / `cache` path routes through
 //! it. Engine-internal tests that do not load the vector crate can
-//! install `[SearchSubsystem]` directly via the builder.
+//! install `[SearchSubsystem]` directly via `OpenSpec::with_subsystem`.
 //!
 //! ## Lifecycle
 //!
 //! ```text
-//! DatabaseBuilder::new()
+//! OpenSpec::primary(path)
 //!     .with_subsystem(VectorSubsystem)
 //!     .with_subsystem(SearchSubsystem)
-//!     .open(path)
 //!         │
 //!         ▼
 //! Database::open_runtime(OpenSpec)
@@ -49,9 +48,9 @@
 //! ```
 //!
 //! See [`Subsystem`] for the trait definition and
-//! `crates/engine/src/database/builder.rs` for the builder API.
+//! `crates/engine/src/database/spec.rs` for the OpenSpec API.
 //!
-//! [`DatabaseBuilder`]: crate::DatabaseBuilder
+//! [`OpenSpec`]: crate::OpenSpec
 
 mod subsystem;
 

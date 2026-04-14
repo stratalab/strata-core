@@ -6,13 +6,13 @@
 //! `VectorSubsystem::freeze`, and reopening restores it through
 //! `VectorSubsystem::recover`. If anyone later reintroduces a lifecycle
 //! path that skips the subsystem list (e.g. a new convenience API that
-//! bypasses `strata_db_builder`), these tests regress.
+//! bypasses `default_product_spec`), these tests regress.
 //!
 //! The companion
 //! `crates/engine/tests/recovery_tests.rs::test_vector_collections_isolated_across_spaces_after_restart`
-//! exercises the same invariant through the explicit `DatabaseBuilder`
-//! API; these tests exercise it through `Strata::open`, which is the
-//! shape real callers use.
+//! exercises the same invariant through the explicit `OpenSpec` API;
+//! these tests exercise it through `Strata::open`, which is the shape
+//! real callers use.
 
 use std::path::PathBuf;
 

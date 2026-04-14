@@ -16,7 +16,7 @@
 //! ## Recovery
 //!
 //! VectorStore participates in Database recovery via `VectorSubsystem`.
-//! Register it with `DatabaseBuilder::with_subsystem(VectorSubsystem)` to
+//! Register it with `OpenSpec::with_subsystem(VectorSubsystem)` to
 //! enable vector state recovery after database restart.
 
 pub mod backend;

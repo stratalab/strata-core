@@ -159,19 +159,19 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 /// # Example
 ///
 /// ```text
-/// use strata_engine::DatabaseBuilder;
+/// use strata_engine::{Database, OpenSpec};
 /// use strata_vector::{VectorConfig, VectorStore, VectorSubsystem};
 /// use strata_core::types::BranchId;
 ///
-/// // Open via DatabaseBuilder with VectorSubsystem so vector recovery
+/// // Open via OpenSpec with VectorSubsystem so vector recovery
 /// // and drop-time freeze are installed. `Database::open` alone does
-/// // NOT install VectorSubsystem — always use the builder (or
-/// // `strata_executor::Strata::open`, which wraps this pattern) for
+/// // NOT install VectorSubsystem — always use `OpenSpec::with_subsystem`
+/// // (or `strata_executor::Strata::open`, which wraps this pattern) for
 /// // disk-backed vector stores, otherwise vector state will not
 /// // survive drop+reopen.
-/// let db = DatabaseBuilder::new()
-///     .with_subsystem(VectorSubsystem)
-///     .open("/path/to/data")?;
+/// let db = Database::open_runtime(
+///     OpenSpec::primary("/path/to/data").with_subsystem(VectorSubsystem)
+/// )?;
 ///
 /// let store = VectorStore::new(db.clone());
 /// let branch_id = BranchId::new();

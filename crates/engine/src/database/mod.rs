@@ -419,7 +419,7 @@ pub struct Database {
 
     /// Registered subsystems for recovery and shutdown hooks.
     ///
-    /// Populated by `DatabaseBuilder` or `Database::open()` (backward compat).
+    /// Populated by `OpenSpec::with_subsystem()` via `Database::open_runtime()`.
     /// Frozen in reverse order during shutdown/drop.
     subsystems: parking_lot::RwLock<Vec<Box<dyn crate::recovery::Subsystem>>>,
 
@@ -469,7 +469,6 @@ pub struct Database {
 }
 
 // Split impl blocks
-pub mod builder;
 mod compaction;
 mod lifecycle;
 mod open;
@@ -538,7 +537,7 @@ impl Database {
         self.coordinator.branch_commit_lock(branch_id)
     }
 
-    /// Set subsystems for this database (called by DatabaseBuilder).
+    /// Set subsystems for this database (called by `open_runtime()`).
     pub(crate) fn set_subsystems(&self, subsystems: Vec<Box<dyn crate::recovery::Subsystem>>) {
         *self.subsystems.write() = subsystems;
     }

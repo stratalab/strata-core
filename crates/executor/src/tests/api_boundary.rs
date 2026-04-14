@@ -84,8 +84,8 @@ fn test_database_not_directly_constructible_from_executor() {
     // let _ = Database::open_follower(path);  // pub(crate) - not accessible
     // let _ = Database::cache();           // pub(crate) - not accessible
     //
-    // use strata_engine::DatabaseBuilder;
-    // let _ = DatabaseBuilder::new();      // pub(crate) - not accessible
+    // Note: OpenSpec is pub, but Database::open_runtime() is pub(crate),
+    // so external code cannot open databases directly via OpenSpec.
 
     // This SHOULD work — it's the only app-facing path:
     let strata = Strata::cache();

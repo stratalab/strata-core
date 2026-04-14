@@ -5,7 +5,7 @@
 //!
 //! ## How It Works
 //!
-//! 1. `DatabaseBuilder` installs `VectorSubsystem`, which is invoked during open
+//! 1. `OpenSpec::with_subsystem(VectorSubsystem)` installs the subsystem at open time
 //! 2. `VectorSubsystem::recover` scans KV store for vector config and data entries
 //! 3. For each collection config found, it creates a backend and loads embeddings
 //! 4. The Database is ready with all vector embeddings restored
@@ -461,7 +461,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 
 /// Subsystem implementation for vector recovery and shutdown hooks.
 ///
-/// Used with `DatabaseBuilder` for explicit subsystem registration.
+/// Used with `OpenSpec::with_subsystem(VectorSubsystem)` for explicit subsystem registration.
 pub struct VectorSubsystem;
 
 impl strata_engine::recovery::Subsystem for VectorSubsystem {

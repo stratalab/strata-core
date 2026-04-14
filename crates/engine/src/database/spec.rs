@@ -247,6 +247,33 @@ impl std::fmt::Debug for OpenSpec {
     }
 }
 
+// =============================================================================
+// Named internal runtime profiles
+// =============================================================================
+
+/// Create an `OpenSpec` for a minimal cache database with only `SearchSubsystem`.
+///
+/// This is the engine-internal profile for tests and utilities that don't need
+/// the full product subsystem set (Graph, Vector, Search). For product code,
+/// use `strata_executor::Strata::cache()` instead.
+pub fn search_only_cache_spec() -> OpenSpec {
+    OpenSpec::cache().with_subsystem(crate::search::SearchSubsystem)
+}
+
+/// Create an `OpenSpec` for a minimal primary database with only `SearchSubsystem`.
+///
+/// For product code, use `strata_executor::Strata::open()` instead.
+pub fn search_only_primary_spec<P: AsRef<std::path::Path>>(path: P) -> OpenSpec {
+    OpenSpec::primary(path).with_subsystem(crate::search::SearchSubsystem)
+}
+
+/// Create an `OpenSpec` for a minimal follower database with only `SearchSubsystem`.
+///
+/// For product code, use `strata_executor::Strata::open_follower()` instead.
+pub fn search_only_follower_spec<P: AsRef<std::path::Path>>(path: P) -> OpenSpec {
+    OpenSpec::follower(path).with_subsystem(crate::search::SearchSubsystem)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

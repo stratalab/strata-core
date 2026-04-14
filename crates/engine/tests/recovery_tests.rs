@@ -1607,11 +1607,11 @@ impl strata_engine::Subsystem for SlowRecoveryMarker {
 /// This test pins a `SlowRecoverySubsystem` on thread A and waits for
 /// thread A to enter `recover()` (via the `started` flag). While thread A
 /// is deterministically inside the sleep, thread B calls
-/// `DatabaseBuilder::new().open(path)` for the same path. With the fix,
-/// thread B blocks on the `OPEN_DATABASES` mutex until thread A finishes
-/// recovery and inserts. When thread B's call returns, the `done` flag
-/// must be `true` — proving thread B saw the Arc only after recovery
-/// fully completed.
+/// `Database::open_runtime(OpenSpec::primary(path))` for the same path.
+/// With the fix, thread B blocks on the `OPEN_DATABASES` mutex until
+/// thread A finishes recovery and inserts. When thread B's call returns,
+/// the `done` flag must be `true` — proving thread B saw the Arc only
+/// after recovery fully completed.
 #[test]
 fn test_concurrent_open_blocks_until_recovery_completes() {
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -1737,9 +1737,9 @@ impl strata_engine::Subsystem for AlwaysFailingSubsystem {
 ///
 /// The fix must drop the guard before `return Err(...)` on the recovery
 /// error path. This test exercises that path by passing an
-/// `AlwaysFailingSubsystem` through `DatabaseBuilder::open`. A failing
-/// version of this fix will deadlock and never return — the test is
-/// wrapped in a joined thread with a hard deadline so a deadlock
+/// `AlwaysFailingSubsystem` through `Database::open_runtime(OpenSpec)`.
+/// A failing version of this fix will deadlock and never return — the
+/// test is wrapped in a joined thread with a hard deadline so a deadlock
 /// surfaces as a visible timeout rather than a hung test binary.
 #[test]
 fn test_recovery_failure_does_not_deadlock() {
