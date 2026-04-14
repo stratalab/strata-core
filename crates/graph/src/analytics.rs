@@ -1517,10 +1517,11 @@ mod tests {
     // =========================================================================
 
     use std::sync::Arc;
-    use strata_engine::Database;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let gs = GraphStore::new(db.clone());
         (db, gs)
     }

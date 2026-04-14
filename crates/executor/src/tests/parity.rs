@@ -8,11 +8,13 @@ use crate::types::*;
 use crate::Value;
 use crate::{Command, Executor, Output};
 use std::sync::Arc;
-use strata_engine::Database;
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem};
 
 /// Create a test executor with shared primitives for parity comparisons.
 fn create_test_environment() -> (Executor, Arc<Primitives>) {
-    let db = Database::cache().unwrap();
+    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let executor = Executor::new(db.clone());
     let primitives = Arc::new(Primitives::new(db));
     (executor, primitives)

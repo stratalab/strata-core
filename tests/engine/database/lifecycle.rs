@@ -3,6 +3,7 @@
 //! Tests for database creation, opening, closing, and reopening.
 
 use crate::common::*;
+use strata_engine::database::OpenSpec;
 
 // ============================================================================
 // Cache Database
@@ -10,7 +11,8 @@ use crate::common::*;
 
 #[test]
 fn cache_database_is_functional() {
-    let db = Database::cache().expect("cache database");
+    let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
+        .expect("cache database");
 
     let branch_id = BranchId::new();
     let kv = KVStore::new(db);
@@ -30,13 +32,15 @@ fn cache_database_data_is_lost_on_drop() {
 
     // Write data
     {
-        let db = Database::cache().expect("cache database");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
+            .expect("cache database");
         let kv = KVStore::new(db);
         kv.put(&branch_id, "default", &key, Value::Int(42)).unwrap();
     }
 
     // New cache database has no data
-    let db = Database::cache().expect("cache database");
+    let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
+        .expect("cache database");
     let kv = KVStore::new(db);
     let result = kv.get(&branch_id, "default", &key).unwrap();
 
@@ -54,7 +58,10 @@ fn persistent_database_creates_directory() {
 
     assert!(!db_path.exists());
 
-    let _db = Database::open(&db_path).expect("create database");
+    let _db = Database::open_runtime(
+        OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem),
+    )
+    .expect("create database");
 
     assert!(db_path.exists());
 }
@@ -116,8 +123,9 @@ fn persistent_database_multiple_reopens() {
 
 #[test]
 fn database_cache_is_truly_cache() {
-    // Database::cache() creates a purely in-memory database
-    let db = Database::cache().expect("cache database");
+    // Database::open_runtime(OpenSpec::cache()) creates a purely in-memory database
+    let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
+        .expect("cache database");
     assert!(db.is_cache());
 }
 
@@ -125,7 +133,10 @@ fn database_cache_is_truly_cache() {
 fn open_creates_persistent_database() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     assert!(!db.is_cache());
 }
@@ -134,7 +145,12 @@ fn open_creates_persistent_database() {
 fn open_with_always_config() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open_with_config(temp_dir.path(), always_config()).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path())
+            .with_config(always_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     // Verify it works
     let branch_id = BranchId::new();
@@ -150,7 +166,10 @@ fn open_with_always_config() {
 fn open_with_standard_config() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     // Verify it works
     let branch_id = BranchId::new();
@@ -180,7 +199,10 @@ fn shutdown_is_idempotent() {
 fn is_open_reflects_state() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     assert!(db.is_open());
 

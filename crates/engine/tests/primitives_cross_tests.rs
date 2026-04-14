@@ -6,7 +6,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
 use strata_engine::Database;
+use strata_engine::SearchSubsystem;
 use strata_engine::{EventLog, EventLogExt, KVStore, KVStoreExt};
 use tempfile::TempDir;
 
@@ -30,7 +32,10 @@ fn int_payload(v: i64) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     (db, temp_dir, branch_id)
 }

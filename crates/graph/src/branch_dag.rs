@@ -1774,10 +1774,11 @@ impl BranchDagHook for GraphBranchDagHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_engine::database::{BranchDagHook, DagEventKind};
+    use strata_engine::database::{BranchDagHook, DagEventKind, OpenSpec};
+    use strata_engine::SearchSubsystem;
 
     fn setup() -> Arc<Database> {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         init_system_branch(&db);
         db
     }

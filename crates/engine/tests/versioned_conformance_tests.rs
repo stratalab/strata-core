@@ -19,6 +19,7 @@ use strata_core::contract::{EntityRef, PrimitiveType, Version};
 use strata_core::primitives::json::JsonPath;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
 use strata_engine::extensions::*;
 use strata_engine::Database;
 use strata_engine::*;
@@ -43,7 +44,8 @@ fn int_payload(v: i64) -> Value {
 }
 
 fn setup() -> (Arc<Database>, BranchId) {
-    let db = Database::cache().unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
     let branch_id = BranchId::new();
     (db, branch_id)
 }

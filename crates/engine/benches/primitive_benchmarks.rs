@@ -11,13 +11,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
 use strata_engine::Database;
-use strata_engine::{EventLog, EventLogExt, KVStore, KVStoreExt};
+use strata_engine::{EventLog, EventLogExt, KVStore, KVStoreExt, SearchSubsystem};
 use tempfile::TempDir;
 
 fn setup_db() -> (Arc<Database>, TempDir, BranchId) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path()).unwrap();
+    let spec = OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let branch_id = BranchId::new();
     (db, temp_dir, branch_id)
 }

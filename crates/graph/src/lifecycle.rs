@@ -178,9 +178,11 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::SearchSubsystem;
 
     fn setup() -> (Arc<Database>, GraphStore) {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let graph = GraphStore::new(db.clone());
         (db, graph)
     }

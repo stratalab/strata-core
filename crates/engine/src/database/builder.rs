@@ -35,7 +35,7 @@ use crate::recovery::Subsystem;
 /// and delegates to `Database::open_runtime`, so the supplied list is the
 /// sole driver of recovery for builder-opened databases — there is no
 /// implicit hardcoded subsystem.
-pub struct DatabaseBuilder {
+pub(crate) struct DatabaseBuilder {
     subsystems: Vec<Box<dyn Subsystem>>,
     config: Option<StrataConfig>,
     default_branch: Option<String>,

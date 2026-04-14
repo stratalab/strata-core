@@ -3,12 +3,14 @@
 //! These tests exercise the full executor path: Command → dispatch → handler → database.
 
 use crate::{Command, Error, Executor, Output};
-use strata_engine::Database;
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem};
 use strata_security::AccessMode;
 
 /// Create a test executor with an in-memory database.
 fn create_test_executor() -> Executor {
-    let db = Database::cache().unwrap();
+    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     Executor::new(db)
 }
 
@@ -428,7 +430,8 @@ fn configure_set_visible_in_full_config() {
 
 #[test]
 fn configure_set_blocked_in_read_only_mode() {
-    let db = Database::cache().unwrap();
+    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let executor = Executor::new_with_mode(db, AccessMode::ReadOnly);
 
     let result = executor.execute(Command::ConfigureSet {
@@ -445,7 +448,8 @@ fn configure_set_blocked_in_read_only_mode() {
 
 #[test]
 fn configure_get_key_allowed_in_read_only_mode() {
-    let db = Database::cache().unwrap();
+    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let executor = Executor::new_with_mode(db, AccessMode::ReadOnly);
 
     let result = executor.execute(Command::ConfigureGetKey {

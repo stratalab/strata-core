@@ -726,10 +726,13 @@ pub fn reindex_embeddings(
 mod tests {
     use super::*;
     use strata_core::types::BranchId;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::{Database, SearchSubsystem};
 
     /// Helper: create a Primitives with auto_embed enabled.
     fn setup() -> Arc<Primitives> {
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         db.set_auto_embed(true);
         let p = Arc::new(Primitives::new(db));
         // Ensure the default branch exists.
@@ -922,7 +925,8 @@ mod tests {
     fn test_executor_drop_flushes_buffer() {
         use crate::Executor;
 
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         db.set_auto_embed(true);
         let executor = Executor::new(db);
 
@@ -962,7 +966,8 @@ mod tests {
     fn test_nrt_timer_flushes_partial_buffer() {
         use crate::Executor;
 
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         db.set_auto_embed(true);
         let executor = Executor::new(db);
 
@@ -1000,7 +1005,8 @@ mod tests {
     fn test_flush_command_drains_async_embeds() {
         use crate::Executor;
 
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         db.set_auto_embed(true);
         let executor = Executor::new(db);
 
@@ -1039,7 +1045,8 @@ mod tests {
     fn test_executor_drop_is_fast() {
         use crate::Executor;
 
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         let executor = Executor::new(db);
 
         let start = std::time::Instant::now();
@@ -1087,7 +1094,8 @@ mod tests {
     fn test_embed_status_via_executor_command() {
         use crate::Executor;
 
-        let db = strata_engine::Database::cache().expect("open cache db");
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec).expect("open cache db");
         db.set_auto_embed(true);
         let executor = Executor::new(db);
 

@@ -325,9 +325,11 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::SearchSubsystem;
 
     fn setup() -> (Arc<Database>, GraphStore) {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let graph = GraphStore::new(db.clone());
         (db, graph)
     }
@@ -1080,7 +1082,7 @@ mod tests {
     fn concurrent_add_edge_same_source() {
         use std::sync::Arc;
 
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let gs = Arc::new(GraphStore::new(db));
         let b = BranchId::from_bytes([0u8; 16]);
 

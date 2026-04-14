@@ -603,10 +603,12 @@ fn hash_entity(e: &EntityRef) -> u64 {
 mod tests {
     use super::*;
     use strata_core::Value;
+    use strata_engine::database::OpenSpec;
     use strata_engine::search::recipe::{
         BM25Config, FusionConfig, RetrieveConfig, TransformConfig, VectorRetrieveConfig,
     };
     use strata_engine::search::Recipe;
+    use strata_engine::SearchSubsystem;
 
     /// Simple keyword recipe for tests (BM25 + RRF + limit 10).
     fn test_recipe() -> Recipe {
@@ -639,7 +641,7 @@ mod tests {
     /// Helper: create a test database and insert KV data.
     /// Returns (db, branch_id) so tests can use the same branch for search.
     fn setup_db_with_kv(entries: &[(&str, &str)]) -> (Arc<Database>, BranchId) {
-        let db = Database::cache().expect("Failed to create test database");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("Failed to create test database");
         let branch_id = BranchId::new();
         let kv = KVStore::new(db.clone());
         for (key, value) in entries {
@@ -722,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_retrieve_empty_db() {
-        let db = Database::cache().expect("Failed to create test database");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("Failed to create test database");
         let recipe = test_recipe();
         let request = RetrievalRequest {
             query: "anything".into(),
@@ -810,7 +812,7 @@ mod tests {
 
         // Create a fresh DB and a shadow vector collection with three records:
         // one in tenant_a, one in tenant_b, one with no source_ref.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());
@@ -1027,7 +1029,7 @@ mod tests {
     fn test_retrieve_with_as_of() {
         // Insert doc at T1, sleep, insert another at T2.
         // Search with as_of=T1 should only return the first doc.
-        let db = Database::cache().expect("Failed to create test database");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("Failed to create test database");
         let branch_id = BranchId::new();
         let kv = KVStore::new(db.clone());
 
@@ -1232,7 +1234,7 @@ mod tests {
     /// space ("tenant_a") to also exercise the multi-space namespace path.
     #[test]
     fn test_as_of_filters_graph_node_created_after_target() {
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         // Insert "early" graph node, then "late" 10ms later.
@@ -1297,7 +1299,7 @@ mod tests {
     /// any time, producing inconsistent result sets relative to vector hits.
     #[test]
     fn test_time_range_filters_kv_outside_range() {
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let _t1 = put_kv_and_observe_ts(&db, &branch_id, "default", "before", "rust early");
@@ -1341,7 +1343,7 @@ mod tests {
     /// of the post-filter through the time_range path.
     #[test]
     fn test_time_range_filters_json_outside_range() {
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let _t1 = put_json_and_observe_ts(
@@ -1402,7 +1404,7 @@ mod tests {
     /// the time_range path.
     #[test]
     fn test_time_range_filters_graph_outside_range() {
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let _t1 = put_graph_node_and_observe_ts(
@@ -1474,7 +1476,7 @@ mod tests {
     /// T4 dropped.
     #[test]
     fn test_time_range_and_as_of_combine() {
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let _t1 = put_kv_and_observe_ts(&db, &branch_id, "default", "d1", "rust one");
@@ -1535,7 +1537,7 @@ mod tests {
     fn test_bm25_fan_out_no_cross_primitive_duplicates() {
         use strata_core::primitives::json::JsonValue;
 
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         // One KV doc and one JSON doc, both indexed under the same branch+space
@@ -1740,7 +1742,7 @@ mod tests {
     fn test_substrate_temporal_hybrid_returns_vector_hits() {
         // Insert shadow-early, capture t1, insert shadow-late.
         // as_of=t1 → exactly the early hit. as_of=None → both.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());
@@ -1842,7 +1844,7 @@ mod tests {
         // Three shadow inserts (tenant_a, tenant_b, orphan with no source_ref).
         // Retrieve with as_of and tenant_a → exactly the tenant_a hit.
         // Retrieve with as_of and tenant_c → zero hits.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());
@@ -1932,7 +1934,7 @@ mod tests {
     #[test]
     fn test_substrate_temporal_hybrid_orphan_dropped() {
         // Only an orphan (no source_ref). as_of query → 0 hits.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());
@@ -1978,7 +1980,7 @@ mod tests {
     #[test]
     fn test_substrate_temporal_hybrid_before_data() {
         // as_of captured BEFORE any vector insert → 0 vector hits.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let t0 = strata_core::Timestamp::now().as_micros();
@@ -2042,7 +2044,7 @@ mod tests {
         // The single hit must be k_3. Pre-fix the vector branch would
         // return shadow_1, shadow_2, shadow_3 (everything visible at t3),
         // breaking the assertion.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());
@@ -2187,7 +2189,7 @@ mod tests {
         // k_3 — everything visible at t3) while BM25 reports 1, breaking
         // the symmetry. Post-fix both branches converge on the same
         // {k_3} set.
-        let db = Database::cache().expect("create db");
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("create db");
         let branch_id = BranchId::new();
 
         let vector_store = strata_vector::VectorStore::new(db.clone());

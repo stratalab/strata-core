@@ -7,6 +7,7 @@
 use crate::common::*;
 use std::collections::HashMap;
 use strata_core::primitives::json::JsonPath;
+use strata_engine::database::OpenSpec;
 use strata_engine::KVStoreExt;
 
 /// Helper to create an event payload object
@@ -93,8 +94,9 @@ fn json_create_get_same_across_modes() {
 
 #[test]
 fn cache_mode_is_cache() {
-    // Database::cache() creates a truly in-memory database with no files
-    let db = Database::cache().expect("cache database");
+    // Database::open_runtime(OpenSpec::cache()) creates a truly in-memory database with no files
+    let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
+        .expect("cache database");
     assert!(db.is_cache());
 }
 
@@ -108,7 +110,10 @@ fn cache_create_test_db_is_cache() {
 #[test]
 fn standard_mode_is_persistent() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db = Database::open(temp_dir.path()).expect("standard database");
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
+    )
+    .expect("standard database");
 
     // Standard mode is NOT cache (has durability)
     assert!(!db.is_cache());
@@ -117,7 +122,12 @@ fn standard_mode_is_persistent() {
 #[test]
 fn always_mode_is_persistent() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db = Database::open_with_config(temp_dir.path(), always_config()).expect("always database");
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path())
+            .with_config(always_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("always database");
 
     assert!(!db.is_cache());
 }
@@ -180,7 +190,12 @@ fn transaction_atomicity_standard() {
 #[test]
 fn transaction_atomicity_always() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db = Database::open_with_config(temp_dir.path(), always_config()).expect("always database");
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path())
+            .with_config(always_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("always database");
     let branch_id = BranchId::new();
 
     db.transaction(branch_id, |txn| {

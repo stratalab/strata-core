@@ -46,7 +46,8 @@
 use std::sync::Arc;
 
 use strata_core::types::{BranchId as CoreBranchId, Key, Namespace, TypeTag};
-use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
@@ -161,9 +162,10 @@ impl Session {
     pub fn new_ipc(client: IpcClient, access_mode: AccessMode) -> Self {
         // We need a dummy Database for the executor, but for IPC sessions
         // the executor is never used — all commands go through the IPC client.
-        // Database::cache() is a lightweight in-memory DB used only as a placeholder.
-        let db =
-            Database::cache().expect("failed to create in-memory placeholder DB (out of memory?)");
+        // Use an in-memory cache DB as a placeholder.
+        let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+        let db = Database::open_runtime(spec)
+            .expect("failed to create in-memory placeholder DB (out of memory?)");
         Self {
             executor: Executor::new_with_mode(db.clone(), access_mode),
             db,

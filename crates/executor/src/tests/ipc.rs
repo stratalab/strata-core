@@ -5,7 +5,8 @@ use crate::ipc::protocol::{self, Request, Response};
 use crate::ipc::server::IpcServer;
 use crate::ipc::wire;
 use crate::{Command, Output, Value};
-use strata_engine::Database;
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem};
 use strata_security::AccessMode;
 
 // =========================================================================
@@ -98,7 +99,8 @@ fn protocol_response_err_round_trip() {
 
 fn setup_server() -> (tempfile::TempDir, IpcServer) {
     let dir = tempfile::tempdir().unwrap();
-    let db = Database::open(dir.path()).unwrap();
+    let spec = OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
 
     // Ensure default branch
     {
@@ -302,7 +304,8 @@ fn ipc_stale_socket_cleanup() {
     std::fs::write(&socket_path, "stale").unwrap();
 
     // Server should clean up stale socket and start successfully
-    let db = Database::open(dir.path()).unwrap();
+    let spec = OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let executor = crate::Executor::new(db.clone());
     executor
         .execute(Command::BranchCreate {

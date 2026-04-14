@@ -115,7 +115,7 @@ impl Database {
     ///
     /// let db = Database::open("/path/to/data")?;
     /// ```
-    pub fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
         // For the full subsystem set, use DatabaseBuilder or the executor's
         // default_product_spec.
@@ -141,7 +141,7 @@ impl Database {
     /// };
     /// let db = Database::open_with_config("/path/to/data", config)?;
     /// ```
-    pub fn open_with_config<P: AsRef<Path>>(path: P, cfg: StrataConfig) -> StrataResult<Arc<Self>> {
+    pub(crate) fn open_with_config<P: AsRef<Path>>(path: P, cfg: StrataConfig) -> StrataResult<Arc<Self>> {
         #[cfg(not(feature = "embed"))]
         let cfg = {
             let mut cfg = cfg;
@@ -377,7 +377,7 @@ impl Database {
     ///
     /// This is the recommended way to provide cross-process read access
     /// (similar to RocksDB secondary instances).
-    pub fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
+    pub(crate) fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
         // For the full subsystem set, use DatabaseBuilder or the executor's
         // default_product_follower_spec.
@@ -835,7 +835,7 @@ impl Database {
     /// |--------|------------|-----|----------|
     /// | `cache()` | None | None | No |
     /// | `open(path)` | Yes | Yes (per config) | Yes |
-    pub fn cache() -> StrataResult<Arc<Self>> {
+    pub(crate) fn cache() -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
         // For the full subsystem set, use DatabaseBuilder or the executor's
         // default_product_cache_spec.

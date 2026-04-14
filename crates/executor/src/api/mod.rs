@@ -80,7 +80,7 @@ use crate::{Command, Error, Executor, Output, Result, Session};
 /// This is the canonical way for product code to construct an `OpenSpec`
 /// with the standard subsystem set. Engine code should not use this function;
 /// it belongs to the executor/product layer.
-pub fn default_product_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
+pub(crate) fn default_product_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
     OpenSpec::primary(path)
         .with_subsystem(GraphSubsystem)
         .with_subsystem(VectorSubsystem)
@@ -92,7 +92,7 @@ pub fn default_product_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
 ///
 /// Same subsystem order as [`default_product_spec`], but in follower mode
 /// (read-only, skips bootstrap).
-pub fn default_product_follower_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
+pub(crate) fn default_product_follower_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
     OpenSpec::follower(path)
         .with_subsystem(GraphSubsystem)
         .with_subsystem(VectorSubsystem)
@@ -103,7 +103,7 @@ pub fn default_product_follower_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
 ///
 /// Same subsystem order as [`default_product_spec`], but in cache mode
 /// (ephemeral, in-memory only).
-pub fn default_product_cache_spec() -> OpenSpec {
+pub(crate) fn default_product_cache_spec() -> OpenSpec {
     OpenSpec::cache()
         .with_subsystem(GraphSubsystem)
         .with_subsystem(VectorSubsystem)
