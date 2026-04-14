@@ -544,15 +544,19 @@ impl Database {
         }
     }
 
-    /// Mark a transaction aborted and run subsystem cleanup observers.
-    pub(crate) fn abort_transaction_in_place(
+    /// Mark a transaction aborted, optionally update coordinator state, and
+    /// run subsystem cleanup observers.
+    fn finalize_aborted_transaction_in_place(
         &self,
         txn: &mut TransactionContext,
         reason: impl Into<String>,
+        record_coordinator_abort: bool,
     ) {
         if txn.is_active() {
             let _ = txn.mark_aborted(reason.into());
-            self.coordinator.record_abort(txn.txn_id);
+            if record_coordinator_abort {
+                self.coordinator.record_abort(txn.txn_id);
+            }
         }
 
         let info = super::AbortInfo {
@@ -560,6 +564,15 @@ impl Database {
             branch_id: txn.branch_id,
         };
         self.abort_observers().notify(&info);
+    }
+
+    /// Mark a transaction aborted and run subsystem cleanup observers.
+    pub(crate) fn abort_transaction_in_place(
+        &self,
+        txn: &mut TransactionContext,
+        reason: impl Into<String>,
+    ) {
+        self.finalize_aborted_transaction_in_place(txn, reason, true);
     }
 
     /// Execute a transaction with the given closure
@@ -764,6 +777,14 @@ impl Database {
         &self,
         txn: &mut TransactionContext,
     ) -> StrataResult<u64> {
+        if self.follower {
+            let err = StrataError::internal(
+                "cannot commit: database opened in follower mode (read-only)",
+            );
+            self.abort_transaction_in_place(txn, format!("Commit failed: {}", err));
+            return Err(err);
+        }
+
         let had_writes = !txn.is_read_only();
         // Admission control: reject writes when L0 is saturated (#1924).
         // Must run BEFORE commit so the caller gets a clean error.
@@ -776,7 +797,14 @@ impl Database {
         let version = match self.commit_internal(txn, self.durability_mode) {
             Ok(version) => version,
             Err(e) => {
-                self.abort_transaction_in_place(txn, format!("Commit failed: {}", e));
+                // `TransactionCoordinator::commit*` already decremented
+                // active_count on commit failure. Only mirror the terminal
+                // state into the pooled TransactionContext here.
+                self.finalize_aborted_transaction_in_place(
+                    txn,
+                    format!("Commit failed: {}", e),
+                    false,
+                );
                 return Err(e);
             }
         };
@@ -810,12 +838,6 @@ impl Database {
         txn: &mut TransactionContext,
         durability: DurabilityMode,
     ) -> StrataResult<CommitVersion> {
-        if self.follower {
-            return Err(StrataError::internal(
-                "cannot commit: database opened in follower mode (read-only)",
-            ));
-        }
-
         // Capture info needed for observer notification before commit
         // (txn state may be modified during commit)
         let txn_id = txn.txn_id;
