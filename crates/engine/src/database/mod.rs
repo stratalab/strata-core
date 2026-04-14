@@ -46,7 +46,10 @@ pub use observers::{
     CommitObserver, CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo,
     ReplayObserver, ReplayObserverRegistry,
 };
-pub use spec::{DatabaseMode, OpenSpec};
+pub use spec::{
+    search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
+    OpenSpec,
+};
 
 pub use config::{ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 pub use profile::{
