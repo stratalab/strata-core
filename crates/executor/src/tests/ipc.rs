@@ -4,7 +4,7 @@ use crate::ipc::client::IpcClient;
 use crate::ipc::protocol::{self, Request, Response};
 use crate::ipc::server::IpcServer;
 use crate::ipc::wire;
-use crate::{Command, Output, Value};
+use crate::{Command, Output, Session, Value};
 use strata_engine::database::search_only_primary_spec;
 use strata_engine::Database;
 use strata_security::AccessMode;
@@ -273,6 +273,60 @@ fn ipc_connect_new() {
 
     let result = client2.execute(Command::Ping).unwrap();
     assert!(matches!(result, Output::Pong { .. }));
+
+    server.shutdown();
+}
+
+#[test]
+fn ipc_session_has_no_local_executor() {
+    let (_dir, mut server) = setup_server();
+    let socket_path = server.socket_path().to_path_buf();
+
+    let client = IpcClient::connect(&socket_path).unwrap();
+    let mut session = Session::new_ipc(client);
+
+    assert!(matches!(session, Session::Ipc(_)));
+    assert!(session.executor().is_none());
+    assert!(!session.in_transaction());
+    assert!(matches!(session.execute(Command::Ping).unwrap(), Output::Pong { .. }));
+
+    server.shutdown();
+}
+
+#[test]
+fn ipc_session_tracks_remote_transaction_state() {
+    let (_dir, mut server) = setup_server();
+    let socket_path = server.socket_path().to_path_buf();
+
+    let client = IpcClient::connect(&socket_path).unwrap();
+    let mut session = Session::new_ipc(client);
+
+    assert!(!session.in_transaction());
+
+    assert!(matches!(
+        session
+            .execute(Command::TxnBegin {
+                branch: None,
+                options: None,
+            })
+            .unwrap(),
+        Output::TxnBegun
+    ));
+    assert!(session.in_transaction());
+    assert!(matches!(
+        session.execute(Command::TxnIsActive).unwrap(),
+        Output::Bool(true)
+    ));
+
+    assert!(matches!(
+        session.execute(Command::TxnRollback).unwrap(),
+        Output::TxnAborted
+    ));
+    assert!(!session.in_transaction());
+    assert!(matches!(
+        session.execute(Command::TxnIsActive).unwrap(),
+        Output::Bool(false)
+    ));
 
     server.shutdown();
 }

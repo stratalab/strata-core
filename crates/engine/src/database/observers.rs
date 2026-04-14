@@ -15,6 +15,7 @@
 //! | Observer | Fires When | Use Cases |
 //! |----------|------------|-----------|
 //! | `CommitObserver` | After successful commit | Index maintenance, audit log |
+//! | `AbortObserver` | After transaction abort/failure | Cleanup staged runtime state |
 //! | `ReplayObserver` | After follower applies record | Index rebuild on replica |
 //! | `BranchOpObserver` | After branch operation | DAG audit, branch metrics |
 //!
@@ -139,8 +140,8 @@ pub struct CommitInfo {
 ///
 /// `CommitObserver` receives only [`CommitInfo`], not the actual committed data.
 /// For operation-specific deferred work (graph node indexing, vector HNSW updates)
-/// that requires data captured during command execution, see `PostCommitOp` in
-/// the executor crate's session module.
+/// that requires data captured during command execution, subsystem state should
+/// be staged during command execution and drained by commit/abort observers.
 ///
 /// ## Thread Safety
 ///
@@ -160,6 +161,31 @@ pub trait CommitObserver: Send + Sync + 'static {
     /// This is called synchronously after the commit completes.
     /// Keep implementations fast to avoid blocking the commit path.
     fn on_commit(&self, info: &CommitInfo) -> Result<(), ObserverError>;
+}
+
+// =============================================================================
+// Replay Observer
+// =============================================================================
+
+/// Information about an aborted transaction.
+#[derive(Debug, Clone)]
+pub struct AbortInfo {
+    /// The transaction that aborted.
+    pub txn_id: TxnId,
+    /// The branch the transaction belonged to.
+    pub branch_id: BranchId,
+}
+
+/// Observer called after a transaction aborts or fails to commit.
+///
+/// Use for cleaning up subsystem-owned staged state that should only survive a
+/// successful commit.
+pub trait AbortObserver: Send + Sync + 'static {
+    /// Human-readable name for logging.
+    fn name(&self) -> &'static str;
+
+    /// Called after the transaction has been marked aborted.
+    fn on_abort(&self, info: &AbortInfo) -> Result<(), ObserverError>;
 }
 
 // =============================================================================
@@ -514,6 +540,55 @@ impl Default for CommitObserverRegistry {
     }
 }
 
+/// Registry for abort observers.
+pub struct AbortObserverRegistry {
+    observers: RwLock<Vec<Arc<dyn AbortObserver>>>,
+}
+
+impl AbortObserverRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            observers: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Register an abort observer.
+    pub fn register(&self, observer: Arc<dyn AbortObserver>) {
+        self.observers.write().push(observer);
+    }
+
+    /// Notify all observers of an abort.
+    pub fn notify(&self, info: &AbortInfo) {
+        let observers = self.observers.read();
+        for observer in observers.iter() {
+            if let Err(e) = observer.on_abort(info) {
+                tracing::error!(
+                    observer = observer.name(),
+                    error = %e,
+                    "abort observer failed"
+                );
+            }
+        }
+    }
+
+    /// Number of registered observers.
+    pub fn len(&self) -> usize {
+        self.observers.read().len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.observers.read().is_empty()
+    }
+}
+
+impl Default for AbortObserverRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Registry for replay observers.
 pub struct ReplayObserverRegistry {
     observers: RwLock<Vec<Arc<dyn ReplayObserver>>>,
@@ -648,6 +723,33 @@ mod tests {
         }
     }
 
+    struct CountingAbortObserver {
+        count: AtomicUsize,
+    }
+
+    impl CountingAbortObserver {
+        fn new() -> Self {
+            Self {
+                count: AtomicUsize::new(0),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl AbortObserver for CountingAbortObserver {
+        fn name(&self) -> &'static str {
+            "counting-abort"
+        }
+
+        fn on_abort(&self, _info: &AbortInfo) -> Result<(), ObserverError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_commit_observer_registry() {
         let registry = CommitObserverRegistry::new();
@@ -670,6 +772,24 @@ mod tests {
 
         registry.notify(&info);
         assert_eq!(observer.count(), 2);
+    }
+
+    #[test]
+    fn test_abort_observer_registry() {
+        let registry = AbortObserverRegistry::new();
+        assert!(registry.is_empty());
+
+        let observer = Arc::new(CountingAbortObserver::new());
+        registry.register(observer.clone());
+        assert_eq!(registry.len(), 1);
+
+        let info = AbortInfo {
+            txn_id: 9u64.into(),
+            branch_id: BranchId::new(),
+        };
+
+        registry.notify(&info);
+        assert_eq!(observer.count(), 1);
     }
 
     #[test]

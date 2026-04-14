@@ -81,8 +81,9 @@ pub struct VectorBackendState {
     /// Operations are keyed by transaction id so concurrent writers on the same
     /// branch cannot apply or clear each other's deferred backend work.
     /// On commit, the VectorCommitObserver drains and applies only the committed
-    /// transaction's ops. On abort or failed commit, the Session clears that
-    /// transaction's queued ops without touching other in-flight writers.
+    /// transaction's ops. On abort or failed commit, engine-owned abort
+    /// observers clear that transaction's queued ops without touching other
+    /// in-flight writers.
     ///
     /// This moves vector backend maintenance ownership from executor (Session)
     /// to subsystem (VectorSubsystem), fulfilling the T2-E2 requirement.
@@ -130,8 +131,8 @@ impl VectorBackendState {
 
     /// Clear pending operations for a transaction without applying them.
     ///
-    /// Called by Session on transaction abort or commit failure to clean up
-    /// uncommitted ops.
+    /// Called by engine-owned abort observers on transaction abort or commit
+    /// failure to clean up uncommitted ops.
     pub fn clear_pending_ops(&self, txn_id: TxnId) {
         self.pending_ops.remove(&txn_id);
     }
@@ -4096,5 +4097,45 @@ mod tests {
         // Same as above: observers count includes SearchSubsystem observers
         assert!(!db.commit_observers().is_empty());
         assert!(!db.replay_observers().is_empty());
+    }
+
+    #[test]
+    fn test_manual_abort_clears_pending_vector_ops() {
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let store = VectorStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "emb", config)
+            .unwrap();
+
+        let state = store.state().unwrap();
+        let mut txn = db.begin_transaction(branch_id).unwrap();
+        let txn_id = txn.txn_id;
+
+        txn.vector_upsert(
+            branch_id,
+            "default",
+            "emb",
+            "v_abort",
+            &[1.0, 0.0, 0.0],
+            None,
+            None,
+            &state,
+        )
+        .unwrap();
+
+        assert!(
+            state.pending_ops.contains_key(&txn_id),
+            "vector upsert should stage backend work until commit"
+        );
+
+        txn.abort();
+
+        assert!(
+            !state.pending_ops.contains_key(&txn_id),
+            "abort should clear staged vector work via engine observers"
+        );
     }
 }

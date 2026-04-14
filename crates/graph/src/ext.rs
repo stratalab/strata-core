@@ -343,7 +343,7 @@ impl GraphStoreExt for TransactionContext {
         }
 
         // Queue for GraphCommitObserver (subsystem-owned maintenance).
-        // T2-E5: replaces executor-owned PostCommitOp pattern.
+        // T2-E5: derived index work is staged in subsystem state, not Session.
         backend_state.queue_pending_op(
             self.txn_id,
             StagedGraphOp::IndexNode {
@@ -478,7 +478,7 @@ impl GraphStoreExt for TransactionContext {
         self.delete(node_storage_key)?;
 
         // Queue for GraphCommitObserver (subsystem-owned maintenance).
-        // T2-E5: replaces executor-owned PostCommitOp pattern.
+        // T2-E5: derived index work is staged in subsystem state, not Session.
         backend_state.queue_pending_op(
             self.txn_id,
             StagedGraphOp::DeindexNode {

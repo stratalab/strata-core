@@ -73,8 +73,9 @@ pub struct GraphBackendState {
     /// Operations are keyed by transaction id so concurrent writers cannot
     /// apply or clear each other's deferred work. On commit, the
     /// `GraphCommitObserver` drains and applies only the committed
-    /// transaction's ops. On abort or failed commit, the Session clears
-    /// that transaction's queued ops without touching other in-flight writers.
+    /// transaction's ops. On abort or failed commit, engine-owned abort
+    /// observers clear that transaction's queued ops without touching other
+    /// in-flight writers.
     pending_ops: DashMap<TxnId, Vec<StagedGraphOp>>,
 
     /// Tracks whether runtime-only hooks have been registered for this
@@ -119,8 +120,8 @@ impl GraphBackendState {
 
     /// Clear pending operations for a transaction without applying them.
     ///
-    /// Called by Session on transaction abort or commit failure to clean up
-    /// uncommitted ops.
+    /// Called by engine-owned abort observers on transaction abort or commit
+    /// failure to clean up uncommitted ops.
     pub fn clear_pending_ops(&self, txn_id: TxnId) {
         self.pending_ops.remove(&txn_id);
     }
@@ -154,7 +155,9 @@ fn apply_staged_graph_op(graph_store: &crate::GraphStore, op: StagedGraphOp) {
 // =============================================================================
 
 use std::sync::Weak;
-use strata_engine::database::observers::{CommitInfo, CommitObserver, ObserverError};
+use strata_engine::database::observers::{
+    AbortInfo, AbortObserver, CommitInfo, CommitObserver, ObserverError,
+};
 use strata_engine::Database;
 
 /// Ensure runtime hooks are wired for this database instance.
@@ -173,6 +176,11 @@ pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>)
     });
     db.commit_observers().register(commit_observer);
 
+    let abort_observer = Arc::new(GraphAbortObserver {
+        db: Arc::downgrade(db),
+    });
+    db.abort_observers().register(abort_observer);
+
     let replay_observer = Arc::new(GraphReplayObserver {
         db: Arc::downgrade(db),
     });
@@ -185,9 +193,9 @@ pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>)
 /// transactions. This observer applies them after successful commit, updating
 /// the BM25 inverted index.
 ///
-/// This moves graph index maintenance ownership from executor (Session's
-/// `PostCommitOp::GraphIndexNode/GraphDeindexNode`) to subsystem
-/// (GraphSubsystem), fulfilling the T2-E5 requirement.
+/// This moves graph index maintenance ownership from executor-local deferred
+/// work to subsystem-owned observers (GraphSubsystem), fulfilling the T2-E5
+/// requirement.
 struct GraphCommitObserver {
     db: Weak<Database>,
 }
@@ -216,6 +224,28 @@ impl CommitObserver for GraphCommitObserver {
                     "Applied pending graph index operations"
                 );
             }
+        }
+
+        Ok(())
+    }
+}
+
+struct GraphAbortObserver {
+    db: Weak<Database>,
+}
+
+impl AbortObserver for GraphAbortObserver {
+    fn name(&self) -> &'static str {
+        "graph-abort"
+    }
+
+    fn on_abort(&self, info: &AbortInfo) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(());
+        };
+
+        if let Ok(state) = db.extension::<GraphBackendState>() {
+            state.clear_pending_ops(info.txn_id);
         }
 
         Ok(())
@@ -322,5 +352,51 @@ fn apply_replayed_graph_changes(
         let branch_id = key.namespace.branch_id;
         let space = key.namespace.space.as_str();
         graph_store.deindex_node_for_search(branch_id, space, graph, node_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ext::GraphStoreExt;
+    use strata_core::types::BranchId;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::SearchSubsystem;
+
+    #[test]
+    fn test_manual_abort_clears_pending_graph_ops() {
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let graph_store = crate::GraphStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        graph_store
+            .create_graph(branch_id, "default", "g", None)
+            .unwrap();
+
+        let state = graph_store.state().unwrap();
+        let mut txn = db.begin_transaction(branch_id).unwrap();
+        let txn_id = txn.txn_id;
+
+        txn.graph_add_node(
+            branch_id,
+            "default",
+            "g",
+            "n_abort",
+            &crate::types::NodeData::default(),
+            &state,
+        )
+        .unwrap();
+
+        assert!(
+            state.pending_ops.contains_key(&txn_id),
+            "graph add node should stage index work until commit"
+        );
+
+        txn.abort();
+
+        assert!(
+            !state.pending_ops.contains_key(&txn_id),
+            "abort should clear staged graph work via engine observers"
+        );
     }
 }

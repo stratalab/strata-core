@@ -1,7 +1,7 @@
 use super::*;
 use crate::recovery::Subsystem;
 use serial_test::serial;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::TransactionPayload;
@@ -422,6 +422,46 @@ fn test_begin_and_commit_manual() {
         .unwrap()
         .unwrap();
     assert_eq!(stored.value, Value::Int(123));
+}
+
+#[test]
+fn test_owned_transaction_commit_emits_one_commit_observer_event() {
+    struct CountingCommitObserver {
+        count: AtomicUsize,
+    }
+
+    impl super::CommitObserver for CountingCommitObserver {
+        fn name(&self) -> &'static str {
+            "counting-commit"
+        }
+
+        fn on_commit(&self, _info: &super::CommitInfo) -> Result<(), super::ObserverError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let observer = Arc::new(CountingCommitObserver {
+        count: AtomicUsize::new(0),
+    });
+    db.commit_observers().register(observer.clone());
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "observer_key");
+
+    let mut txn = db.begin_transaction(branch_id).unwrap();
+    txn.put(key.clone(), Value::Int(1)).unwrap();
+    let version = txn.commit().unwrap();
+
+    assert!(version > 0);
+    assert_eq!(
+        observer.count.load(Ordering::SeqCst),
+        1,
+        "successful manual commits should emit exactly one observer event"
+    );
 }
 
 // ========================================================================
@@ -2476,7 +2516,6 @@ fn test_open_runtime_failed_config_write_can_retry() {
 /// read, so OCC validation had no read-set entry to detect the conflict.
 #[test]
 fn test_issue_1914_concurrent_event_append_occ_conflict() {
-    use crate::transaction::Transaction;
     use crate::transaction_ops::TransactionOps;
 
     let temp_dir = TempDir::new().unwrap();
@@ -2491,12 +2530,12 @@ fn test_issue_1914_concurrent_event_append_occ_conflict() {
 
     // Both append an event using the Transaction wrapper (executor path)
     {
-        let mut t1 = Transaction::new(&mut txn1, ns.clone());
+        let mut t1 = crate::transaction::context::Transaction::new(&mut txn1, ns.clone());
         t1.event_append("test_event", Value::String("from_t1".into()))
             .unwrap();
     }
     {
-        let mut t2 = Transaction::new(&mut txn2, ns.clone());
+        let mut t2 = crate::transaction::context::Transaction::new(&mut txn2, ns.clone());
         t2.event_append("test_event", Value::String("from_t2".into()))
             .unwrap();
     }
@@ -2524,7 +2563,6 @@ fn test_issue_1914_concurrent_event_append_occ_conflict() {
 /// sequence numbers sourced from persisted metadata, not ephemeral defaults.
 #[test]
 fn test_issue_1914_sequence_from_persisted_meta() {
-    use crate::transaction::Transaction;
     use crate::transaction_ops::TransactionOps;
 
     let temp_dir = TempDir::new().unwrap();
@@ -2536,7 +2574,7 @@ fn test_issue_1914_sequence_from_persisted_meta() {
     // First transaction: append event at sequence 0
     let mut txn1 = db.begin_transaction(branch_id).unwrap();
     {
-        let mut t = Transaction::new(&mut txn1, ns.clone());
+        let mut t = crate::transaction::context::Transaction::new(&mut txn1, ns.clone());
         let v = t
             .event_append("evt", Value::String("first".into()))
             .unwrap();
@@ -2548,7 +2586,7 @@ fn test_issue_1914_sequence_from_persisted_meta() {
     // Second transaction: should continue at sequence 1 (from persisted meta)
     let mut txn2 = db.begin_transaction(branch_id).unwrap();
     {
-        let mut t = Transaction::new(&mut txn2, ns.clone());
+        let mut t = crate::transaction::context::Transaction::new(&mut txn2, ns.clone());
         let v = t
             .event_append("evt", Value::String("second".into()))
             .unwrap();
@@ -2567,7 +2605,7 @@ fn test_issue_1914_sequence_from_persisted_meta() {
     // Verify the hash chain: event 1's prev_hash must equal event 0's hash
     let mut txn3 = db.begin_transaction(branch_id).unwrap();
     {
-        let mut t = Transaction::new(&mut txn3, ns.clone());
+        let mut t = crate::transaction::context::Transaction::new(&mut txn3, ns.clone());
         let e0 = t.event_get(0).unwrap().expect("event 0 must exist");
         let e1 = t.event_get(1).unwrap().expect("event 1 must exist");
         assert_eq!(

@@ -42,9 +42,10 @@ pub use merge_registry::{
     VectorMergePrecheckFn,
 };
 pub use observers::{
-    BranchOpEvent, BranchOpKind, BranchOpObserver, BranchOpObserverRegistry, CommitInfo,
-    CommitObserver, CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo,
-    ReplayObserver, ReplayObserverRegistry,
+    AbortInfo, AbortObserver, AbortObserverRegistry, BranchOpEvent, BranchOpKind,
+    BranchOpObserver, BranchOpObserverRegistry, CommitInfo, CommitObserver,
+    CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo, ReplayObserver,
+    ReplayObserverRegistry,
 };
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
@@ -445,6 +446,12 @@ pub struct Database {
     /// Best-effort: failures are logged, not propagated.
     commit_observers: CommitObserverRegistry,
 
+    /// Per-database abort observer registry.
+    ///
+    /// Observers are notified after a transaction aborts or fails to commit.
+    /// Best-effort: failures are logged, not propagated.
+    abort_observers: AbortObserverRegistry,
+
     /// Per-database replay observer registry.
     ///
     /// Observers are notified after each fully-applied follower replay record.
@@ -619,7 +626,7 @@ impl Database {
     }
 
     // =========================================================================
-    // Commit/Replay Observers
+    // Commit/Abort/Replay Observers
     // =========================================================================
 
     /// Get the per-database commit observer registry.
@@ -627,6 +634,13 @@ impl Database {
     /// Observers are notified after each successful WAL-backed commit.
     pub fn commit_observers(&self) -> &CommitObserverRegistry {
         &self.commit_observers
+    }
+
+    /// Get the per-database abort observer registry.
+    ///
+    /// Observers are notified after transaction abort/failure cleanup points.
+    pub fn abort_observers(&self) -> &AbortObserverRegistry {
+        &self.abort_observers
     }
 
     /// Get the per-database replay observer registry.

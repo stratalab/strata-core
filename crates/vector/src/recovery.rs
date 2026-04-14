@@ -32,6 +32,7 @@
 
 use strata_core::id::CommitVersion;
 use strata_core::StrataResult;
+use strata_engine::database::observers::{AbortInfo, AbortObserver};
 use strata_engine::Database;
 use tracing::info;
 
@@ -519,6 +520,11 @@ pub(crate) fn ensure_runtime_wiring(
     });
     db.commit_observers().register(commit_observer);
 
+    let abort_observer = Arc::new(VectorAbortObserver {
+        db: Arc::downgrade(db),
+    });
+    db.abort_observers().register(abort_observer);
+
     let replay_observer = Arc::new(VectorReplayObserver {
         db: Arc::downgrade(db),
     });
@@ -531,9 +537,9 @@ pub(crate) fn ensure_runtime_wiring(
 /// transactions. This observer applies them after successful commit, updating
 /// the in-memory HNSW indices.
 ///
-/// This moves vector backend maintenance ownership from executor (Session's
-/// `PostCommitOp::VectorBackendOp`) to subsystem (VectorSubsystem), fulfilling
-/// the T2-E2 requirement.
+/// This moves vector backend maintenance ownership from executor-local deferred
+/// work to subsystem-owned observers (VectorSubsystem), fulfilling the T2-E2
+/// requirement.
 struct VectorCommitObserver {
     db: std::sync::Weak<strata_engine::Database>,
 }
@@ -561,6 +567,28 @@ impl CommitObserver for VectorCommitObserver {
                     "Applied pending HNSW operations"
                 );
             }
+        }
+
+        Ok(())
+    }
+}
+
+struct VectorAbortObserver {
+    db: std::sync::Weak<strata_engine::Database>,
+}
+
+impl AbortObserver for VectorAbortObserver {
+    fn name(&self) -> &'static str {
+        "vector-abort"
+    }
+
+    fn on_abort(&self, info: &AbortInfo) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(());
+        };
+
+        if let Ok(state) = db.extension::<super::VectorBackendState>() {
+            state.clear_pending_ops(info.txn_id);
         }
 
         Ok(())

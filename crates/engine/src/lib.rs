@@ -53,7 +53,7 @@ pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
 pub use strata_storage::StorageIterator;
 pub use strata_storage::VersionedEntry;
-pub use transaction::{Transaction, TransactionPool, MAX_POOL_SIZE};
+pub use transaction::{ScopedTransaction, Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
 pub mod branch_ops;

@@ -13,7 +13,7 @@ use strata_durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::SegmentedStore;
 
 use super::Database;
-use crate::transaction::TransactionPool;
+use crate::transaction::{Transaction, TransactionPool};
 
 /// Return freed heap pages to the OS.
 ///
@@ -526,43 +526,40 @@ impl Database {
     }
 
     /// Execute one transaction attempt: commit on success, abort on error.
-    ///
-    /// Handles the commit-or-abort decision and coordinator bookkeeping.
-    /// The caller is responsible for calling `end_transaction()` afterward.
-    ///
     /// Returns `(closure_result, commit_version)` on success.
     fn run_single_attempt<T>(
         &self,
         txn: &mut TransactionContext,
         result: StrataResult<T>,
-        durability: DurabilityMode,
     ) -> StrataResult<(T, u64)> {
         match result {
             Ok(value) => {
-                let had_writes = !txn.is_read_only();
-                // Admission control: reject writes when L0 is saturated (#1924).
-                // Must run BEFORE commit so the caller gets a clean error and
-                // no data is committed that the caller doesn't know about.
-                if had_writes {
-                    if let Err(e) = self.maybe_apply_write_backpressure() {
-                        let _ = txn.mark_aborted(format!("Write stall: {}", e));
-                        self.coordinator.record_abort(txn.txn_id);
-                        return Err(e);
-                    }
-                }
-                let commit_version = self.commit_internal(txn, durability)?;
-                // Schedule flush only for write transactions (reads skip entirely)
-                if had_writes {
-                    self.schedule_flush_if_needed();
-                }
-                Ok((value, commit_version.as_u64()))
+                let commit_version = self.commit_transaction_context(txn)?;
+                Ok((value, commit_version))
             }
             Err(e) => {
-                let _ = txn.mark_aborted(format!("Closure error: {}", e));
-                self.coordinator.record_abort(txn.txn_id);
+                self.abort_transaction_in_place(txn, format!("Closure error: {}", e));
                 Err(e)
             }
         }
+    }
+
+    /// Mark a transaction aborted and run subsystem cleanup observers.
+    pub(crate) fn abort_transaction_in_place(
+        &self,
+        txn: &mut TransactionContext,
+        reason: impl Into<String>,
+    ) {
+        if txn.is_active() {
+            let _ = txn.mark_aborted(reason.into());
+            self.coordinator.record_abort(txn.txn_id);
+        }
+
+        let info = super::AbortInfo {
+            txn_id: txn.txn_id,
+            branch_id: txn.branch_id,
+        };
+        self.abort_observers().notify(&info);
     }
 
     /// Execute a transaction with the given closure
@@ -594,10 +591,10 @@ impl Database {
         F: FnOnce(&mut TransactionContext) -> StrataResult<T>,
     {
         self.check_accepting()?;
-        let mut txn = self.begin_transaction(branch_id)?;
+        let mut txn = self.begin_transaction_context(branch_id)?;
         let result = f(&mut txn);
-        let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
-        self.end_transaction(txn);
+        let outcome = self.run_single_attempt(&mut txn, result);
+        self.end_transaction_context(txn);
         outcome.map(|(value, _)| value)
     }
 
@@ -627,35 +624,40 @@ impl Database {
         F: FnOnce(&mut TransactionContext) -> StrataResult<T>,
     {
         self.check_accepting()?;
-        let mut txn = self.begin_transaction(branch_id)?;
+        let mut txn = self.begin_transaction_context(branch_id)?;
         let result = f(&mut txn);
-        let outcome = self.run_single_attempt(&mut txn, result, self.durability_mode);
-        self.end_transaction(txn);
+        let outcome = self.run_single_attempt(&mut txn, result);
+        self.end_transaction_context(txn);
         outcome
     }
 
     /// Begin a new transaction (for manual control)
     ///
-    /// Returns a TransactionContext that must be manually committed or aborted.
-    /// Prefer `transaction()` closure API for automatic handling.
-    ///
-    /// Uses thread-local pool to avoid allocation overhead after warmup.
-    /// Call `end_transaction()` after commit/abort to return context to pool.
+    /// Returns an owned transaction handle that commits, aborts, and returns
+    /// its context to the pool without executor/session state.
     ///
     /// # Arguments
     /// * `branch_id` - BranchId for namespace isolation
     ///
     /// # Returns
-    /// * `TransactionContext` - Active transaction ready for operations
+    /// * `Transaction` - Active transaction ready for operations
     ///
     /// # Example
     /// ```text
     /// let mut txn = db.begin_transaction(branch_id)?;
     /// txn.put(key, value)?;
-    /// db.commit_transaction(&mut txn)?;
-    /// db.end_transaction(txn); // Return to pool
+    /// txn.commit()?;
     /// ```
-    pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<TransactionContext> {
+    pub fn begin_transaction(&self, branch_id: BranchId) -> StrataResult<Transaction> {
+        let txn = self.begin_transaction_context(branch_id)?;
+        Ok(Transaction::new(Self::shared(self), txn))
+    }
+
+    /// Internal transaction-context constructor used by closure APIs.
+    pub(crate) fn begin_transaction_context(
+        &self,
+        branch_id: BranchId,
+    ) -> StrataResult<TransactionContext> {
         self.check_accepting()?;
         let txn_id = self.coordinator.next_txn_id()?;
         // Use storage.version() as the snapshot (includes own thread's commits),
@@ -706,11 +708,17 @@ impl Database {
     ///
     /// Returns a transaction that rejects writes and skips read-set tracking,
     /// saving memory on large scan workloads.
-    pub fn begin_read_only_transaction(
+    pub fn begin_read_only_transaction(&self, branch_id: BranchId) -> StrataResult<Transaction> {
+        let txn = self.begin_read_only_transaction_context(branch_id)?;
+        Ok(Transaction::new(Self::shared(self), txn))
+    }
+
+    /// Internal read-only context constructor used by engine internals.
+    pub(crate) fn begin_read_only_transaction_context(
         &self,
         branch_id: BranchId,
     ) -> StrataResult<TransactionContext> {
-        let mut txn = self.begin_transaction(branch_id)?;
+        let mut txn = self.begin_transaction_context(branch_id)?;
         txn.set_read_only(true);
         Ok(txn)
     }
@@ -720,21 +728,15 @@ impl Database {
     /// Returns the transaction context to the thread-local pool for reuse.
     /// This avoids allocation overhead on subsequent transactions.
     ///
-    /// Should be called after `commit_transaction()` or after aborting.
-    /// The closure API (`transaction()`) calls this automatically.
-    ///
-    /// # Arguments
-    /// * `ctx` - Transaction context to return to pool
-    ///
-    /// # Example
-    /// ```text
-    /// let mut txn = db.begin_transaction(branch_id)?;
-    /// txn.put(key, value)?;
-    /// db.commit_transaction(&mut txn)?;
-    /// db.end_transaction(txn); // Return to pool for reuse
-    /// ```
-    pub fn end_transaction(&self, ctx: TransactionContext) {
+    /// Internal pool-return helper for transaction contexts.
+    pub(crate) fn end_transaction_context(&self, ctx: TransactionContext) {
         TransactionPool::release(ctx);
+    }
+
+    /// Legacy compatibility shim: dropping the owned transaction already
+    /// returns it to the pool, so this is just an explicit drop.
+    pub fn end_transaction(&self, txn: Transaction) {
+        drop(txn);
     }
 
     /// Commit a transaction
@@ -758,22 +760,35 @@ impl Database {
     ///
     /// # Contract
     /// Returns the commit version (u64) assigned to all writes in this transaction.
-    pub fn commit_transaction(&self, txn: &mut TransactionContext) -> StrataResult<u64> {
+    pub(crate) fn commit_transaction_context(
+        &self,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<u64> {
         let had_writes = !txn.is_read_only();
         // Admission control: reject writes when L0 is saturated (#1924).
         // Must run BEFORE commit so the caller gets a clean error.
         if had_writes {
             if let Err(e) = self.maybe_apply_write_backpressure() {
-                let _ = txn.mark_aborted(format!("Write stall: {}", e));
-                self.coordinator.record_abort(txn.txn_id);
+                self.abort_transaction_in_place(txn, format!("Write stall: {}", e));
                 return Err(e);
             }
         }
-        let version = self.commit_internal(txn, self.durability_mode)?;
+        let version = match self.commit_internal(txn, self.durability_mode) {
+            Ok(version) => version,
+            Err(e) => {
+                self.abort_transaction_in_place(txn, format!("Commit failed: {}", e));
+                return Err(e);
+            }
+        };
         if had_writes {
             self.schedule_flush_if_needed();
         }
         Ok(version.as_u64())
+    }
+
+    /// Legacy compatibility shim for callers still routing through Database.
+    pub fn commit_transaction(&self, txn: &mut Transaction) -> StrataResult<u64> {
+        txn.commit()
     }
 
     /// Internal commit implementation shared by commit_transaction and transaction closures
@@ -830,5 +845,22 @@ impl Database {
         }
 
         Ok(commit_version)
+    }
+
+    /// Clone an `Arc<Database>` from an internal `&Database` reference.
+    ///
+    /// `Database` instances are always owned behind `Arc`; the public open
+    /// paths never hand out stack-owned values. This lets the manual
+    /// transaction handle retain shared ownership even when callers only have
+    /// `&Database` (common in helper functions and integration tests).
+    fn shared(this: &Self) -> Arc<Self> {
+        let ptr = this as *const Self;
+        // SAFETY: every live Database is allocated inside an Arc returned from
+        // the open paths. We increment the strong count before reconstructing
+        // the Arc so the original allocation remains owned.
+        unsafe {
+            Arc::increment_strong_count(ptr);
+            Arc::from_raw(ptr)
+        }
     }
 }

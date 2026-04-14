@@ -18,7 +18,9 @@
 //! TransactionOps trait for unified primitive access within transactions.
 
 pub mod context;
+pub mod owned;
 pub mod pool;
 
-pub use context::Transaction;
+pub use context::Transaction as ScopedTransaction;
+pub use owned::Transaction;
 pub use pool::{TransactionPool, MAX_POOL_SIZE};
