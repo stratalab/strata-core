@@ -339,6 +339,7 @@ impl Executor {
                 })?;
                 crate::handlers::recipe::recipe_delete(&self.primitives, branch, name)
             }
+            Command::RecipeSeed => crate::handlers::recipe::recipe_seed(&self.primitives),
 
             Command::TimeRange { branch } => {
                 let branch = branch.ok_or(Error::InvalidInput {

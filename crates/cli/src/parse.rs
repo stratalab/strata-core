@@ -58,6 +58,8 @@ pub enum CliAction {
         command: Command,
         with_version: bool,
     },
+    /// Seed built-in recipes via typed product API.
+    SeedRecipes,
 }
 
 /// Primitive type for ListAll pagination.
@@ -1374,6 +1376,7 @@ fn parse_config(matches: &ArgMatches) -> Result<CliAction, String> {
 fn parse_recipe(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
     let (sub, m) = matches.subcommand().ok_or("No recipe subcommand")?;
     match sub {
+        "seed" => Ok(CliAction::SeedRecipes),
         "show" => Ok(CliAction::Execute(Command::RecipeGetDefault {
             branch: branch(state),
         })),
@@ -1406,7 +1409,7 @@ fn parse_recipe(matches: &ArgMatches, state: &SessionState) -> Result<CliAction,
         other => Err(unknown_subcommand(
             "recipe",
             other,
-            &["show", "set", "get", "list", "delete"],
+            &["seed", "show", "set", "get", "list", "delete"],
         )),
     }
 }

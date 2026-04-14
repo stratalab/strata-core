@@ -1471,6 +1471,12 @@ pub enum Command {
         name: String,
     },
 
+    /// Seed built-in recipes to the `_system_` branch.
+    ///
+    /// Idempotent: safe to call multiple times.
+    /// Returns: `Output::Unit`
+    RecipeSeed,
+
     /// Delete a space (must be empty unless force=true).
     /// Returns: `Output::Unit`
     SpaceDelete {
@@ -2108,6 +2114,7 @@ impl Command {
                 | Command::ReindexEmbeddings { .. }
                 | Command::RecipeSet { .. }
                 | Command::RecipeDelete { .. }
+                | Command::RecipeSeed
                 | Command::TagCreate { .. }
                 | Command::TagDelete { .. }
                 | Command::NoteAdd { .. }
@@ -2227,6 +2234,7 @@ impl Command {
             Command::RecipeGetDefault { .. } => "RecipeGetDefault",
             Command::RecipeList { .. } => "RecipeList",
             Command::RecipeDelete { .. } => "RecipeDelete",
+            Command::RecipeSeed => "RecipeSeed",
             Command::Embed { .. } => "Embed",
             Command::EmbedBatch { .. } => "EmbedBatch",
             Command::ModelsList => "ModelsList",
@@ -2471,7 +2479,8 @@ impl Command {
             | Command::BranchBundleValidate { .. }
             | Command::ConfigureModel { .. }
             | Command::ConfigureSet { .. }
-            | Command::ConfigureGetKey { .. } => {}
+            | Command::ConfigureGetKey { .. }
+            | Command::RecipeSeed => {}
         }
     }
 

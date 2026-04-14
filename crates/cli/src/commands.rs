@@ -1363,6 +1363,7 @@ fn build_recipe() -> Command {
         .about("Search recipe operations")
         .subcommand_required(true)
         .subcommand(Command::new("show").about("Show the resolved default recipe"))
+        .subcommand(Command::new("seed").about("Seed built-in recipes to the _system_ branch"))
         .subcommand(
             Command::new("set")
                 .about("Set a named recipe (JSON)")

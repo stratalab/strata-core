@@ -113,3 +113,127 @@ fn test_openspec_not_directly_accessible() {
     let strata = Strata::cache();
     assert!(strata.is_ok());
 }
+
+// ==================== T2-E4: Recipe Auto-Seeding on Product Opens ====================
+
+use strata_security::{AccessMode, OpenOptions};
+
+/// Fresh `Strata::cache()` auto-seeds built-in recipes.
+///
+/// Per T2-E4: product opens SHOULD automatically seed recipes.
+/// This verifies the cache open path seeds recipes without explicit user action.
+#[test]
+fn test_strata_cache_auto_seeds_recipes() {
+    let strata = Strata::cache().expect("cache() should succeed");
+
+    // All 6 built-in recipes should be available immediately
+    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    match result {
+        Ok(Output::Keys(names)) => {
+            assert_eq!(names.len(), 6, "Should have 6 built-in recipes auto-seeded");
+            assert!(names.contains(&"default".to_string()));
+            assert!(names.contains(&"keyword".to_string()));
+            assert!(names.contains(&"semantic".to_string()));
+            assert!(names.contains(&"hybrid".to_string()));
+            assert!(names.contains(&"graph".to_string()));
+            assert!(names.contains(&"rag".to_string()));
+        }
+        other => panic!("Expected Keys with 6 items, got: {other:?}"),
+    }
+}
+
+/// Fresh `Strata::open_with()` auto-seeds built-in recipes.
+///
+/// Per T2-E4: product opens SHOULD automatically seed recipes.
+/// This verifies the disk-based open path seeds recipes.
+#[test]
+fn test_strata_open_with_auto_seeds_recipes() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let opts = OpenOptions::new().access_mode(AccessMode::ReadWrite);
+    let strata = Strata::open_with(temp_dir.path(), opts).expect("open should succeed");
+
+    // All 6 built-in recipes should be available immediately
+    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    match result {
+        Ok(Output::Keys(names)) => {
+            assert_eq!(names.len(), 6, "Should have 6 built-in recipes auto-seeded");
+            assert!(names.contains(&"default".to_string()));
+            assert!(names.contains(&"keyword".to_string()));
+        }
+        other => panic!("Expected Keys with 6 items, got: {other:?}"),
+    }
+}
+
+/// Local ReadOnly open still auto-seeds built-in recipes.
+///
+/// Per T2-E4: only followers and IPC clients skip seeding.
+/// A local ReadOnly open (not a follower) should still seed.
+#[test]
+fn test_strata_local_readonly_auto_seeds_recipes() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    // Open ReadOnly on a fresh database - seeding should still happen
+    // because it's a local open, not a follower or IPC client.
+    let opts = OpenOptions::new().access_mode(AccessMode::ReadOnly);
+    let strata = Strata::open_with(temp_dir.path(), opts).expect("open should succeed");
+
+    // Built-in recipes should be available
+    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    match result {
+        Ok(Output::Keys(names)) => {
+            assert_eq!(
+                names.len(),
+                6,
+                "Local ReadOnly should auto-seed recipes: {:?}",
+                names
+            );
+        }
+        other => panic!("Expected Keys with 6 items, got: {other:?}"),
+    }
+}
+
+/// Explicit `seed_builtin_recipes()` API is idempotent.
+///
+/// Per T2-E4: the typed product API should work correctly.
+#[test]
+fn test_strata_seed_builtin_recipes_api() {
+    let strata = Strata::cache().expect("cache() should succeed");
+
+    // Already auto-seeded, calling again should be idempotent
+    strata
+        .seed_builtin_recipes()
+        .expect("seed should succeed (idempotent)");
+    strata
+        .seed_builtin_recipes()
+        .expect("seed should succeed (idempotent)");
+
+    // Still have exactly 6 recipes
+    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    match result {
+        Ok(Output::Keys(names)) => {
+            assert_eq!(names.len(), 6, "Should have exactly 6 built-in recipes");
+        }
+        other => panic!("Expected Keys with 6 items, got: {other:?}"),
+    }
+}
+
+/// Explicit seed via typed API is blocked in read-only mode.
+#[test]
+fn test_strata_seed_blocked_in_readonly_mode() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+
+    // First open ReadWrite to seed (auto-seeding happens)
+    {
+        let opts = OpenOptions::new().access_mode(AccessMode::ReadWrite);
+        let _ = Strata::open_with(temp_dir.path(), opts).unwrap();
+    }
+
+    // Reopen ReadOnly - explicit seed should be blocked
+    let opts = OpenOptions::new().access_mode(AccessMode::ReadOnly);
+    let strata = Strata::open_with(temp_dir.path(), opts).unwrap();
+    let result = strata.seed_builtin_recipes();
+    assert!(
+        result.is_err(),
+        "seed_builtin_recipes() should fail in ReadOnly mode"
+    );
+}
