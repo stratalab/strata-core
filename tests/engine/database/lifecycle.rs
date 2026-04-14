@@ -58,10 +58,8 @@ fn persistent_database_creates_directory() {
 
     assert!(!db_path.exists());
 
-    let _db = Database::open_runtime(
-        OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem),
-    )
-    .expect("create database");
+    let _db = Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem))
+        .expect("create database");
 
     assert!(db_path.exists());
 }
@@ -133,10 +131,9 @@ fn database_cache_is_truly_cache() {
 fn open_creates_persistent_database() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     assert!(!db.is_cache());
 }
@@ -166,10 +163,9 @@ fn open_with_always_config() {
 fn open_with_standard_config() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     // Verify it works
     let branch_id = BranchId::new();
@@ -199,10 +195,9 @@ fn shutdown_is_idempotent() {
 fn is_open_reflects_state() {
     let temp_dir = tempfile::tempdir().unwrap();
 
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     assert!(db.is_open());
 

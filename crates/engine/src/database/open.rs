@@ -117,10 +117,10 @@ impl Database {
     /// ```
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use DatabaseBuilder or the executor's
-        // default_product_spec.
-        let spec = super::spec::OpenSpec::primary(path)
-            .with_subsystem(crate::search::SearchSubsystem);
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_spec() or search_only_primary_spec(path).
+        let spec =
+            super::spec::OpenSpec::primary(path).with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
     }
 
@@ -141,7 +141,10 @@ impl Database {
     /// };
     /// let db = Database::open_with_config("/path/to/data", config)?;
     /// ```
-    pub(crate) fn open_with_config<P: AsRef<Path>>(path: P, cfg: StrataConfig) -> StrataResult<Arc<Self>> {
+    pub(crate) fn open_with_config<P: AsRef<Path>>(
+        path: P,
+        cfg: StrataConfig,
+    ) -> StrataResult<Arc<Self>> {
         #[cfg(not(feature = "embed"))]
         let cfg = {
             let mut cfg = cfg;
@@ -251,7 +254,7 @@ impl Database {
                              the existing instance with the EARLIER subsystems; \
                              the requested subsystems were silently dropped. Use \
                              the same opener (e.g. `Strata::open` everywhere, or \
-                             `DatabaseBuilder` with the same list) across all \
+                             `OpenSpec` with the same subsystem list) across all \
                              call sites for this path. See audit follow-up to \
                              #2354 Finding 2."
                         );
@@ -379,10 +382,10 @@ impl Database {
     /// (similar to RocksDB secondary instances).
     pub(crate) fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use DatabaseBuilder or the executor's
-        // default_product_follower_spec.
-        let spec = super::spec::OpenSpec::follower(path)
-            .with_subsystem(crate::search::SearchSubsystem);
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_follower_spec() or search_only_follower_spec(path).
+        let spec =
+            super::spec::OpenSpec::follower(path).with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
     }
     /// Open a follower `Database` at the given canonicalized path.
@@ -837,10 +840,9 @@ impl Database {
     /// | `open(path)` | Yes | Yes (per config) | Yes |
     pub(crate) fn cache() -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use DatabaseBuilder or the executor's
-        // default_product_cache_spec.
-        let spec = super::spec::OpenSpec::cache()
-            .with_subsystem(crate::search::SearchSubsystem);
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_cache_spec() or search_only_cache_spec().
+        let spec = super::spec::OpenSpec::cache().with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
     }
 
@@ -848,7 +850,7 @@ impl Database {
     ///
     /// This is an internal helper used by `open_runtime_cache()`. External
     /// callers should use `cache()` which adds SearchSubsystem, or
-    /// `DatabaseBuilder` for custom subsystem sets.
+    /// `OpenSpec::cache().with_subsystem(...)` for custom subsystem sets.
     fn create_ephemeral_bare() -> StrataResult<Arc<Self>> {
         let mut cfg = StrataConfig::default();
         // Apply hardware profile so resource-constrained hosts (Pi Zero, etc.)

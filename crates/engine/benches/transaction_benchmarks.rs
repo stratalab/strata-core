@@ -23,9 +23,9 @@ fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
 fn bench_single_threaded_transactions(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open_runtime(
-            OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -84,9 +84,10 @@ fn bench_multi_threaded_no_conflict(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let temp_dir = TempDir::new().unwrap();
                     let db = Database::open_runtime(
-            OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+                        OpenSpec::primary(temp_dir.path().join("db"))
+                            .with_subsystem(SearchSubsystem),
+                    )
+                    .unwrap();
                     let branch_id = BranchId::new();
 
                     let start = std::time::Instant::now();
@@ -138,9 +139,10 @@ fn bench_multi_threaded_with_conflict(c: &mut Criterion) {
                 b.iter_custom(|iters| {
                     let temp_dir = TempDir::new().unwrap();
                     let db = Database::open_runtime(
-            OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+                        OpenSpec::primary(temp_dir.path().join("db"))
+                            .with_subsystem(SearchSubsystem),
+                    )
+                    .unwrap();
                     let branch_id = BranchId::new();
                     let ns = create_ns(branch_id);
                     let key = Key::new_kv(ns, "contested_key");
@@ -193,9 +195,9 @@ fn bench_multi_threaded_with_conflict(c: &mut Criterion) {
 fn bench_read_only_transactions(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open_runtime(
-            OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -243,9 +245,9 @@ fn bench_read_only_transactions(c: &mut Criterion) {
 fn bench_direct_operations(c: &mut Criterion) {
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open_runtime(
-            OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 

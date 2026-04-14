@@ -89,7 +89,10 @@ fn test_database_not_directly_constructible_from_executor() {
 
     // This SHOULD work — it's the only app-facing path:
     let strata = Strata::cache();
-    assert!(strata.is_ok(), "Strata::cache() is the canonical app entry point");
+    assert!(
+        strata.is_ok(),
+        "Strata::cache() is the canonical app entry point"
+    );
 }
 
 /// Verify that default_product_spec is not exported from strata_executor.

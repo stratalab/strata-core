@@ -206,12 +206,13 @@ pub fn create_persistent_db(path: &Path) -> Arc<Database> {
 /// Create in-memory, standard, and always databases for cross-mode testing.
 fn all_mode_databases() -> Vec<(&'static str, Arc<Database>, Option<TempDir>)> {
     let standard_dir = tempfile::tempdir().expect("Failed to create temp dir for standard db");
-    let standard_db = Database::open_runtime(test_open_spec_primary(standard_dir.path()))
-        .expect("standard db");
+    let standard_db =
+        Database::open_runtime(test_open_spec_primary(standard_dir.path())).expect("standard db");
     let always_dir = tempfile::tempdir().expect("Failed to create temp dir for always db");
-    let always_db =
-        Database::open_runtime(test_open_spec_primary(always_dir.path()).with_config(always_config()))
-            .expect("always db");
+    let always_db = Database::open_runtime(
+        test_open_spec_primary(always_dir.path()).with_config(always_config()),
+    )
+    .expect("always db");
     vec![
         ("in_memory", create_test_db(), None),
         ("standard", standard_db, Some(standard_dir)),

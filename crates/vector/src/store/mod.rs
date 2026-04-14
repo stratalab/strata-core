@@ -2942,8 +2942,7 @@ mod tests {
 
     #[test]
     fn test_create_collection_with_brute_force_backend() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3035,8 +3034,7 @@ mod tests {
 
     #[test]
     fn test_search_with_include_metadata() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3088,8 +3086,7 @@ mod tests {
 
     #[test]
     fn test_search_with_custom_overfetch_multipliers() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3138,8 +3135,7 @@ mod tests {
 
     #[test]
     fn test_search_with_empty_overfetch_multipliers_still_returns_results() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3191,8 +3187,7 @@ mod tests {
 
     #[test]
     fn test_delete_collection_with_many_vectors() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3245,8 +3240,7 @@ mod tests {
 
     #[test]
     fn test_concurrent_upserts_same_collection() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3305,8 +3299,7 @@ mod tests {
 
     #[test]
     fn test_search_after_backend_eviction_and_reload() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db.clone());
         let branch_id = BranchId::new();
 
@@ -3366,8 +3359,7 @@ mod tests {
 
     #[test]
     fn test_batch_insert_mix_new_and_update() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3438,8 +3430,7 @@ mod tests {
     /// described in #1907 cannot occur.
     #[test]
     fn test_issue_1907_concurrent_insert_and_search_during_seal() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3554,8 +3545,7 @@ mod tests {
     /// last). A mismatch indicates a TOCTOU race.
     #[test]
     fn test_issue_1572_delete_insert_toctou() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -3650,8 +3640,7 @@ mod tests {
     /// the entry (phantom) or vice versa.
     #[test]
     fn test_issue_1572_delete_insert_toctou_concurrent() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db);
         let branch_id = BranchId::new();
 
@@ -4060,8 +4049,7 @@ mod tests {
 
     #[test]
     fn test_raw_cache_db_manual_commit_updates_hnsw() {
-        let db =
-            Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let store = VectorStore::new(db.clone());
         let branch_id = BranchId::new();
 

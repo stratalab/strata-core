@@ -35,10 +35,9 @@ fn string_payload(s: &str) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     (db, temp_dir)
 }
 

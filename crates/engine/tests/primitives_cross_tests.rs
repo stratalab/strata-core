@@ -32,10 +32,9 @@ fn int_payload(v: i64) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     let branch_id = BranchId::new();
     (db, temp_dir, branch_id)
 }

@@ -60,15 +60,13 @@ fn test_follower_opens_without_lock() {
     let dir = tempdir().unwrap();
 
     // Primary holds exclusive lock
-    let _primary = Database::open_runtime(
-        OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let _primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     // Follower should open successfully without any lock
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    );
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem));
     assert!(
         follower.is_ok(),
         "Follower should open while primary holds exclusive lock: {:?}",
@@ -84,10 +82,9 @@ fn test_follower_sees_primary_data() {
 
     // Primary writes data and flushes
     {
-        let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        let primary =
+            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+                .unwrap();
         primary_put(&primary, branch, "greeting", "hello");
         primary_put(&primary, branch, "count", "42");
         primary.flush().unwrap();
@@ -95,10 +92,9 @@ fn test_follower_sees_primary_data() {
     // Primary dropped, lock released
 
     // Follower opens and should see ALL the data via WAL recovery
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(
         read_kv(&follower, branch, "greeting").as_deref(),
         Some("hello")
@@ -114,18 +110,16 @@ fn test_follower_refresh_sees_new_data() {
     let branch = BranchId::default();
 
     // Primary writes initial data
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary_put(&primary, branch, "k1", "v1");
     primary.flush().unwrap();
 
     // Open follower — sees initial data
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(read_kv(&follower, branch, "k1").as_deref(), Some("v1"));
 
     // Primary writes more data
@@ -156,17 +150,15 @@ fn test_follower_refresh_sees_updates_to_existing_keys() {
     let dir = tempdir().unwrap();
     let branch = BranchId::default();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary_put(&primary, branch, "key", "original");
     primary.flush().unwrap();
 
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(
         read_kv(&follower, branch, "key").as_deref(),
         Some("original")
@@ -189,17 +181,15 @@ fn test_follower_refresh_sees_deletes() {
     let dir = tempdir().unwrap();
     let branch = BranchId::default();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary_put(&primary, branch, "ephemeral", "here_now");
     primary.flush().unwrap();
 
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(
         read_kv(&follower, branch, "ephemeral").as_deref(),
         Some("here_now")
@@ -222,16 +212,14 @@ fn test_follower_multiple_refreshes() {
     let dir = tempdir().unwrap();
     let branch = BranchId::default();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary.flush().unwrap();
 
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     // Write and refresh in rounds
     for i in 0..5 {
@@ -272,19 +260,17 @@ fn test_follower_rejects_writes() {
 
     // Create primary, write something, then drop it
     {
-        let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        let primary =
+            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+                .unwrap();
         primary_put(&primary, branch, "k", "v");
         primary.flush().unwrap();
     }
 
     // Open follower
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     // Attempt to write should fail at commit
     let k = Key::new_kv(ns(branch), "new_key");
@@ -317,10 +303,9 @@ fn test_follower_with_empty_wal() {
     std::fs::create_dir_all(dir.path().join("wal")).unwrap();
 
     // Follower should open with empty state
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert!(follower.is_follower());
 
     // Reads return nothing
@@ -337,9 +322,8 @@ fn test_follower_on_nonexistent_path() {
     let dir = tempdir().unwrap();
     let nonexistent = dir.path().join("does_not_exist");
 
-    let result = Database::open_runtime(
-        OpenSpec::follower(&nonexistent).with_subsystem(SearchSubsystem),
-    );
+    let result =
+        Database::open_runtime(OpenSpec::follower(&nonexistent).with_subsystem(SearchSubsystem));
     assert!(result.is_err(), "Follower should fail on nonexistent path");
 }
 
@@ -349,26 +333,19 @@ fn test_follower_multiple_followers() {
     let branch = BranchId::default();
 
     // Primary writes data
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary_put(&primary, branch, "shared_key", "shared_value");
     primary.flush().unwrap();
 
     // Open 3 followers simultaneously
-    let f1 = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
-    let f2 = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
-    let f3 = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let f1 = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+        .unwrap();
+    let f2 = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+        .unwrap();
+    let f3 = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+        .unwrap();
 
     // All should see the data
     for (i, f) in [&f1, &f2, &f3].iter().enumerate() {
@@ -410,20 +387,18 @@ fn test_follower_survives_primary_crash() {
 
     // Simulate: primary writes data then "crashes" (drop without clean shutdown)
     {
-        let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        let primary =
+            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+                .unwrap();
         primary_put(&primary, branch, "crash_key", "crash_value");
         primary.flush().unwrap();
         // Drop without explicit close — simulates crash
     }
 
     // Follower should recover and see committed data
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(
         read_kv(&follower, branch, "crash_key").as_deref(),
         Some("crash_value")
@@ -439,22 +414,19 @@ fn test_follower_is_follower_accessor() {
     let dir = tempdir().unwrap();
 
     // Primary is not a follower
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert!(!primary.is_follower());
 
     // Follower is a follower
-    let follower = Database::open_runtime(
-        OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert!(follower.is_follower());
 
     // Cache is not a follower
-    let cache =
-        Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+    let cache = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
     assert!(!cache.is_follower());
 }
 
@@ -462,15 +434,13 @@ fn test_follower_is_follower_accessor() {
 fn test_refresh_on_non_follower_returns_zero() {
     let dir = tempdir().unwrap();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     let result = primary.refresh().unwrap();
     assert_eq!(result, 0, "refresh on non-follower should be a no-op");
 
-    let cache =
-        Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
+    let cache = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
     let result = cache.refresh().unwrap();
     assert_eq!(result, 0, "refresh on cache should be a no-op");
 }
@@ -494,10 +464,9 @@ fn test_issue_1707_refresh_atomic_visibility() {
     let dir = tempdir().unwrap();
     let branch = BranchId::default();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
 
     // Set up: commit many keys that will be deleted in the multi-key transaction.
     // Use a large number of keys to widen the race window.
@@ -515,10 +484,8 @@ fn test_issue_1707_refresh_atomic_visibility() {
 
     // Open follower BEFORE the multi-key transaction — it sees only old keys.
     let follower = Arc::new(
-        Database::open_runtime(
-            OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap(),
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap(),
     );
 
     // Now commit ONE transaction that puts 50 new keys AND deletes 50 old keys.
@@ -629,18 +596,15 @@ fn test_issue_1707_refresh_atomic_concurrent() {
     let dir = tempdir().unwrap();
     let branch = BranchId::default();
 
-    let primary = Database::open_runtime(
-            OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     primary.flush().unwrap();
 
     // Open follower BEFORE the batch transactions.
     let follower = Arc::new(
-        Database::open_runtime(
-            OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem),
-        )
-        .unwrap(),
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap(),
     );
 
     // Commit 10 transactions, each writing 20 keys with the same value tag.

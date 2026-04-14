@@ -32,10 +32,9 @@ fn int_payload(v: i64) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     let branch_id = BranchId::new();
     (db, temp_dir, branch_id)
 }
@@ -77,8 +76,7 @@ fn test_kv_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // Data survived
@@ -137,8 +135,7 @@ fn test_kv_list_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // List still works
@@ -188,8 +185,7 @@ fn test_event_log_chain_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     // Data is intact (verify_chain removed in MVP)
@@ -240,8 +236,7 @@ fn test_event_log_multiple_events_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     // Individual reads work (read_range removed in MVP)
@@ -281,8 +276,7 @@ fn test_branch_index_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
 
@@ -302,8 +296,7 @@ fn test_branch_index_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
 
     // Branch preserved
@@ -317,8 +310,7 @@ fn test_branch_index_list_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
 
@@ -335,8 +327,7 @@ fn test_branch_index_list_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
 
     // List all branches works (includes _system_ from init_system_branch)
@@ -357,8 +348,7 @@ fn test_branch_delete_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());
@@ -383,8 +373,7 @@ fn test_branch_delete_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());
 
@@ -421,8 +410,7 @@ fn test_cross_primitive_transaction_survives_recovery() {
 
     // Recovery
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
 
@@ -443,9 +431,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 1: Create and populate
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         kv.put(&branch_id, "default", "cycle1", Value::Int(1))
             .unwrap();
@@ -453,9 +440,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 2: Add more data
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Verify cycle 1 data
@@ -471,9 +457,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 3: Add more data
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Verify all previous data
@@ -493,9 +478,8 @@ fn test_multiple_recovery_cycles() {
 
     // Final verification
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         assert_eq!(
@@ -522,9 +506,8 @@ fn test_all_primitives_recover_together() {
     // Phase 1: Create data for all primitives
     let branch_id: BranchId;
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
@@ -549,9 +532,8 @@ fn test_all_primitives_recover_together() {
 
     // Phase 2: Verify all recovered
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
@@ -584,9 +566,8 @@ fn test_search_index_survives_recovery() {
 
     // Session 1: index documents and verify search works
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -622,9 +603,8 @@ fn test_search_index_survives_recovery() {
 
     // Session 2: reopen and verify search still works
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // KV data survived
@@ -656,9 +636,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 1: Create initial data
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         kv.put(
             &branch_id,
@@ -671,9 +650,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 2: Add more data, verify previous data searchable
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "indexing");
@@ -694,9 +672,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 3: Verify both documents searchable
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "retrieval");
@@ -723,9 +700,8 @@ fn test_issue_1710_checkpoint_recovery_preserves_all_data() {
 
     // Phase 1: Write initial data and checkpoint
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         for i in 0..10 {
@@ -763,9 +739,8 @@ fn test_issue_1710_checkpoint_recovery_preserves_all_data() {
 
     // Phase 3: Recovery — all 20 keys must be present
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         for i in 0..10 {
@@ -808,9 +783,8 @@ fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
     let keys_per_writer = 25;
 
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Write initial data
@@ -858,9 +832,8 @@ fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
 
     // Recovery: all keys must be present
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         assert_eq!(
@@ -900,9 +873,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
 
     // Session 1: Write initial data and close cleanly (creates search manifest)
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -934,9 +906,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
 
     // Session 2: Add more data, close cleanly (manifest updated with new data)
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -966,9 +937,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
     // Session 3: Reopen — fast path loads stale manifest.
     // Without the fix, session 2 data is in KV but invisible to search.
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
 
@@ -1031,8 +1001,7 @@ fn test_bm25_search_isolates_by_space_kv() {
     let branch_id = BranchId::new();
 
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // Same key, different spaces, identical text → identical BM25 candidates
@@ -1087,8 +1056,7 @@ fn test_bm25_search_isolates_by_space_event() {
     let branch_id = BranchId::new();
 
     let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     event_log
@@ -1144,9 +1112,8 @@ fn test_json_survives_bm25_slow_path_rebuild() {
 
     // Session 1: write a JSON doc
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let doc = JsonValue::from_value(serde_json::json!({
@@ -1168,9 +1135,8 @@ fn test_json_survives_bm25_slow_path_rebuild() {
 
     // Session 2: reopen — slow path must re-index the JSON doc
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "supremacy").with_space("tenant_a");
@@ -1218,9 +1184,8 @@ fn test_json_slow_path_skips_secondary_index_storage() {
     // filter against a doc that *would* deserialize successfully if the
     // filter weren't there.
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let doc = JsonValue::from_value(serde_json::json!({
@@ -1255,9 +1220,8 @@ fn test_json_slow_path_skips_secondary_index_storage() {
     // Session 2: reopen — slow path should index doc1 but skip both the
     // serde-encoded IndexDef metadata AND the smuggled JsonDoc.
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         // doc1 is searchable in tenant_a
@@ -1525,9 +1489,8 @@ fn test_startup_repair_registers_orphan_data_spaces() {
     // No metadata is ever written for this space — the bypass helper
     // skips every primitive's registration call site.
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         bypass_kv_put(&db, branch_id, "orphan_startup", b"k", Value::Int(1));
         drop(db);
     }
@@ -1539,9 +1502,8 @@ fn test_startup_repair_registers_orphan_data_spaces() {
     // assertion fails when startup repair is reverted instead of being
     // masked by the data-scan fallback.
     {
-        let db =
-            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-                .unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         assert!(
             space_metadata_exists(&db, branch_id, "orphan_startup"),
             "startup repair must persist a SpaceIndex metadata key for orphan data"
@@ -1754,9 +1716,8 @@ fn test_recovery_failure_does_not_deadlock() {
     // signal, we know the worker deadlocked.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = Database::open_runtime(
-            OpenSpec::primary(&path).with_subsystem(AlwaysFailingSubsystem),
-        );
+        let result =
+            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(AlwaysFailingSubsystem));
         let _ = tx.send(result.is_err());
     });
 
@@ -1823,9 +1784,7 @@ fn test_recovery_panic_does_not_deadlock() {
         // The worker thread reports back whether it reached here at all
         // (i.e. whether it did not deadlock).
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            Database::open_runtime(
-                OpenSpec::primary(&path).with_subsystem(PanickingSubsystem),
-            )
+            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(PanickingSubsystem))
         }));
         let _ = tx.send(caught.is_err());
     });
@@ -1914,9 +1873,16 @@ fn test_mixed_opener_rejects_subsystem_mismatch() {
     );
 
     assert!(
-        matches!(&result, Err(strata_core::StrataError::IncompatibleReuse { .. })),
+        matches!(
+            &result,
+            Err(strata_core::StrataError::IncompatibleReuse { .. })
+        ),
         "mixed-opener with different subsystems must return IncompatibleReuse, got {}",
-        if result.is_ok() { "Ok(_)" } else { "different error" }
+        if result.is_ok() {
+            "Ok(_)"
+        } else {
+            "different error"
+        }
     );
 
     // db_a is still valid and has the original subsystem list

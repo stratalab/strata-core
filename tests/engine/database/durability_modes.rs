@@ -110,10 +110,9 @@ fn cache_create_test_db_is_cache() {
 #[test]
 fn standard_mode_is_persistent() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db = Database::open_runtime(
-        OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem),
-    )
-    .expect("standard database");
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .expect("standard database");
 
     // Standard mode is NOT cache (has durability)
     assert!(!db.is_cache());
