@@ -45,7 +45,9 @@ Every method on the `Strata` struct, grouped by category.
 |--------|-----------|---------|
 | `current_space` | `() -> &str` | Current space name |
 | `set_space` | `(name: &str) -> Result<()>` | Switches current space |
+| `create_space` | `(name: &str) -> Result<()>` | Creates a space in current branch |
 | `list_spaces` | `() -> Result<Vec<String>>` | All space names in current branch |
+| `space_exists` | `(name: &str) -> Result<bool>` | Whether the space exists |
 | `delete_space` | `(name: &str) -> Result<()>` | Deletes empty space |
 | `delete_space_force` | `(name: &str) -> Result<()>` | Deletes space and all its data |
 

@@ -30,8 +30,8 @@
 //! ```
 
 use crate::ipc::Backend;
-use crate::types::BranchId;
-use crate::{Command, Error, Output, Result};
+use crate::types::{BranchId, BranchInfo, BranchStatus, VersionedBranchInfo};
+use crate::{Command, Error, Output, Result, Value};
 use strata_engine::branch_ops::{
     BranchDiffResult, CherryPickFilter, CherryPickInfo, ForkInfo, MergeInfo, MergeStrategy,
     NoteInfo, RevertInfo, TagInfo, ThreeWayDiffResult,
@@ -53,14 +53,30 @@ impl<'a> Branches<'a> {
 
     /// List all branch names.
     pub fn list(&self) -> Result<Vec<String>> {
+        Ok(self
+            .list_with_options(None, None, None)?
+            .into_iter()
+            .map(|r| r.info.id.0)
+            .collect())
+    }
+
+    /// List branch info with optional pagination.
+    ///
+    /// `offset` and `limit` are applied by the executor. The `state` parameter
+    /// is accepted for command parity, but is currently equivalent to `None`
+    /// because the executor only exposes `BranchStatus::Active`.
+    pub fn list_with_options(
+        &self,
+        state: Option<BranchStatus>,
+        limit: Option<u64>,
+        offset: Option<u64>,
+    ) -> Result<Vec<VersionedBranchInfo>> {
         match self.backend.execute(Command::BranchList {
-            state: None,
-            limit: None,
-            offset: None,
+            state,
+            limit,
+            offset,
         })? {
-            Output::BranchInfoList(branches) => {
-                Ok(branches.into_iter().map(|r| r.info.id.0).collect())
-            }
+            Output::BranchInfoList(branches) => Ok(branches),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchList".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
@@ -85,7 +101,7 @@ impl<'a> Branches<'a> {
     ///
     /// # Returns
     /// `Some(VersionedBranchInfo)` if the branch exists, `None` otherwise.
-    pub fn info(&self, name: &str) -> Result<Option<crate::types::VersionedBranchInfo>> {
+    pub fn info(&self, name: &str) -> Result<Option<VersionedBranchInfo>> {
         match self.backend.execute(Command::BranchGet {
             branch: BranchId::from(name),
         })? {
@@ -99,11 +115,26 @@ impl<'a> Branches<'a> {
 
     /// Create a new empty branch.
     pub fn create(&self, name: &str) -> Result<()> {
+        self.create_with_options(Some(name.to_string()), None)
+            .map(|_| ())
+    }
+
+    /// Create a branch with optional explicit name and metadata.
+    ///
+    /// If `branch_id` is `None`, the executor generates a UUID-based name.
+    /// The current executor accepts `metadata` for command parity, but the
+    /// handler still ignores it in MVP mode.
+    /// Returns the created branch info and its creation version.
+    pub fn create_with_options(
+        &self,
+        branch_id: Option<String>,
+        metadata: Option<Value>,
+    ) -> Result<(BranchInfo, u64)> {
         match self.backend.execute(Command::BranchCreate {
-            branch_id: Some(name.to_string()),
-            metadata: None,
+            branch_id,
+            metadata,
         })? {
-            Output::BranchWithVersion { .. } => Ok(()),
+            Output::BranchWithVersion { info, version } => Ok((info, version)),
             _ => Err(Error::Internal {
                 reason: "Unexpected output for BranchCreate".into(),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),

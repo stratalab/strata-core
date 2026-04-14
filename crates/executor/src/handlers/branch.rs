@@ -47,8 +47,12 @@ fn versioned_to_branch_info(v: strata_core::Versioned<BranchMetadata>) -> Versio
 pub fn branch_create(
     p: &Arc<Primitives>,
     branch_id: Option<String>,
-    _metadata: Option<strata_core::Value>,
+    metadata: Option<strata_core::Value>,
 ) -> Result<Output> {
+    // BranchCreate still accepts metadata for command/API parity, but the
+    // current executor MVP path does not persist it yet.
+    let _ = metadata;
+
     // Users can provide any string as a branch name (like git branch names).
     // If not provided, generate a UUID for anonymous branches.
     let branch_str = branch_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
@@ -77,11 +81,14 @@ pub fn branch_get(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// Handle BranchList command.
 pub fn branch_list(
     p: &Arc<Primitives>,
-    _state: Option<crate::types::BranchStatus>,
+    state: Option<crate::types::BranchStatus>,
     limit: Option<u64>,
-    _offset: Option<u64>,
+    offset: Option<u64>,
 ) -> Result<Output> {
-    // MVP: ignore status filter, list all branches
+    // The executor currently exposes only the Active branch status, so the
+    // status filter is a no-op until additional user-visible states exist.
+    let _ = state;
+
     let ids = convert_result(p.branch.list_branches())?;
 
     let mut all = Vec::new();
@@ -94,10 +101,12 @@ pub fn branch_list(
         }
     }
 
-    // Apply limit if specified
+    let offset = offset.unwrap_or(0) as usize;
+    let branches = all.into_iter().skip(offset);
+
     let limited: Vec<VersionedBranchInfo> = match limit {
-        Some(l) => all.into_iter().take(l as usize).collect(),
-        None => all,
+        Some(l) => branches.take(l as usize).collect(),
+        None => branches.collect(),
     };
 
     Ok(Output::BranchInfoList(limited))
