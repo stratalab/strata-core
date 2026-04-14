@@ -1501,6 +1501,21 @@ impl strata_engine::Subsystem for SlowRecoverySubsystem {
     }
 }
 
+/// Marker subsystem with same name as `SlowRecoverySubsystem` for signature
+/// compatibility. Used by concurrent openers that need to match the first
+/// opener's subsystem list for hard reuse rejection.
+struct SlowRecoveryMarker;
+
+impl strata_engine::Subsystem for SlowRecoveryMarker {
+    fn name(&self) -> &'static str {
+        "slow-recovery-regression-test"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+}
+
 /// Audit-follow-up regression for stratalab/strata-core#2354 Finding 1.
 ///
 /// Before the fix, `acquire_primary_db` inserted the fresh `Arc<Database>`
@@ -1555,14 +1570,18 @@ fn test_concurrent_open_blocks_until_recovery_completes() {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    // Thread B: concurrent open of the same path. With the fix, this
-    // blocks on OPEN_DATABASES until thread A finishes recovery and
-    // publishes the Arc. Without the fix, thread B returns immediately
-    // and the `done` flag load below is `false`.
+    // Thread B: concurrent open of the same path with matching subsystem.
+    // With the fix, this blocks on OPEN_DATABASES until thread A finishes
+    // recovery and publishes the Arc. Without the fix, thread B returns
+    // immediately and the `done` flag load below is `false`.
+    // Note: Must use SlowRecoveryMarker (same name) to pass hard reuse rejection.
     let path_b = Arc::clone(&path);
     let done_b = Arc::clone(&done);
     let handle_b = std::thread::spawn(move || {
-        let db = DatabaseBuilder::new().open(&*path_b).unwrap();
+        let db = DatabaseBuilder::new()
+            .with_subsystem(SlowRecoveryMarker)
+            .open(&*path_b)
+            .unwrap();
         let observed_done = done_b.load(Ordering::SeqCst);
         (db, observed_done)
     });
@@ -1763,13 +1782,12 @@ fn test_recovery_panic_does_not_deadlock() {
 }
 
 // ============================================================================
-// Audit-follow-up regression for stratalab/strata-core#2354 Finding 2:
-// mixed-opener bypass must preserve the earlier subsystem list. See the
-// fast-path mismatch warning in `acquire_primary_db`.
+// Hard reuse rejection: mixing openers with different subsystem lists
+// must return an error, not silently drop the later caller's subsystems.
 // ============================================================================
 
 /// Trivial test-only `Subsystem` whose `recover()` is a no-op. Used by
-/// `test_mixed_opener_returns_earlier_subsystems` to construct a second
+/// `test_mixed_opener_rejects_subsystem_mismatch` to construct a second
 /// caller's subsystem list that is intentionally distinct from
 /// `Database::open`'s hardcoded `[SearchSubsystem]`.
 struct NoopRegressionSubsystem;
@@ -1784,24 +1802,13 @@ impl strata_engine::Subsystem for NoopRegressionSubsystem {
     }
 }
 
-/// Audit follow-up to stratalab/strata-core#2354 Finding 2.
+/// T2-E3 hard reuse rejection: subsystem mismatches are errors.
 ///
 /// When two callers open the same canonical path through
-/// `acquire_primary_db` with different subsystem lists, the fast-path
-/// single-instance-per-path contract returns the **earlier** instance
-/// unchanged — the second caller's requested subsystems are silently
-/// dropped. This is the behavior we are locking in, not the behavior
-/// we wish we had: `Strata` / `DatabaseBuilder` callers must notice
-/// the mismatch via the `tracing::warn!` that `acquire_primary_db`'s
-/// fast path emits. "Upgrading" the subsystem list instead would
-/// break the singleton-per-path contract and surprise callers who
-/// mix `Database::open` and `Strata::open` in the same process.
-///
-/// The test asserts two invariants:
-///   1. Singleton-per-path: `Arc::ptr_eq(&db_a, &db_b)`.
-///   2. The installed subsystem list on the returned Arc is what the
-///      FIRST caller requested — the second caller's distinct
-///      subsystems are not present.
+/// `acquire_primary_db` with different subsystem lists, the second
+/// caller receives `StrataError::IncompatibleReuse`. This prevents
+/// silent subsystem dropping when mixing openers (e.g., `Database::open`
+/// and `Strata::open` on the same path).
 ///
 /// Lives in the integration test binary (not `crates/engine/src/database/tests.rs`)
 /// because several lib tests call `OPEN_DATABASES.lock().clear()` for
@@ -1810,7 +1817,7 @@ impl strata_engine::Subsystem for NoopRegressionSubsystem {
 /// `open()` to fall through to a file-lock collision. Integration
 /// tests run in a separate process so the race cannot fire.
 #[test]
-fn test_mixed_opener_returns_earlier_subsystems() {
+fn test_mixed_opener_rejects_subsystem_mismatch() {
     use strata_engine::DatabaseBuilder;
 
     let temp = TempDir::new().unwrap();
@@ -1823,35 +1830,19 @@ fn test_mixed_opener_returns_earlier_subsystems() {
         "Database::open should install only SearchSubsystem"
     );
 
-    // Caller B: `DatabaseBuilder` with an intentionally different
-    // subsystem list (`SearchSubsystem` + `NoopRegressionSubsystem`).
-    // This enters `acquire_primary_db`, hits the registry fast path,
-    // and must return the SAME Arc as caller A — with caller A's
-    // subsystem list, not caller B's.
-    let db_b = DatabaseBuilder::new()
+    // Caller B: `DatabaseBuilder` with a different subsystem list.
+    // This must fail with IncompatibleReuse, not silently return db_a.
+    let result = DatabaseBuilder::new()
         .with_subsystem(strata_engine::SearchSubsystem)
         .with_subsystem(NoopRegressionSubsystem)
-        .open(temp.path())
-        .unwrap();
+        .open(temp.path());
 
-    // Singleton-per-path invariant.
     assert!(
-        Arc::ptr_eq(&db_a, &db_b),
-        "same-path opens must return the same Arc<Database> \
-         (single-instance-per-path contract)"
+        matches!(&result, Err(strata_core::StrataError::IncompatibleReuse { .. })),
+        "mixed-opener with different subsystems must return IncompatibleReuse, got {}",
+        if result.is_ok() { "Ok(_)" } else { "different error" }
     );
 
-    // Key assertion: the installed list is A's, not B's. Caller B's
-    // `NoopRegressionSubsystem` was silently dropped. If a future
-    // refactor ever makes the second caller's list win, this
-    // assertion fires.
-    assert_eq!(
-        db_b.installed_subsystem_names(),
-        vec!["search"],
-        "mixed-opener bypass must preserve the EARLIER subsystem list; \
-         caller B's requested `noop-mixed-opener-regression` subsystem \
-         was silently dropped (see tracing::warn! in \
-         acquire_primary_db's fast path, audit follow-up to #2354 \
-         Finding 2)"
-    );
+    // db_a is still valid and has the original subsystem list
+    assert_eq!(db_a.installed_subsystem_names(), vec!["search"]);
 }

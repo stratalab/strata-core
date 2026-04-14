@@ -219,25 +219,13 @@ impl Database {
                         )
                     })?;
                     if let Err(reason) = existing_signature.check_compatible(requested_signature) {
-                        // Subsystem mismatches are soft errors — warn and return
-                        // the existing instance (same behavior as old mixed-opener
-                        // detection). Mode/durability/codec/default_branch mismatches
-                        // are hard errors because they affect correctness.
-                        if matches!(reason, super::compat::IncompatibleReason::SubsystemMismatch { .. }) {
-                            tracing::warn!(
-                                target: "strata::db",
-                                path = ?canonical_path,
-                                %reason,
-                                "Mixed-opener detected: returning existing instance with \
-                                 earlier subsystems. Use consistent opener across all call \
-                                 sites for this path."
-                            );
-                        } else {
-                            return Err(StrataError::incompatible_reuse(format!(
-                                "cannot reuse existing database instance: {}",
-                                reason
-                            )));
-                        }
+                        // Hard reuse rejection: all mismatches (including subsystem)
+                        // are errors. This prevents silent subsystem dropping when
+                        // mixing openers (e.g., Database::open + Strata::open).
+                        return Err(StrataError::incompatible_reuse(format!(
+                            "cannot reuse existing database instance: {}",
+                            reason
+                        )));
                     }
                 } else {
                     // Mixed-opener detection (audit follow-up to #2354
@@ -1017,6 +1005,21 @@ impl Database {
         } else {
             config::StrataConfig::default()
         };
+
+        // Sanitize auto_embed when embed feature is not compiled
+        #[cfg(not(feature = "embed"))]
+        let resolved_cfg = {
+            let mut cfg = resolved_cfg;
+            if cfg.auto_embed {
+                warn!(
+                    "auto_embed=true but the 'embed' feature is not compiled; \
+                     auto-embedding is disabled"
+                );
+                cfg.auto_embed = false;
+            }
+            cfg
+        };
+
         let durability_mode = resolved_cfg.durability_mode()?;
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
@@ -1034,7 +1037,17 @@ impl Database {
             subsystems,
             Some(requested_signature),
         )? {
-            AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
+            AcquiredDatabase::Existing(db) => {
+                // Ensure config file exists even on reuse (per documented contract).
+                // If caller provided an explicit config, write it. Otherwise ensure
+                // a default exists so subsequent opens find it.
+                if let Some(cfg) = config.as_ref() {
+                    cfg.write_to_file(&config_path)?;
+                } else {
+                    config::StrataConfig::write_default_if_missing(&config_path)?;
+                }
+                Self::wait_for_opened_db(db)
+            }
             AcquiredDatabase::New { db, canonical_path } => {
                 Self::finish_opened_db(db, &canonical_path, |db| {
                     if let Some(cfg) = config.as_ref() {
