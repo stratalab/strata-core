@@ -35,7 +35,7 @@ use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
-use strata_core::id::CommitVersion;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
 use strata_core::EntityRef;
@@ -76,13 +76,15 @@ pub struct VectorBackendState {
 
     /// Pending HNSW operations to be applied after transaction commit.
     ///
-    /// Operations are keyed by branch_id. On commit, the VectorCommitObserver
-    /// drains and applies pending ops for the committed branch. On abort,
-    /// the Session clears pending ops for the aborted branch.
+    /// Operations are keyed by transaction id so concurrent writers on the same
+    /// branch cannot apply or clear each other's deferred backend work.
+    /// On commit, the VectorCommitObserver drains and applies only the committed
+    /// transaction's ops. On abort or failed commit, the Session clears that
+    /// transaction's queued ops without touching other in-flight writers.
     ///
     /// This moves vector backend maintenance ownership from executor (Session)
     /// to subsystem (VectorSubsystem), fulfilling the T2-E2 requirement.
-    pending_ops: DashMap<strata_core::types::BranchId, Vec<crate::ext::StagedVectorOp>>,
+    pending_ops: DashMap<TxnId, Vec<crate::ext::StagedVectorOp>>,
 }
 
 impl Default for VectorBackendState {
@@ -99,20 +101,16 @@ impl VectorBackendState {
     ///
     /// Called by VectorStoreExt during transactions. The operation will be
     /// applied by VectorCommitObserver after the transaction commits.
-    pub fn queue_pending_op(
-        &self,
-        branch_id: strata_core::types::BranchId,
-        op: crate::ext::StagedVectorOp,
-    ) {
-        self.pending_ops.entry(branch_id).or_default().push(op);
+    pub fn queue_pending_op(&self, txn_id: TxnId, op: crate::ext::StagedVectorOp) {
+        self.pending_ops.entry(txn_id).or_default().push(op);
     }
 
-    /// Apply and clear all pending operations for a branch.
+    /// Apply and clear all pending operations for a transaction.
     ///
     /// Called by VectorCommitObserver after transaction commit.
     /// Returns the number of operations applied.
-    pub fn apply_pending_ops(&self, branch_id: strata_core::types::BranchId) -> usize {
-        if let Some((_, ops)) = self.pending_ops.remove(&branch_id) {
+    pub fn apply_pending_ops(&self, txn_id: TxnId) -> usize {
+        if let Some((_, ops)) = self.pending_ops.remove(&txn_id) {
             let count = ops.len();
             for op in ops {
                 crate::ext::apply_staged_vector_op(self, op);
@@ -123,11 +121,12 @@ impl VectorBackendState {
         }
     }
 
-    /// Clear pending operations for a branch without applying them.
+    /// Clear pending operations for a transaction without applying them.
     ///
-    /// Called by Session on transaction abort to clean up uncommitted ops.
-    pub fn clear_pending_ops(&self, branch_id: strata_core::types::BranchId) {
-        self.pending_ops.remove(&branch_id);
+    /// Called by Session on transaction abort or commit failure to clean up
+    /// uncommitted ops.
+    pub fn clear_pending_ops(&self, txn_id: TxnId) {
+        self.pending_ops.remove(&txn_id);
     }
 }
 

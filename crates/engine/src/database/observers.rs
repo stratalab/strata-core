@@ -27,8 +27,9 @@ use parking_lot::RwLock;
 use std::fmt;
 use std::sync::Arc;
 
-use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::id::{CommitVersion, TxnId};
+use strata_core::types::{BranchId, Key};
+use strata_core::value::Value;
 
 // =============================================================================
 // Error Types
@@ -117,6 +118,8 @@ impl std::error::Error for ObserverError {}
 /// Information about a committed transaction.
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
+    /// The transaction that committed.
+    pub txn_id: TxnId,
     /// The branch that was committed to.
     pub branch_id: BranchId,
     /// The commit version assigned.
@@ -172,6 +175,10 @@ pub struct ReplayInfo {
     pub commit_version: CommitVersion,
     /// Number of entries in the record.
     pub entry_count: usize,
+    /// Values written by the replayed record.
+    pub puts: Vec<(Key, Value)>,
+    /// Values that existed before deleted keys were replayed.
+    pub deleted_values: Vec<(Key, Value)>,
 }
 
 /// Observer called after a follower applies a WAL record.
@@ -246,6 +253,8 @@ pub struct BranchOpEvent {
     pub source_branch_name: Option<String>,
     /// The commit version at which the operation occurred.
     pub commit_version: Option<CommitVersion>,
+    /// Tag name for tag/untag operations.
+    pub tag_name: Option<String>,
     /// Optional message (for fork, merge, revert).
     pub message: Option<String>,
     /// Optional creator identifier.
@@ -274,6 +283,7 @@ impl BranchOpEvent {
             source_branch_id: None,
             source_branch_name: None,
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: None,
@@ -294,6 +304,7 @@ impl BranchOpEvent {
             source_branch_id: None,
             source_branch_name: None,
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: None,
@@ -320,6 +331,7 @@ impl BranchOpEvent {
             source_branch_id: Some(source_branch_id),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(commit_version),
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: None,
@@ -349,6 +361,7 @@ impl BranchOpEvent {
             source_branch_id: Some(source_branch_id),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(merge_version),
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: Some(strategy.into()),
@@ -375,6 +388,7 @@ impl BranchOpEvent {
             source_branch_id: None,
             source_branch_name: None,
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: None,
@@ -402,6 +416,7 @@ impl BranchOpEvent {
             source_branch_id: Some(source_branch_id),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
             merge_strategy: None,
@@ -643,6 +658,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
 
         let info = CommitInfo {
+            txn_id: 7u64.into(),
             branch_id: BranchId::new(),
             commit_version: CommitVersion(1),
             entry_count: 10,

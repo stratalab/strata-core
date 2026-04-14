@@ -39,74 +39,6 @@ fn versioned_to_branch_info(v: strata_core::Versioned<BranchMetadata>) -> Versio
     }
 }
 
-/// Validate a branch name (executor layer).
-///
-/// ## Layered Validation
-///
-/// Branch names are validated at two layers:
-/// - **Executor (here):** User-facing validation with helpful hints
-/// - **Engine (`BranchService`):** API contract enforcement
-///
-/// This duplication is intentional. Executor catches invalid input early
-/// with UX-friendly error messages and hints. Engine enforces contracts
-/// even for direct API callers (bypassing executor).
-///
-/// ## Rules
-///
-/// - Non-empty, non-whitespace
-/// - No NUL bytes or control characters
-/// - Max 255 bytes
-/// - No `_system` prefix (reserved for system branches)
-fn validate_branch_name(name: &str) -> Result<()> {
-    if name.is_empty() {
-        return Err(Error::InvalidInput {
-            reason: "Branch name must not be empty".to_string(),
-            hint: None,
-        });
-    }
-    if name.trim().is_empty() {
-        return Err(Error::InvalidInput {
-            reason: "Branch name must not be whitespace-only".to_string(),
-            hint: None,
-        });
-    }
-    if name.contains('\0') {
-        return Err(Error::InvalidInput {
-            reason: "Branch name must not contain NUL bytes".to_string(),
-            hint: None,
-        });
-    }
-    if name.chars().any(|c| c.is_control()) {
-        return Err(Error::InvalidInput {
-            reason: "Branch name must not contain control characters".to_string(),
-            hint: None,
-        });
-    }
-    if name.len() > 255 {
-        return Err(Error::InvalidInput {
-            reason: "Branch name must not exceed 255 bytes".to_string(),
-            hint: None,
-        });
-    }
-    if name.starts_with("_system") {
-        return Err(Error::InvalidInput {
-            reason: "Branch names starting with '_system' are reserved".to_string(),
-            hint: Some("Choose a different branch name.".to_string()),
-        });
-    }
-    Ok(())
-}
-
-/// Guard: reject operations on the default branch that would delete it.
-fn reject_default_branch(branch: &BranchId, operation: &str) -> Result<()> {
-    if branch.is_default() {
-        return Err(Error::ConstraintViolation {
-            reason: format!("Cannot {} the default branch", operation),
-        });
-    }
-    Ok(())
-}
-
 // =============================================================================
 // MVP Handlers
 // =============================================================================
@@ -119,19 +51,10 @@ pub fn branch_create(
 ) -> Result<Output> {
     // Users can provide any string as a branch name (like git branch names).
     // If not provided, generate a UUID for anonymous branches.
-    let branch_str = match &branch_id {
-        Some(s) => {
-            validate_branch_name(s)?;
-            s.clone()
-        }
-        None => uuid::Uuid::new_v4().to_string(),
-    };
+    let branch_str = branch_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Use BranchService for canonical path with DAG integration.
-    let metadata = p.db.branches().create(&branch_str).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+    let metadata = convert_result(p.db.branches().create(&branch_str))?;
 
     Ok(Output::BranchWithVersion {
         info: metadata_to_branch_info(&metadata),
@@ -195,14 +118,8 @@ pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// - Removes the per-branch commit lock to prevent unbounded growth (#944)
 /// - Deletes all vector collections for the branch to free memory (#946)
 pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
-    reject_default_branch(&branch, "delete")?;
-    crate::handlers::reject_system_branch(&branch)?;
-
     // Use BranchService for canonical path with DAG integration.
-    p.db.branches().delete(branch.as_str()).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+    convert_result(p.db.branches().delete(branch.as_str()))?;
 
     // Cleanup: remove per-branch commit lock (#944)
     // Convert the executor BranchId to core BranchId for the lock cleanup
@@ -242,19 +159,7 @@ pub fn branch_fork(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    if source.starts_with("_system") {
-        return Err(Error::InvalidInput {
-            reason: format!("Cannot fork from reserved branch '{}'", source),
-            hint: Some("Branches starting with '_system' are internal.".to_string()),
-        });
-    }
-    validate_branch_name(&destination)?;
-
     // Use BranchService for canonical path with DAG integration.
-    let options = ForkOptions::default()
-        .with_message(message.clone().unwrap_or_default())
-        .with_creator(creator.clone().unwrap_or_default());
-    // Only set message/creator if they were provided
     let options = match (&message, &creator) {
         (Some(m), Some(c)) => ForkOptions::default()
             .with_message(m.clone())
@@ -263,11 +168,10 @@ pub fn branch_fork(
         (None, Some(c)) => ForkOptions::default().with_creator(c.clone()),
         (None, None) => ForkOptions::default(),
     };
-    let info = p.db.branches().fork_with_options(&source, &destination, options)
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
+    let info = convert_result(
+        p.db.branches()
+            .fork_with_options(&source, &destination, options),
+    )?;
 
     Ok(Output::BranchForked(info))
 }
@@ -293,12 +197,10 @@ pub fn branch_diff(
         },
         as_of,
     };
-    let result =
-        strata_engine::branch_ops::diff_branches_with_options(&p.db, &branch_a, &branch_b, options)
-            .map_err(|e| Error::Internal {
-                reason: e.to_string(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+    let result = convert_result(
+        p.db.branches()
+            .diff_with_options(&branch_a, &branch_b, options),
+    )?;
     Ok(Output::BranchDiff(result))
 }
 
@@ -311,13 +213,6 @@ pub fn branch_merge(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    if source.starts_with("_system") || target.starts_with("_system") {
-        return Err(Error::InvalidInput {
-            reason: "Cannot merge to or from reserved '_system' branches".to_string(),
-            hint: Some("Branches starting with '_system' are internal.".to_string()),
-        });
-    }
-
     // Use BranchService for canonical path with DAG integration.
     let mut options = MergeOptions::with_strategy(strategy);
     if let Some(m) = &message {
@@ -326,11 +221,10 @@ pub fn branch_merge(
     if let Some(c) = &creator {
         options = options.with_creator(c.clone());
     }
-    let info = p.db.branches().merge_with_options(&source, &target, options)
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
+    let info = convert_result(
+        p.db.branches()
+            .merge_with_options(&source, &target, options),
+    )?;
 
     Ok(Output::BranchMerged(info))
 }
@@ -344,11 +238,7 @@ pub fn branch_diff_three_way(
     // Route through BranchService — it resolves DAG-backed merge bases when
     // the graph subsystem is installed and falls back to storage-level fork
     // info otherwise.
-    let result = p.db.branches().diff3(&branch_a, &branch_b, None)
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
+    let result = convert_result(p.db.branches().diff3(&branch_a, &branch_b, None))?;
 
     Ok(Output::ThreeWayDiff(result))
 }
@@ -360,11 +250,7 @@ pub fn branch_merge_base(
     branch_b: String,
 ) -> Result<Output> {
     // Route through BranchService — it queries merge_base from DAG internally.
-    let merge_base = p.db.branches().merge_base(&branch_a, &branch_b)
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
+    let merge_base = convert_result(p.db.branches().merge_base(&branch_a, &branch_b))?;
 
     // Convert MergeBaseResult to MergeBaseInfo for output compatibility
     let result = merge_base.map(|mb| strata_engine::branch_ops::MergeBaseInfo {
@@ -386,20 +272,12 @@ pub fn branch_revert(
     from_version: u64,
     to_version: u64,
 ) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-
     // Use BranchService for canonical path with DAG integration.
-    let info =
-        p.db.branches()
-            .revert(
-                &branch,
-                CommitVersion(from_version),
-                CommitVersion(to_version),
-            )
-            .map_err(|e| Error::Internal {
-                reason: e.to_string(),
-                hint: None,
-            })?;
+    let info = convert_result(p.db.branches().revert(
+        &branch,
+        CommitVersion(from_version),
+        CommitVersion(to_version),
+    ))?;
 
     Ok(Output::BranchReverted(info))
 }
@@ -418,11 +296,8 @@ pub fn branch_cherry_pick(
     filter_keys: Option<Vec<String>>,
     filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
 ) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(source.as_str()))?;
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(target.as_str()))?;
-
     // Use BranchService for canonical path with DAG integration.
-    let info = if let Some(keys) = keys {
+    let info = convert_result(if let Some(keys) = keys {
         // Direct key pick
         p.db.branches().cherry_pick(&source, &target, &keys)
     } else {
@@ -433,10 +308,6 @@ pub fn branch_cherry_pick(
         };
         p.db.branches()
             .cherry_pick_from_diff(&source, &target, filter, None)
-    }
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
     })?;
 
     Ok(Output::BranchCherryPicked(info))
@@ -515,20 +386,14 @@ pub fn tag_create(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-
     // Use BranchService for canonical path with observer notification.
-    let info = p.db.branches().tag(
+    let info = convert_result(p.db.branches().tag(
         &branch,
         &name,
         version,
         message.as_deref(),
         creator.as_deref(),
-    )
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
-    })?;
+    ))?;
 
     Ok(Output::TagCreated(info))
 }
@@ -537,37 +402,20 @@ pub fn tag_create(
 ///
 /// Routes through `db.branches().untag()` for observer notification.
 pub fn tag_delete(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-
     // Use BranchService for canonical path with observer notification.
-    let deleted = p.db.branches().untag(&branch, &name).map_err(|e| {
-        Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        }
-    })?;
+    let deleted = convert_result(p.db.branches().untag(&branch, &name))?;
     Ok(Output::Bool(deleted))
 }
 
 /// Handle TagList command.
 pub fn tag_list(p: &Arc<Primitives>, branch: String) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let tags = p.db.branches().list_tags(&branch).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
-    })?;
+    let tags = convert_result(p.db.branches().list_tags(&branch))?;
     Ok(Output::TagList(tags))
 }
 
 /// Handle TagResolve command.
 pub fn tag_resolve(p: &Arc<Primitives>, branch: String, name: String) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let tag = p.db.branches().resolve_tag(&branch, &name).map_err(|e| {
-        Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        }
-    })?;
+    let tag = convert_result(p.db.branches().resolve_tag(&branch, &name))?;
     Ok(Output::MaybeTag(tag))
 }
 
@@ -588,59 +436,33 @@ pub fn note_add(
     author: Option<String>,
     metadata: Option<strata_core::Value>,
 ) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-
     // Use BranchService for canonical path.
-    let note = p.db.branches().add_note(
+    let note = convert_result(p.db.branches().add_note(
         &branch,
         CommitVersion(version),
         &message,
         author.as_deref(),
         metadata,
-    )
-    .map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
-    })?;
+    ))?;
 
     Ok(Output::NoteAdded(note))
 }
 
 /// Handle NoteGet command.
 pub fn note_get(p: &Arc<Primitives>, branch: String, version: Option<u64>) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let notes = p.db.branches().get_notes(&branch, version).map_err(|e| {
-        Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        }
-    })?;
+    let notes = convert_result(p.db.branches().get_notes(&branch, version))?;
     Ok(Output::NoteList(notes))
 }
 
 /// Handle NoteDelete command.
 pub fn note_delete(p: &Arc<Primitives>, branch: String, version: u64) -> Result<Output> {
-    crate::handlers::reject_system_branch(&crate::types::BranchId::from(branch.as_str()))?;
-    let deleted = p.db.branches().delete_note(&branch, CommitVersion(version))
-        .map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+    let deleted = convert_result(p.db.branches().delete_note(&branch, CommitVersion(version)))?;
     Ok(Output::Bool(deleted))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_reject_default_branch() {
-        let branch = BranchId::from("default");
-        assert!(reject_default_branch(&branch, "delete").is_err());
-
-        let branch = BranchId::from("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        assert!(reject_default_branch(&branch, "delete").is_ok());
-    }
 
     #[test]
     fn test_metadata_to_branch_info() {
@@ -658,39 +480,5 @@ mod tests {
         let info = metadata_to_branch_info(&m);
         assert_eq!(info.id.as_str(), "test-branch");
         assert_eq!(info.status, crate::types::BranchStatus::Active);
-    }
-
-    #[test]
-    fn reject_create_system_branch() {
-        assert!(validate_branch_name("_system_foo").is_err());
-        assert!(validate_branch_name("_system_").is_err());
-        assert!(validate_branch_name("_system").is_err());
-    }
-
-    #[test]
-    fn reject_system_branch_variants() {
-        // All _system* prefixes must be rejected
-        for name in &["_system_", "_system", "_system_foo", "_system_bar"] {
-            let branch = BranchId::from(*name);
-            assert!(
-                crate::handlers::reject_system_branch(&branch).is_err(),
-                "expected rejection for '{name}'"
-            );
-        }
-        // Normal branches must be allowed
-        for name in &["default", "my-branch", "system_not_prefixed"] {
-            let branch = BranchId::from(*name);
-            assert!(
-                crate::handlers::reject_system_branch(&branch).is_ok(),
-                "expected OK for '{name}'"
-            );
-        }
-    }
-
-    #[test]
-    fn validate_normal_branch_names() {
-        assert!(validate_branch_name("my-branch").is_ok());
-        assert!(validate_branch_name("feature/test").is_ok());
-        assert!(validate_branch_name("default").is_ok());
     }
 }

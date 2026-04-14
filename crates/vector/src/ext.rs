@@ -246,7 +246,7 @@ impl VectorStoreExt for TransactionContext {
 
         // Queue for VectorCommitObserver (subsystem-owned maintenance).
         // Also return the op for backward compatibility with executor Session.
-        backend_state.queue_pending_op(branch_id, staged_op.clone());
+        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
 
         Ok((Version::counter(record_version), staged_op))
     }
@@ -295,7 +295,7 @@ impl VectorStoreExt for TransactionContext {
 
         // Queue for VectorCommitObserver (subsystem-owned maintenance).
         // Also return the op for backward compatibility with executor Session.
-        backend_state.queue_pending_op(branch_id, staged_op.clone());
+        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
 
         Ok((true, Some(staged_op)))
     }

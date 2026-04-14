@@ -21,6 +21,7 @@ use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
+use strata_core::EntityRef;
 use strata_core::{StrataError, StrataResult};
 
 use crate::branch_ops::with_branch_dag_hooks_suppressed;
@@ -33,6 +34,8 @@ use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBase
 use crate::database::observers::{BranchOpEvent, BranchOpKind};
 use crate::database::Database;
 use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
+use crate::primitives::event::EventLog;
+use crate::SYSTEM_BRANCH;
 
 // =============================================================================
 // Merge Options
@@ -158,6 +161,28 @@ fn validate_branch_name(name: &str) -> StrataResult<()> {
     Ok(())
 }
 
+fn reject_system_branch(name: &str, operation: &str) -> StrataResult<()> {
+    if name.starts_with(SYSTEM_PREFIX) {
+        return Err(StrataError::invalid_input(format!(
+            "cannot {} system branch '{}'",
+            operation, name
+        )));
+    }
+
+    Ok(())
+}
+
+fn reject_default_branch(name: &str, operation: &str) -> StrataResult<()> {
+    if name == "default" {
+        return Err(StrataError::invalid_operation(
+            EntityRef::branch(resolve_branch_name(name)),
+            format!("cannot {} the default branch", operation),
+        ));
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // BranchService
 // =============================================================================
@@ -209,9 +234,8 @@ impl BranchService {
     ///
     /// Emits a DAG delete event if a DAG hook is installed.
     pub fn delete(&self, name: &str) -> StrataResult<()> {
-        if name.starts_with(SYSTEM_PREFIX) {
-            return Err(StrataError::invalid_input("cannot delete system branches"));
-        }
+        reject_system_branch(name, "delete")?;
+        reject_default_branch(name, "delete")?;
 
         let mut mutation = BranchMutation::new(&self.db);
         let branch_id = resolve_branch_name(name);
@@ -309,6 +333,7 @@ impl BranchService {
         destination: &str,
         options: ForkOptions,
     ) -> StrataResult<ForkInfo> {
+        reject_system_branch(source, "fork from")?;
         validate_branch_name(destination)?;
 
         // Create mutation context for atomicity
@@ -393,6 +418,9 @@ impl BranchService {
         target: &str,
         options: MergeOptions,
     ) -> StrataResult<MergeInfo> {
+        reject_system_branch(source, "merge from")?;
+        reject_system_branch(target, "merge into")?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Merge requires DAG — without it, merge provenance is lost
@@ -486,6 +514,8 @@ impl BranchService {
         from_version: CommitVersion,
         to_version: CommitVersion,
     ) -> StrataResult<RevertInfo> {
+        reject_system_branch(branch, "revert")?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Revert requires DAG — without it, revert history is lost
@@ -534,6 +564,9 @@ impl BranchService {
         target: &str,
         keys: &[(String, String)],
     ) -> StrataResult<CherryPickInfo> {
+        reject_system_branch(source, "cherry-pick from")?;
+        reject_system_branch(target, "cherry-pick into")?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
@@ -596,6 +629,9 @@ impl BranchService {
         filter: CherryPickFilter,
         merge_base: Option<(BranchId, u64)>,
     ) -> StrataResult<CherryPickInfo> {
+        reject_system_branch(source, "cherry-pick from")?;
+        reject_system_branch(target, "cherry-pick into")?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
@@ -711,17 +747,19 @@ impl BranchService {
         message: Option<&str>,
         creator: Option<&str>,
     ) -> StrataResult<TagInfo> {
+        reject_system_branch(branch, "tag")?;
         let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
 
         // Emit observer event
         let branch_id = resolve_branch_name(branch);
-        let mut event = BranchOpEvent {
+        let event = BranchOpEvent {
             kind: BranchOpKind::Tag,
             branch_id,
             branch_name: Some(branch.to_string()),
             source_branch_id: None,
             source_branch_name: None,
             commit_version: Some(CommitVersion(info.version)),
+            tag_name: Some(name.to_string()),
             message: message.map(|s| s.to_string()),
             creator: creator.map(|s| s.to_string()),
             merge_strategy: None,
@@ -731,10 +769,6 @@ impl BranchService {
             from_version: None,
             to_version: None,
         };
-        // Add tag name to message if not already set
-        if event.message.is_none() {
-            event.message = Some(name.to_string());
-        }
         self.db.branch_op_observers().notify(&event);
 
         Ok(info)
@@ -744,6 +778,7 @@ impl BranchService {
     ///
     /// Emits a `BranchOpEvent::Untag` to observers if the tag existed.
     pub fn untag(&self, branch: &str, name: &str) -> StrataResult<bool> {
+        reject_system_branch(branch, "untag")?;
         let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
 
         if deleted {
@@ -756,7 +791,8 @@ impl BranchService {
                 source_branch_id: None,
                 source_branch_name: None,
                 commit_version: None,
-                message: Some(name.to_string()), // Tag name
+                tag_name: Some(name.to_string()),
+                message: None,
                 creator: None,
                 merge_strategy: None,
                 keys_applied: None,
@@ -773,11 +809,13 @@ impl BranchService {
 
     /// List all tags on a branch.
     pub fn list_tags(&self, branch: &str) -> StrataResult<Vec<TagInfo>> {
+        reject_system_branch(branch, "list tags on")?;
         branch_ops::list_tags(&self.db, branch)
     }
 
     /// Resolve a tag to its version.
     pub fn resolve_tag(&self, branch: &str, name: &str) -> StrataResult<Option<TagInfo>> {
+        reject_system_branch(branch, "resolve tag on")?;
         branch_ops::resolve_tag(&self.db, branch, name)
     }
 
@@ -787,8 +825,10 @@ impl BranchService {
 
     /// Add a note to a specific version on a branch.
     ///
-    /// Notes are not tracked by the observer pipeline since they are
-    /// metadata annotations, not structural branch operations.
+    /// Notes are not tracked by the branch-op observer pipeline since they are
+    /// metadata annotations, not structural branch operations. Audit emission
+    /// therefore happens directly here so the executor/API contract still
+    /// exposes `branch.note` entries.
     pub fn add_note(
         &self,
         branch: &str,
@@ -797,16 +837,50 @@ impl BranchService {
         author: Option<&str>,
         metadata: Option<strata_core::Value>,
     ) -> StrataResult<NoteInfo> {
-        branch_ops::add_note(&self.db, branch, version, message, author, metadata)
+        reject_system_branch(branch, "add note to")?;
+        let note = branch_ops::add_note(&self.db, branch, version, message, author, metadata)?;
+
+        let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+        let payload = strata_core::value::Value::object(
+            [
+                ("branch".to_string(), branch.into()),
+                (
+                    "version".to_string(),
+                    strata_core::Value::Int(version.0 as i64),
+                ),
+                ("message".to_string(), message.into()),
+            ]
+            .into_iter()
+            .collect(),
+        );
+
+        if let Err(e) = EventLog::new(self.db.clone()).append(
+            &system_branch_id,
+            "default",
+            "branch.note",
+            payload,
+        ) {
+            tracing::warn!(
+                target: "strata::audit",
+                error = %e,
+                branch,
+                version = version.0,
+                "Failed to emit branch.note audit event"
+            );
+        }
+
+        Ok(note)
     }
 
     /// Get notes for a branch, optionally filtered by version.
     pub fn get_notes(&self, branch: &str, version: Option<u64>) -> StrataResult<Vec<NoteInfo>> {
+        reject_system_branch(branch, "read notes from")?;
         branch_ops::get_notes(&self.db, branch, version)
     }
 
     /// Delete a note from a specific version on a branch.
     pub fn delete_note(&self, branch: &str, version: CommitVersion) -> StrataResult<bool> {
+        reject_system_branch(branch, "delete note from")?;
         branch_ops::delete_note(&self.db, branch, version)
     }
 
@@ -867,5 +941,19 @@ mod tests {
 
         assert_eq!(opts.strategy, MergeStrategy::Strict);
         assert_eq!(opts.message, Some("Merge feature".to_string()));
+    }
+
+    #[test]
+    fn test_delete_default_branch_is_rejected_by_service() {
+        let db = Database::cache().unwrap();
+        let err = db.branches().delete("default").unwrap_err();
+        assert!(matches!(err, StrataError::InvalidOperation { .. }));
+    }
+
+    #[test]
+    fn test_fork_rejects_system_source_before_dag_check() {
+        let db = Database::cache().unwrap();
+        let err = db.branches().fork("_system_", "feature").unwrap_err();
+        assert!(matches!(err, StrataError::InvalidInput { .. }));
     }
 }

@@ -338,6 +338,7 @@ impl Session {
         let mut ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
+        let txn_id = ctx.txn_id;
         self.txn_branch_id = None;
 
         match self.db.commit_transaction(&mut ctx) {
@@ -350,6 +351,9 @@ impl Session {
                 // Return context to pool even on failure
                 self.db.end_transaction(ctx);
                 self.post_commit_ops.clear();
+                if let Ok(state) = self.executor.primitives().vector.state() {
+                    state.clear_pending_ops(txn_id);
+                }
                 // Discriminate error types: only OCC validation failures
                 // become TransactionConflict; storage/WAL errors become Io;
                 // other errors become Internal.
@@ -384,15 +388,14 @@ impl Session {
         let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
-        let branch_id = self.txn_branch_id.take();
+        let txn_id = ctx.txn_id;
+        self.txn_branch_id.take();
         self.post_commit_ops.clear();
 
-        // Clear pending vector ops for this branch (T2-E2: subsystem-owned cleanup).
+        // Clear pending vector ops for this transaction (T2-E2: subsystem-owned cleanup).
         // These ops were queued by VectorStoreExt but will not be committed.
-        if let Some(bid) = branch_id {
-            if let Ok(state) = self.executor.primitives().vector.state() {
-                state.clear_pending_ops(bid);
-            }
+        if let Ok(state) = self.executor.primitives().vector.state() {
+            state.clear_pending_ops(txn_id);
         }
 
         self.db.end_transaction(ctx);
@@ -1203,6 +1206,10 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.post_commit_ops.clear();
         if let Some(ctx) = self.txn_ctx.take() {
+            if let Ok(state) = self.executor.primitives().vector.state() {
+                state.clear_pending_ops(ctx.txn_id);
+            }
+            self.txn_branch_id = None;
             self.db.end_transaction(ctx);
         }
     }

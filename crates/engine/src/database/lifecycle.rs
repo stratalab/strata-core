@@ -2,6 +2,7 @@
 
 use std::sync::atomic::Ordering;
 use strata_core::id::CommitVersion;
+use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
 use tracing::warn;
@@ -154,7 +155,8 @@ impl Database {
         let search_index = self.extension::<crate::search::InvertedIndex>().ok();
         let search_enabled = search_index.as_ref().is_some_and(|idx| idx.is_enabled());
 
-        // Get refresh hooks (vector, etc.) for incremental updates
+        // Get refresh hooks used for any subsystem that still relies on the
+        // legacy follower-refresh contract.
         let refresh_hooks = self
             .extension::<super::refresh::RefreshHooks>()
             .ok()
@@ -184,6 +186,26 @@ impl Database {
             let hook_pre_reads: Vec<Vec<(Key, Vec<u8>)>> = refresh_hooks
                 .iter()
                 .map(|hook| hook.pre_delete_read(self, &payload.deletes))
+                .collect();
+            let deleted_values: Vec<(Key, strata_core::value::Value)> = payload
+                .deletes
+                .iter()
+                .filter_map(
+                    |key| match self.storage.get_versioned(key, CommitVersion::MAX) {
+                        Ok(Some(vv)) => Some((key.clone(), vv.value)),
+                        Ok(None) => None,
+                        Err(e) => {
+                            warn!(
+                                target: "strata::db",
+                                txn_id = record.txn_id.as_u64(),
+                                version = payload.version,
+                                error = %e,
+                                "Refresh: skipping pre-delete value capture for key"
+                            );
+                            None
+                        }
+                    },
+                )
                 .collect();
 
             // Apply puts and deletes atomically with original WAL timestamp
@@ -356,6 +378,8 @@ impl Database {
                 branch_id,
                 commit_version: CommitVersion(payload.version),
                 entry_count,
+                puts: puts_slice,
+                deleted_values,
             };
             self.replay_observers().notify(&info);
 

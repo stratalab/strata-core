@@ -471,7 +471,9 @@ impl crate::recovery::Subsystem for SearchSubsystem {
 // Search Observers
 // =============================================================================
 
-use crate::database::observers::{CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver};
+use crate::database::observers::{
+    CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver,
+};
 use std::sync::{atomic::AtomicU64, Weak};
 
 /// Commit observer for search index maintenance.

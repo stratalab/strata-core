@@ -803,6 +803,7 @@ impl Database {
 
         // Capture info needed for observer notification before commit
         // (txn state may be modified during commit)
+        let txn_id = txn.txn_id;
         let branch_id = txn.branch_id;
         let entry_count = txn.write_set.len() + txn.delete_set.len() + txn.cas_set.len();
 
@@ -819,6 +820,7 @@ impl Database {
         // Notify commit observers (best-effort, errors logged not propagated)
         if entry_count > 0 {
             let info = super::CommitInfo {
+                txn_id,
                 branch_id,
                 commit_version,
                 entry_count,

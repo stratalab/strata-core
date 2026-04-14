@@ -1219,6 +1219,64 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_branches_tag_audit_payload_preserves_tag_and_message() {
+        let db = create_strata();
+
+        db.kv_put("tag-base", "value").unwrap();
+        db.branches()
+            .create_tag("default", "release-1", Some("ship it"))
+            .unwrap();
+
+        let events = db.branches().log(None).unwrap();
+        let payload = events
+            .iter()
+            .filter_map(|event| event.as_object())
+            .find(|payload| payload.get("tag") == Some(&Value::String("release-1".into())))
+            .expect("branch.tag audit payload should include the tag field");
+
+        assert_eq!(
+            payload.get("branch"),
+            Some(&Value::String("default".into()))
+        );
+        assert_eq!(
+            payload.get("message"),
+            Some(&Value::String("ship it".into()))
+        );
+        assert!(payload.get("version").is_some());
+    }
+
+    #[test]
+    fn test_branches_note_audit_event_is_emitted() {
+        let db = create_strata();
+
+        let version = db.kv_put("note-base", "value").unwrap();
+        db.branches()
+            .add_note("default", version, "release note", Some("alice"))
+            .unwrap();
+
+        let events = db.branches().log(None).unwrap();
+        let payload = events
+            .iter()
+            .filter_map(|event| event.as_object())
+            .find(|payload| {
+                payload.get("branch") == Some(&Value::String("default".into()))
+                    && payload.get("version") == Some(&Value::Int(version as i64))
+                    && payload.get("message") == Some(&Value::String("release note".into()))
+            })
+            .expect("branch.note audit payload should be present in branches().log()");
+
+        assert_eq!(
+            payload.get("branch"),
+            Some(&Value::String("default".into()))
+        );
+        assert_eq!(payload.get("version"), Some(&Value::Int(version as i64)));
+        assert_eq!(
+            payload.get("message"),
+            Some(&Value::String("release note".into()))
+        );
+    }
+
     // =========================================================================
     // Configuration Tests
     // =========================================================================

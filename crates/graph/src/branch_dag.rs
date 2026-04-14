@@ -916,7 +916,9 @@ impl strata_engine::Subsystem for GraphSubsystem {
 // =============================================================================
 
 use std::sync::Weak;
-use strata_engine::database::observers::{BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError};
+use strata_engine::database::observers::{
+    BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError,
+};
 use strata_engine::primitives::event::EventLog;
 
 /// Observer that emits audit events to the `_system_` branch event log.
@@ -961,23 +963,38 @@ impl BranchOpObserver for AuditBranchOpObserver {
 
         // Core fields present in most events
         if let Some(ref name) = event.branch_name {
-            payload.insert("branch".to_string(), serde_json::Value::String(name.clone()));
+            payload.insert(
+                "branch".to_string(),
+                serde_json::Value::String(name.clone()),
+            );
         }
         if let Some(ref source_name) = event.source_branch_name {
             // Use field names matching original executor payloads
             match event.kind {
                 BranchOpKind::Fork => {
                     // Fork uses parent/child naming
-                    payload.insert("parent".to_string(), serde_json::Value::String(source_name.clone()));
+                    payload.insert(
+                        "parent".to_string(),
+                        serde_json::Value::String(source_name.clone()),
+                    );
                     if let Some(ref child) = event.branch_name {
-                        payload.insert("child".to_string(), serde_json::Value::String(child.clone()));
+                        payload.insert(
+                            "child".to_string(),
+                            serde_json::Value::String(child.clone()),
+                        );
                     }
                 }
                 _ => {
                     // Merge/cherry-pick use source/target naming
-                    payload.insert("source".to_string(), serde_json::Value::String(source_name.clone()));
+                    payload.insert(
+                        "source".to_string(),
+                        serde_json::Value::String(source_name.clone()),
+                    );
                     if let Some(ref target) = event.branch_name {
-                        payload.insert("target".to_string(), serde_json::Value::String(target.clone()));
+                        payload.insert(
+                            "target".to_string(),
+                            serde_json::Value::String(target.clone()),
+                        );
                     }
                 }
             }
@@ -989,37 +1006,70 @@ impl BranchOpObserver for AuditBranchOpObserver {
                 BranchOpKind::Merge => "merge_version",
                 _ => "version",
             };
-            payload.insert(version_key.to_string(), serde_json::Value::Number(version.0.into()));
+            payload.insert(
+                version_key.to_string(),
+                serde_json::Value::Number(version.0.into()),
+            );
+        }
+        if let Some(ref tag_name) = event.tag_name {
+            payload.insert(
+                "tag".to_string(),
+                serde_json::Value::String(tag_name.clone()),
+            );
         }
         if let Some(ref message) = event.message {
-            payload.insert("message".to_string(), serde_json::Value::String(message.clone()));
+            payload.insert(
+                "message".to_string(),
+                serde_json::Value::String(message.clone()),
+            );
         }
         if let Some(ref creator) = event.creator {
-            payload.insert("creator".to_string(), serde_json::Value::String(creator.clone()));
+            payload.insert(
+                "creator".to_string(),
+                serde_json::Value::String(creator.clone()),
+            );
         }
 
         // Merge-specific fields
         if let Some(ref strategy) = event.merge_strategy {
-            payload.insert("strategy".to_string(), serde_json::Value::String(strategy.clone()));
+            payload.insert(
+                "strategy".to_string(),
+                serde_json::Value::String(strategy.clone()),
+            );
         }
 
         // Keys applied/deleted (merge, cherry-pick)
         if let Some(keys_applied) = event.keys_applied {
-            payload.insert("keys_applied".to_string(), serde_json::Value::Number(keys_applied.into()));
+            payload.insert(
+                "keys_applied".to_string(),
+                serde_json::Value::Number(keys_applied.into()),
+            );
         }
         if let Some(keys_deleted) = event.keys_deleted {
-            payload.insert("keys_deleted".to_string(), serde_json::Value::Number(keys_deleted.into()));
+            payload.insert(
+                "keys_deleted".to_string(),
+                serde_json::Value::Number(keys_deleted.into()),
+            );
         }
 
         // Revert-specific fields
         if let Some(keys_reverted) = event.keys_reverted {
-            payload.insert("keys_reverted".to_string(), serde_json::Value::Number(keys_reverted.into()));
+            payload.insert(
+                "keys_reverted".to_string(),
+                serde_json::Value::Number(keys_reverted.into()),
+            );
         }
         if let Some(from_version) = event.from_version {
-            payload.insert("from_version".to_string(), serde_json::Value::Number(from_version.0.into()));
+            payload.insert(
+                "from_version".to_string(),
+                serde_json::Value::Number(from_version.0.into()),
+            );
         }
         if let Some(to_version) = event.to_version {
-            payload.insert("to_version".to_string(), serde_json::Value::Number(to_version.0.into()));
+            payload.insert(
+                "to_version".to_string(),
+                serde_json::Value::Number(to_version.0.into()),
+            );
         }
 
         // Convert to core Value
@@ -1378,17 +1428,28 @@ fn event_node_to_dag_event(
 /// queries for merge-base, log, and ancestry. This hook is fail-fast: errors
 /// propagate and abort the calling branch operation.
 struct GraphBranchDagHook {
-    db: Arc<Database>,
+    db: Weak<Database>,
 }
 
 impl GraphBranchDagHook {
     fn new(db: Arc<Database>) -> Self {
-        Self { db }
+        Self {
+            db: Arc::downgrade(&db),
+        }
     }
 
     /// Map a StrataError to BranchDagError.
     fn map_write_error(e: StrataError) -> BranchDagError {
         BranchDagError::new(BranchDagErrorKind::WriteFailed, e.to_string())
+    }
+
+    fn upgrade_db(&self) -> Result<Arc<Database>, BranchDagError> {
+        self.db.upgrade().ok_or_else(|| {
+            BranchDagError::new(
+                BranchDagErrorKind::Other,
+                "database dropped while branch DAG hook was still referenced",
+            )
+        })
     }
 }
 
@@ -1399,6 +1460,8 @@ impl BranchDagHook for GraphBranchDagHook {
 
     fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
         use strata_core::branch_dag::is_system_branch;
+
+        let db = self.upgrade_db()?;
 
         // Skip system branch events (same guard as the old global hooks).
         if is_system_branch(&event.branch_name) {
@@ -1413,7 +1476,7 @@ impl BranchDagHook for GraphBranchDagHook {
         match event.kind {
             DagEventKind::BranchCreate => {
                 dag_add_branch(
-                    &self.db,
+                    &db,
                     &event.branch_name,
                     event.message.as_deref(),
                     event.creator.as_deref(),
@@ -1421,7 +1484,7 @@ impl BranchDagHook for GraphBranchDagHook {
                 .map_err(Self::map_write_error)?;
             }
             DagEventKind::BranchDelete => {
-                dag_mark_deleted(&self.db, &event.branch_name).map_err(Self::map_write_error)?;
+                dag_mark_deleted(&db, &event.branch_name).map_err(Self::map_write_error)?;
             }
             DagEventKind::Fork => {
                 let source = event.source_branch_name.as_deref().ok_or_else(|| {
@@ -1431,7 +1494,7 @@ impl BranchDagHook for GraphBranchDagHook {
                     )
                 })?;
                 dag_record_fork(
-                    &self.db,
+                    &db,
                     source,
                     &event.branch_name,
                     Some(event.commit_version.0),
@@ -1451,7 +1514,7 @@ impl BranchDagHook for GraphBranchDagHook {
                     )
                 })?;
                 dag_record_merge(
-                    &self.db,
+                    &db,
                     source,
                     &event.branch_name,
                     merge_info,
@@ -1469,7 +1532,7 @@ impl BranchDagHook for GraphBranchDagHook {
                     )
                 })?;
                 dag_record_revert(
-                    &self.db,
+                    &db,
                     revert_info,
                     event.message.as_deref(),
                     event.creator.as_deref(),
@@ -1489,7 +1552,7 @@ impl BranchDagHook for GraphBranchDagHook {
                         "cherry-pick event missing source branch name",
                     )
                 })?;
-                dag_record_cherry_pick(&self.db, source, &event.branch_name, cherry_pick_info)
+                dag_record_cherry_pick(&db, source, &event.branch_name, cherry_pick_info)
                     .map_err(Self::map_write_error)?;
             }
             // DagEventKind is non-exhaustive; handle future variants gracefully.
@@ -1510,8 +1573,10 @@ impl BranchDagHook for GraphBranchDagHook {
         branch_a: &str,
         branch_b: &str,
     ) -> Result<Option<MergeBaseResult>, BranchDagError> {
+        let db = self.upgrade_db()?;
+
         // Check for previous merge first (takes priority over fork)
-        if let Ok(Some(merge_version)) = find_last_merge_version(&self.db, branch_a, branch_b) {
+        if let Ok(Some(merge_version)) = find_last_merge_version(&db, branch_a, branch_b) {
             // The merge was into the target branch, so that's the merge base
             return Ok(Some(MergeBaseResult {
                 branch_id: resolve_branch_name(branch_b),
@@ -1521,9 +1586,7 @@ impl BranchDagHook for GraphBranchDagHook {
         }
 
         // Check for fork relationship
-        if let Ok(Some((child_name, fork_version))) =
-            find_fork_version(&self.db, branch_a, branch_b)
-        {
+        if let Ok(Some((child_name, fork_version))) = find_fork_version(&db, branch_a, branch_b) {
             // Return the forked-from branch as the merge base
             let (base_branch_name, base_name) = if child_name == branch_a {
                 (branch_b, branch_b.to_string()) // a was forked from b
@@ -1542,7 +1605,8 @@ impl BranchDagHook for GraphBranchDagHook {
     }
 
     fn log(&self, branch: &str, limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
-        let graph_store = GraphStore::new(self.db.clone());
+        let db = self.upgrade_db()?;
+        let graph_store = GraphStore::new(db);
         let system_id = resolve_branch_name(SYSTEM_BRANCH);
         let mut timeline: Vec<(u64, DagEvent)> = Vec::new();
 
@@ -1598,12 +1662,13 @@ impl BranchDagHook for GraphBranchDagHook {
     }
 
     fn ancestors(&self, branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
+        let db = self.upgrade_db()?;
         let mut ancestors = Vec::new();
         let mut current = branch.to_string();
         let mut visited = std::collections::HashSet::new();
 
         // Walk up the parent chain via fork relationships
-        while let Ok(Some(fork)) = find_fork_origin(&self.db, &current) {
+        while let Ok(Some(fork)) = find_fork_origin(&db, &current) {
             if visited.contains(&fork.parent) {
                 break; // Avoid infinite loop
             }
