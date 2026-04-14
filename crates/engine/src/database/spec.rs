@@ -14,7 +14,7 @@
 //! ## Example
 //!
 //! ```text
-//! use strata_engine::{OpenSpec, DatabaseMode};
+//! use strata_engine::database::{OpenSpec, DatabaseMode};
 //!
 //! let spec = OpenSpec::primary("/data")
 //!     .with_config(config)
