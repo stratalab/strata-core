@@ -81,6 +81,22 @@ impl<'a> Branches<'a> {
         }
     }
 
+    /// Get detailed branch info.
+    ///
+    /// # Returns
+    /// `Some(VersionedBranchInfo)` if the branch exists, `None` otherwise.
+    pub fn info(&self, name: &str) -> Result<Option<crate::types::VersionedBranchInfo>> {
+        match self.backend.execute(Command::BranchGet {
+            branch: BranchId::from(name),
+        })? {
+            Output::MaybeBranchInfo(info) => Ok(info),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for BranchGet".into(),
+                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+            }),
+        }
+    }
+
     /// Create a new empty branch.
     pub fn create(&self, name: &str) -> Result<()> {
         match self.backend.execute(Command::BranchCreate {

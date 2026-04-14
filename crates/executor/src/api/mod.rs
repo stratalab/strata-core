@@ -36,7 +36,6 @@
 //! assert_eq!(db.kv_get("key")?, Some(Value::String("hello".into())));
 //! ```
 
-mod branch;
 mod branches;
 mod db;
 mod event;
@@ -890,15 +889,17 @@ mod tests {
     fn test_branch_create_list() {
         let db = create_strata();
 
-        let (info, _version) = db
-            .branch_create(
-                Some("550e8400-e29b-41d4-a716-446655440099".to_string()),
-                None,
-            )
+        db.branches()
+            .create("550e8400-e29b-41d4-a716-446655440099")
             .unwrap();
-        assert_eq!(info.id.as_str(), "550e8400-e29b-41d4-a716-446655440099");
+        let info = db
+            .branches()
+            .info("550e8400-e29b-41d4-a716-446655440099")
+            .unwrap()
+            .expect("branch should exist");
+        assert_eq!(info.info.id.as_str(), "550e8400-e29b-41d4-a716-446655440099");
 
-        let branches = db.branch_list(None, None, None).unwrap();
+        let branches = db.branches().list().unwrap();
         assert!(!branches.is_empty());
     }
 
@@ -923,7 +924,7 @@ mod tests {
         assert_eq!(db.current_branch(), "default");
 
         // But the branch exists
-        assert!(db.branch_exists("experiment-1").unwrap());
+        assert!(db.branches().exists("experiment-1").unwrap());
     }
 
     #[test]
@@ -973,7 +974,7 @@ mod tests {
         db.delete_branch("to-delete").unwrap();
 
         // Verify it's gone
-        assert!(!db.branch_exists("to-delete").unwrap());
+        assert!(!db.branches().exists("to-delete").unwrap());
     }
 
     #[test]
