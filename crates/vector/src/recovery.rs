@@ -480,29 +480,8 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
-        use std::sync::Arc;
-
-        // Register vector merge handlers with the per-database registry.
-        // This enables dimension/metric validation during merge precheck
-        // and per-collection HNSW rebuilds after merge commit.
-        db.merge_registry().register_vector(
-            crate::merge_handler::vector_precheck_fn,
-            crate::merge_handler::vector_post_commit_fn,
-        );
-
-        // Register commit observer for HNSW backend maintenance.
-        // Vector write methods queue StagedVectorOps during transactions;
-        // this observer applies them after successful commit.
-        let commit_observer = Arc::new(VectorCommitObserver {
-            db: Arc::downgrade(db),
-        });
-        db.commit_observers().register(commit_observer);
-
-        let replay_observer = Arc::new(VectorReplayObserver {
-            db: Arc::downgrade(db),
-        });
-        db.replay_observers().register(replay_observer);
-
+        let state = db.extension::<super::VectorBackendState>()?;
+        ensure_runtime_wiring(db, &state);
         Ok(())
     }
 
@@ -518,6 +497,33 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
 use strata_engine::database::observers::{
     CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver,
 };
+
+pub(crate) fn ensure_runtime_wiring(
+    db: &std::sync::Arc<strata_engine::Database>,
+    state: &std::sync::Arc<super::VectorBackendState>,
+) {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    if state.runtime_wired.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    db.merge_registry().register_vector(
+        crate::merge_handler::vector_precheck_fn,
+        crate::merge_handler::vector_post_commit_fn,
+    );
+
+    let commit_observer = Arc::new(VectorCommitObserver {
+        db: Arc::downgrade(db),
+    });
+    db.commit_observers().register(commit_observer);
+
+    let replay_observer = Arc::new(VectorReplayObserver {
+        db: Arc::downgrade(db),
+    });
+    db.replay_observers().register(replay_observer);
+}
 
 /// Observer that applies pending HNSW backend operations after commit.
 ///

@@ -33,6 +33,7 @@ use crate::{
 use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::{CommitVersion, TxnId};
@@ -85,6 +86,10 @@ pub struct VectorBackendState {
     /// This moves vector backend maintenance ownership from executor (Session)
     /// to subsystem (VectorSubsystem), fulfilling the T2-E2 requirement.
     pending_ops: DashMap<TxnId, Vec<crate::ext::StagedVectorOp>>,
+
+    /// Tracks whether runtime-only hooks have been registered for this
+    /// database instance.
+    pub(crate) runtime_wired: AtomicBool,
 }
 
 impl Default for VectorBackendState {
@@ -92,6 +97,7 @@ impl Default for VectorBackendState {
         Self {
             backends: DashMap::new(),
             pending_ops: DashMap::new(),
+            runtime_wired: AtomicBool::new(false),
         }
     }
 }
@@ -208,9 +214,12 @@ impl VectorStore {
     /// This returns the shared `VectorBackendState` stored in the Database.
     /// All VectorStore instances for the same Database share this state.
     pub fn state(&self) -> Result<Arc<VectorBackendState>, VectorError> {
-        self.db
+        let state = self
+            .db
             .extension::<VectorBackendState>()
-            .map_err(|e| VectorError::Storage(e.to_string()))
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+        crate::recovery::ensure_runtime_wiring(&self.db, &state);
+        Ok(state)
     }
 
     /// Build namespace for branch+space-scoped operations
@@ -792,6 +801,7 @@ use crate::types::now_micros;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ext::VectorStoreExt;
     use crate::{DistanceMetric, VectorConfig};
     use tempfile::TempDir;
 
@@ -4024,5 +4034,47 @@ mod tests {
         assert_eq!(response.len(), 1);
         // doc_ref should be the KV source_ref, not the vector key
         assert_eq!(response.hits[0].doc_ref, source);
+    }
+
+    #[test]
+    fn test_raw_cache_db_manual_commit_updates_hnsw() {
+        let db = Database::cache().unwrap();
+        let store = VectorStore::new(db.clone());
+        let branch_id = BranchId::new();
+
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
+        store
+            .create_collection(branch_id, "default", "emb", config)
+            .unwrap();
+
+        assert_eq!(db.commit_observers().len(), 1);
+        assert_eq!(db.replay_observers().len(), 1);
+
+        let state = store.state().unwrap();
+        let mut txn = db.begin_transaction(branch_id).unwrap();
+        let (_version, _op) = txn
+            .vector_upsert(
+                branch_id,
+                "default",
+                "emb",
+                "v1",
+                &[1.0, 0.0, 0.0],
+                None,
+                None,
+                &state,
+            )
+            .unwrap();
+        db.commit_transaction(&mut txn).unwrap();
+        db.end_transaction(txn);
+
+        let results = store
+            .search(branch_id, "default", "emb", &[1.0, 0.0, 0.0], 1, None)
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].key, "v1");
+
+        let _ = store.state().unwrap();
+        assert_eq!(db.commit_observers().len(), 1);
+        assert_eq!(db.replay_observers().len(), 1);
     }
 }

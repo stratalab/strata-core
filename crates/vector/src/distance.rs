@@ -238,65 +238,67 @@ fn dot_norms_x86(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn dot_norms_avx2(a: &[f32], b: &[f32]) -> (f32, f32, f32) {
     use std::arch::x86_64::*;
-    // 2x unroll with 6 accumulators (2 × 3 streams: dot, norm_a, norm_b)
-    // AVX2 has only 16 YMM regs; 4x would need 20 and cause spills.
-    // 2x still gives 2.5x throughput vs single-accumulator.
-    let mut vdot0 = _mm256_setzero_ps();
-    let mut vdot1 = _mm256_setzero_ps();
-    let mut vna0 = _mm256_setzero_ps();
-    let mut vna1 = _mm256_setzero_ps();
-    let mut vnb0 = _mm256_setzero_ps();
-    let mut vnb1 = _mm256_setzero_ps();
-    let chunks16 = a.len() / 16;
-    for i in 0..chunks16 {
-        let base = i * 16;
-        let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
-        let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
-        vdot0 = _mm256_fmadd_ps(va0, vb0, vdot0);
-        vna0 = _mm256_fmadd_ps(va0, va0, vna0);
-        vnb0 = _mm256_fmadd_ps(vb0, vb0, vnb0);
-        let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
-        let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
-        vdot1 = _mm256_fmadd_ps(va1, vb1, vdot1);
-        vna1 = _mm256_fmadd_ps(va1, va1, vna1);
-        vnb1 = _mm256_fmadd_ps(vb1, vb1, vnb1);
+    unsafe {
+        // 2x unroll with 6 accumulators (2 × 3 streams: dot, norm_a, norm_b)
+        // AVX2 has only 16 YMM regs; 4x would need 20 and cause spills.
+        // 2x still gives 2.5x throughput vs single-accumulator.
+        let mut vdot0 = _mm256_setzero_ps();
+        let mut vdot1 = _mm256_setzero_ps();
+        let mut vna0 = _mm256_setzero_ps();
+        let mut vna1 = _mm256_setzero_ps();
+        let mut vnb0 = _mm256_setzero_ps();
+        let mut vnb1 = _mm256_setzero_ps();
+        let chunks16 = a.len() / 16;
+        for i in 0..chunks16 {
+            let base = i * 16;
+            let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
+            let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
+            vdot0 = _mm256_fmadd_ps(va0, vb0, vdot0);
+            vna0 = _mm256_fmadd_ps(va0, va0, vna0);
+            vnb0 = _mm256_fmadd_ps(vb0, vb0, vnb0);
+            let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
+            let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
+            vdot1 = _mm256_fmadd_ps(va1, vb1, vdot1);
+            vna1 = _mm256_fmadd_ps(va1, va1, vna1);
+            vnb1 = _mm256_fmadd_ps(vb1, vb1, vnb1);
+        }
+        // Reduce 2 accumulators → 1 for each stream
+        vdot0 = _mm256_add_ps(vdot0, vdot1);
+        vna0 = _mm256_add_ps(vna0, vna1);
+        vnb0 = _mm256_add_ps(vnb0, vnb1);
+        // Horizontal sum of 8-wide vectors
+        let hsum = |v: __m256| -> f32 {
+            let hi = _mm256_extractf128_ps(v, 1);
+            let lo = _mm256_castps256_ps128(v);
+            let sum128 = _mm_add_ps(lo, hi);
+            let hi64 = _mm_movehl_ps(sum128, sum128);
+            let sum64 = _mm_add_ps(sum128, hi64);
+            let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
+            let sum32 = _mm_add_ss(sum64, hi32);
+            _mm_cvtss_f32(sum32)
+        };
+        let mut sd = hsum(vdot0);
+        let mut sna = hsum(vna0);
+        let mut snb = hsum(vnb0);
+        // Remainder: 8-wide chunks
+        for i in (chunks16 * 2)..(a.len() / 8) {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+            let r_dot = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
+            let r_na = _mm256_fmadd_ps(va, va, _mm256_setzero_ps());
+            let r_nb = _mm256_fmadd_ps(vb, vb, _mm256_setzero_ps());
+            sd += hsum(r_dot);
+            sna += hsum(r_na);
+            snb += hsum(r_nb);
+        }
+        // Scalar remainder
+        for i in (a.len() / 8 * 8)..a.len() {
+            sd += a[i] * b[i];
+            sna += a[i] * a[i];
+            snb += b[i] * b[i];
+        }
+        (sd, sna, snb)
     }
-    // Reduce 2 accumulators → 1 for each stream
-    vdot0 = _mm256_add_ps(vdot0, vdot1);
-    vna0 = _mm256_add_ps(vna0, vna1);
-    vnb0 = _mm256_add_ps(vnb0, vnb1);
-    // Horizontal sum of 8-wide vectors
-    let hsum = |v: __m256| -> f32 {
-        let hi = _mm256_extractf128_ps(v, 1);
-        let lo = _mm256_castps256_ps128(v);
-        let sum128 = _mm_add_ps(lo, hi);
-        let hi64 = _mm_movehl_ps(sum128, sum128);
-        let sum64 = _mm_add_ps(sum128, hi64);
-        let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
-        let sum32 = _mm_add_ss(sum64, hi32);
-        _mm_cvtss_f32(sum32)
-    };
-    let mut sd = hsum(vdot0);
-    let mut sna = hsum(vna0);
-    let mut snb = hsum(vnb0);
-    // Remainder: 8-wide chunks
-    for i in (chunks16 * 2)..(a.len() / 8) {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        let r_dot = _mm256_fmadd_ps(va, vb, _mm256_setzero_ps());
-        let r_na = _mm256_fmadd_ps(va, va, _mm256_setzero_ps());
-        let r_nb = _mm256_fmadd_ps(vb, vb, _mm256_setzero_ps());
-        sd += hsum(r_dot);
-        sna += hsum(r_na);
-        snb += hsum(r_nb);
-    }
-    // Scalar remainder
-    for i in (a.len() / 8 * 8)..a.len() {
-        sd += a[i] * b[i];
-        sna += a[i] * a[i];
-        snb += b[i] * b[i];
-    }
-    (sd, sna, snb)
 }
 
 // ============================================================================
@@ -407,64 +409,66 @@ fn euclidean_distance_x86(a: &[f32], b: &[f32]) -> f32 {
 #[target_feature(enable = "avx2,fma")]
 unsafe fn euclidean_distance_avx2(a: &[f32], b: &[f32]) -> f32 {
     use std::arch::x86_64::*;
-    let mut vsum0 = _mm256_setzero_ps();
-    let mut vsum1 = _mm256_setzero_ps();
-    let mut vsum2 = _mm256_setzero_ps();
-    let mut vsum3 = _mm256_setzero_ps();
-    let chunks32 = a.len() / 32;
-    for i in 0..chunks32 {
-        let base = i * 32;
-        let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
-        let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
-        let diff0 = _mm256_sub_ps(va0, vb0);
-        vsum0 = _mm256_fmadd_ps(diff0, diff0, vsum0);
-        let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
-        let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
-        let diff1 = _mm256_sub_ps(va1, vb1);
-        vsum1 = _mm256_fmadd_ps(diff1, diff1, vsum1);
-        let va2 = _mm256_loadu_ps(a.as_ptr().add(base + 16));
-        let vb2 = _mm256_loadu_ps(b.as_ptr().add(base + 16));
-        let diff2 = _mm256_sub_ps(va2, vb2);
-        vsum2 = _mm256_fmadd_ps(diff2, diff2, vsum2);
-        let va3 = _mm256_loadu_ps(a.as_ptr().add(base + 24));
-        let vb3 = _mm256_loadu_ps(b.as_ptr().add(base + 24));
-        let diff3 = _mm256_sub_ps(va3, vb3);
-        vsum3 = _mm256_fmadd_ps(diff3, diff3, vsum3);
-    }
-    // Reduce 4 accumulators → 1
-    vsum0 = _mm256_add_ps(vsum0, vsum1);
-    vsum2 = _mm256_add_ps(vsum2, vsum3);
-    vsum0 = _mm256_add_ps(vsum0, vsum2);
-    // Horizontal sum
-    let hi = _mm256_extractf128_ps(vsum0, 1);
-    let lo = _mm256_castps256_ps128(vsum0);
-    let sum128 = _mm_add_ps(lo, hi);
-    let hi64 = _mm_movehl_ps(sum128, sum128);
-    let sum64 = _mm_add_ps(sum128, hi64);
-    let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
-    let sum32 = _mm_add_ss(sum64, hi32);
-    let mut s = _mm_cvtss_f32(sum32);
-    // Remainder: 8-wide chunks
-    for i in (chunks32 * 4)..(a.len() / 8) {
-        let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
-        let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
-        let diff = _mm256_sub_ps(va, vb);
-        let r = _mm256_fmadd_ps(diff, diff, _mm256_setzero_ps());
-        let hi = _mm256_extractf128_ps(r, 1);
-        let lo = _mm256_castps256_ps128(r);
+    unsafe {
+        let mut vsum0 = _mm256_setzero_ps();
+        let mut vsum1 = _mm256_setzero_ps();
+        let mut vsum2 = _mm256_setzero_ps();
+        let mut vsum3 = _mm256_setzero_ps();
+        let chunks32 = a.len() / 32;
+        for i in 0..chunks32 {
+            let base = i * 32;
+            let va0 = _mm256_loadu_ps(a.as_ptr().add(base));
+            let vb0 = _mm256_loadu_ps(b.as_ptr().add(base));
+            let diff0 = _mm256_sub_ps(va0, vb0);
+            vsum0 = _mm256_fmadd_ps(diff0, diff0, vsum0);
+            let va1 = _mm256_loadu_ps(a.as_ptr().add(base + 8));
+            let vb1 = _mm256_loadu_ps(b.as_ptr().add(base + 8));
+            let diff1 = _mm256_sub_ps(va1, vb1);
+            vsum1 = _mm256_fmadd_ps(diff1, diff1, vsum1);
+            let va2 = _mm256_loadu_ps(a.as_ptr().add(base + 16));
+            let vb2 = _mm256_loadu_ps(b.as_ptr().add(base + 16));
+            let diff2 = _mm256_sub_ps(va2, vb2);
+            vsum2 = _mm256_fmadd_ps(diff2, diff2, vsum2);
+            let va3 = _mm256_loadu_ps(a.as_ptr().add(base + 24));
+            let vb3 = _mm256_loadu_ps(b.as_ptr().add(base + 24));
+            let diff3 = _mm256_sub_ps(va3, vb3);
+            vsum3 = _mm256_fmadd_ps(diff3, diff3, vsum3);
+        }
+        // Reduce 4 accumulators → 1
+        vsum0 = _mm256_add_ps(vsum0, vsum1);
+        vsum2 = _mm256_add_ps(vsum2, vsum3);
+        vsum0 = _mm256_add_ps(vsum0, vsum2);
+        // Horizontal sum
+        let hi = _mm256_extractf128_ps(vsum0, 1);
+        let lo = _mm256_castps256_ps128(vsum0);
         let sum128 = _mm_add_ps(lo, hi);
         let hi64 = _mm_movehl_ps(sum128, sum128);
         let sum64 = _mm_add_ps(sum128, hi64);
         let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
         let sum32 = _mm_add_ss(sum64, hi32);
-        s += _mm_cvtss_f32(sum32);
+        let mut s = _mm_cvtss_f32(sum32);
+        // Remainder: 8-wide chunks
+        for i in (chunks32 * 4)..(a.len() / 8) {
+            let va = _mm256_loadu_ps(a.as_ptr().add(i * 8));
+            let vb = _mm256_loadu_ps(b.as_ptr().add(i * 8));
+            let diff = _mm256_sub_ps(va, vb);
+            let r = _mm256_fmadd_ps(diff, diff, _mm256_setzero_ps());
+            let hi = _mm256_extractf128_ps(r, 1);
+            let lo = _mm256_castps256_ps128(r);
+            let sum128 = _mm_add_ps(lo, hi);
+            let hi64 = _mm_movehl_ps(sum128, sum128);
+            let sum64 = _mm_add_ps(sum128, hi64);
+            let hi32 = _mm_shuffle_ps(sum64, sum64, 0x1);
+            let sum32 = _mm_add_ss(sum64, hi32);
+            s += _mm_cvtss_f32(sum32);
+        }
+        // Scalar remainder
+        for i in (a.len() / 8 * 8)..a.len() {
+            let d = a[i] - b[i];
+            s += d * d;
+        }
+        s.sqrt()
     }
-    // Scalar remainder
-    for i in (a.len() / 8 * 8)..a.len() {
-        let d = a[i] - b[i];
-        s += d * d;
-    }
-    s.sqrt()
 }
 
 // ============================================================================
