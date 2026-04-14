@@ -22,21 +22,23 @@ use std::path::Path;
 use std::sync::Arc;
 
 use strata_core::StrataResult;
-use tracing::info;
 
 use super::config::StrataConfig;
+use super::spec::OpenSpec;
 use super::Database;
 use crate::recovery::Subsystem;
 
 /// Builder for `Database` that accepts an explicit `Subsystem` list.
 ///
 /// Subsystems are recovered in registration order on open and frozen in
-/// reverse order on shutdown / drop. The builder routes through the
-/// subsystem-aware open paths on `Database`, so the supplied list is the
+/// reverse order on shutdown / drop. The builder assembles an `OpenSpec`
+/// and delegates to `Database::open_runtime`, so the supplied list is the
 /// sole driver of recovery for builder-opened databases — there is no
 /// implicit hardcoded subsystem.
 pub struct DatabaseBuilder {
     subsystems: Vec<Box<dyn Subsystem>>,
+    config: Option<StrataConfig>,
+    default_branch: Option<String>,
 }
 
 impl DatabaseBuilder {
@@ -44,6 +46,8 @@ impl DatabaseBuilder {
     pub fn new() -> Self {
         Self {
             subsystems: Vec::new(),
+            config: None,
+            default_branch: None,
         }
     }
 
@@ -56,26 +60,37 @@ impl DatabaseBuilder {
         self
     }
 
-    /// Open a disk-backed primary database with the registered subsystems.
+    /// Set the database configuration.
     ///
-    /// Reads `strata.toml` from the data directory, creating a default
-    /// config file if one does not exist. The same subsystem list drives
-    /// recovery on open and freeze-on-drop.
-    pub fn open<P: AsRef<Path>>(self, path: P) -> StrataResult<Arc<Database>> {
-        Database::open_with_subsystems(path, self.subsystems)
+    /// If not set, configuration is read from `strata.toml` in the data
+    /// directory (or defaults are used if the file doesn't exist).
+    pub fn with_config(mut self, config: StrataConfig) -> Self {
+        self.config = Some(config);
+        self
     }
 
-    /// Open a disk-backed primary database with an explicit `StrataConfig`
-    /// and the registered subsystems.
+    /// Set the default branch name.
     ///
-    /// The supplied config is written to `strata.toml` so that subsequent
-    /// opens pick up the same settings.
-    pub fn open_with_config<P: AsRef<Path>>(
-        self,
-        path: P,
-        cfg: StrataConfig,
-    ) -> StrataResult<Arc<Database>> {
-        Database::open_with_config_and_subsystems(path, cfg, self.subsystems)
+    /// The branch is created during bootstrap if it doesn't exist.
+    pub fn with_default_branch(mut self, name: impl Into<String>) -> Self {
+        self.default_branch = Some(name.into());
+        self
+    }
+
+    /// Open a disk-backed primary database with the registered subsystems.
+    ///
+    /// Reads `strata.toml` from the data directory (creating a default
+    /// if one does not exist) unless a config was set via `with_config`.
+    /// The same subsystem list drives recovery on open and freeze-on-drop.
+    pub fn open<P: AsRef<Path>>(self, path: P) -> StrataResult<Arc<Database>> {
+        let mut spec = OpenSpec::primary(path).with_subsystems(self.subsystems);
+        if let Some(cfg) = self.config {
+            spec = spec.with_config(cfg);
+        }
+        if let Some(branch) = self.default_branch {
+            spec = spec.with_default_branch(branch);
+        }
+        Database::open_runtime(spec)
     }
 
     /// Open a read-only follower of an existing database with the
@@ -85,7 +100,12 @@ impl DatabaseBuilder {
     /// on `is_follower()`), but the supplied subsystems still drive
     /// recovery.
     pub fn open_follower<P: AsRef<Path>>(self, path: P) -> StrataResult<Arc<Database>> {
-        Database::open_follower_with_subsystems(path, self.subsystems)
+        let mut spec = OpenSpec::follower(path).with_subsystems(self.subsystems);
+        if let Some(cfg) = self.config {
+            spec = spec.with_config(cfg);
+        }
+        // Note: default_branch is ignored for followers (they don't bootstrap)
+        Database::open_runtime(spec)
     }
 
     /// Create an ephemeral in-memory database with the registered
@@ -99,48 +119,12 @@ impl DatabaseBuilder {
     /// the freeze chain on cache databases too, but each freeze step
     /// no-ops on the empty path.
     pub fn cache(self) -> StrataResult<Arc<Database>> {
-        let db = Database::cache()?;
-
-        // Phase 1: Recovery
-        for subsystem in &self.subsystems {
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Running cache subsystem recovery"
-            );
-            subsystem.recover(&db)?;
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Cache subsystem recovery complete"
-            );
+        let mut spec = OpenSpec::cache().with_subsystems(self.subsystems);
+        if let Some(branch) = self.default_branch {
+            spec = spec.with_default_branch(branch);
         }
-
-        db.set_subsystems(self.subsystems);
-
-        // Phase 2: Initialize (write-free wiring of hooks/handlers)
-        for subsystem in db.installed_subsystems().iter() {
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Running cache subsystem initialize"
-            );
-            subsystem.initialize(&db)?;
-        }
-
-        // Phase 3: Bootstrap (idempotent first-time writes; cache = not follower)
-        for subsystem in db.installed_subsystems().iter() {
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Running cache subsystem bootstrap"
-            );
-            subsystem.bootstrap(&db)?;
-        }
-
-        db.set_lifecycle_complete();
-
-        Ok(db)
+        // Note: config is ignored for cache (ephemeral, no persistence)
+        Database::open_runtime(spec)
     }
 }
 

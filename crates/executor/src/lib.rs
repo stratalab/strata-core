@@ -75,6 +75,7 @@ mod tests;
 
 // Core types
 pub use api::{
+    default_product_cache_spec, default_product_follower_spec, default_product_spec,
     BranchDiffEntry, BranchDiffResult, Branches, CherryPickFilter, CherryPickInfo, ConflictEntry,
     DiffFilter, DiffOptions, DiffSummary, ForkInfo, MergeInfo, MergeStrategy, RevertInfo,
     SpaceDiff, Strata, SystemBranch,

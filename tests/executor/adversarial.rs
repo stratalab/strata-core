@@ -1042,8 +1042,8 @@ fn executor_branch_isolation() {
 /// Strata API should be safe to use from multiple threads
 #[test]
 fn strata_api_thread_safe() {
-    let db = create_db();
-    let strata = Arc::new(strata_executor::Strata::from_database(db).unwrap());
+    // Use Strata::cache() directly for ephemeral test database
+    let strata = Arc::new(strata_executor::Strata::cache().unwrap());
 
     let num_threads = 8;
     let ops_per_thread = 100;

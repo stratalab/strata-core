@@ -1504,12 +1504,11 @@ impl strata_engine::Subsystem for SlowRecoverySubsystem {
 /// Audit-follow-up regression for stratalab/strata-core#2354 Finding 1.
 ///
 /// Before the fix, `acquire_primary_db` inserted the fresh `Arc<Database>`
-/// into the process-global `OPEN_DATABASES` registry **before**
-/// `open_internal_with_subsystems` ran the `subsystem.recover()` loop. A
-/// concurrent opener for the same path that came in during the recovery
-/// window would upgrade the weak ref, return `(db, false)`, and hand the
-/// caller a reference to a `Database` whose in-memory subsystem state was
-/// still being rebuilt.
+/// into the process-global `OPEN_DATABASES` registry **before** running
+/// the `subsystem.recover()` loop. A concurrent opener for the same path
+/// that came in during the recovery window would upgrade the weak ref,
+/// return `(db, false)`, and hand the caller a reference to a `Database`
+/// whose in-memory subsystem state was still being rebuilt.
 ///
 /// This test pins a `SlowRecoverySubsystem` on thread A and waits for
 /// thread A to enter `recover()` (via the `started` flag). While thread A

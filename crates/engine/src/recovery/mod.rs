@@ -32,7 +32,7 @@
 //!     .open(path)
 //!         │
 //!         ▼
-//! Database::open_internal_with_subsystems
+//! Database::open_runtime(OpenSpec)
 //!     1. WAL replay + segment recovery (engine-owned, no subsystem)
 //!     2. for subsystem in &subsystems { subsystem.recover(&db)?; }
 //!     3. db.set_subsystems(subsystems)    // same list, same order

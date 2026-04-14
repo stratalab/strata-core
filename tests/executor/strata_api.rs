@@ -375,8 +375,8 @@ fn use_all_primitives() {
 
 #[test]
 fn session_from_strata() {
-    let db = create_db();
-    let strata = strata_executor::Strata::from_database(db.clone()).unwrap();
+    // Use Strata::cache() directly for ephemeral test database
+    let strata = strata_executor::Strata::cache().unwrap();
 
     // Session can be created from the strata instance
     let _session = strata.session();
