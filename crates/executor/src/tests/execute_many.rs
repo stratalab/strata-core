@@ -9,11 +9,11 @@ use crate::{Command, Executor, Output};
 
 /// Create a test executor with a cache in-memory database.
 fn create_test_executor() -> Executor {
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
-    let db = Database::open_runtime(spec).unwrap();
+    
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Executor::new(db)
 }
 

@@ -1,12 +1,12 @@
 //! Integration tests for Recipe commands.
 
 use crate::{Command, Executor, Output, Value};
-use strata_engine::database::OpenSpec;
-use strata_engine::{Database, SearchSubsystem};
+use strata_engine::database::search_only_cache_spec;
+use strata_engine::Database;
 
 fn create_test_executor() -> Executor {
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
-    let db = Database::open_runtime(spec).unwrap();
+    
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Executor::new(db)
 }
 

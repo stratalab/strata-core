@@ -3,13 +3,13 @@
 use crate::types::DistanceMetric;
 use crate::Value;
 use crate::{Command, Error, Output, Session, Strata};
-use strata_engine::database::OpenSpec;
-use strata_engine::{Database, SearchSubsystem};
+use strata_engine::database::search_only_cache_spec;
+use strata_engine::Database;
 
 /// Create a test session with a cache in-memory database.
 fn create_test_session() -> Session {
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
-    let db = Database::open_runtime(spec).unwrap();
+    
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Session::new(db)
 }
 

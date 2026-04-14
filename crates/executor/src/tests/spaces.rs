@@ -825,10 +825,10 @@ fn space_metadata_registered(db: &std::sync::Arc<strata_engine::Database>, space
 #[test]
 fn test_session_kv_put_registers_non_default_space() {
     use crate::Session;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 
@@ -858,10 +858,10 @@ fn test_session_kv_put_registers_non_default_space() {
 fn test_session_kv_batch_put_registers_non_default_space() {
     use crate::types::BatchKvEntry;
     use crate::Session;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 
@@ -915,10 +915,10 @@ fn test_session_kv_batch_put_registers_non_default_space() {
 fn test_session_event_append_registers_non_default_space() {
     use crate::Session;
     use std::collections::HashMap;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 
@@ -953,10 +953,10 @@ fn test_session_event_batch_append_registers_non_default_space() {
     use crate::types::BatchEventEntry;
     use crate::Session;
     use std::collections::HashMap;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 
@@ -1009,10 +1009,10 @@ fn test_session_event_batch_append_registers_non_default_space() {
 #[test]
 fn test_session_json_set_registers_non_default_space() {
     use crate::Session;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 
@@ -1050,10 +1050,10 @@ fn test_session_default_space_skipped() {
     use crate::Session;
     use strata_core::traits::Storage;
     use strata_core::types::{BranchId, Key};
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use strata_engine::database::search_only_cache_spec;
+    use strata_engine::Database;
 
-    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let spec = search_only_cache_spec();
     let db = Database::open_runtime(spec).unwrap();
     let mut session = Session::new(db.clone());
 

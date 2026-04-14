@@ -49,6 +49,23 @@ fn restrict_dir(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_dir(_path: &Path) {}
 
+/// Sanitize config for runtime consistency across all modes.
+///
+/// Currently clamps `auto_embed` to `false` when the `embed` feature is not
+/// compiled. Called from primary, follower, and cache paths to ensure
+/// consistent behavior.
+fn sanitize_config(mut cfg: super::config::StrataConfig) -> super::config::StrataConfig {
+    #[cfg(not(feature = "embed"))]
+    if cfg.auto_embed {
+        warn!(
+            "auto_embed=true but the 'embed' feature is not compiled; \
+             auto-embedding is disabled"
+        );
+        cfg.auto_embed = false;
+    }
+    cfg
+}
+
 /// Restrict a file to owner-only read/write (rw-------).
 /// Best-effort: ignores errors (defense in depth for data files).
 #[cfg(unix)]
@@ -855,7 +872,7 @@ impl Database {
     /// If `spec_config` is provided, it is used as the base config (with hardware
     /// profile applied on top for sizing). If `None`, defaults are used.
     fn create_ephemeral_bare(spec_config: Option<&StrataConfig>) -> StrataResult<Arc<Self>> {
-        let mut cfg = spec_config.cloned().unwrap_or_default();
+        let mut cfg = sanitize_config(spec_config.cloned().unwrap_or_default());
         // Apply hardware profile so resource-constrained hosts (Pi Zero, etc.)
         // get appropriate sizing. Without this, cache() would inherit the
         // 256 MB DEFAULT_CAPACITY_BYTES from the global block cache singleton,
@@ -1003,26 +1020,15 @@ impl Database {
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let resolved_cfg = if let Some(cfg) = config.as_ref() {
-            cfg.clone()
-        } else if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
-        };
-
-        // Sanitize auto_embed when embed feature is not compiled
-        #[cfg(not(feature = "embed"))]
         let resolved_cfg = {
-            let mut cfg = resolved_cfg;
-            if cfg.auto_embed {
-                warn!(
-                    "auto_embed=true but the 'embed' feature is not compiled; \
-                     auto-embedding is disabled"
-                );
-                cfg.auto_embed = false;
-            }
-            cfg
+            let base = if let Some(cfg) = config.as_ref() {
+                cfg.clone()
+            } else if config_path.exists() {
+                config::StrataConfig::from_file(&config_path)?
+            } else {
+                config::StrataConfig::default()
+            };
+            sanitize_config(base)
         };
 
         let durability_mode = resolved_cfg.durability_mode()?;
@@ -1085,12 +1091,15 @@ impl Database {
         let data_dir = path;
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let cfg = if let Some(cfg) = config.as_ref() {
-            cfg.clone()
-        } else if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
+        let cfg = {
+            let base = if let Some(cfg) = config.as_ref() {
+                cfg.clone()
+            } else if config_path.exists() {
+                config::StrataConfig::from_file(&config_path)?
+            } else {
+                config::StrataConfig::default()
+            };
+            sanitize_config(base)
         };
         let durability_mode = cfg.durability_mode()?;
         let codec_name = cfg.storage.codec.clone();
