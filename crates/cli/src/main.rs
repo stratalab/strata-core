@@ -209,6 +209,16 @@ fn run_shell_mode(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
                 }
             },
         },
+        Ok(CliAction::SeedRecipes) => match state.seed_builtin_recipes() {
+            Ok(()) => {
+                println!("OK");
+                0
+            }
+            Err(e) => {
+                eprintln!("{}", format_error(&e, mode));
+                1
+            }
+        },
         Ok(CliAction::Meta(_)) => {
             eprintln!("(error) Meta-commands are only available in REPL mode");
             1

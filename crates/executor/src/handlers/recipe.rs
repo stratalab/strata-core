@@ -101,3 +101,14 @@ pub fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     })?;
     Ok(Output::Keys(names))
 }
+
+/// Seed built-in recipes to the `_system_` branch.
+///
+/// Idempotent: safe to call multiple times.
+pub fn recipe_seed(p: &Arc<Primitives>) -> Result<Output> {
+    recipe_store::seed_builtin_recipes(&p.db).map_err(|e| Error::Internal {
+        reason: format!("Failed to seed built-in recipes: {}", e),
+        hint: None,
+    })?;
+    Ok(Output::Unit)
+}

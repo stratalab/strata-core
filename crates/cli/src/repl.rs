@@ -231,6 +231,16 @@ fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: Ou
                 }
             },
         },
+        Ok(CliAction::SeedRecipes) => match state.seed_builtin_recipes() {
+            Ok(()) => {
+                println!("OK");
+                true
+            }
+            Err(e) => {
+                eprintln!("{}", format_error(&e, mode));
+                false
+            }
+        },
         Ok(CliAction::Meta(_)) => {
             // Meta-commands should have been handled before reaching here
             true

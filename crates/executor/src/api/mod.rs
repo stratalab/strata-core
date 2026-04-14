@@ -199,15 +199,17 @@ impl Strata {
         let spec = default_product_spec(&data_dir);
         match Database::open_runtime(spec) {
             Ok(db) => {
-                // Seed built-in recipes if not already present
+                // Seed built-in recipes (product bootstrap, not engine bootstrap).
+                // Done on ALL local opens, not just read-write. Epic exempts only
+                // followers and IPC clients. Failures warn but don't fail open.
                 if let Err(e) = strata_engine::recipe_store::seed_builtin_recipes(&db) {
                     tracing::warn!(error = %e, "Failed to seed built-in recipes");
                 }
                 let executor = Executor::new_with_mode(db, access_mode);
-                match access_mode {
-                    AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
-                    AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
+                if access_mode == AccessMode::ReadWrite {
+                    Self::ensure_default_branch(&executor)?;
                 }
+                // Read-only: no verification needed; operations fail gracefully
                 Ok(Self {
                     backend: Backend::Local { executor },
                     current_branch: BranchId::default(),
@@ -249,21 +251,17 @@ impl Strata {
                                 let retry_spec = default_product_spec(&data_dir);
                                 match Database::open_runtime(retry_spec) {
                                     Ok(db) => {
-                                        // Seed built-in recipes if not already present
+                                        // Seed built-in recipes (product bootstrap)
                                         if let Err(e) =
                                             strata_engine::recipe_store::seed_builtin_recipes(&db)
                                         {
                                             tracing::warn!(error = %e, "Failed to seed built-in recipes");
                                         }
                                         let executor = Executor::new_with_mode(db, access_mode);
-                                        match access_mode {
-                                            AccessMode::ReadWrite => {
-                                                Self::ensure_default_branch(&executor)?
-                                            }
-                                            AccessMode::ReadOnly => {
-                                                Self::verify_default_branch(&executor)?
-                                            }
+                                        if access_mode == AccessMode::ReadWrite {
+                                            Self::ensure_default_branch(&executor)?;
                                         }
+                                        // Read-only: no verification needed
                                         return Ok(Self {
                                             backend: Backend::Local { executor },
                                             current_branch: BranchId::default(),
@@ -317,6 +315,12 @@ impl Strata {
             reason: format!("Failed to open cache database: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
+
+        // Seed built-in recipes (product bootstrap). Failures warn but don't fail open.
+        if let Err(e) = strata_engine::recipe_store::seed_builtin_recipes(&db) {
+            tracing::warn!(error = %e, "Failed to seed built-in recipes");
+        }
+
         let executor = Executor::new(db);
 
         // Ensure the default branch exists (idempotent, open_runtime also ensures it)
@@ -354,11 +358,11 @@ impl Strata {
                 let db = executor.primitives().db.clone();
                 let new_executor = Executor::new_with_mode(db, self.access_mode);
 
-                // Verify/ensure the default branch exists (idempotent)
-                match self.access_mode {
-                    AccessMode::ReadWrite => Self::ensure_default_branch(&new_executor)?,
-                    AccessMode::ReadOnly => Self::verify_default_branch(&new_executor)?,
+                // Ensure the default branch exists (idempotent)
+                if self.access_mode == AccessMode::ReadWrite {
+                    Self::ensure_default_branch(&new_executor)?;
                 }
+                // Read-only: no verification needed; operations fail gracefully
 
                 Ok(Self {
                     backend: Backend::Local {
@@ -416,26 +420,6 @@ impl Strata {
         }
     }
 
-    /// Verifies the "default" branch exists without attempting to create it.
-    ///
-    /// Used by read-only open to avoid issuing writes.
-    fn verify_default_branch(executor: &Executor) -> Result<()> {
-        // BranchExists is a read command, so the read-only guard won't fire.
-        match executor.execute(Command::BranchExists {
-            branch: BranchId::default(),
-        })? {
-            Output::Bool(true) => Ok(()),
-            Output::Bool(false) => Err(Error::BranchNotFound {
-                branch: "default".to_string(),
-                hint: None,
-            }),
-            _ => Err(Error::Internal {
-                reason: "Unexpected output for BranchExists".into(),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            }),
-        }
-    }
-
     /// Get the underlying executor for direct command execution.
     ///
     /// # Panics
@@ -453,6 +437,29 @@ impl Strata {
     /// Panics if this Strata instance is connected via IPC.
     pub fn database(&self) -> Arc<Database> {
         self.backend.executor().primitives().db.clone()
+    }
+
+    /// Seed built-in recipes to the `_system_` branch.
+    ///
+    /// This materializes the compiled recipe catalog into storage for
+    /// discoverability and user override. Search works WITHOUT seeding
+    /// due to the built-in fallback, but seeding enables `recipe list`
+    /// to show all available recipes.
+    ///
+    /// Idempotent: safe to call multiple times.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database is opened in read-only mode.
+    pub fn seed_builtin_recipes(&self) -> Result<()> {
+        // Route through execute_cmd to respect access mode guard and support IPC
+        match self.execute_cmd(Command::RecipeSeed)? {
+            Output::Unit => Ok(()),
+            other => Err(Error::Internal {
+                reason: format!("Unexpected output for RecipeSeed: {:?}", other),
+                hint: None,
+            }),
+        }
     }
 
     /// Returns the access mode of this database handle.

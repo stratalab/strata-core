@@ -64,6 +64,11 @@ impl SessionState {
         self.db.branches().merge(source, &self.branch, strategy)
     }
 
+    /// Seed built-in recipes via the typed product API.
+    pub fn seed_builtin_recipes(&self) -> Result<()> {
+        self.db.seed_builtin_recipes()
+    }
+
     /// Current branch name.
     pub fn branch(&self) -> &str {
         &self.branch
