@@ -213,7 +213,8 @@ fn test_search_with_expand_rerank_disabled() {
 #[cfg(feature = "embed")]
 #[test]
 fn test_issue_1768_search_stats_include_embedding_progress() {
-    let db = Database::cache().unwrap();
+    let spec = OpenSpec::cache().with_subsystem(SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     db.set_auto_embed(true);
     let executor = Executor::new(db);
 

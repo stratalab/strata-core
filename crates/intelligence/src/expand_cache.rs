@@ -240,7 +240,8 @@ mod tests {
     use super::*;
 
     fn fresh_db() -> std::sync::Arc<Database> {
-        Database::cache().expect("Database::cache() should succeed")
+        use strata_engine::database::search_only_cache_spec;
+        Database::open_runtime(search_only_cache_spec()).expect("open_runtime should succeed")
     }
 
     fn lex(text: &str) -> ExpandedQuery {
