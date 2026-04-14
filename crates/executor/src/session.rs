@@ -22,32 +22,24 @@
 //! session.execute(Command::TxnCommit)?;
 //! ```
 //!
-//! # Deferred Operations
+//! # Post-Commit Work
 //!
-//! The session maintains two distinct deferred operation mechanisms:
+//! Post-commit work (derived index updates) is handled by subsystem-owned
+//! observers registered with the Database:
 //!
-//! ## PostCommitOp (Executor Layer)
+//! - `VectorCommitObserver` (T2-E2): applies queued HNSW operations
+//! - `GraphCommitObserver` (T2-E5): applies queued BM25 index operations
 //!
-//! Command-specific side effects requiring data staged during execution.
-//! Applied by `run_post_commit_ops()` after successful commit. Examples:
-//! - Graph node indexing for BM25 search
-//! - Vector HNSW index updates
-//!
-//! ## CommitObserver (Engine Layer)
-//!
-//! Generic commit notifications via `db.commit_observers().notify()`.
-//! Receives only `CommitInfo` (branch_id, commit_version, entry_count).
-//! Used for audit, metrics, and other cross-cutting concerns.
-//!
-//! These are complementary, not competing patterns. `PostCommitOp` handles
-//! operations requiring command-specific data (embeddings, node properties),
-//! while `CommitObserver` handles generic notifications.
+//! During transactions, operations are queued in `VectorBackendState` and
+//! `GraphBackendState` (stored as Database extensions). After commit, the
+//! corresponding observers apply the queued operations. On abort or commit
+//! failure, Session clears the queued operations without applying them.
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId as CoreBranchId, Key, Namespace, TypeTag};
-use strata_engine::database::{search_only_cache_spec, OpenSpec};
-use strata_engine::{Database, SearchSubsystem, Transaction, TransactionContext, TransactionOps};
+use strata_core::types::{Key, Namespace, TypeTag};
+use strata_engine::database::search_only_cache_spec;
+use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
@@ -61,50 +53,6 @@ use crate::convert::convert_result;
 use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
-
-/// Deferred operations executed after a successful transaction commit.
-///
-/// ## Why PostCommitOp Exists
-///
-/// These operations update derived indices (graph search index, vector HNSW)
-/// that cannot participate in OCC (Optimistic Concurrency Control):
-/// - HNSW index updates are in-memory and not rollback-safe
-/// - Graph search index updates depend on committed node data
-///
-/// ## Why Not CommitObserver?
-///
-/// Engine's `CommitObserver` receives only `CommitInfo` (branch_id,
-/// commit_version, entry_count). `PostCommitOp` variants require
-/// operation-specific data captured during command execution:
-/// - `GraphIndexNode` needs `NodeData` (properties, entity_ref)
-/// - `VectorBackendOp` needs `StagedVectorOp` (embedding, vector_id)
-///
-/// This data cannot be reconstructed from generic commit info without
-/// re-reading and parsing committed data, making `CommitObserver` unsuitable.
-///
-/// ## Failure Model
-///
-/// Best-effort: failures are logged but never propagate back to the caller.
-/// The primary data is already committed to KV; derived indices will catch
-/// up on next recovery if an update fails.
-///
-/// Note: VectorBackendOp was removed in T2-E2. Vector HNSW maintenance is now
-/// subsystem-owned via VectorCommitObserver in VectorSubsystem.
-enum PostCommitOp {
-    GraphIndexNode {
-        branch_id: CoreBranchId,
-        space: String,
-        graph: String,
-        node_id: String,
-        data: NodeData,
-    },
-    GraphDeindexNode {
-        branch_id: CoreBranchId,
-        space: String,
-        graph: String,
-        node_id: String,
-    },
-}
 
 /// A stateful session that wraps an [`Executor`] and manages an optional
 /// open transaction with read-your-writes semantics.
@@ -125,8 +73,6 @@ pub struct Session {
     txn_branch_id: Option<strata_core::types::BranchId>,
     /// Optional IPC client for remote sessions.
     ipc_client: Option<IpcClient>,
-    /// Deferred operations executed after a successful commit.
-    post_commit_ops: Vec<PostCommitOp>,
 }
 
 impl Session {
@@ -138,7 +84,6 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: None,
-            post_commit_ops: Vec::new(),
         }
     }
 
@@ -150,7 +95,6 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: None,
-            post_commit_ops: Vec::new(),
         }
     }
 
@@ -171,7 +115,6 @@ impl Session {
             txn_ctx: None,
             txn_branch_id: None,
             ipc_client: Some(client),
-            post_commit_ops: Vec::new(),
         }
     }
 
@@ -344,15 +287,19 @@ impl Session {
 
         match self.db.commit_transaction(&mut ctx) {
             Ok(version) => {
+                // T2-E5: Post-commit work is now handled by subsystem observers
+                // (GraphCommitObserver, VectorCommitObserver) registered with the database.
                 self.db.end_transaction(ctx);
-                self.run_post_commit_ops();
                 Ok(Output::TxnCommitted { version })
             }
             Err(e) => {
                 // Return context to pool even on failure
                 self.db.end_transaction(ctx);
-                self.post_commit_ops.clear();
+                // Clear pending ops for uncommitted transactions (T2-E2, T2-E5: subsystem-owned cleanup).
                 if let Ok(state) = self.executor.primitives().vector.state() {
+                    state.clear_pending_ops(txn_id);
+                }
+                if let Ok(state) = self.executor.primitives().graph.state() {
                     state.clear_pending_ops(txn_id);
                 }
                 // Discriminate error types: only OCC validation failures
@@ -391,11 +338,13 @@ impl Session {
         })?;
         let txn_id = ctx.txn_id;
         self.txn_branch_id.take();
-        self.post_commit_ops.clear();
 
-        // Clear pending vector ops for this transaction (T2-E2: subsystem-owned cleanup).
-        // These ops were queued by VectorStoreExt but will not be committed.
+        // Clear pending ops for aborted transactions (T2-E2, T2-E5: subsystem-owned cleanup).
+        // These ops were queued by VectorStoreExt/GraphStoreExt but will not be committed.
         if let Ok(state) = self.executor.primitives().vector.state() {
+            state.clear_pending_ops(txn_id);
+        }
+        if let Ok(state) = self.executor.primitives().graph.state() {
             state.clear_pending_ops(txn_id);
         }
 
@@ -412,41 +361,6 @@ impl Session {
             })))
         } else {
             Ok(Output::TxnInfo(None))
-        }
-    }
-
-    // =========================================================================
-    // Post-commit hooks
-    // =========================================================================
-
-    fn run_post_commit_ops(&mut self) {
-        let ops = std::mem::take(&mut self.post_commit_ops);
-        let primitives = self.executor.primitives();
-
-        for op in ops {
-            match op {
-                PostCommitOp::GraphIndexNode {
-                    branch_id,
-                    space,
-                    graph,
-                    node_id,
-                    data,
-                } => {
-                    primitives
-                        .graph
-                        .index_node_for_search(branch_id, &space, &graph, &node_id, &data);
-                }
-                PostCommitOp::GraphDeindexNode {
-                    branch_id,
-                    space,
-                    graph,
-                    node_id,
-                } => {
-                    primitives
-                        .graph
-                        .deindex_node_for_search(branch_id, &space, &graph, &node_id);
-                }
-            }
         }
     }
 
@@ -521,15 +435,7 @@ impl Session {
 
         // Temporarily take the context to create a Transaction
         let mut ctx = self.txn_ctx.take().unwrap();
-        let result = Self::dispatch_in_txn(
-            &self.executor,
-            &mut ctx,
-            ns,
-            branch_id,
-            &space,
-            cmd,
-            &mut self.post_commit_ops,
-        );
+        let result = Self::dispatch_in_txn(&self.executor, &mut ctx, ns, branch_id, &space, cmd);
         self.txn_ctx = Some(ctx);
 
         result
@@ -542,7 +448,6 @@ impl Session {
         branch_id: strata_core::types::BranchId,
         space: &str,
         cmd: Command,
-        post_commit_ops: &mut Vec<PostCommitOp>,
     ) -> Result<Output> {
         // Read commands use ctx.get() / ctx.scan_prefix() directly so they
         // fall through to the snapshot when the key isn't in the write-set.
@@ -771,23 +676,63 @@ impl Session {
                 };
                 let created =
                     convert_result(ctx.graph_add_node(branch_id, space, &graph, &node_id, &data))?;
-                post_commit_ops.push(PostCommitOp::GraphIndexNode {
-                    branch_id,
-                    space: space.to_string(),
-                    graph,
-                    node_id: node_id.clone(),
-                    data,
-                });
+                // Queue for GraphCommitObserver (subsystem-owned maintenance).
+                // T2-E5: replaces executor-owned PostCommitOp pattern.
+                match executor.primitives().graph.state() {
+                    Ok(state) => {
+                        state.queue_pending_op(
+                            ctx.txn_id,
+                            strata_graph::StagedGraphOp::IndexNode {
+                                branch_id,
+                                space: space.to_string(),
+                                graph: graph.clone(),
+                                node_id: node_id.clone(),
+                                data,
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        // Best-effort: log but don't fail the operation.
+                        // Search index can be rebuilt from committed data.
+                        tracing::warn!(
+                            target: "strata::graph",
+                            graph = %graph,
+                            node_id = %node_id,
+                            error = %e,
+                            "Failed to queue graph index op; search index may be stale"
+                        );
+                    }
+                }
                 Ok(Output::GraphWriteResult { node_id, created })
             }
             Command::GraphRemoveNode { graph, node_id, .. } => {
                 convert_result(ctx.graph_remove_node(branch_id, space, &graph, &node_id))?;
-                post_commit_ops.push(PostCommitOp::GraphDeindexNode {
-                    branch_id,
-                    space: space.to_string(),
-                    graph,
-                    node_id: node_id.clone(),
-                });
+                // Queue for GraphCommitObserver (subsystem-owned maintenance).
+                // T2-E5: replaces executor-owned PostCommitOp pattern.
+                match executor.primitives().graph.state() {
+                    Ok(state) => {
+                        state.queue_pending_op(
+                            ctx.txn_id,
+                            strata_graph::StagedGraphOp::DeindexNode {
+                                branch_id,
+                                space: space.to_string(),
+                                graph: graph.clone(),
+                                node_id: node_id.clone(),
+                            },
+                        );
+                    }
+                    Err(e) => {
+                        // Best-effort: log but don't fail the operation.
+                        // Search index can be rebuilt from committed data.
+                        tracing::warn!(
+                            target: "strata::graph",
+                            graph = %graph,
+                            node_id = %node_id,
+                            error = %e,
+                            "Failed to queue graph deindex op; search index may be stale"
+                        );
+                    }
+                }
                 Ok(Output::Unit)
             }
             Command::GraphAddEdge {
@@ -1205,9 +1150,14 @@ impl Session {
 
 impl Drop for Session {
     fn drop(&mut self) {
-        self.post_commit_ops.clear();
+        // Clean up any in-progress transaction on drop.
+        // Clear pending ops and return context to pool.
         if let Some(ctx) = self.txn_ctx.take() {
+            // Clear pending ops for the abandoned transaction (T2-E2, T2-E5).
             if let Ok(state) = self.executor.primitives().vector.state() {
+                state.clear_pending_ops(ctx.txn_id);
+            }
+            if let Ok(state) = self.executor.primitives().graph.state() {
                 state.clear_pending_ops(ctx.txn_id);
             }
             self.txn_branch_id = None;

@@ -22,6 +22,7 @@ mod nodes;
 pub mod ontology;
 pub mod packed;
 mod snapshot;
+pub mod store;
 pub mod traversal;
 pub mod types;
 
@@ -30,6 +31,7 @@ pub use strata_core::branch_dag::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
     BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
+pub use store::{GraphBackendState, StagedGraphOp};
 
 use std::sync::Arc;
 
@@ -53,6 +55,21 @@ impl GraphStore {
     /// Create a new GraphStore backed by the given database.
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
+    }
+
+    /// Get access to the shared backend state.
+    ///
+    /// This returns the shared `GraphBackendState` stored in the Database.
+    /// All GraphStore instances for the same Database share this state.
+    ///
+    /// Also ensures runtime wiring (commit/replay observers) is registered.
+    pub fn state(&self) -> StrataResult<Arc<GraphBackendState>> {
+        let state = self
+            .db
+            .extension::<GraphBackendState>()
+            .map_err(|e| StrataError::internal(e.to_string()))?;
+        store::ensure_runtime_wiring(&self.db, &state);
+        Ok(state)
     }
 
     /// Build a snapshot of the entire graph.
