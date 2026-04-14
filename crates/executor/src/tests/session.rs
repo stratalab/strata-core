@@ -1,7 +1,8 @@
 //! Session tests: verify transactional session lifecycle and routing.
 
+use crate::types::DistanceMetric;
 use crate::Value;
-use crate::{Command, Error, Output, Session};
+use crate::{Command, Error, Output, Session, Strata};
 use strata_engine::Database;
 
 /// Create a test session with a cache in-memory database.
@@ -274,6 +275,61 @@ fn test_drop_with_active_txn_does_not_panic() {
 }
 
 #[test]
+fn test_drop_with_active_txn_clears_pending_vector_ops() {
+    let strata = Strata::cache().unwrap();
+    let db = strata.database();
+
+    strata
+        .vector_create_collection("emb", 3u64, DistanceMetric::Cosine)
+        .unwrap();
+    strata
+        .vector_upsert("emb", "k1", vec![1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    let mut abandoned = Session::new(db.clone());
+    abandoned
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    abandoned
+        .execute(Command::VectorDelete {
+            branch: None,
+            space: None,
+            collection: "emb".to_string(),
+            key: "k1".to_string(),
+        })
+        .unwrap();
+    drop(abandoned);
+
+    let mut trigger = Session::new(db);
+    trigger
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    trigger
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "trigger".to_string(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    trigger.execute(Command::TxnCommit).unwrap();
+
+    let matches = strata
+        .vector_query("emb", vec![1.0, 0.0, 0.0], 10u64)
+        .unwrap();
+    assert!(
+        matches.iter().any(|m| m.key == "k1"),
+        "dropping a session with an active transaction must discard queued vector backend ops"
+    );
+}
+
+#[test]
 fn test_drop_without_active_txn_does_not_panic() {
     let session = create_test_session();
     drop(session);
@@ -356,6 +412,71 @@ fn test_begin_with_explicit_branch() {
     assert!(matches!(result, Ok(Output::TxnBegun)));
 
     session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn test_vector_pending_ops_are_isolated_per_transaction() {
+    let strata = Strata::cache().unwrap();
+    let db = strata.database();
+
+    strata
+        .vector_create_collection("emb", 3u64, DistanceMetric::Cosine)
+        .unwrap();
+    strata
+        .vector_upsert("emb", "k1", vec![1.0, 0.0, 0.0], None)
+        .unwrap();
+
+    let mut session1 = Session::new(db.clone());
+    let mut session2 = Session::new(db);
+
+    session2
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session2
+        .execute(Command::VectorDelete {
+            branch: None,
+            space: None,
+            collection: "emb".to_string(),
+            key: "k1".to_string(),
+        })
+        .unwrap();
+
+    session1
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session1
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "trigger".to_string(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    session1.execute(Command::TxnCommit).unwrap();
+
+    let matches = strata
+        .vector_query("emb", vec![1.0, 0.0, 0.0], 10u64)
+        .unwrap();
+    assert!(
+        matches.iter().any(|m| m.key == "k1"),
+        "an unrelated commit must not apply another transaction's pending vector delete"
+    );
+
+    session2.execute(Command::TxnRollback).unwrap();
+
+    let matches = strata
+        .vector_query("emb", vec![1.0, 0.0, 0.0], 10u64)
+        .unwrap();
+    assert!(
+        matches.iter().any(|m| m.key == "k1"),
+        "rolling back the deleting transaction must leave the committed vector searchable"
+    );
 }
 
 // =============================================================================

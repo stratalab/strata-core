@@ -41,8 +41,8 @@ use tracing::info;
 fn recover_vector_state(db: &Database) -> StrataResult<()> {
     recover_from_db(db)?;
 
-    // Register the vector refresh hook for follower refresh support
-    register_vector_refresh_hook(db);
+    // Register the lifecycle hook used for freeze-to-disk and merge reloads.
+    register_vector_lifecycle_hook(db);
 
     Ok(())
 }
@@ -480,13 +480,8 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
     ) -> strata_core::StrataResult<()> {
-        // Register vector merge handlers with the per-database registry.
-        // This enables dimension/metric validation during merge precheck
-        // and per-collection HNSW rebuilds after merge commit.
-        db.merge_registry().register_vector(
-            crate::merge_handler::vector_precheck_fn,
-            crate::merge_handler::vector_post_commit_fn,
-        );
+        let state = db.extension::<super::VectorBackendState>()?;
+        ensure_runtime_wiring(db, &state);
         Ok(())
     }
 
@@ -496,14 +491,213 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
 }
 
 // =============================================================================
-// Refresh Hook Implementation
+// Vector Commit Observer
 // =============================================================================
 
-/// Register the vector refresh hook with the database.
+use strata_engine::database::observers::{
+    CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver,
+};
+
+pub(crate) fn ensure_runtime_wiring(
+    db: &std::sync::Arc<strata_engine::Database>,
+    state: &std::sync::Arc<super::VectorBackendState>,
+) {
+    use std::sync::atomic::Ordering;
+    use std::sync::Arc;
+
+    if state.runtime_wired.swap(true, Ordering::AcqRel) {
+        return;
+    }
+
+    db.merge_registry().register_vector(
+        crate::merge_handler::vector_precheck_fn,
+        crate::merge_handler::vector_post_commit_fn,
+    );
+
+    let commit_observer = Arc::new(VectorCommitObserver {
+        db: Arc::downgrade(db),
+    });
+    db.commit_observers().register(commit_observer);
+
+    let replay_observer = Arc::new(VectorReplayObserver {
+        db: Arc::downgrade(db),
+    });
+    db.replay_observers().register(replay_observer);
+}
+
+/// Observer that applies pending HNSW backend operations after commit.
 ///
-/// This allows the engine's follower refresh to incrementally update
-/// vector backends without knowing the concrete vector types.
-fn register_vector_refresh_hook(db: &Database) {
+/// Vector write methods queue `StagedVectorOp`s in `VectorBackendState` during
+/// transactions. This observer applies them after successful commit, updating
+/// the in-memory HNSW indices.
+///
+/// This moves vector backend maintenance ownership from executor (Session's
+/// `PostCommitOp::VectorBackendOp`) to subsystem (VectorSubsystem), fulfilling
+/// the T2-E2 requirement.
+struct VectorCommitObserver {
+    db: std::sync::Weak<strata_engine::Database>,
+}
+
+impl CommitObserver for VectorCommitObserver {
+    fn name(&self) -> &'static str {
+        "vector"
+    }
+
+    fn on_commit(&self, info: &CommitInfo) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(()); // Database dropped
+        };
+
+        // Get vector backend state and apply pending ops for this commit only.
+        if let Ok(state) = db.extension::<super::VectorBackendState>() {
+            let applied = state.apply_pending_ops(info.txn_id);
+            if applied > 0 {
+                tracing::debug!(
+                    target: "strata::vector",
+                    txn_id = info.txn_id.0,
+                    branch_id = ?info.branch_id,
+                    commit_version = info.commit_version.0,
+                    ops_applied = applied,
+                    "Applied pending HNSW operations"
+                );
+            }
+        }
+
+        Ok(())
+    }
+}
+
+struct VectorReplayObserver {
+    db: std::sync::Weak<strata_engine::Database>,
+}
+
+impl ReplayObserver for VectorReplayObserver {
+    fn name(&self) -> &'static str {
+        "vector"
+    }
+
+    fn on_replay(&self, info: &ReplayInfo) -> Result<(), ObserverError> {
+        let Some(db) = self.db.upgrade() else {
+            return Ok(());
+        };
+
+        if let Ok(state) = db.extension::<super::VectorBackendState>() {
+            apply_replayed_vector_changes(&state, &info.puts, &info.deleted_values);
+        }
+
+        Ok(())
+    }
+}
+
+// =============================================================================
+// Lifecycle Hook Implementation
+// =============================================================================
+
+fn apply_replayed_vector_changes(
+    state: &super::VectorBackendState,
+    puts: &[(strata_core::types::Key, strata_core::value::Value)],
+    deleted_values: &[(strata_core::types::Key, strata_core::value::Value)],
+) {
+    use strata_core::primitives::vector::{CollectionId, VectorId};
+    use strata_core::types::TypeTag;
+
+    for (key, value) in puts {
+        if key.type_tag != TypeTag::Vector {
+            continue;
+        }
+        let bytes = match value {
+            strata_core::value::Value::Bytes(b) => b,
+            _ => continue,
+        };
+        let record = match super::VectorRecord::from_bytes(bytes) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let user_key_str = match key.user_key_string() {
+            Some(s) => s,
+            None => continue,
+        };
+        let (collection, vector_key) = match user_key_str.split_once('/') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let branch_id = key.namespace.branch_id;
+        let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
+        let vid = VectorId::new(record.vector_id);
+
+        if let Some(mut backend) = state.backends.get_mut(&cid) {
+            if let Err(e) = backend.insert_with_timestamp(vid, &record.embedding, record.created_at)
+            {
+                tracing::warn!(
+                    target: "strata::refresh",
+                    collection = collection,
+                    vector_key = vector_key,
+                    error = %e,
+                    "Vector insert failed during replay"
+                );
+            }
+            backend.set_inline_meta(
+                vid,
+                super::types::InlineMeta {
+                    key: vector_key.to_string(),
+                    source_ref: record.source_ref.clone(),
+                },
+            );
+        } else {
+            tracing::debug!(
+                target: "strata::refresh",
+                collection = collection,
+                "Skipping vector insert for unknown collection (will be picked up on restart)"
+            );
+        }
+    }
+
+    for (key, value) in deleted_values {
+        if key.type_tag != TypeTag::Vector {
+            continue;
+        }
+        let bytes = match value {
+            strata_core::value::Value::Bytes(b) => b,
+            _ => continue,
+        };
+        let record = match super::VectorRecord::from_bytes(bytes) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let user_key_str = match key.user_key_string() {
+            Some(s) => s,
+            None => continue,
+        };
+        let collection = match user_key_str.split_once('/') {
+            Some((coll, _)) => coll,
+            None => continue,
+        };
+        let branch_id = key.namespace.branch_id;
+        let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
+        let vid = VectorId::new(record.vector_id);
+
+        if let Some(mut backend) = state.backends.get_mut(&cid) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_micros() as u64)
+                .unwrap_or(0);
+            if let Err(e) = backend.delete_with_timestamp(vid, now) {
+                tracing::warn!(
+                    target: "strata::refresh",
+                    collection = collection,
+                    error = %e,
+                    "Vector delete failed during replay"
+                );
+            }
+            backend.remove_inline_meta(vid);
+        }
+    }
+}
+
+/// Register the vector lifecycle hook with the database.
+///
+/// This hook only owns freeze-to-disk and post-merge reload behaviors.
+fn register_vector_lifecycle_hook(db: &Database) {
     use std::sync::Arc;
 
     let state = match db.extension::<super::VectorBackendState>() {
@@ -511,139 +705,37 @@ fn register_vector_refresh_hook(db: &Database) {
         Err(_) => return,
     };
 
-    let hook = Arc::new(VectorRefreshHook { state });
+    let hook = Arc::new(VectorLifecycleHook { state });
 
     if let Ok(hooks) = db.extension::<strata_engine::RefreshHooks>() {
         hooks.register(hook);
     }
 }
 
-/// Refresh hook implementation for vector backends.
-struct VectorRefreshHook {
+/// Lifecycle hook implementation for vector backends.
+struct VectorLifecycleHook {
     state: std::sync::Arc<super::VectorBackendState>,
 }
 
 // Safety: VectorBackendState uses DashMap which is Send + Sync
-unsafe impl Send for VectorRefreshHook {}
-unsafe impl Sync for VectorRefreshHook {}
+unsafe impl Send for VectorLifecycleHook {}
+unsafe impl Sync for VectorLifecycleHook {}
 
-impl strata_engine::RefreshHook for VectorRefreshHook {
+impl strata_engine::RefreshHook for VectorLifecycleHook {
     fn pre_delete_read(
         &self,
-        db: &strata_engine::Database,
-        deletes: &[strata_core::types::Key],
+        _db: &strata_engine::Database,
+        _deletes: &[strata_core::types::Key],
     ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
-        use strata_core::traits::Storage;
-        use strata_core::types::TypeTag;
-
-        let mut pre_reads = Vec::new();
-        for key in deletes {
-            if key.type_tag == TypeTag::Vector {
-                if let Ok(Some(vv)) = db.storage().get_versioned(key, CommitVersion::MAX) {
-                    if let strata_core::value::Value::Bytes(ref bytes) = vv.value {
-                        pre_reads.push((key.clone(), bytes.clone()));
-                    }
-                }
-            }
-        }
-        pre_reads
+        Vec::new()
     }
 
     fn apply_refresh(
         &self,
-        puts: &[(strata_core::types::Key, strata_core::value::Value)],
-        pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+        _puts: &[(strata_core::types::Key, strata_core::value::Value)],
+        _pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
     ) {
-        use strata_core::primitives::vector::{CollectionId, VectorId};
-        use strata_core::types::TypeTag;
-
-        // Vector puts: insert into backend
-        for (key, value) in puts {
-            if key.type_tag != TypeTag::Vector {
-                continue;
-            }
-            let bytes = match value {
-                strata_core::value::Value::Bytes(b) => b,
-                _ => continue,
-            };
-            let record = match super::VectorRecord::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let user_key_str = match key.user_key_string() {
-                Some(s) => s,
-                None => continue,
-            };
-            let (collection, vector_key) = match user_key_str.split_once('/') {
-                Some(pair) => pair,
-                None => continue,
-            };
-            let branch_id = key.namespace.branch_id;
-            let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
-            let vid = VectorId::new(record.vector_id);
-
-            if let Some(mut backend) = self.state.backends.get_mut(&cid) {
-                if let Err(e) =
-                    backend.insert_with_timestamp(vid, &record.embedding, record.created_at)
-                {
-                    tracing::warn!(
-                        target: "strata::refresh",
-                        collection = collection,
-                        vector_key = vector_key,
-                        error = %e,
-                        "Vector insert failed during refresh"
-                    );
-                }
-                backend.set_inline_meta(
-                    vid,
-                    super::types::InlineMeta {
-                        key: vector_key.to_string(),
-                        source_ref: record.source_ref.clone(),
-                    },
-                );
-            } else {
-                tracing::debug!(
-                    target: "strata::refresh",
-                    collection = collection,
-                    "Skipping vector insert for unknown collection (will be picked up on restart)"
-                );
-            }
-        }
-
-        // Vector deletes: remove from backend using pre-reads
-        for (key, bytes) in pre_read_deletes {
-            let record = match super::VectorRecord::from_bytes(bytes) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-            let user_key_str = match key.user_key_string() {
-                Some(s) => s,
-                None => continue,
-            };
-            let collection = match user_key_str.split_once('/') {
-                Some((coll, _)) => coll,
-                None => continue,
-            };
-            let branch_id = key.namespace.branch_id;
-            let cid = CollectionId::new(branch_id, key.namespace.space.as_str(), collection);
-            let vid = VectorId::new(record.vector_id);
-
-            if let Some(mut backend) = self.state.backends.get_mut(&cid) {
-                let now = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_micros() as u64)
-                    .unwrap_or(0);
-                if let Err(e) = backend.delete_with_timestamp(vid, now) {
-                    tracing::warn!(
-                        target: "strata::refresh",
-                        collection = collection,
-                        error = %e,
-                        "Vector delete failed during refresh"
-                    );
-                }
-                backend.remove_inline_meta(vid);
-            }
-        }
+        // Follower-side vector maintenance now lives in VectorReplayObserver.
     }
 
     fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
@@ -679,9 +771,8 @@ impl strata_engine::RefreshHook for VectorRefreshHook {
     // spaces. The handler iterates affected (space, collection) pairs
     // explicitly and avoids both problems.
     //
-    // `pre_delete_read`, `apply_refresh`, and `freeze_to_disk` remain
-    // unchanged: they participate in the follower refresh and shutdown
-    // paths, neither of which is replaced by Phase 4.
+    // `freeze_to_disk` remains lifecycle-owned here. Follower replay moved
+    // to `VectorReplayObserver`.
 }
 
 #[cfg(test)]

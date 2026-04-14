@@ -9,26 +9,17 @@
 //! `merge_branches`, and friends — but the engine cannot depend on the graph
 //! crate directly (cycle: `strata-graph` already depends on `strata-engine`).
 //!
-//! The fix mirrors the existing `register_vector_merge` /
-//! `register_graph_merge_plan` pattern in `branch_ops/primitive_merge.rs`: the
-//! engine declares hook *signatures*, the graph crate registers the
-//! *implementations* at startup, and the engine calls the registered hooks
-//! from inside its branch-mutating functions. Engine-direct callers and
-//! executor-driven callers go through identical code paths, so no one can
-//! bypass the DAG by reaching into the engine API directly.
-//!
 //! ## Failure model
 //!
-//! Hooks are infallible (`fn(...)` with no `Result`). The implementation
-//! handles its own errors by logging warnings — it must never propagate
-//! a failure back through the engine, because the underlying branch
-//! operation has already committed by the time the hook fires. The DAG is
-//! a query-optimization index for `compute_merge_base_from_dag`; staleness
-//! degrades gracefully to engine-level fork-info lookup.
+//! Best-effort hooks log warnings on failure — they never propagate errors
+//! back through the engine, because the underlying branch operation has already
+//! committed by the time the hook fires. The DAG is a query-optimization index
+//! for `compute_merge_base_from_dag`; staleness degrades gracefully to
+//! engine-level fork-info lookup.
 //!
 //! ## Lifecycle
 //!
-//! The primary DAG path is now per-database:
+//! DAG hooks are per-database:
 //!
 //! 1. `GraphSubsystem::initialize()` installs a per-database `BranchDagHook`.
 //! 2. `GraphSubsystem::bootstrap()` creates the `_system_` branch and the
@@ -37,15 +28,13 @@
 //!    load-bearing DAG write through its mutation boundary, so the canonical
 //!    branch API records exactly once.
 //! 4. Direct engine callers (`branch_ops::*`, `BranchIndex::*`, bundle import)
-//!    still dispatch through this module. Those calls prefer the per-database
-//!    hook and fall back to the legacy process-global registration only when no
-//!    per-database hook is installed.
-//! 5. `OnceCell` keeps the legacy fallback registration idempotent.
+//!    dispatch through this module using the per-database hook. If no hook is
+//!    installed (engine-only unit tests), operations complete without DAG
+//!    recording.
 
 use std::cell::Cell;
 use std::sync::Arc;
 
-use once_cell::sync::OnceCell;
 use strata_core::id::CommitVersion;
 use tracing::warn;
 
@@ -106,8 +95,10 @@ pub type BranchRevertHook =
 pub type BranchCherryPickHook =
     fn(db: &Arc<Database>, source: &str, target: &str, info: &CherryPickInfo);
 
-/// Bundle of all six DAG hooks. The graph crate constructs and registers
-/// this struct exactly once at startup via [`register_branch_dag_hooks`].
+/// Bundle of all six DAG hooks.
+///
+/// This struct is legacy — the canonical path is now the per-database
+/// `BranchDagHook` trait installed by `GraphSubsystem::initialize()`.
 pub struct BranchDagHooks {
     /// Fired by `BranchIndex::create_branch` and `bundle::import_branch`.
     pub on_create: BranchCreateHook,
@@ -123,34 +114,8 @@ pub struct BranchDagHooks {
     pub on_cherry_pick: BranchCherryPickHook,
 }
 
-/// Process-global hook bundle. Set once via [`register_branch_dag_hooks`].
-/// `OnceCell` makes the first call win — subsequent registration attempts
-/// are no-ops, matching the existing `register_vector_merge` /
-/// `register_graph_merge_plan` semantics.
-static BRANCH_DAG_HOOKS: OnceCell<BranchDagHooks> = OnceCell::new();
-
 std::thread_local! {
     static SUPPRESS_BRANCH_DAG_HOOKS: Cell<usize> = const { Cell::new(0) };
-}
-
-/// Register the branch DAG hook implementation.
-///
-/// Legacy compatibility registration for environments that still rely on a
-/// process-global DAG implementation. The canonical production path is the
-/// per-database hook installed by `GraphSubsystem::initialize()`.
-pub fn register_branch_dag_hooks(hooks: BranchDagHooks) {
-    let _ = BRANCH_DAG_HOOKS.set(hooks);
-}
-
-/// Engine-internal accessor. Returns the registered hooks if any.
-///
-/// Engine functions that mutate branch state (`fork_branch`,
-/// `merge_branches`, etc.) call this and dispatch to the hook if it exists.
-/// If no hook is registered (engine-only unit tests that don't load the
-/// graph crate), the call is a no-op and the operation completes normally
-/// without DAG bookkeeping.
-pub(crate) fn branch_dag_hooks() -> Option<&'static BranchDagHooks> {
-    BRANCH_DAG_HOOKS.get()
 }
 
 struct BranchDagHookSuppressionGuard;
@@ -200,17 +165,11 @@ pub(crate) fn dispatch_create_hook(db: &Arc<Database>, branch: &str) {
         return;
     }
 
-    if record_event_best_effort(
+    record_event_best_effort(
         db,
         "create",
         DagEvent::create(resolve_branch_name(branch), branch),
-    ) {
-        return;
-    }
-
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_create)(db, branch);
-    }
+    );
 }
 
 pub(crate) fn dispatch_delete_hook(db: &Arc<Database>, branch: &str) {
@@ -218,17 +177,11 @@ pub(crate) fn dispatch_delete_hook(db: &Arc<Database>, branch: &str) {
         return;
     }
 
-    if record_event_best_effort(
+    record_event_best_effort(
         db,
         "delete",
         DagEvent::delete(resolve_branch_name(branch), branch),
-    ) {
-        return;
-    }
-
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_delete)(db, branch);
-    }
+    );
 }
 
 pub(crate) fn dispatch_fork_hook(
@@ -241,30 +194,24 @@ pub(crate) fn dispatch_fork_hook(
         return;
     }
 
-    if let Some(fork_version) = info.fork_version {
-        let mut event = DagEvent::fork(
-            resolve_branch_name(&info.destination),
-            &info.destination,
-            resolve_branch_name(&info.source),
-            &info.source,
-            CommitVersion(fork_version),
-        );
-        if let Some(message) = message {
-            event = event.with_message(message);
-        }
-        if let Some(creator) = creator {
-            event = event.with_creator(creator);
-        }
-        if record_event_best_effort(db, "fork", event) {
-            return;
-        }
-    } else if db.dag_hook().get().is_some() {
+    let Some(fork_version) = info.fork_version else {
         return;
-    }
+    };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_fork)(db, info, message, creator);
+    let mut event = DagEvent::fork(
+        resolve_branch_name(&info.destination),
+        &info.destination,
+        resolve_branch_name(&info.source),
+        &info.source,
+        CommitVersion(fork_version),
+    );
+    if let Some(message) = message {
+        event = event.with_message(message);
     }
+    if let Some(creator) = creator {
+        event = event.with_creator(creator);
+    }
+    record_event_best_effort(db, "fork", event);
 }
 
 pub(crate) fn dispatch_merge_hook(
@@ -278,32 +225,26 @@ pub(crate) fn dispatch_merge_hook(
         return;
     }
 
-    if let Some(merge_version) = info.merge_version {
-        let mut event = DagEvent::merge(
-            resolve_branch_name(&info.target),
-            &info.target,
-            resolve_branch_name(&info.source),
-            &info.source,
-            CommitVersion(merge_version),
-            info.clone(),
-            strategy,
-        );
-        if let Some(message) = message {
-            event = event.with_message(message);
-        }
-        if let Some(creator) = creator {
-            event = event.with_creator(creator);
-        }
-        if record_event_best_effort(db, "merge", event) {
-            return;
-        }
-    } else if db.dag_hook().get().is_some() {
+    let Some(merge_version) = info.merge_version else {
         return;
-    }
+    };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_merge)(db, info, strategy, message, creator);
+    let mut event = DagEvent::merge(
+        resolve_branch_name(&info.target),
+        &info.target,
+        resolve_branch_name(&info.source),
+        &info.source,
+        CommitVersion(merge_version),
+        info.clone(),
+        strategy,
+    );
+    if let Some(message) = message {
+        event = event.with_message(message);
     }
+    if let Some(creator) = creator {
+        event = event.with_creator(creator);
+    }
+    record_event_best_effort(db, "merge", event);
 }
 
 pub(crate) fn dispatch_revert_hook(
@@ -316,29 +257,23 @@ pub(crate) fn dispatch_revert_hook(
         return;
     }
 
-    if let Some(revert_version) = info.revert_version {
-        let mut event = DagEvent::revert(
-            resolve_branch_name(&info.branch),
-            &info.branch,
-            revert_version,
-            info.clone(),
-        );
-        if let Some(message) = message {
-            event = event.with_message(message);
-        }
-        if let Some(creator) = creator {
-            event = event.with_creator(creator);
-        }
-        if record_event_best_effort(db, "revert", event) {
-            return;
-        }
-    } else if db.dag_hook().get().is_some() {
+    let Some(revert_version) = info.revert_version else {
         return;
-    }
+    };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_revert)(db, info, message, creator);
+    let mut event = DagEvent::revert(
+        resolve_branch_name(&info.branch),
+        &info.branch,
+        revert_version,
+        info.clone(),
+    );
+    if let Some(message) = message {
+        event = event.with_message(message);
     }
+    if let Some(creator) = creator {
+        event = event.with_creator(creator);
+    }
+    record_event_best_effort(db, "revert", event);
 }
 
 pub(crate) fn dispatch_cherry_pick_hook(
@@ -351,23 +286,17 @@ pub(crate) fn dispatch_cherry_pick_hook(
         return;
     }
 
-    if let Some(cherry_pick_version) = info.cherry_pick_version {
-        let event = DagEvent::cherry_pick(
-            resolve_branch_name(target),
-            target,
-            resolve_branch_name(source),
-            source,
-            CommitVersion(cherry_pick_version),
-            info.clone(),
-        );
-        if record_event_best_effort(db, "cherry_pick", event) {
-            return;
-        }
-    } else if db.dag_hook().get().is_some() {
+    let Some(cherry_pick_version) = info.cherry_pick_version else {
         return;
-    }
+    };
 
-    if let Some(hooks) = branch_dag_hooks() {
-        (hooks.on_cherry_pick)(db, source, target, info);
-    }
+    let event = DagEvent::cherry_pick(
+        resolve_branch_name(target),
+        target,
+        resolve_branch_name(source),
+        source,
+        CommitVersion(cherry_pick_version),
+        info.clone(),
+    );
+    record_event_best_effort(db, "cherry_pick", event);
 }

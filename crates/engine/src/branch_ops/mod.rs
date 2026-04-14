@@ -25,8 +25,8 @@ pub(crate) use dag_hooks::{
     with_branch_dag_hooks_suppressed,
 };
 pub use dag_hooks::{
-    register_branch_dag_hooks, BranchCherryPickHook, BranchCreateHook, BranchDagHooks,
-    BranchDeleteHook, BranchForkHook, BranchMergeHook, BranchRevertHook,
+    BranchCherryPickHook, BranchCreateHook, BranchDagHooks, BranchDeleteHook, BranchForkHook,
+    BranchMergeHook, BranchRevertHook,
 };
 
 use crate::database::Database;
@@ -303,10 +303,10 @@ fn check_event_merge_divergence(
 //
 // The graph crate ships a real semantic merge that handles divergent
 // branches correctly (decoded edge diffing, additive merging of disjoint
-// edges, referential integrity validation). Production builds register
-// it via `register_graph_merge_plan`. The fallback in this file is the
-// tactical "refuse any divergent graph merge" rule, used only by engine
-// unit tests that don't load the graph crate.
+// edges, referential integrity validation). Production builds register it
+// via `db.merge_registry().register_graph()` in `GraphSubsystem::initialize()`.
+// The fallback in this file is the tactical "refuse any divergent graph
+// merge" rule, used only by engine unit tests that don't load the graph crate.
 //
 // Without the semantic merge, the generic three-way merge would treat
 // `(space, TypeTag::Graph)` cells as opaque KV, producing two distinct
@@ -1219,8 +1219,7 @@ fn cow_diff_branches(
 /// Common ancestor state for three-way merge.
 ///
 /// `pub` (re-exported from `strata_engine`) so primitive crates that
-/// register graph plan callbacks via `register_graph_merge_plan` can
-/// borrow it through `MergePlanCtx`.
+/// implement graph plan callbacks can borrow it through `MergePlanCtx`.
 #[derive(Debug, Clone)]
 pub struct MergeBase {
     /// Branch to read ancestor state from. For COW-aware merges, this
@@ -1499,9 +1498,8 @@ fn compute_merge_base(
 /// merge surface (sum of per-space slices), not by `n_spaces × full_branch_data`.
 /// `BTreeMap` for deterministic iteration order.
 ///
-/// `pub` (re-exported from `strata_engine`) so primitive crates registering
-/// graph plan callbacks via `register_graph_merge_plan` can iterate cells
-/// from inside their function.
+/// `pub` (re-exported from `strata_engine`) so primitive crates implementing
+/// graph plan callbacks can iterate cells from inside their function.
 pub struct TypedEntries {
     /// Per-(space, type_tag) entry slices, keyed by `(space_name, type_tag)`.
     /// Sorted via `BTreeMap` for deterministic iteration order.

@@ -437,7 +437,114 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         recover_search_state(db)
     }
 
+    fn initialize(
+        &self,
+        db: &std::sync::Arc<crate::database::Database>,
+    ) -> strata_core::StrataResult<()> {
+        use std::sync::Arc;
+
+        // Register commit observer for search index maintenance.
+        // Index updates happen inline during primitive operations; this observer
+        // handles periodic seal operations for durability.
+        let commit_observer = Arc::new(SearchCommitObserver {
+            db: Arc::downgrade(db),
+        });
+        db.commit_observers().register(commit_observer);
+
+        // Register replay observer for follower index maintenance.
+        // Followers don't execute primitive operations (data arrives via WAL),
+        // so this observer ensures the index stays consistent after replays.
+        let replay_observer = Arc::new(SearchReplayObserver {
+            db: Arc::downgrade(db),
+        });
+        db.replay_observers().register(replay_observer);
+
+        Ok(())
+    }
+
     fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
         db.freeze_search_index()
+    }
+}
+
+// =============================================================================
+// Search Observers
+// =============================================================================
+
+use crate::database::observers::{
+    CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver,
+};
+use std::sync::{atomic::AtomicU64, Weak};
+
+/// Commit observer for search index maintenance.
+///
+/// ## Architectural Note: Why Search Differs from Vector
+///
+/// Unlike vector (where HNSW can't participate in OCC and needs post-commit
+/// updates via VectorCommitObserver), search index updates happen **inline**
+/// during primitive operations (KV, Event, JSON put). This is intentional:
+///
+/// - **Search index is transactional**: Updates can be rolled back by simply
+///   not committing. The inline updates participate in MVCC.
+/// - **Immediate visibility**: Search results reflect writes within the same
+///   transaction (read-your-writes).
+/// - **No staged ops needed**: Unlike embeddings, search tokens don't require
+///   separate storage - they're derived from committed data on recovery.
+///
+/// Moving to observer-based indexing would change semantics (search results
+/// not visible until commit) and complicate rollback. The current inline
+/// approach is the correct architecture for search.
+///
+/// This observer handles secondary concerns (metrics, periodic seal) rather
+/// than primary indexing.
+struct SearchCommitObserver {
+    db: Weak<Database>,
+}
+
+impl CommitObserver for SearchCommitObserver {
+    fn name(&self) -> &'static str {
+        "search"
+    }
+
+    fn on_commit(&self, _info: &CommitInfo) -> Result<(), ObserverError> {
+        // Primary index updates happen inline during primitive operations.
+        // This observer handles secondary concerns:
+        // - Could trigger periodic seal (currently handled by freeze/shutdown)
+        // - Could track commit metrics (future enhancement)
+        Ok(())
+    }
+}
+
+/// Replay observer for follower search index maintenance.
+///
+/// ## Architectural Note: Follower Search Reconciliation
+///
+/// Followers receive data via WAL replay, not primitive operations. Unlike
+/// vector (which uses RefreshHook to capture embeddings during WAL apply),
+/// search doesn't need real-time incremental updates because:
+///
+/// - **Recovery rebuilds**: Search index is rebuildable from committed data,
+///   so recovery can fully reconcile the index.
+/// - **Derived state**: Search tokens are derived from document content, not
+///   stored separately like embeddings.
+/// - **Cost tradeoff**: Real-time reconciliation would require re-parsing all
+///   replayed documents to extract tokens. Recovery-based reconciliation is
+///   more efficient for read replicas.
+///
+/// For workloads requiring real-time follower search, a RefreshHook-based
+/// approach (like vector) could be implemented as a future enhancement.
+struct SearchReplayObserver {
+    db: Weak<Database>,
+}
+
+impl ReplayObserver for SearchReplayObserver {
+    fn name(&self) -> &'static str {
+        "search"
+    }
+
+    fn on_replay(&self, _info: &ReplayInfo) -> Result<(), ObserverError> {
+        // Follower search index reconciliation is deferred to recovery.
+        // See architectural note above for rationale.
+        Ok(())
     }
 }

@@ -27,24 +27,23 @@
 //!   reasons; both `merge_branches` and `cherry_pick_from_diff` reach it
 //!   through this handler.
 //! - `VectorMergeHandler` tracks affected `(space, collection)` pairs in
-//!   `plan` and dispatches to function pointers registered by the vector
-//!   crate (`register_vector_merge`) for the dimension/metric mismatch
-//!   precheck and the per-collection HNSW rebuild in `post_commit`. If
-//!   unset (engine-only unit tests that don't load the vector crate),
-//!   the handler is a pure pass-through and HNSW backends only catch up
-//!   to the merged KV state on the next full recovery.
-//! - `GraphMergeHandler::plan` dispatches to a function pointer registered
-//!   by the graph crate (`register_graph_merge_plan`), which implements
-//!   the semantic merge algorithm: decoded edge diffing, additive merging
-//!   of disjoint edges, referential integrity validation, additive catalog
-//!   merging. If unset (engine-only unit tests that don't load the graph
-//!   crate), the handler falls back to `check_graph_merge_divergence` —
-//!   the tactical "refuse divergent graph merges" rule.
+//!   `plan` and dispatches to the per-database `MergeHandlerRegistry` for
+//!   the dimension/metric mismatch precheck and the per-collection HNSW
+//!   rebuild in `post_commit`. If unset (engine-only unit tests that don't
+//!   load the vector crate), the handler is a pure pass-through and HNSW
+//!   backends only catch up to the merged KV state on the next full recovery.
+//! - `GraphMergeHandler::plan` dispatches to the per-database
+//!   `MergeHandlerRegistry`, which the graph crate populates via
+//!   `GraphSubsystem::initialize()`. It implements the semantic merge
+//!   algorithm: decoded edge diffing, additive merging of disjoint edges,
+//!   referential integrity validation, additive catalog merging. If unset
+//!   (engine-only unit tests that don't load the graph crate), the handler
+//!   falls back to `check_graph_merge_divergence` — the tactical "refuse
+//!   divergent graph merges" rule.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-use once_cell::sync::OnceCell;
 use parking_lot::Mutex;
 use strata_core::primitives::json::JsonValue;
 use strata_core::types::{BranchId, TypeTag};
@@ -859,13 +858,13 @@ impl PrimitiveMergeHandler for EventMergeHandler {
 
 /// Function pointer type for the vector merge precheck.
 ///
-/// The vector crate provides this implementation via
-/// `register_vector_merge`. Called from `VectorMergeHandler::precheck` to
-/// reject merges that would combine collections with incompatible
-/// configurations (dimension or metric mismatch). The check requires
-/// decoding `CollectionRecord` rows, which lives in the vector crate, so
-/// the engine dispatches to it via this callback rather than rolling its
-/// own decoder.
+/// The vector crate provides this implementation and registers it via
+/// `db.merge_registry().register_vector()` during `VectorSubsystem::initialize()`.
+/// Called from `VectorMergeHandler::precheck` to reject merges that would
+/// combine collections with incompatible configurations (dimension or metric
+/// mismatch). The check requires decoding `CollectionRecord` rows, which
+/// lives in the vector crate, so the engine dispatches to it via this
+/// callback rather than rolling its own decoder.
 ///
 /// Returns `Err` to abort the entire merge (no writes happen).
 pub type VectorMergePrecheckFn =
@@ -873,11 +872,12 @@ pub type VectorMergePrecheckFn =
 
 /// Function pointer type for the vector merge post-commit rebuild.
 ///
-/// The vector crate provides this implementation via
-/// `register_vector_merge`. Called from `VectorMergeHandler::post_commit`
-/// once per merge with the set of `(space, collection)` pairs that the
-/// merge actually touched on either side. The vector crate rebuilds only
-/// those collections' HNSW backends, leaving untouched collections alone.
+/// The vector crate provides this implementation and registers it via
+/// `db.merge_registry().register_vector()` during `VectorSubsystem::initialize()`.
+/// Called from `VectorMergeHandler::post_commit` once per merge with the set
+/// of `(space, collection)` pairs that the merge actually touched on either
+/// side. The vector crate rebuilds only those collections' HNSW backends,
+/// leaving untouched collections alone.
 ///
 /// Per-collection failures inside the callback are typically logged and
 /// swallowed by the implementation: at this point the merge has already
@@ -892,40 +892,6 @@ pub type VectorMergePostCommitFn = fn(
     target: BranchId,
     affected: &BTreeSet<(String, String)>,
 ) -> StrataResult<()>;
-
-/// Bundle of vector-merge callbacks registered by the vector crate.
-struct VectorMergeCallbacks {
-    precheck: VectorMergePrecheckFn,
-    post_commit: VectorMergePostCommitFn,
-}
-
-/// Registered vector semantic merge implementation, set by the vector
-/// crate at startup via `register_vector_merge`. If unset (engine-only
-/// unit tests that don't load the vector crate), `VectorMergeHandler` is
-/// a pure pass-through: precheck and post_commit are no-ops, vectors
-/// merge through the generic 14-case classifier (which writes correct
-/// KV) but no in-memory HNSW rebuild fires. The next full recovery on
-/// db open will catch up via `recover_vector_state`.
-static VECTOR_MERGE_CALLBACKS: OnceCell<VectorMergeCallbacks> = OnceCell::new();
-
-/// Register the vector crate's semantic merge implementation.
-///
-/// Should be called once at application/test startup, before any
-/// `merge_branches` calls. Subsequent calls are no-ops (the first
-/// registration wins).
-///
-/// The standard test fixtures call this from
-/// `ensure_test_handlers_registered` alongside the
-/// `register_graph_semantic_merge` and branch DAG hook installations.
-pub fn register_vector_merge(
-    precheck: VectorMergePrecheckFn,
-    post_commit: VectorMergePostCommitFn,
-) {
-    let _ = VECTOR_MERGE_CALLBACKS.set(VectorMergeCallbacks {
-        precheck,
-        post_commit,
-    });
-}
 
 /// Vector merge handler.
 ///
@@ -1053,9 +1019,10 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
 
 /// Function pointer type for the graph semantic merge plan.
 ///
-/// The graph crate provides this implementation via
-/// `register_graph_merge_plan`. The engine's `GraphMergeHandler::plan`
-/// method dispatches to it if registered, falling back to the divergence
+/// The graph crate provides this implementation and registers it via
+/// `db.merge_registry().register_graph(graph_plan_fn)` during
+/// `GraphSubsystem::initialize()`. The engine's `GraphMergeHandler::plan`
+/// method dispatches to it if registered, falling back to divergence
 /// refusal + default classify behavior if not.
 ///
 /// Returns the per-handler `PrimitiveMergePlan` shape directly so the
@@ -1066,31 +1033,12 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
 /// fails (e.g., corrupt packed binary on disk).
 pub type GraphMergePlanFn = fn(&MergePlanCtx<'_>) -> StrataResult<PrimitiveMergePlan>;
 
-/// Registered graph semantic merge implementation, set by the graph
-/// crate at startup via `register_graph_merge_plan`. If unset (e.g.
-/// in unit tests that don't load the graph crate), `GraphMergeHandler`
-/// falls back to the divergence-refusal precheck + default classify
-/// behavior.
-static GRAPH_MERGE_PLAN_FN: OnceCell<GraphMergePlanFn> = OnceCell::new();
-
-/// Register the graph crate's semantic merge implementation.
-///
-/// Should be called once at application/test startup, before any
-/// `merge_branches` calls. Subsequent calls are no-ops (the first
-/// registration wins).
-///
-/// The standard test fixtures call this from
-/// `ensure_test_handlers_registered` alongside the vector semantic merge
-/// and branch DAG hook installations.
-pub fn register_graph_merge_plan(plan_fn: GraphMergePlanFn) {
-    let _ = GRAPH_MERGE_PLAN_FN.set(plan_fn);
-}
-
 /// Graph merge handler.
 ///
 /// Dispatches to the graph crate's semantic merge — decoded edge diffing,
 /// additive merging of disjoint edges, referential integrity validation,
-/// additive catalog merging — registered via `register_graph_merge_plan`.
+/// additive catalog merging — registered via the per-database
+/// `MergeHandlerRegistry`.
 ///
 /// If no graph plan function is registered (typical for engine-only unit
 /// tests that don't load the graph crate), the handler falls back to:

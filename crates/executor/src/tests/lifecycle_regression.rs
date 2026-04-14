@@ -127,10 +127,10 @@ fn test_strata_open_drop_reopen_preserves_vectors_through_drop_freeze() {
 /// `Strata::open_with(follower: true)` after `db.refresh()`.
 ///
 /// This locks the invariant that the follower open path installs
-/// `VectorSubsystem` (which registers the vector refresh hook via
-/// `register_vector_refresh_hook` inside `recover_vector_state`), so
-/// `Database::refresh()` picks up vector updates incrementally via the
-/// refresh hook chain — not via full re-recovery.
+/// `VectorSubsystem` (which registers the vector replay observer during
+/// `VectorSubsystem::initialize`), so `Database::refresh()` picks up
+/// vector updates incrementally via replay observers — not via full
+/// re-recovery.
 ///
 /// Empirical revert: drop `VectorSubsystem` from `strata_db_builder()`
 /// on the follower branch in `Strata::open_with` and this test fails —
@@ -171,8 +171,8 @@ fn test_strata_follower_observes_primary_vector_writes_via_refresh() {
     primary.database().flush().unwrap();
 
     // Follower refresh must pick up the new vector. This requires the
-    // vector refresh hook to be installed on the follower, which only
-    // happens if `VectorSubsystem::recover` ran during follower open —
+    // vector replay observer to be installed on the follower, which only
+    // happens if `VectorSubsystem::initialize` ran during follower open —
     // which only happens if `strata_db_builder()` was used.
     let applied = follower.database().refresh().unwrap();
     assert!(

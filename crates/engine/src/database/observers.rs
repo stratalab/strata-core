@@ -27,8 +27,9 @@ use parking_lot::RwLock;
 use std::fmt;
 use std::sync::Arc;
 
-use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::id::{CommitVersion, TxnId};
+use strata_core::types::{BranchId, Key};
+use strata_core::value::Value;
 
 // =============================================================================
 // Error Types
@@ -117,6 +118,8 @@ impl std::error::Error for ObserverError {}
 /// Information about a committed transaction.
 #[derive(Debug, Clone)]
 pub struct CommitInfo {
+    /// The transaction that committed.
+    pub txn_id: TxnId,
     /// The branch that was committed to.
     pub branch_id: BranchId,
     /// The commit version assigned.
@@ -129,7 +132,15 @@ pub struct CommitInfo {
 
 /// Observer called after each successful commit.
 ///
-/// Use for index maintenance, audit logging, metrics, etc.
+/// Use for audit logging, metrics, and other cross-cutting concerns that
+/// only need generic commit information (branch_id, commit_version, entry_count).
+///
+/// ## Scope
+///
+/// `CommitObserver` receives only [`CommitInfo`], not the actual committed data.
+/// For operation-specific deferred work (graph node indexing, vector HNSW updates)
+/// that requires data captured during command execution, see `PostCommitOp` in
+/// the executor crate's session module.
 ///
 /// ## Thread Safety
 ///
@@ -164,6 +175,10 @@ pub struct ReplayInfo {
     pub commit_version: CommitVersion,
     /// Number of entries in the record.
     pub entry_count: usize,
+    /// Values written by the replayed record.
+    pub puts: Vec<(Key, Value)>,
+    /// Values that existed before deleted keys were replayed.
+    pub deleted_values: Vec<(Key, Value)>,
 }
 
 /// Observer called after a follower applies a WAL record.
@@ -234,12 +249,28 @@ pub struct BranchOpEvent {
     pub branch_name: Option<String>,
     /// Source branch for fork/merge/cherry-pick (if applicable).
     pub source_branch_id: Option<BranchId>,
+    /// Source branch name (for fork: parent, for merge/cherry-pick: source).
+    pub source_branch_name: Option<String>,
     /// The commit version at which the operation occurred.
     pub commit_version: Option<CommitVersion>,
+    /// Tag name for tag/untag operations.
+    pub tag_name: Option<String>,
     /// Optional message (for fork, merge, revert).
     pub message: Option<String>,
     /// Optional creator identifier.
     pub creator: Option<String>,
+    /// Merge strategy (for merge operations).
+    pub merge_strategy: Option<String>,
+    /// Number of keys applied (for merge, cherry-pick).
+    pub keys_applied: Option<u64>,
+    /// Number of keys deleted (for merge, cherry-pick).
+    pub keys_deleted: Option<u64>,
+    /// Number of keys reverted (for revert).
+    pub keys_reverted: Option<u64>,
+    /// Start version for revert range.
+    pub from_version: Option<CommitVersion>,
+    /// End version for revert range.
+    pub to_version: Option<CommitVersion>,
 }
 
 impl BranchOpEvent {
@@ -250,9 +281,17 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_name: None,
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
@@ -263,9 +302,17 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_name: None,
             commit_version: None,
+            tag_name: None,
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
@@ -274,6 +321,7 @@ impl BranchOpEvent {
         branch_id: BranchId,
         branch_name: impl Into<String>,
         source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
     ) -> Self {
         Self {
@@ -281,9 +329,102 @@ impl BranchOpEvent {
             branch_id,
             branch_name: Some(branch_name.into()),
             source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(commit_version),
+            tag_name: None,
             message: None,
             creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
+        }
+    }
+
+    /// Create an event for branch merge.
+    pub fn merge(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        strategy: impl Into<String>,
+        keys_applied: u64,
+        keys_deleted: u64,
+        merge_version: CommitVersion,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::Merge,
+            branch_id: target_branch_id,
+            branch_name: Some(target_branch_name.into()),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version: Some(merge_version),
+            tag_name: None,
+            message: None,
+            creator: None,
+            merge_strategy: Some(strategy.into()),
+            keys_applied: Some(keys_applied),
+            keys_deleted: Some(keys_deleted),
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
+        }
+    }
+
+    /// Create an event for branch revert.
+    pub fn revert(
+        branch_id: BranchId,
+        branch_name: impl Into<String>,
+        from_version: CommitVersion,
+        to_version: CommitVersion,
+        keys_reverted: u64,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::Revert,
+            branch_id,
+            branch_name: Some(branch_name.into()),
+            source_branch_id: None,
+            source_branch_name: None,
+            commit_version: None,
+            tag_name: None,
+            message: None,
+            creator: None,
+            merge_strategy: None,
+            keys_applied: None,
+            keys_deleted: None,
+            keys_reverted: Some(keys_reverted),
+            from_version: Some(from_version),
+            to_version: Some(to_version),
+        }
+    }
+
+    /// Create an event for cherry-pick.
+    pub fn cherry_pick(
+        target_branch_id: BranchId,
+        target_branch_name: impl Into<String>,
+        source_branch_id: BranchId,
+        source_branch_name: impl Into<String>,
+        keys_applied: u64,
+        keys_deleted: u64,
+    ) -> Self {
+        Self {
+            kind: BranchOpKind::CherryPick,
+            branch_id: target_branch_id,
+            branch_name: Some(target_branch_name.into()),
+            source_branch_id: Some(source_branch_id),
+            source_branch_name: Some(source_branch_name.into()),
+            commit_version: None,
+            tag_name: None,
+            message: None,
+            creator: None,
+            merge_strategy: None,
+            keys_applied: Some(keys_applied),
+            keys_deleted: Some(keys_deleted),
+            keys_reverted: None,
+            from_version: None,
+            to_version: None,
         }
     }
 
@@ -517,6 +658,7 @@ mod tests {
         assert_eq!(registry.len(), 1);
 
         let info = CommitInfo {
+            txn_id: 7u64.into(),
             branch_id: BranchId::new(),
             commit_version: CommitVersion(1),
             entry_count: 10,

@@ -1,5 +1,6 @@
 use super::*;
 use crate::recovery::Subsystem;
+use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1516,6 +1517,7 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
     // Issue #1730: checkpoint+compact deletes WAL segments, but recovery
     // is WAL-only and never loads snapshots. This causes data loss.
@@ -1581,6 +1583,7 @@ fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1730_standard_durability() {
     // Same as above but with Standard durability mode (disk-based, batched fsync).
     let temp_dir = TempDir::new().unwrap();
@@ -1922,6 +1925,7 @@ fn test_issue_1738_shutdown_waits_for_active_transactions() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1733_history_no_duplicates_after_recovery() {
     // Issue #1733: WAL replay replays ALL records (including already-flushed
     // ones) into memtables. After segment recovery loads the same data from
@@ -1985,6 +1989,7 @@ fn test_issue_1733_history_no_duplicates_after_recovery() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1733_partial_flush_no_duplicates() {
     // Variant: only some versions are flushed. After recovery, flushed
     // versions appear in both memtable and segment; unflushed versions
@@ -2029,6 +2034,7 @@ fn test_issue_1733_partial_flush_no_duplicates() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1733_tombstone_no_duplicate_after_recovery() {
     // Variant: a delete (tombstone) was flushed. After recovery, history
     // must show the tombstone exactly once, not twice.
@@ -2270,6 +2276,7 @@ impl Subsystem for TestRuntimeSubsystem {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_open_runtime_lifecycle_order_and_reuse() {
     OPEN_DATABASES.lock().clear();
 
@@ -2338,6 +2345,7 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_open_runtime_rejects_incompatible_reuse() {
     OPEN_DATABASES.lock().clear();
 
@@ -2370,6 +2378,7 @@ fn test_open_runtime_rejects_incompatible_reuse() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_open_runtime_failed_open_can_retry() {
     OPEN_DATABASES.lock().clear();
 
@@ -2406,6 +2415,7 @@ fn test_open_runtime_failed_open_can_retry() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_open_runtime_failed_config_write_can_retry() {
     OPEN_DATABASES.lock().clear();
 

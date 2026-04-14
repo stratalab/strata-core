@@ -672,6 +672,9 @@ impl Database {
     /// are still installed via `set_subsystems` for symmetry with the
     /// primary path. The supplied `subsystems` list is the sole driver
     /// of recovery for this open.
+    ///
+    /// Note: Registry deduplication for followers is handled by `open_runtime_follower`,
+    /// not here. This function creates a new database instance unconditionally.
     pub(crate) fn open_follower_internal_with_subsystems(
         canonical_path: PathBuf,
         cfg: StrataConfig,
@@ -703,6 +706,7 @@ impl Database {
 
         // NOTE: Lifecycle hooks (initialize) and lifecycle_complete are handled
         // by callers. Followers skip bootstrap since they read from primary.
+        // Registry registration is handled by open_runtime_follower, not here.
 
         Ok(db)
     }

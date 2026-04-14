@@ -235,17 +235,20 @@ impl VectorStoreExt for TransactionContext {
         self.put(kv_key, Value::Bytes(record_bytes))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        Ok((
-            Version::counter(record_version),
-            StagedVectorOp::Insert {
-                collection_id,
-                vector_id,
-                embedding: embedding.to_vec(),
-                key: key.to_string(),
-                source_ref,
-                created_at,
-            },
-        ))
+        let staged_op = StagedVectorOp::Insert {
+            collection_id,
+            vector_id,
+            embedding: embedding.to_vec(),
+            key: key.to_string(),
+            source_ref,
+            created_at,
+        };
+
+        // Queue for VectorCommitObserver (subsystem-owned maintenance).
+        // Also return the op for backward compatibility with executor Session.
+        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
+
+        Ok((Version::counter(record_version), staged_op))
     }
 
     fn vector_delete(
@@ -284,14 +287,17 @@ impl VectorStoreExt for TransactionContext {
         self.delete(kv_key)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        Ok((
-            true,
-            Some(StagedVectorOp::Delete {
-                collection_id,
-                vector_id,
-                key: key.to_string(),
-            }),
-        ))
+        let staged_op = StagedVectorOp::Delete {
+            collection_id,
+            vector_id,
+            key: key.to_string(),
+        };
+
+        // Queue for VectorCommitObserver (subsystem-owned maintenance).
+        // Also return the op for backward compatibility with executor Session.
+        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
+
+        Ok((true, Some(staged_op)))
     }
 
     fn vector_get(

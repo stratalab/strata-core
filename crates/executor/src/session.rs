@@ -21,6 +21,27 @@
 //! // Commit
 //! session.execute(Command::TxnCommit)?;
 //! ```
+//!
+//! # Deferred Operations
+//!
+//! The session maintains two distinct deferred operation mechanisms:
+//!
+//! ## PostCommitOp (Executor Layer)
+//!
+//! Command-specific side effects requiring data staged during execution.
+//! Applied by `run_post_commit_ops()` after successful commit. Examples:
+//! - Graph node indexing for BM25 search
+//! - Vector HNSW index updates
+//!
+//! ## CommitObserver (Engine Layer)
+//!
+//! Generic commit notifications via `db.commit_observers().notify()`.
+//! Receives only `CommitInfo` (branch_id, commit_version, entry_count).
+//! Used for audit, metrics, and other cross-cutting concerns.
+//!
+//! These are complementary, not competing patterns. `PostCommitOp` handles
+//! operations requiring command-specific data (embeddings, node properties),
+//! while `CommitObserver` handles generic notifications.
 
 use std::sync::Arc;
 
@@ -29,7 +50,7 @@ use strata_engine::{Database, Transaction, TransactionContext, TransactionOps};
 use strata_graph::ext::GraphStoreExt;
 use strata_graph::types::NodeData;
 use strata_security::AccessMode;
-use strata_vector::ext::{StagedVectorOp, VectorStoreExt};
+use strata_vector::ext::VectorStoreExt;
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, to_core_branch_id, to_versioned_value,
@@ -40,7 +61,34 @@ use crate::ipc::IpcClient;
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result};
 
-/// Deferred operations that run after a successful commit.
+/// Deferred operations executed after a successful transaction commit.
+///
+/// ## Why PostCommitOp Exists
+///
+/// These operations update derived indices (graph search index, vector HNSW)
+/// that cannot participate in OCC (Optimistic Concurrency Control):
+/// - HNSW index updates are in-memory and not rollback-safe
+/// - Graph search index updates depend on committed node data
+///
+/// ## Why Not CommitObserver?
+///
+/// Engine's `CommitObserver` receives only `CommitInfo` (branch_id,
+/// commit_version, entry_count). `PostCommitOp` variants require
+/// operation-specific data captured during command execution:
+/// - `GraphIndexNode` needs `NodeData` (properties, entity_ref)
+/// - `VectorBackendOp` needs `StagedVectorOp` (embedding, vector_id)
+///
+/// This data cannot be reconstructed from generic commit info without
+/// re-reading and parsing committed data, making `CommitObserver` unsuitable.
+///
+/// ## Failure Model
+///
+/// Best-effort: failures are logged but never propagate back to the caller.
+/// The primary data is already committed to KV; derived indices will catch
+/// up on next recovery if an update fails.
+///
+/// Note: VectorBackendOp was removed in T2-E2. Vector HNSW maintenance is now
+/// subsystem-owned via VectorCommitObserver in VectorSubsystem.
 enum PostCommitOp {
     GraphIndexNode {
         branch_id: CoreBranchId,
@@ -55,7 +103,6 @@ enum PostCommitOp {
         graph: String,
         node_id: String,
     },
-    VectorBackendOp(StagedVectorOp),
 }
 
 /// A stateful session that wraps an [`Executor`] and manages an optional
@@ -291,6 +338,7 @@ impl Session {
         let mut ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
+        let txn_id = ctx.txn_id;
         self.txn_branch_id = None;
 
         match self.db.commit_transaction(&mut ctx) {
@@ -303,6 +351,9 @@ impl Session {
                 // Return context to pool even on failure
                 self.db.end_transaction(ctx);
                 self.post_commit_ops.clear();
+                if let Ok(state) = self.executor.primitives().vector.state() {
+                    state.clear_pending_ops(txn_id);
+                }
                 // Discriminate error types: only OCC validation failures
                 // become TransactionConflict; storage/WAL errors become Io;
                 // other errors become Internal.
@@ -337,8 +388,16 @@ impl Session {
         let ctx = self.txn_ctx.take().ok_or(Error::TransactionNotActive {
             hint: Some("Start one with: begin".to_string()),
         })?;
-        self.txn_branch_id = None;
+        let txn_id = ctx.txn_id;
+        self.txn_branch_id.take();
         self.post_commit_ops.clear();
+
+        // Clear pending vector ops for this transaction (T2-E2: subsystem-owned cleanup).
+        // These ops were queued by VectorStoreExt but will not be committed.
+        if let Ok(state) = self.executor.primitives().vector.state() {
+            state.clear_pending_ops(txn_id);
+        }
+
         self.db.end_transaction(ctx);
         Ok(Output::TxnAborted)
     }
@@ -385,11 +444,6 @@ impl Session {
                     primitives
                         .graph
                         .deindex_node_for_search(branch_id, &space, &graph, &node_id);
-                }
-                PostCommitOp::VectorBackendOp(staged_op) => {
-                    if let Ok(state) = primitives.vector.state() {
-                        strata_vector::ext::apply_staged_vector_op(&state, staged_op);
-                    }
                 }
             }
         }
@@ -905,7 +959,9 @@ impl Session {
                     .vector
                     .state()
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                let (version, staged_op) = ctx
+                // VectorStoreExt queues ops internally for VectorCommitObserver;
+                // we ignore the returned staged_op (T2-E2: subsystem-owned).
+                let (version, _staged_op) = ctx
                     .vector_upsert(
                         branch_id,
                         &space,
@@ -917,7 +973,6 @@ impl Session {
                         &state,
                     )
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                post_commit_ops.push(PostCommitOp::VectorBackendOp(staged_op));
                 Ok(Output::VectorWriteResult {
                     collection,
                     key,
@@ -941,12 +996,11 @@ impl Session {
                     .vector
                     .state()
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                let (existed, staged_op) = ctx
+                // VectorStoreExt queues ops internally for VectorCommitObserver;
+                // we ignore the returned staged_op (T2-E2: subsystem-owned).
+                let (existed, _staged_op) = ctx
                     .vector_delete(branch_id, &space, &collection, &key, &state)
                     .map_err(|e| Error::from(e.into_strata_error(branch_id)))?;
-                if let Some(op) = staged_op {
-                    post_commit_ops.push(PostCommitOp::VectorBackendOp(op));
-                }
                 Ok(Output::VectorDeleteResult {
                     collection,
                     key,
@@ -1152,6 +1206,10 @@ impl Drop for Session {
     fn drop(&mut self) {
         self.post_commit_ops.clear();
         if let Some(ctx) = self.txn_ctx.take() {
+            if let Ok(state) = self.executor.primitives().vector.state() {
+                state.clear_pending_ops(ctx.txn_id);
+            }
+            self.txn_branch_id = None;
             self.db.end_transaction(ctx);
         }
     }

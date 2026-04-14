@@ -25,10 +25,6 @@ mod snapshot;
 pub mod traversal;
 pub mod types;
 
-pub use merge_handler::register_graph_semantic_merge;
-
-pub use dag_hook_impl::register_branch_dag_hook_implementation;
-
 pub use branch_dag::GraphSubsystem;
 pub use strata_core::branch_dag::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
