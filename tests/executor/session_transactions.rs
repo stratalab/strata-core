@@ -731,7 +731,10 @@ fn graph_rollback_discards_writes() {
 
 #[test]
 fn graph_commit_makes_writes_visible() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
@@ -785,7 +788,10 @@ fn graph_commit_makes_writes_visible() {
 
 #[test]
 fn graph_and_kv_atomic() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
@@ -1056,7 +1062,10 @@ fn graph_remove_node_in_txn() {
 
 #[test]
 fn graph_kv_rollback_discards_both() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
@@ -1350,7 +1359,10 @@ fn vector_getv_bypasses_txn() {
 
 #[test]
 fn vector_commit_makes_writes_visible() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
@@ -1395,7 +1407,10 @@ fn vector_commit_makes_writes_visible() {
 
 #[test]
 fn vector_and_kv_atomic() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
@@ -1543,7 +1558,10 @@ fn vector_delete_in_txn() {
 
 #[test]
 fn vector_hnsw_updated_after_commit() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
@@ -1594,7 +1612,10 @@ fn vector_hnsw_updated_after_commit() {
 
 #[test]
 fn vector_rollback_does_not_update_hnsw() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
@@ -2298,7 +2319,10 @@ fn batch_get_sees_uncommitted() {
 
 #[test]
 fn all_primitives_atomic_commit() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
@@ -2432,7 +2456,10 @@ fn all_primitives_atomic_commit() {
 
 #[test]
 fn all_primitives_atomic_rollback() {
-    let db = strata_engine::Database::cache().unwrap();
+    let db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
     strata_graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 

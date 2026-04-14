@@ -109,9 +109,9 @@ pub use strata_engine::{
     Profile,
 };
 
-// Re-export Database and DurabilityMode so users can open/create databases
-// and create sessions without depending on strata-engine directly
-pub use strata_engine::{Database, DurabilityMode};
+// Re-export DurabilityMode for configuration. Database is intentionally NOT
+// re-exported — application code should use Strata::open() as the only entry point.
+pub use strata_engine::DurabilityMode;
 
 /// Result type for executor operations
 pub type Result<T> = std::result::Result<T, Error>;

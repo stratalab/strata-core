@@ -325,8 +325,7 @@ fn test_read_only_propagates_to_handle() {
     let db = strata.executor().primitives().db.clone();
 
     // Build a read-only handle via open_with path is tricky with cache,
-    // so we test via from_database indirectly through new_handle.
-    // Instead: create a read-only Strata by building manually.
+    // so we test read-only propagation by creating a new executor manually.
     let ro_executor = Executor::new_with_mode(db.clone(), AccessMode::ReadOnly);
     // Verify the executor is read-only
     assert_eq!(ro_executor.access_mode(), AccessMode::ReadOnly);

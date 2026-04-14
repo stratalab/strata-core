@@ -49,6 +49,23 @@ fn restrict_dir(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_dir(_path: &Path) {}
 
+/// Sanitize config for runtime consistency across all modes.
+///
+/// Currently clamps `auto_embed` to `false` when the `embed` feature is not
+/// compiled. Called from primary, follower, and cache paths to ensure
+/// consistent behavior.
+fn sanitize_config(mut cfg: super::config::StrataConfig) -> super::config::StrataConfig {
+    #[cfg(not(feature = "embed"))]
+    if cfg.auto_embed {
+        warn!(
+            "auto_embed=true but the 'embed' feature is not compiled; \
+             auto-embedding is disabled"
+        );
+        cfg.auto_embed = false;
+    }
+    cfg
+}
+
 /// Restrict a file to owner-only read/write (rw-------).
 /// Best-effort: ignores errors (defense in depth for data files).
 #[cfg(unix)]
@@ -115,15 +132,13 @@ impl Database {
     ///
     /// let db = Database::open("/path/to/data")?;
     /// ```
-    pub fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
-
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
-        config::StrataConfig::write_default_if_missing(&config_path)?;
-        let cfg = config::StrataConfig::from_file(&config_path)?;
-
-        Self::open_with_config(path, cfg)
+    pub(crate) fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
+        // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_spec() or search_only_primary_spec(path).
+        let spec =
+            super::spec::OpenSpec::primary(path).with_subsystem(crate::search::SearchSubsystem);
+        Self::open_runtime(spec)
     }
 
     /// Open database at the given path with an explicit configuration.
@@ -143,68 +158,10 @@ impl Database {
     /// };
     /// let db = Database::open_with_config("/path/to/data", config)?;
     /// ```
-    pub fn open_with_config<P: AsRef<Path>>(path: P, cfg: StrataConfig) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
-
-        #[cfg(not(feature = "embed"))]
-        let cfg = {
-            let mut cfg = cfg;
-            if cfg.auto_embed {
-                warn!(
-                    "auto_embed=true but the 'embed' feature is not compiled; \
-                     auto-embedding is disabled"
-                );
-                cfg.auto_embed = false;
-            }
-            cfg
-        };
-
-        let mode = cfg.durability_mode()?;
-
-        // Write config to strata.toml so restarts pick it up
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
-        cfg.write_to_file(&config_path)?;
-
-        let db = Self::open_internal(path, mode, cfg)?;
-        Ok(db)
-    }
-
-    /// Open a primary database with an explicit subsystem list.
-    ///
-    /// Subsystem-aware mirror of `Database::open`. Reads `strata.toml` from
-    /// the data directory (creating a default if missing) and delegates to
-    /// [`Database::open_with_config_and_subsystems`]. The same subsystem
-    /// list drives recovery on open and freeze-on-drop.
-    pub(crate) fn open_with_subsystems<P: AsRef<Path>>(
-        path: P,
-        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
-    ) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
-
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
-        config::StrataConfig::write_default_if_missing(&config_path)?;
-        let cfg = config::StrataConfig::from_file(&config_path)?;
-
-        Self::open_with_config_and_subsystems(path, cfg, subsystems)
-    }
-
-    /// Open a primary database with an explicit `StrataConfig` and an
-    /// explicit subsystem list.
-    ///
-    /// Subsystem-aware mirror of `Database::open_with_config`. The supplied
-    /// config is written to `strata.toml` so that subsequent opens pick up
-    /// the same settings, then control is handed to
-    /// [`Database::open_internal_with_subsystems`].
-    pub(crate) fn open_with_config_and_subsystems<P: AsRef<Path>>(
+    pub(crate) fn open_with_config<P: AsRef<Path>>(
         path: P,
         cfg: StrataConfig,
-        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
     ) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
-
         #[cfg(not(feature = "embed"))]
         let cfg = {
             let mut cfg = cfg;
@@ -218,13 +175,11 @@ impl Database {
             cfg
         };
 
-        let mode = cfg.durability_mode()?;
-
-        // Write config to strata.toml so restarts pick it up
-        let config_path = data_dir.join(config::CONFIG_FILE_NAME);
-        cfg.write_to_file(&config_path)?;
-
-        Self::open_internal_with_subsystems(path, mode, cfg, subsystems)
+        // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
+        let spec = super::spec::OpenSpec::primary(path)
+            .with_config(cfg)
+            .with_subsystem(crate::search::SearchSubsystem);
+        Self::open_runtime(spec)
     }
 
     /// Acquire a primary `Database` for `path`, running subsystem recovery
@@ -284,6 +239,9 @@ impl Database {
                         )
                     })?;
                     if let Err(reason) = existing_signature.check_compatible(requested_signature) {
+                        // Hard reuse rejection: all mismatches (including subsystem)
+                        // are errors. This prevents silent subsystem dropping when
+                        // mixing openers (e.g., Database::open + Strata::open).
                         return Err(StrataError::incompatible_reuse(format!(
                             "cannot reuse existing database instance: {}",
                             reason
@@ -313,7 +271,7 @@ impl Database {
                              the existing instance with the EARLIER subsystems; \
                              the requested subsystems were silently dropped. Use \
                              the same opener (e.g. `Strata::open` everywhere, or \
-                             `DatabaseBuilder` with the same list) across all \
+                             `OpenSpec` with the same subsystem list) across all \
                              call sites for this path. See audit follow-up to \
                              #2354 Finding 2."
                         );
@@ -407,50 +365,6 @@ impl Database {
 
         Ok(AcquiredDatabase::New { db, canonical_path })
     }
-
-    /// Convenience entry point used by `Database::open` / `open_with_config`.
-    ///
-    /// Delegates to `open_internal_with_subsystems` with a hardcoded
-    /// `[SearchSubsystem]` list. The engine crate does not depend on
-    /// `strata-vector`, so vector recovery is only available through the
-    /// builder with an explicit `VectorSubsystem` registration (see
-    /// `DatabaseBuilder`).
-    pub(super) fn open_internal<P: AsRef<Path>>(
-        path: P,
-        durability_mode: DurabilityMode,
-        cfg: StrataConfig,
-    ) -> StrataResult<Arc<Self>> {
-        Self::open_internal_with_subsystems(
-            path,
-            durability_mode,
-            cfg,
-            vec![Box::new(crate::search::SearchSubsystem)],
-        )
-    }
-
-    /// Open a primary database with an explicit subsystem list.
-    ///
-    /// The supplied subsystems drive both recovery (called in registration
-    /// order) and freeze-on-drop (called in reverse order). This is the
-    /// canonical open path — both `DatabaseBuilder` and the `Database::open`
-    /// convenience API route through here, so the supplied `subsystems` list
-    /// is the sole driver of recovery.
-    pub(crate) fn open_internal_with_subsystems<P: AsRef<Path>>(
-        path: P,
-        durability_mode: DurabilityMode,
-        cfg: StrataConfig,
-        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
-    ) -> StrataResult<Arc<Self>> {
-        match Self::acquire_primary_db(path.as_ref(), durability_mode, cfg, subsystems, None)? {
-            AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
-            AcquiredDatabase::New { db, canonical_path } => {
-                Self::finish_opened_db(db, &canonical_path, |db| {
-                    Self::run_lifecycle_hooks(db, true)
-                })
-            }
-        }
-    }
-
     /// Repair space metadata at open time by reconciling registered metadata
     /// with the actual data found by `discover_used_spaces`. Skipped on
     /// followers (read-only) — they still get correct enumeration via the
@@ -483,50 +397,14 @@ impl Database {
     ///
     /// This is the recommended way to provide cross-process read access
     /// (similar to RocksDB secondary instances).
-    pub fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
-
-        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let cfg = if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
-        };
-
-        Self::open_follower_internal(canonical_path, cfg)
+    pub(crate) fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
+        // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_follower_spec() or search_only_follower_spec(path).
+        let spec =
+            super::spec::OpenSpec::follower(path).with_subsystem(crate::search::SearchSubsystem);
+        Self::open_runtime(spec)
     }
-
-    /// Open a read-only follower of an existing database with an explicit
-    /// subsystem list.
-    ///
-    /// Subsystem-aware mirror of `Database::open_follower`. Reads
-    /// `strata.toml` if present (else defaults) and delegates to
-    /// [`Database::open_follower_internal_with_subsystems`]. Followers do
-    /// not freeze on drop, but the supplied subsystems still drive recovery.
-    pub(crate) fn open_follower_with_subsystems<P: AsRef<Path>>(
-        path: P,
-        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
-    ) -> StrataResult<Arc<Self>> {
-        let data_dir = path.as_ref().to_path_buf();
-        let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
-
-        let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let cfg = if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
-        };
-
-        let db = Self::open_follower_internal_with_subsystems(canonical_path, cfg, subsystems)?;
-
-        // Lifecycle hooks: initialize only (no bootstrap for followers)
-        Self::run_lifecycle_hooks(&db, false)?;
-        db.set_lifecycle_complete();
-
-        Ok(db)
-    }
-
     /// Open a follower `Database` at the given canonicalized path.
     ///
     /// Handles hardware-profile application, read-only WAL recovery,
@@ -640,77 +518,6 @@ impl Database {
 
         Ok(db)
     }
-
-    /// Convenience entry point used by `Database::open_follower`.
-    ///
-    /// Delegates to `open_follower_internal_with_subsystems` with a hardcoded
-    /// `[SearchSubsystem]` list. The engine crate does not depend on
-    /// `strata-vector`, so vector recovery for followers is only available
-    /// through the builder with an explicit `VectorSubsystem` registration.
-    fn open_follower_internal(
-        canonical_path: PathBuf,
-        cfg: StrataConfig,
-    ) -> StrataResult<Arc<Self>> {
-        let db = Self::open_follower_internal_with_subsystems(
-            canonical_path,
-            cfg,
-            vec![Box::new(crate::search::SearchSubsystem)],
-        )?;
-
-        // Lifecycle hooks: initialize only (no bootstrap for followers)
-        Self::run_lifecycle_hooks(&db, false)?;
-        db.set_lifecycle_complete();
-
-        Ok(db)
-    }
-
-    /// Open a follower database with an explicit subsystem list.
-    ///
-    /// The supplied subsystems drive recovery (called in registration
-    /// order). Followers do not freeze on drop — `Drop for Database`
-    /// short-circuits on `is_follower()` — but the supplied subsystems
-    /// are still installed via `set_subsystems` for symmetry with the
-    /// primary path. The supplied `subsystems` list is the sole driver
-    /// of recovery for this open.
-    ///
-    /// Note: Registry deduplication for followers is handled by `open_runtime_follower`,
-    /// not here. This function creates a new database instance unconditionally.
-    pub(crate) fn open_follower_internal_with_subsystems(
-        canonical_path: PathBuf,
-        cfg: StrataConfig,
-        subsystems: Vec<Box<dyn crate::recovery::Subsystem>>,
-    ) -> StrataResult<Arc<Self>> {
-        let db = Self::acquire_follower_db(canonical_path, cfg)?;
-
-        // Followers are read-only — `repair_space_metadata_on_open` is a
-        // no-op for them but kept on the same code path for symmetry. The
-        // union behaviour in `SpaceIndex::list/exists` still gives the
-        // follower correct discovery via a data scan.
-        Self::repair_space_metadata_on_open(&db);
-
-        for subsystem in &subsystems {
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Running follower subsystem recovery"
-            );
-            subsystem.recover(&db)?;
-            info!(
-                target: "strata::recovery",
-                subsystem = subsystem.name(),
-                "Follower subsystem recovery complete"
-            );
-        }
-
-        db.set_subsystems(subsystems);
-
-        // NOTE: Lifecycle hooks (initialize) and lifecycle_complete are handled
-        // by callers. Followers skip bootstrap since they read from primary.
-        // Registry registration is handled by open_runtime_follower, not here.
-
-        Ok(db)
-    }
-
     /// Spawn the background WAL flush thread for Standard durability mode.
     ///
     /// Returns `None` for non-Standard modes (Cache, Always).
@@ -1048,8 +855,24 @@ impl Database {
     /// |--------|------------|-----|----------|
     /// | `cache()` | None | None | No |
     /// | `open(path)` | Yes | Yes (per config) | Yes |
-    pub fn cache() -> StrataResult<Arc<Self>> {
-        let mut cfg = StrataConfig::default();
+    pub(crate) fn cache() -> StrataResult<Arc<Self>> {
+        // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
+        // For the full subsystem set, use OpenSpec with the executor's
+        // default_product_cache_spec() or search_only_cache_spec().
+        let spec = super::spec::OpenSpec::cache().with_subsystem(crate::search::SearchSubsystem);
+        Self::open_runtime(spec)
+    }
+
+    /// Create a bare ephemeral database without any subsystems.
+    ///
+    /// This is an internal helper used by `open_runtime_cache()`. External
+    /// callers should use `cache()` which adds SearchSubsystem, or
+    /// `OpenSpec::cache().with_subsystem(...)` for custom subsystem sets.
+    ///
+    /// If `spec_config` is provided, it is used as the base config (with hardware
+    /// profile applied on top for sizing). If `None`, defaults are used.
+    fn create_ephemeral_bare(spec_config: Option<&StrataConfig>) -> StrataResult<Arc<Self>> {
+        let mut cfg = sanitize_config(spec_config.cloned().unwrap_or_default());
         // Apply hardware profile so resource-constrained hosts (Pi Zero, etc.)
         // get appropriate sizing. Without this, cache() would inherit the
         // 256 MB DEFAULT_CAPACITY_BYTES from the global block cache singleton,
@@ -1197,20 +1020,26 @@ impl Database {
         std::fs::create_dir_all(&data_dir).map_err(StrataError::from)?;
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let resolved_cfg = if let Some(cfg) = config.as_ref() {
-            cfg.clone()
-        } else if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
+        let resolved_cfg = {
+            let base = if let Some(cfg) = config.as_ref() {
+                cfg.clone()
+            } else if config_path.exists() {
+                config::StrataConfig::from_file(&config_path)?
+            } else {
+                config::StrataConfig::default()
+            };
+            sanitize_config(base)
         };
+
         let durability_mode = resolved_cfg.durability_mode()?;
+        let codec_name = resolved_cfg.storage.codec.clone();
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Primary,
             subsystem_names,
             durability_mode,
+            codec_name,
             default_branch.clone(),
         );
 
@@ -1221,14 +1050,18 @@ impl Database {
             subsystems,
             Some(requested_signature),
         )? {
-            AcquiredDatabase::Existing(db) => Self::wait_for_opened_db(db),
+            AcquiredDatabase::Existing(db) => {
+                // On reuse, do NOT overwrite config — the existing DB's config is
+                // authoritative. Signature check ensures the caller's request is
+                // compatible with the running instance.
+                Self::wait_for_opened_db(db)
+            }
             AcquiredDatabase::New { db, canonical_path } => {
                 Self::finish_opened_db(db, &canonical_path, |db| {
-                    if let Some(cfg) = config.as_ref() {
-                        cfg.write_to_file(&config_path)?;
-                    } else {
-                        config::StrataConfig::write_default_if_missing(&config_path)?;
-                    }
+                    // Write the *sanitized* resolved_cfg, not the original config.
+                    // This ensures persisted config matches runtime state (e.g.,
+                    // auto_embed=false when embed feature is not compiled).
+                    resolved_cfg.write_to_file(&config_path)?;
                     Self::run_lifecycle_hooks(db, true)?;
                     if let Some(branch_name) = &default_branch {
                         Self::ensure_default_branch(db, branch_name)?;
@@ -1240,6 +1073,10 @@ impl Database {
     }
 
     /// Open a follower database from an `OpenSpec`.
+    ///
+    /// Followers are NOT deduplicated via the registry — each caller gets their
+    /// own independent instance with its own refresh state. This differs from
+    /// primaries, which have singleton semantics (one per path in the process).
     fn open_runtime_follower(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
         use super::compat::CompatibilitySignature;
 
@@ -1254,81 +1091,67 @@ impl Database {
         let data_dir = path;
         let canonical_path = data_dir.canonicalize().map_err(StrataError::from)?;
         let config_path = canonical_path.join(config::CONFIG_FILE_NAME);
-        let cfg = if let Some(cfg) = config.as_ref() {
-            cfg.clone()
-        } else if config_path.exists() {
-            config::StrataConfig::from_file(&config_path)?
-        } else {
-            config::StrataConfig::default()
+        let cfg = {
+            let base = if let Some(cfg) = config.as_ref() {
+                cfg.clone()
+            } else if config_path.exists() {
+                config::StrataConfig::from_file(&config_path)?
+            } else {
+                config::StrataConfig::default()
+            };
+            sanitize_config(base)
         };
         let durability_mode = cfg.durability_mode()?;
+        let codec_name = cfg.storage.codec.clone();
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Follower,
             subsystem_names,
             durability_mode,
+            codec_name,
             default_branch,
         );
 
-        {
-            let registry = super::OPEN_DATABASES.lock();
-            if let Some(weak) = registry.get(&canonical_path) {
-                if let Some(existing_db) = weak.upgrade() {
-                    let existing_signature = existing_db.runtime_signature().ok_or_else(|| {
-                        StrataError::incompatible_reuse(
-                            "existing database instance was not opened via open_runtime",
-                        )
-                    })?;
-                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
-                        return Err(StrataError::incompatible_reuse(format!(
-                            "cannot reuse existing database instance: {}",
-                            reason
-                        )));
-                    }
-                    drop(registry);
-                    return Self::wait_for_opened_db(existing_db);
-                }
-            }
+        // Create follower database — no registry check, followers are independent
+        let db = Self::acquire_follower_db(canonical_path.clone(), cfg)?;
+
+        // Followers are read-only — repair_space_metadata_on_open is a no-op
+        // but kept for symmetry with primary path.
+        Self::repair_space_metadata_on_open(&db);
+
+        // Run subsystem recovery
+        for subsystem in &subsystems {
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Running follower subsystem recovery"
+            );
+            subsystem.recover(&db)?;
+            info!(
+                target: "strata::recovery",
+                subsystem = subsystem.name(),
+                "Follower subsystem recovery complete"
+            );
         }
 
-        // Delegate to existing follower open path with subsystems
-        let db =
-            Self::open_follower_internal_with_subsystems(canonical_path.clone(), cfg, subsystems)?;
-        db.set_runtime_signature(requested_signature.clone());
+        db.set_subsystems(subsystems);
+        db.set_runtime_signature(requested_signature);
         db.set_lifecycle_initializing();
 
-        {
-            let mut registry = super::OPEN_DATABASES.lock();
-            if let Some(weak) = registry.get(&canonical_path) {
-                if let Some(existing_db) = weak.upgrade() {
-                    let existing_signature = existing_db.runtime_signature().ok_or_else(|| {
-                        StrataError::incompatible_reuse(
-                            "existing database instance was not opened via open_runtime",
-                        )
-                    })?;
-                    if let Err(reason) = existing_signature.check_compatible(&requested_signature) {
-                        return Err(StrataError::incompatible_reuse(format!(
-                            "cannot reuse existing database instance: {}",
-                            reason
-                        )));
-                    }
-                    drop(registry);
-                    return Self::wait_for_opened_db(existing_db);
-                }
-            }
-            registry.insert(canonical_path.clone(), Arc::downgrade(&db));
-        }
+        // Followers don't use the registry — no insertion needed.
+        // Each follower is an independent instance with its own refresh state.
 
-        Self::finish_opened_db(db, &canonical_path, |db| {
-            Self::run_lifecycle_hooks(db, false)
-        })
+        // Complete lifecycle directly (no registry entry to clean up on failure)
+        Self::run_lifecycle_hooks(&db, false)?;
+        db.set_lifecycle_complete();
+        Ok(db)
     }
 
     /// Open a cache database from an `OpenSpec`.
     fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
-        // Create ephemeral database (config is applied internally by cache())
+        // Create ephemeral database with spec.config if provided.
         // Cache databases are not in the registry, so no reuse check needed.
-        let db = Self::cache()?;
+        let db = Self::create_ephemeral_bare(spec.config.as_ref())?;
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
         // and install subsystems for freeze-on-drop

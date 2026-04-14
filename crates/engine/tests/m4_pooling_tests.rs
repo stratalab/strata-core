@@ -11,7 +11,8 @@
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_engine::{Database, TransactionPool, MAX_POOL_SIZE};
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem, TransactionPool, MAX_POOL_SIZE};
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
@@ -29,7 +30,10 @@ fn create_key(ns: &Arc<Namespace>, user_key: &str) -> Key {
 #[test]
 fn test_pool_reuses_contexts() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -73,7 +77,10 @@ fn test_pool_reuses_contexts() {
 #[test]
 fn test_pool_warmup_reduces_allocations() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -107,7 +114,10 @@ fn test_pool_warmup_reduces_allocations() {
 #[test]
 fn test_capacity_grows_with_usage() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -153,7 +163,10 @@ fn test_capacity_grows_with_usage() {
 #[test]
 fn test_aborted_transactions_return_to_pool() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -193,7 +206,10 @@ fn test_concurrent_transactions_use_pool() {
     use std::thread;
 
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     // Note: Each thread has its own thread-local pool
     // This test verifies that multiple threads can use pooling independently
@@ -250,7 +266,10 @@ fn test_concurrent_transactions_use_pool() {
 fn test_pool_caps_at_max_size() {
     // Verify pool doesn't exceed MAX_POOL_SIZE after many transactions
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 

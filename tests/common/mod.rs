@@ -16,23 +16,30 @@ use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
+pub use strata_engine::database::OpenSpec;
 pub use strata_engine::{
-    BranchIndex, Database, DatabaseBuilder, EventLog, JsonStore, KVStore, SearchSubsystem,
-    StrataConfig,
+    BranchIndex, Database, EventLog, JsonStore, KVStore, SearchSubsystem, StrataConfig,
 };
 pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
-/// Fresh `DatabaseBuilder` wired with the production subsystems
+/// Create an OpenSpec with the production subsystems
 /// (`GraphSubsystem` + `VectorSubsystem` + `SearchSubsystem`), used by
 /// all test-helper open paths so integration tests exercise the same
 /// recovery pipeline the executor uses in production.
 ///
 /// `GraphSubsystem` must be first because its `initialize()` method
 /// registers the per-database graph merge handler and DAG hook.
-fn test_db_builder() -> DatabaseBuilder {
-    DatabaseBuilder::new()
+fn test_open_spec_primary(path: &std::path::Path) -> OpenSpec {
+    OpenSpec::primary(path)
+        .with_subsystem(strata_graph::GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
+}
+
+fn test_open_spec_cache() -> OpenSpec {
+    OpenSpec::cache()
         .with_subsystem(strata_graph::GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
@@ -41,9 +48,7 @@ fn test_db_builder() -> DatabaseBuilder {
 /// Open a test database at the given path with production subsystems.
 /// Used for recovery tests that need to reopen at a specific path.
 pub fn test_db_open(path: &std::path::Path) -> Arc<Database> {
-    test_db_builder()
-        .open(path)
-        .expect("Failed to open test database")
+    Database::open_runtime(test_open_spec_primary(path)).expect("Failed to open test database")
 }
 
 /// Create a StrataConfig with always durability mode.
@@ -71,8 +76,7 @@ impl TestDb {
     /// Create a new test database with standard durability (default for tests).
     pub fn new() -> Self {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let db = test_db_builder()
-            .open(dir.path())
+        let db = Database::open_runtime(test_open_spec_primary(dir.path()))
             .expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
@@ -82,9 +86,8 @@ impl TestDb {
     pub fn new_strict() -> Self {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
         let config = always_config();
-        let db = test_db_builder()
-            .open_with_config(dir.path(), config)
-            .expect("Failed to create test database");
+        let spec = test_open_spec_primary(dir.path()).with_config(config);
+        let db = Database::open_runtime(spec).expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
     }
@@ -92,9 +95,8 @@ impl TestDb {
     /// Create an in-memory test database.
     pub fn new_in_memory() -> Self {
         let dir = tempfile::tempdir().expect("Failed to create temp dir");
-        let db = test_db_builder()
-            .cache()
-            .expect("Failed to create test database");
+        let db =
+            Database::open_runtime(test_open_spec_cache()).expect("Failed to create test database");
         let branch_id = BranchId::new();
         TestDb { db, dir, branch_id }
     }
@@ -156,11 +158,10 @@ impl TestDb {
         let path = self.dir.path().to_path_buf();
         drop(std::mem::replace(
             &mut self.db,
-            Database::cache().expect("temporary cache for swap"),
+            Database::open_runtime(test_open_spec_cache()).expect("temporary cache for swap"),
         ));
         // Now open fresh from the same path (reads strata.toml)
-        self.db = test_db_builder()
-            .open(&path)
+        self.db = Database::open_runtime(test_open_spec_primary(&path))
             .expect("Failed to reopen database");
     }
 
@@ -193,28 +194,25 @@ pub struct AllPrimitives {
 
 /// Create an in-memory test database (fastest, no persistence).
 pub fn create_test_db() -> Arc<Database> {
-    test_db_builder()
-        .cache()
-        .expect("Failed to create test database")
+    Database::open_runtime(test_open_spec_cache()).expect("Failed to create test database")
 }
 
 /// Create a persistent database at the given path.
 pub fn create_persistent_db(path: &Path) -> Arc<Database> {
-    test_db_builder()
-        .open(path)
+    Database::open_runtime(test_open_spec_primary(path))
         .expect("Failed to create persistent database")
 }
 
 /// Create in-memory, standard, and always databases for cross-mode testing.
 fn all_mode_databases() -> Vec<(&'static str, Arc<Database>, Option<TempDir>)> {
     let standard_dir = tempfile::tempdir().expect("Failed to create temp dir for standard db");
-    let standard_db = test_db_builder()
-        .open(standard_dir.path())
-        .expect("standard db");
+    let standard_db =
+        Database::open_runtime(test_open_spec_primary(standard_dir.path())).expect("standard db");
     let always_dir = tempfile::tempdir().expect("Failed to create temp dir for always db");
-    let always_db = test_db_builder()
-        .open_with_config(always_dir.path(), always_config())
-        .expect("always db");
+    let always_db = Database::open_runtime(
+        test_open_spec_primary(always_dir.path()).with_config(always_config()),
+    )
+    .expect("always db");
     vec![
         ("in_memory", create_test_db(), None),
         ("standard", standard_db, Some(standard_dir)),

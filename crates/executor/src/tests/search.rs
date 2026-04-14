@@ -8,10 +8,12 @@
 use crate::types::SearchQuery;
 use crate::Value;
 use crate::{Command, Executor, Output};
-use strata_engine::Database;
+use strata_engine::database::{search_only_cache_spec, OpenSpec};
+use strata_engine::{Database, SearchSubsystem};
 
 fn create_executor() -> Executor {
-    let db = Database::cache().unwrap();
+    let spec = search_only_cache_spec();
+    let db = Database::open_runtime(spec).unwrap();
     Executor::new(db)
 }
 
@@ -211,7 +213,8 @@ fn test_search_with_expand_rerank_disabled() {
 #[cfg(feature = "embed")]
 #[test]
 fn test_issue_1768_search_stats_include_embedding_progress() {
-    let db = Database::cache().unwrap();
+    let spec = search_only_cache_spec();
+    let db = Database::open_runtime(spec).unwrap();
     db.set_auto_embed(true);
     let executor = Executor::new(db);
 
@@ -266,7 +269,8 @@ fn test_issue_1768_search_stats_include_embedding_progress() {
 /// auto-embed is enabled but nothing is pending (all embedded).
 #[test]
 fn test_issue_1768_search_stats_no_embedding_when_nothing_pending() {
-    let db = Database::cache().unwrap();
+    let spec = search_only_cache_spec();
+    let db = Database::open_runtime(spec).unwrap();
     db.set_auto_embed(true);
     let executor = Executor::new(db);
 

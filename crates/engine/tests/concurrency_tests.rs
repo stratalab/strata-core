@@ -8,7 +8,9 @@ use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
 use strata_engine::Database;
+use strata_engine::SearchSubsystem;
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
@@ -23,7 +25,10 @@ fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
 #[test]
 fn test_blind_writes_no_conflict() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
@@ -72,7 +77,10 @@ fn test_blind_writes_no_conflict() {
 #[test]
 fn test_no_conflict_different_keys() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
@@ -120,7 +128,10 @@ fn test_no_conflict_different_keys() {
 #[test]
 fn test_multi_threaded_contention() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
@@ -180,7 +191,10 @@ fn test_multi_threaded_contention() {
 #[test]
 fn test_read_only_transactions_no_conflict() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
@@ -238,7 +252,10 @@ fn test_read_only_transactions_no_conflict() {
 #[test]
 fn test_concurrent_disjoint_transactions() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);

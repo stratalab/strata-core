@@ -1,6 +1,7 @@
 //! Test modules for the executor crate.
 
 pub mod access_mode;
+pub mod api_boundary;
 #[cfg(feature = "arrow")]
 pub mod arrow_import;
 pub mod config;

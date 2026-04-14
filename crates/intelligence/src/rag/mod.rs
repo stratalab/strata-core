@@ -318,7 +318,8 @@ mod tests {
 
     #[test]
     fn test_generate_answer_skipped_when_prompt_unset() {
-        let db = Database::cache().expect("create db");
+        use strata_engine::database::search_only_cache_spec;
+        let db = Database::open_runtime(search_only_cache_spec()).expect("create db");
         let hits = vec![kv_hit("doc1", "rust is a systems language")];
         let result = generate_answer(&db, "What is Rust?", &hits, &standard_recipe());
         assert!(
@@ -329,7 +330,8 @@ mod tests {
 
     #[test]
     fn test_generate_answer_zero_hits_canned_response() {
-        let db = Database::cache().expect("create db");
+        use strata_engine::database::search_only_cache_spec;
+        let db = Database::open_runtime(search_only_cache_spec()).expect("create db");
         let recipe = rag_recipe(Some("local:qwen3:1.7b"));
         let result = generate_answer(&db, "What is Rust?", &[], &recipe);
         let answer = result.expect("zero-hits should return a canned response, not None");
@@ -346,7 +348,8 @@ mod tests {
 
     #[test]
     fn test_generate_answer_zero_hits_uses_default_model_when_unset() {
-        let db = Database::cache().expect("create db");
+        use strata_engine::database::search_only_cache_spec;
+        let db = Database::open_runtime(search_only_cache_spec()).expect("create db");
         let recipe = rag_recipe(None); // No models.generate
         let result = generate_answer(&db, "Q?", &[], &recipe);
         let answer = result.expect("canned response should still return");
@@ -356,7 +359,8 @@ mod tests {
     #[test]
     fn test_generate_answer_model_load_failure_returns_none() {
         // An invalid model spec should fail to load → graceful None.
-        let db = Database::cache().expect("create db");
+        use strata_engine::database::search_only_cache_spec;
+        let db = Database::open_runtime(search_only_cache_spec()).expect("create db");
         let recipe = rag_recipe(Some("nonexistent:model"));
         let hits = vec![kv_hit("doc1", "some content about rust")];
         let result = generate_answer(&db, "What is Rust?", &hits, &recipe);

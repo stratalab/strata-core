@@ -30,7 +30,10 @@ impl Database {
             durability: dur_str.to_string(),
             ..StrataConfig::default()
         };
-        Self::open_internal(path, durability_mode, cfg)
+        let spec = super::spec::OpenSpec::primary(path)
+            .with_config(cfg)
+            .with_subsystem(crate::search::SearchSubsystem);
+        Self::open_runtime(spec)
     }
 }
 
@@ -1666,6 +1669,7 @@ fn test_issue_1699_refresh_preserves_wal_timestamp() {
         .unwrap();
 
     // 3. Open follower — initial recovery replays B via RecoveryCoordinator (correct path)
+    // Followers don't use the registry, so they can coexist with a primary in the same process.
     let follower = Database::open_follower(&db_path).unwrap();
 
     // 4. Primary commits: put A + delete B in one transaction
@@ -2328,20 +2332,26 @@ fn test_open_runtime_lifecycle_order_and_reuse() {
         "follower open_runtime must skip bootstrap"
     );
 
-    let follower_reuse = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
+    // Followers are NOT deduplicated — each open_follower call returns an
+    // independent instance with its own refresh state. This differs from
+    // primaries which have singleton semantics per path.
+    events.lock().clear();
+    let follower2 = Database::open_runtime(OpenSpec::follower(&db_path).with_subsystem(
         TestRuntimeSubsystem::recording("runtime-subsystem", events.clone()),
     ))
     .unwrap();
-    assert!(Arc::ptr_eq(&follower, &follower_reuse));
+    assert!(
+        !Arc::ptr_eq(&follower, &follower2),
+        "follower opens must return independent instances"
+    );
     assert_eq!(
         events.lock().as_slice(),
         ["recover", "initialize"],
-        "reusing an initialized follower must not rerun lifecycle hooks"
+        "each follower open runs its own lifecycle"
     );
 
-    drop(follower_reuse);
+    drop(follower2);
     drop(follower);
-    OPEN_DATABASES.lock().clear();
 }
 
 #[test]
@@ -2635,7 +2645,10 @@ fn test_issue_1924_write_stall_timeout_surfaced_to_caller() {
         ..StrataConfig::default()
     };
 
-    let db = Database::open_internal(&db_path, DurabilityMode::Cache, cfg).unwrap();
+    let spec = super::spec::OpenSpec::primary(&db_path)
+        .with_config(cfg)
+        .with_subsystem(crate::search::SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
 
     // Write large values to force memtable rotation and L0 creation.
     // With write_buffer_size=128, a 512-byte value exceeds the threshold.
@@ -2689,7 +2702,10 @@ fn test_issue_1924_write_stall_timeout_manual_commit() {
         ..StrataConfig::default()
     };
 
-    let db = Database::open_internal(&db_path, DurabilityMode::Cache, cfg).unwrap();
+    let spec = super::spec::OpenSpec::primary(&db_path)
+        .with_config(cfg)
+        .with_subsystem(crate::search::SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
     let big_value = Value::Bytes(vec![0u8; 512]);
 
     let mut saw_timeout = false;
@@ -2731,7 +2747,7 @@ fn test_issue_1380_default_codec_is_identity() {
 /// (e.g. `test_issue_1380_codec_mismatch_rejected` and
 /// `test_issue_1380_encryption_rejected_with_wal`) can interleave their
 /// set/remove calls — one test's `remove_var` lands between another
-/// test's `set_var` and the internal `open_internal` read, producing a
+/// test's `set_var` and the internal `open_runtime` read, producing a
 /// "STRATA_ENCRYPTION_KEY environment variable not set" error instead
 /// of the codec-mismatch / WAL-unsupported error the test expects.
 ///
@@ -2750,8 +2766,14 @@ fn test_issue_1380_codec_mismatch_rejected() {
 
     // First open with Cache mode: creates MANIFEST with "identity"
     {
-        let cfg = StrataConfig::default();
-        let db = Database::open_internal(temp_dir.path(), DurabilityMode::Cache, cfg).unwrap();
+        let cfg = StrataConfig {
+            durability: "cache".to_string(),
+            ..StrataConfig::default()
+        };
+        let spec = super::spec::OpenSpec::primary(temp_dir.path())
+            .with_config(cfg)
+            .with_subsystem(crate::search::SearchSubsystem);
+        let db = Database::open_runtime(spec).unwrap();
         drop(db);
     }
 
@@ -2763,13 +2785,17 @@ fn test_issue_1380_codec_mismatch_rejected() {
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     let cfg = StrataConfig {
+        durability: "cache".to_string(),
         storage: StorageConfig {
             codec: "aes-gcm-256".to_string(),
             ..StorageConfig::default()
         },
         ..StrataConfig::default()
     };
-    let result = Database::open_internal(temp_dir.path(), DurabilityMode::Cache, cfg);
+    let spec = super::spec::OpenSpec::primary(temp_dir.path())
+        .with_config(cfg)
+        .with_subsystem(crate::search::SearchSubsystem);
+    let result = Database::open_runtime(spec);
     std::env::remove_var("STRATA_ENCRYPTION_KEY");
 
     match result {
@@ -2802,14 +2828,13 @@ fn test_issue_1380_encryption_rejected_with_wal() {
         },
         ..StrataConfig::default()
     };
-    let result = Database::open_internal(
-        temp_dir.path(),
-        DurabilityMode::Standard {
-            interval_ms: 100,
-            batch_size: 1000,
-        },
-        cfg,
-    );
+    // Note: Using config with standard durability mode
+    let mut cfg_with_durability = cfg;
+    cfg_with_durability.durability = "standard".to_string();
+    let spec = super::spec::OpenSpec::primary(temp_dir.path())
+        .with_config(cfg_with_durability)
+        .with_subsystem(crate::search::SearchSubsystem);
+    let result = Database::open_runtime(spec);
     std::env::remove_var("STRATA_ENCRYPTION_KEY");
 
     match result {

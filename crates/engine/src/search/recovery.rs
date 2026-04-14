@@ -4,7 +4,7 @@
 //!
 //! ## How It Works
 //!
-//! 1. `DatabaseBuilder` installs `SearchSubsystem`, which is invoked during open
+//! 1. `OpenSpec::with_subsystem(SearchSubsystem)` installs the subsystem at open time
 //! 2. `SearchSubsystem::recover` calls `recover_search_state`, which either:
 //!    - **Fast path**: Loads manifest + mmap'd sealed segments (sub-second)
 //!    - **Slow path**: Scans all KV/Event entries, indexes them, and
@@ -422,7 +422,7 @@ fn reconcile_index(db: &Database, index: &InvertedIndex) -> StrataResult<u64> {
 
 /// Subsystem implementation for search index recovery and shutdown hooks.
 ///
-/// Used with `DatabaseBuilder` for explicit subsystem registration.
+/// Used with `OpenSpec::with_subsystem(SearchSubsystem)` for explicit subsystem registration.
 pub struct SearchSubsystem;
 
 impl crate::recovery::Subsystem for SearchSubsystem {

@@ -117,7 +117,7 @@ tranche = 2
 status = "pending"
 evidence_kind = "structural"
 file = ""
-notes = "Zero pub fn in engine::database::open outside open_runtime + DatabaseBuilder::open path"
+notes = "Zero pub fn in engine::database::open outside open_runtime path"
 
 [[tests]]
 name = "rc_subsystem_trait_has_initialize_bootstrap"
@@ -229,7 +229,7 @@ tranche = 2
 status = "pending"
 evidence_kind = "rust_test"
 file = ""
-notes = "Strata::open and equivalent DatabaseBuilder produce identical CompatibilitySignature"
+notes = "Strata::open and equivalent Database::open_runtime(OpenSpec) produce identical CompatibilitySignature"
 
 [[tests]]
 name = "incompatible_reuse_rejected"
@@ -279,7 +279,7 @@ tranche = 2
 status = "pending"
 evidence_kind = "rust_test"
 file = ""
-notes = "Database opened via bare DatabaseBuilder records branch-dag events without executor"
+notes = "Database opened via Database::open_runtime(OpenSpec) records branch-dag events without executor"
 
 [[tests]]
 name = "dag_single_write_authority"
@@ -429,7 +429,7 @@ tranche = 2
 status = "pending"
 evidence_kind = "rust_test"
 file = ""
-notes = "Bare DatabaseBuilder without GraphSubsystem - create/delete/list work, fork/merge/revert return MissingCapability"
+notes = "Direct Database::open_runtime(OpenSpec) without GraphSubsystem - create/delete/list work, fork/merge/revert return MissingCapability"
 
 [[tests]]
 name = "no_globals_between_instances"
@@ -1355,7 +1355,7 @@ tranche = 4
 status = "pending"
 evidence_kind = "rust_test"
 file = ""
-notes = "Merge base via bare DatabaseBuilder and via executor-routed call produces same result"
+notes = "Merge base via direct Database::open_runtime(OpenSpec) and via executor-routed call produces same result"
 
 [[tests]]
 name = "merge_base_fails_without_dag_hook"
@@ -1605,7 +1605,7 @@ tranche = 4
 status = "pending"
 evidence_kind = "rust_test"
 file = ""
-notes = "Bare DatabaseBuilder without GraphSubsystem - merge involving graph returns MissingCapability"
+notes = "Direct Database::open_runtime(OpenSpec) without GraphSubsystem - merge involving graph returns MissingCapability"
 
 [[tests]]
 name = "event_branch_divergence_is_structured_error"

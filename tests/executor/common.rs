@@ -1,17 +1,19 @@
 //! Common test utilities for executor tests
 
 use std::sync::Arc;
-use strata_engine::{Database, DatabaseBuilder, SearchSubsystem};
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem};
 use strata_executor::{Executor, Output, Session, Strata};
 use strata_vector::VectorSubsystem;
 
 fn test_cache_db() -> Arc<Database> {
-    DatabaseBuilder::new()
-        .with_subsystem(strata_graph::GraphSubsystem)
-        .with_subsystem(VectorSubsystem)
-        .with_subsystem(SearchSubsystem)
-        .cache()
-        .unwrap()
+    Database::open_runtime(
+        OpenSpec::cache()
+            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(VectorSubsystem)
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap()
 }
 
 /// Create an executor with an in-memory database

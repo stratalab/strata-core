@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
+use strata_engine::SearchSubsystem;
 use strata_engine::{BranchIndex, EventLog, KVStore};
 use strata_engine::{Database, SearchRequest};
 use tempfile::TempDir;
@@ -30,7 +32,9 @@ fn int_payload(v: i64) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir, BranchId) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     let branch_id = BranchId::new();
     (db, temp_dir, branch_id)
 }
@@ -71,7 +75,8 @@ fn test_kv_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // Data survived
@@ -129,7 +134,8 @@ fn test_kv_list_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // List still works
@@ -178,7 +184,8 @@ fn test_event_log_chain_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     // Data is intact (verify_chain removed in MVP)
@@ -228,7 +235,8 @@ fn test_event_log_multiple_events_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     // Individual reads work (read_range removed in MVP)
@@ -267,7 +275,8 @@ fn test_event_log_multiple_events_survives_recovery() {
 fn test_branch_index_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
 
@@ -286,7 +295,8 @@ fn test_branch_index_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
 
     // Branch preserved
@@ -299,7 +309,8 @@ fn test_branch_index_survives_recovery() {
 fn test_branch_index_list_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
 
@@ -315,7 +326,8 @@ fn test_branch_index_list_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
 
     // List all branches works (includes _system_ from init_system_branch)
@@ -335,7 +347,8 @@ fn test_branch_index_list_survives_recovery() {
 fn test_branch_delete_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
     let path = get_path(&temp_dir);
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());
@@ -359,7 +372,8 @@ fn test_branch_delete_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());
 
@@ -395,7 +409,8 @@ fn test_cross_primitive_transaction_survives_recovery() {
     drop(db);
 
     // Recovery
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
 
@@ -416,7 +431,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 1: Create and populate
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         kv.put(&branch_id, "default", "cycle1", Value::Int(1))
             .unwrap();
@@ -424,7 +440,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 2: Add more data
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Verify cycle 1 data
@@ -440,7 +457,8 @@ fn test_multiple_recovery_cycles() {
 
     // Cycle 3: Add more data
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Verify all previous data
@@ -460,7 +478,8 @@ fn test_multiple_recovery_cycles() {
 
     // Final verification
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         assert_eq!(
@@ -487,7 +506,8 @@ fn test_all_primitives_recover_together() {
     // Phase 1: Create data for all primitives
     let branch_id: BranchId;
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
@@ -512,7 +532,8 @@ fn test_all_primitives_recover_together() {
 
     // Phase 2: Verify all recovered
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let branch_index = BranchIndex::new(db.clone());
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
@@ -545,7 +566,8 @@ fn test_search_index_survives_recovery() {
 
     // Session 1: index documents and verify search works
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -581,7 +603,8 @@ fn test_search_index_survives_recovery() {
 
     // Session 2: reopen and verify search still works
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // KV data survived
@@ -613,7 +636,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 1: Create initial data
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         kv.put(
             &branch_id,
@@ -626,7 +650,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 2: Add more data, verify previous data searchable
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "indexing");
@@ -647,7 +672,8 @@ fn test_search_index_survives_multiple_recoveries() {
 
     // Cycle 3: Verify both documents searchable
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "retrieval");
@@ -674,7 +700,8 @@ fn test_issue_1710_checkpoint_recovery_preserves_all_data() {
 
     // Phase 1: Write initial data and checkpoint
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         for i in 0..10 {
@@ -712,7 +739,8 @@ fn test_issue_1710_checkpoint_recovery_preserves_all_data() {
 
     // Phase 3: Recovery — all 20 keys must be present
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         for i in 0..10 {
@@ -755,7 +783,8 @@ fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
     let keys_per_writer = 25;
 
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         // Write initial data
@@ -803,7 +832,8 @@ fn test_issue_1710_checkpoint_concurrent_writes_recovery() {
 
     // Recovery: all keys must be present
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         assert_eq!(
@@ -843,7 +873,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
 
     // Session 1: Write initial data and close cleanly (creates search manifest)
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -875,7 +906,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
 
     // Session 2: Add more data, close cleanly (manifest updated with new data)
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
 
         kv.put(
@@ -905,7 +937,8 @@ fn test_issue_1908_search_index_reconciles_after_crash() {
     // Session 3: Reopen — fast path loads stale manifest.
     // Without the fix, session 2 data is in KV but invisible to search.
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
 
@@ -967,7 +1000,8 @@ fn test_bm25_search_isolates_by_space_kv() {
     let path = temp_dir.path().to_path_buf();
     let branch_id = BranchId::new();
 
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let kv = KVStore::new(db.clone());
 
     // Same key, different spaces, identical text → identical BM25 candidates
@@ -1021,7 +1055,8 @@ fn test_bm25_search_isolates_by_space_event() {
     let path = temp_dir.path().to_path_buf();
     let branch_id = BranchId::new();
 
-    let db = Database::open(&path).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
     event_log
@@ -1077,7 +1112,8 @@ fn test_json_survives_bm25_slow_path_rebuild() {
 
     // Session 1: write a JSON doc
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let doc = JsonValue::from_value(serde_json::json!({
@@ -1099,7 +1135,8 @@ fn test_json_survives_bm25_slow_path_rebuild() {
 
     // Session 2: reopen — slow path must re-index the JSON doc
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let req = SearchRequest::new(branch_id, "supremacy").with_space("tenant_a");
@@ -1147,7 +1184,8 @@ fn test_json_slow_path_skips_secondary_index_storage() {
     // filter against a doc that *would* deserialize successfully if the
     // filter weren't there.
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         let doc = JsonValue::from_value(serde_json::json!({
@@ -1182,7 +1220,8 @@ fn test_json_slow_path_skips_secondary_index_storage() {
     // Session 2: reopen — slow path should index doc1 but skip both the
     // serde-encoded IndexDef metadata AND the smuggled JsonDoc.
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         let json = JsonStore::new(db.clone());
 
         // doc1 is searchable in tenant_a
@@ -1450,7 +1489,8 @@ fn test_startup_repair_registers_orphan_data_spaces() {
     // No metadata is ever written for this space — the bypass helper
     // skips every primitive's registration call site.
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         bypass_kv_put(&db, branch_id, "orphan_startup", b"k", Value::Int(1));
         drop(db);
     }
@@ -1462,7 +1502,8 @@ fn test_startup_repair_registers_orphan_data_spaces() {
     // assertion fails when startup repair is reverted instead of being
     // masked by the data-scan fallback.
     {
-        let db = Database::open(&path).unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+            .unwrap();
         assert!(
             space_metadata_exists(&db, branch_id, "orphan_startup"),
             "startup repair must persist a SpaceIndex metadata key for orphan data"
@@ -1501,29 +1542,42 @@ impl strata_engine::Subsystem for SlowRecoverySubsystem {
     }
 }
 
+/// Marker subsystem with same name as `SlowRecoverySubsystem` for signature
+/// compatibility. Used by concurrent openers that need to match the first
+/// opener's subsystem list for hard reuse rejection.
+struct SlowRecoveryMarker;
+
+impl strata_engine::Subsystem for SlowRecoveryMarker {
+    fn name(&self) -> &'static str {
+        "slow-recovery-regression-test"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+}
+
 /// Audit-follow-up regression for stratalab/strata-core#2354 Finding 1.
 ///
 /// Before the fix, `acquire_primary_db` inserted the fresh `Arc<Database>`
-/// into the process-global `OPEN_DATABASES` registry **before**
-/// `open_internal_with_subsystems` ran the `subsystem.recover()` loop. A
-/// concurrent opener for the same path that came in during the recovery
-/// window would upgrade the weak ref, return `(db, false)`, and hand the
-/// caller a reference to a `Database` whose in-memory subsystem state was
-/// still being rebuilt.
+/// into the process-global `OPEN_DATABASES` registry **before** running
+/// the `subsystem.recover()` loop. A concurrent opener for the same path
+/// that came in during the recovery window would upgrade the weak ref,
+/// return `(db, false)`, and hand the caller a reference to a `Database`
+/// whose in-memory subsystem state was still being rebuilt.
 ///
 /// This test pins a `SlowRecoverySubsystem` on thread A and waits for
 /// thread A to enter `recover()` (via the `started` flag). While thread A
 /// is deterministically inside the sleep, thread B calls
-/// `DatabaseBuilder::new().open(path)` for the same path. With the fix,
-/// thread B blocks on the `OPEN_DATABASES` mutex until thread A finishes
-/// recovery and inserts. When thread B's call returns, the `done` flag
-/// must be `true` — proving thread B saw the Arc only after recovery
-/// fully completed.
+/// `Database::open_runtime(OpenSpec::primary(path))` for the same path.
+/// With the fix, thread B blocks on the `OPEN_DATABASES` mutex until
+/// thread A finishes recovery and inserts. When thread B's call returns,
+/// the `done` flag must be `true` — proving thread B saw the Arc only
+/// after recovery fully completed.
 #[test]
 fn test_concurrent_open_blocks_until_recovery_completes() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
-    use strata_engine::DatabaseBuilder;
 
     let temp = TempDir::new().unwrap();
     let path = Arc::new(temp.path().to_path_buf());
@@ -1540,14 +1594,14 @@ fn test_concurrent_open_blocks_until_recovery_completes() {
     let started_a = Arc::clone(&started);
     let done_a = Arc::clone(&done);
     let handle_a = std::thread::spawn(move || {
-        DatabaseBuilder::new()
-            .with_subsystem(SlowRecoverySubsystem {
+        Database::open_runtime(
+            OpenSpec::primary(&*path_a).with_subsystem(SlowRecoverySubsystem {
                 started: started_a,
                 done: done_a,
                 delay: Duration::from_millis(500),
-            })
-            .open(&*path_a)
-            .unwrap()
+            }),
+        )
+        .unwrap()
     });
 
     // Spin until thread A has definitely entered recover(). This removes
@@ -1556,14 +1610,17 @@ fn test_concurrent_open_blocks_until_recovery_completes() {
         std::thread::sleep(Duration::from_millis(5));
     }
 
-    // Thread B: concurrent open of the same path. With the fix, this
-    // blocks on OPEN_DATABASES until thread A finishes recovery and
-    // publishes the Arc. Without the fix, thread B returns immediately
-    // and the `done` flag load below is `false`.
+    // Thread B: concurrent open of the same path with matching subsystem.
+    // With the fix, this blocks on OPEN_DATABASES until thread A finishes
+    // recovery and publishes the Arc. Without the fix, thread B returns
+    // immediately and the `done` flag load below is `false`.
+    // Note: Must use SlowRecoveryMarker (same name) to pass hard reuse rejection.
     let path_b = Arc::clone(&path);
     let done_b = Arc::clone(&done);
     let handle_b = std::thread::spawn(move || {
-        let db = DatabaseBuilder::new().open(&*path_b).unwrap();
+        let db =
+            Database::open_runtime(OpenSpec::primary(&*path_b).with_subsystem(SlowRecoveryMarker))
+                .unwrap();
         let observed_done = done_b.load(Ordering::SeqCst);
         (db, observed_done)
     });
@@ -1642,15 +1699,14 @@ impl strata_engine::Subsystem for AlwaysFailingSubsystem {
 ///
 /// The fix must drop the guard before `return Err(...)` on the recovery
 /// error path. This test exercises that path by passing an
-/// `AlwaysFailingSubsystem` through `DatabaseBuilder::open`. A failing
-/// version of this fix will deadlock and never return — the test is
-/// wrapped in a joined thread with a hard deadline so a deadlock
+/// `AlwaysFailingSubsystem` through `Database::open_runtime(OpenSpec)`.
+/// A failing version of this fix will deadlock and never return — the
+/// test is wrapped in a joined thread with a hard deadline so a deadlock
 /// surfaces as a visible timeout rather than a hung test binary.
 #[test]
 fn test_recovery_failure_does_not_deadlock() {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
-    use strata_engine::DatabaseBuilder;
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().to_path_buf();
@@ -1660,9 +1716,8 @@ fn test_recovery_failure_does_not_deadlock() {
     // signal, we know the worker deadlocked.
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
-        let result = DatabaseBuilder::new()
-            .with_subsystem(AlwaysFailingSubsystem)
-            .open(&path);
+        let result =
+            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(AlwaysFailingSubsystem));
         let _ = tx.send(result.is_err());
     });
 
@@ -1719,7 +1774,6 @@ fn test_recovery_failure_does_not_deadlock() {
 fn test_recovery_panic_does_not_deadlock() {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
-    use strata_engine::DatabaseBuilder;
 
     let temp = TempDir::new().unwrap();
     let path = temp.path().to_path_buf();
@@ -1730,9 +1784,7 @@ fn test_recovery_panic_does_not_deadlock() {
         // The worker thread reports back whether it reached here at all
         // (i.e. whether it did not deadlock).
         let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            DatabaseBuilder::new()
-                .with_subsystem(PanickingSubsystem)
-                .open(&path)
+            Database::open_runtime(OpenSpec::primary(&path).with_subsystem(PanickingSubsystem))
         }));
         let _ = tx.send(caught.is_err());
     });
@@ -1764,13 +1816,12 @@ fn test_recovery_panic_does_not_deadlock() {
 }
 
 // ============================================================================
-// Audit-follow-up regression for stratalab/strata-core#2354 Finding 2:
-// mixed-opener bypass must preserve the earlier subsystem list. See the
-// fast-path mismatch warning in `acquire_primary_db`.
+// Hard reuse rejection: mixing openers with different subsystem lists
+// must return an error, not silently drop the later caller's subsystems.
 // ============================================================================
 
 /// Trivial test-only `Subsystem` whose `recover()` is a no-op. Used by
-/// `test_mixed_opener_returns_earlier_subsystems` to construct a second
+/// `test_mixed_opener_rejects_subsystem_mismatch` to construct a second
 /// caller's subsystem list that is intentionally distinct from
 /// `Database::open`'s hardcoded `[SearchSubsystem]`.
 struct NoopRegressionSubsystem;
@@ -1785,24 +1836,13 @@ impl strata_engine::Subsystem for NoopRegressionSubsystem {
     }
 }
 
-/// Audit follow-up to stratalab/strata-core#2354 Finding 2.
+/// T2-E3 hard reuse rejection: subsystem mismatches are errors.
 ///
 /// When two callers open the same canonical path through
-/// `acquire_primary_db` with different subsystem lists, the fast-path
-/// single-instance-per-path contract returns the **earlier** instance
-/// unchanged — the second caller's requested subsystems are silently
-/// dropped. This is the behavior we are locking in, not the behavior
-/// we wish we had: `Strata` / `DatabaseBuilder` callers must notice
-/// the mismatch via the `tracing::warn!` that `acquire_primary_db`'s
-/// fast path emits. "Upgrading" the subsystem list instead would
-/// break the singleton-per-path contract and surprise callers who
-/// mix `Database::open` and `Strata::open` in the same process.
-///
-/// The test asserts two invariants:
-///   1. Singleton-per-path: `Arc::ptr_eq(&db_a, &db_b)`.
-///   2. The installed subsystem list on the returned Arc is what the
-///      FIRST caller requested — the second caller's distinct
-///      subsystems are not present.
+/// `acquire_primary_db` with different subsystem lists, the second
+/// caller receives `StrataError::IncompatibleReuse`. This prevents
+/// silent subsystem dropping when mixing openers (e.g., `Database::open`
+/// and `Strata::open` on the same path).
 ///
 /// Lives in the integration test binary (not `crates/engine/src/database/tests.rs`)
 /// because several lib tests call `OPEN_DATABASES.lock().clear()` for
@@ -1811,48 +1851,40 @@ impl strata_engine::Subsystem for NoopRegressionSubsystem {
 /// `open()` to fall through to a file-lock collision. Integration
 /// tests run in a separate process so the race cannot fire.
 #[test]
-fn test_mixed_opener_returns_earlier_subsystems() {
-    use strata_engine::DatabaseBuilder;
-
+fn test_mixed_opener_rejects_subsystem_mismatch() {
     let temp = TempDir::new().unwrap();
 
-    // Caller A: bare `Database::open` → `[SearchSubsystem]`.
-    let db_a = Database::open(temp.path()).unwrap();
+    // Caller A: `open_runtime` with SearchSubsystem → `[SearchSubsystem]`.
+    let db_a =
+        Database::open_runtime(OpenSpec::primary(temp.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     assert_eq!(
         db_a.installed_subsystem_names(),
         vec!["search"],
-        "Database::open should install only SearchSubsystem"
+        "open_runtime with SearchSubsystem should install only SearchSubsystem"
     );
 
-    // Caller B: `DatabaseBuilder` with an intentionally different
-    // subsystem list (`SearchSubsystem` + `NoopRegressionSubsystem`).
-    // This enters `acquire_primary_db`, hits the registry fast path,
-    // and must return the SAME Arc as caller A — with caller A's
-    // subsystem list, not caller B's.
-    let db_b = DatabaseBuilder::new()
-        .with_subsystem(strata_engine::SearchSubsystem)
-        .with_subsystem(NoopRegressionSubsystem)
-        .open(temp.path())
-        .unwrap();
+    // Caller B: `open_runtime` with a different subsystem list.
+    // This must fail with IncompatibleReuse, not silently return db_a.
+    let result = Database::open_runtime(
+        OpenSpec::primary(temp.path())
+            .with_subsystem(strata_engine::SearchSubsystem)
+            .with_subsystem(NoopRegressionSubsystem),
+    );
 
-    // Singleton-per-path invariant.
     assert!(
-        Arc::ptr_eq(&db_a, &db_b),
-        "same-path opens must return the same Arc<Database> \
-         (single-instance-per-path contract)"
+        matches!(
+            &result,
+            Err(strata_core::StrataError::IncompatibleReuse { .. })
+        ),
+        "mixed-opener with different subsystems must return IncompatibleReuse, got {}",
+        if result.is_ok() {
+            "Ok(_)"
+        } else {
+            "different error"
+        }
     );
 
-    // Key assertion: the installed list is A's, not B's. Caller B's
-    // `NoopRegressionSubsystem` was silently dropped. If a future
-    // refactor ever makes the second caller's list win, this
-    // assertion fires.
-    assert_eq!(
-        db_b.installed_subsystem_names(),
-        vec!["search"],
-        "mixed-opener bypass must preserve the EARLIER subsystem list; \
-         caller B's requested `noop-mixed-opener-regression` subsystem \
-         was silently dropped (see tracing::warn! in \
-         acquire_primary_db's fast path, audit follow-up to #2354 \
-         Finding 2)"
-    );
+    // db_a is still valid and has the original subsystem list
+    assert_eq!(db_a.installed_subsystem_names(), vec!["search"]);
 }

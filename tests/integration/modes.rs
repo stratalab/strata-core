@@ -6,6 +6,7 @@
 
 use crate::common::*;
 use std::sync::Arc;
+use strata_engine::database::OpenSpec;
 use tempfile::TempDir;
 
 // ============================================================================
@@ -13,15 +14,21 @@ use tempfile::TempDir;
 // ============================================================================
 
 fn create_cache() -> Arc<Database> {
-    Database::cache().expect("cache db")
+    Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).expect("cache db")
 }
 
 fn create_persistent_standard(dir: &TempDir) -> Arc<Database> {
-    Database::open(dir.path()).expect("standard db")
+    Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+        .expect("standard db")
 }
 
 fn create_persistent_always(dir: &TempDir) -> Arc<Database> {
-    Database::open_with_config(dir.path(), always_config()).expect("always db")
+    Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_config(always_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("always db")
 }
 
 // ============================================================================

@@ -6,11 +6,12 @@
 use crate::types::*;
 use crate::Value;
 use crate::{Command, Executor, Output};
+use strata_engine::database::search_only_cache_spec;
 use strata_engine::Database;
 
 /// Create a test executor.
 fn create_test_executor() -> Executor {
-    let db = Database::cache().unwrap();
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Executor::new(db)
 }
 

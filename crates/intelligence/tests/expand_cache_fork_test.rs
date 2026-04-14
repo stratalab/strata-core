@@ -8,6 +8,7 @@
 #![cfg(feature = "embed")]
 
 use strata_engine::branch_ops;
+use strata_engine::database::search_only_primary_spec;
 use strata_engine::primitives::branch::{resolve_branch_name, BranchIndex};
 use strata_engine::Database;
 use strata_intelligence::expand_cache;
@@ -24,7 +25,7 @@ fn lex(text: &str) -> ExpandedQuery {
 #[test]
 fn test_fork_branch_inherits_cache() {
     let dir = TempDir::new().unwrap();
-    let db = Database::open(dir.path()).unwrap();
+    let db = Database::open_runtime(search_only_primary_spec(dir.path())).unwrap();
 
     // Create the parent branch and warm its cache with one entry.
     let branch_index = BranchIndex::new(db.clone());
@@ -68,7 +69,7 @@ fn test_fork_child_writes_isolated_from_parent() {
     // After fork, writes on the child must not leak into the parent.
     // This proves the COW path is doing copy-on-write, not aliasing.
     let dir = TempDir::new().unwrap();
-    let db = Database::open(dir.path()).unwrap();
+    let db = Database::open_runtime(search_only_primary_spec(dir.path())).unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
     branch_index.create_branch("p").unwrap();

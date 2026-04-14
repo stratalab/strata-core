@@ -431,9 +431,11 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::SearchSubsystem;
 
     fn setup() -> (Arc<Database>, GraphStore) {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let graph = GraphStore::new(db.clone());
         (db, graph)
     }
@@ -1761,7 +1763,7 @@ mod tests {
     fn parallel_branch_ingest_throughput() {
         use std::sync::Arc;
 
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let gs = Arc::new(GraphStore::new(db.clone()));
 
         let num_threads = 4;
@@ -1805,7 +1807,7 @@ mod tests {
     fn parallel_ingest_isolation() {
         use std::sync::Arc;
 
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let gs = Arc::new(GraphStore::new(db.clone()));
 
         let handles: Vec<_> = (0..4)

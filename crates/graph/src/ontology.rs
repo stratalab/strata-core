@@ -876,10 +876,11 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use strata_engine::Database;
+    use strata_engine::database::OpenSpec;
+    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
-        let db = Database::cache().unwrap();
+        let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
         let graph = GraphStore::new(db.clone());
         (db, graph)
     }

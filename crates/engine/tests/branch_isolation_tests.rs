@@ -8,7 +8,9 @@ use std::sync::Arc;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::config::StorageConfig;
+use strata_engine::database::OpenSpec;
 use strata_engine::Database;
+use strata_engine::SearchSubsystem;
 use strata_engine::StrataConfig;
 use strata_engine::{BranchIndex, EventLog, KVStore};
 use tempfile::TempDir;
@@ -33,7 +35,9 @@ fn string_payload(s: &str) -> Value {
 
 fn setup() -> (Arc<Database>, TempDir) {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path()).unwrap();
+    let db =
+        Database::open_runtime(OpenSpec::primary(temp_dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
     (db, temp_dir)
 }
 
@@ -301,7 +305,12 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
         },
         ..StrataConfig::default()
     };
-    let db = Database::open_with_config(temp_dir.path(), cfg).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path())
+            .with_config(cfg)
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
 
     let branch_index = BranchIndex::new(db.clone());
     let kv = KVStore::new(db.clone());

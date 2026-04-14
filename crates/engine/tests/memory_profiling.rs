@@ -6,7 +6,9 @@
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
+use strata_engine::database::OpenSpec;
 use strata_engine::Database;
+use strata_engine::SearchSubsystem;
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
@@ -17,7 +19,10 @@ fn create_ns(branch_id: BranchId) -> Arc<Namespace> {
 #[test]
 fn test_read_set_memory_growth() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -51,7 +56,10 @@ fn test_read_set_memory_growth() {
 #[test]
 fn test_write_set_memory_growth() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -74,7 +82,10 @@ fn test_write_set_memory_growth() {
 #[test]
 fn test_no_memory_leaks() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -98,7 +109,10 @@ fn test_no_memory_leaks() {
 #[test]
 fn test_aborted_transaction_cleanup() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 
@@ -126,7 +140,10 @@ fn test_aborted_transaction_cleanup() {
 #[test]
 fn test_large_value_memory() {
     let temp_dir = TempDir::new().unwrap();
-    let db = Database::open(temp_dir.path().join("db")).unwrap();
+    let db = Database::open_runtime(
+        OpenSpec::primary(temp_dir.path().join("db")).with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
     let branch_id = BranchId::new();
     let ns = create_ns(branch_id);
 

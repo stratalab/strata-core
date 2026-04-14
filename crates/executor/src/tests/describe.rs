@@ -2,12 +2,13 @@
 
 use crate::types::{BranchId, DistanceMetric};
 use crate::{Command, Executor, Output};
+use strata_engine::database::search_only_cache_spec;
 use strata_engine::Database;
 use strata_security::AccessMode;
 
 /// Create a test executor with an in-memory database.
 fn create_test_executor() -> Executor {
-    let db = Database::cache().unwrap();
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     Executor::new(db)
 }
 
@@ -71,7 +72,7 @@ fn describe_is_not_a_write() {
 
 #[test]
 fn describe_works_in_read_only_mode() {
-    let db = Database::cache().unwrap();
+    let db = Database::open_runtime(search_only_cache_spec()).unwrap();
     let executor = Executor::new_with_mode(db, AccessMode::ReadOnly);
 
     let result = executor.execute(Command::Describe {

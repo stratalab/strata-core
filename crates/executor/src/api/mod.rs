@@ -58,7 +58,8 @@ pub use system::SystemBranch;
 use std::path::Path;
 use std::sync::Arc;
 
-use strata_engine::{Database, DatabaseBuilder, SearchSubsystem};
+use strata_engine::database::OpenSpec;
+use strata_engine::{Database, SearchSubsystem};
 use strata_graph::GraphSubsystem;
 use strata_security::{AccessMode, OpenOptions};
 use strata_vector::VectorSubsystem;
@@ -67,19 +68,47 @@ use crate::ipc::{Backend, IpcClient};
 use crate::types::BranchId;
 use crate::{Command, Error, Executor, Output, Result, Session};
 
-/// Construct a `DatabaseBuilder` pre-loaded with the standard production
-/// subsystem set. The same ordered list drives recovery on open and
-/// freeze-on-drop, so production opens cannot diverge from the test path
-/// validated by `crates/engine/tests/recovery_tests.rs`.
+/// Create the default product `OpenSpec` for a primary database.
 ///
-/// Order: `GraphSubsystem` first (installs DAG hook and merge handler),
-/// then `VectorSubsystem`, then `SearchSubsystem`. Recovery runs in this
-/// order; freeze runs in reverse.
-fn strata_db_builder() -> DatabaseBuilder {
-    DatabaseBuilder::new()
+/// Product-default subsystem order:
+/// 1. `GraphSubsystem` (installs DAG hook and merge handler)
+/// 2. `VectorSubsystem`
+/// 3. `SearchSubsystem`
+///
+/// Recovery runs in this order; freeze runs in reverse.
+///
+/// This is the canonical way for product code to construct an `OpenSpec`
+/// with the standard subsystem set. Engine code should not use this function;
+/// it belongs to the executor/product layer.
+pub(crate) fn default_product_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
+    OpenSpec::primary(path)
         .with_subsystem(GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
+        .with_default_branch("default")
+}
+
+/// Create the default product `OpenSpec` for a follower database.
+///
+/// Same subsystem order as [`default_product_spec`], but in follower mode
+/// (read-only, skips bootstrap).
+pub(crate) fn default_product_follower_spec<P: AsRef<Path>>(path: P) -> OpenSpec {
+    OpenSpec::follower(path)
+        .with_subsystem(GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
+}
+
+/// Create the default product `OpenSpec` for a cache database.
+///
+/// Same subsystem order as [`default_product_spec`], but in cache mode
+/// (ephemeral, in-memory only).
+pub(crate) fn default_product_cache_spec() -> OpenSpec {
+    OpenSpec::cache()
+        .with_subsystem(GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem)
+        .with_default_branch("default")
 }
 
 /// High-level typed wrapper for database operations.
@@ -137,7 +166,8 @@ impl Strata {
 
         if opts.follower {
             // Follower mode: read-only, never write to the database directory
-            let db = strata_db_builder().open_follower(&data_dir).map_err(|e| Error::Internal {
+            let spec = default_product_follower_spec(&data_dir);
+            let db = Database::open_runtime(spec).map_err(|e| Error::Internal {
                 reason: format!("Failed to open database (follower): {}", e),
                 hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
             })?;
@@ -161,29 +191,13 @@ impl Strata {
             });
         }
 
-        std::fs::create_dir_all(&data_dir).map_err(|e| Error::Internal {
-            reason: format!("Failed to create data directory: {}", e),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-        })?;
-
-        // Read existing config (or defaults)
-        let config_path = data_dir.join(strata_engine::database::config::CONFIG_FILE_NAME);
-        strata_engine::database::config::StrataConfig::write_default_if_missing(&config_path)
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to write default config: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
-        let cfg = strata_engine::database::config::StrataConfig::from_file(&config_path).map_err(
-            |e| Error::Internal {
-                reason: format!("Failed to read config: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            },
-        )?;
-
         let access_mode = opts.access_mode;
 
-        // Try to open the database directly
-        match strata_db_builder().open_with_config(&data_dir, cfg) {
+        // Try to open the database directly via open_runtime.
+        // open_runtime handles directory creation, config resolution,
+        // and default branch creation internally.
+        let spec = default_product_spec(&data_dir);
+        match Database::open_runtime(spec) {
             Ok(db) => {
                 // Seed built-in recipes if not already present
                 if let Err(e) = strata_engine::recipe_store::seed_builtin_recipes(&db) {
@@ -231,19 +245,16 @@ impl Strata {
                             Err(_) => {
                                 // Stale socket — try to clean up and retry
                                 let _ = std::fs::remove_file(&socket_path);
-                                // Re-read config for retry
-                                let cfg2 =
-                                    strata_engine::database::config::StrataConfig::from_file(
-                                        &config_path,
-                                    )
-                                    .map_err(|e| {
-                                        Error::Internal {
-                                            reason: format!("Failed to read config: {}", e),
-                                            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-                                        }
-                                    })?;
-                                match strata_db_builder().open_with_config(&data_dir, cfg2) {
+                                // Retry with open_runtime (config resolved internally)
+                                let retry_spec = default_product_spec(&data_dir);
+                                match Database::open_runtime(retry_spec) {
                                     Ok(db) => {
+                                        // Seed built-in recipes if not already present
+                                        if let Err(e) =
+                                            strata_engine::recipe_store::seed_builtin_recipes(&db)
+                                        {
+                                            tracing::warn!(error = %e, "Failed to seed built-in recipes");
+                                        }
                                         let executor = Executor::new_with_mode(db, access_mode);
                                         match access_mode {
                                             AccessMode::ReadWrite => {
@@ -301,13 +312,14 @@ impl Strata {
     /// db.kv_put("key", Value::Int(42))?;
     /// ```
     pub fn cache() -> Result<Self> {
-        let db = strata_db_builder().cache().map_err(|e| Error::Internal {
+        let spec = default_product_cache_spec();
+        let db = Database::open_runtime(spec).map_err(|e| Error::Internal {
             reason: format!("Failed to open cache database: {}", e),
             hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
         })?;
         let executor = Executor::new(db);
 
-        // Ensure the default branch exists
+        // Ensure the default branch exists (idempotent, open_runtime also ensures it)
         Self::ensure_default_branch(&executor)?;
 
         Ok(Self {
@@ -335,9 +347,27 @@ impl Strata {
     /// ```
     pub fn new_handle(&self) -> Result<Self> {
         match &self.backend {
-            Backend::Local { .. } => {
-                let db = self.database();
-                Self::from_database_with_mode(db, self.access_mode)
+            Backend::Local { executor } => {
+                // Create a new executor wrapping the same database.
+                // Skip subsystem validation since the original Strata was
+                // created via open/open_with which uses the validated spec.
+                let db = executor.primitives().db.clone();
+                let new_executor = Executor::new_with_mode(db, self.access_mode);
+
+                // Verify/ensure the default branch exists (idempotent)
+                match self.access_mode {
+                    AccessMode::ReadWrite => Self::ensure_default_branch(&new_executor)?,
+                    AccessMode::ReadOnly => Self::verify_default_branch(&new_executor)?,
+                }
+
+                Ok(Self {
+                    backend: Backend::Local {
+                        executor: new_executor,
+                    },
+                    current_branch: BranchId::default(),
+                    current_space: "default".to_string(),
+                    access_mode: self.access_mode,
+                })
             }
             Backend::Ipc {
                 client,
@@ -362,84 +392,6 @@ impl Strata {
             }
         }
     }
-
-    /// Create a new Strata instance from an existing database.
-    ///
-    /// Use this when you need more control over database configuration.
-    /// For most cases, prefer [`Strata::open()`].
-    ///
-    /// # Subsystem contract
-    ///
-    /// The supplied `Arc<Database>` **must** have been opened through a
-    /// builder that installed the production subsystem set
-    /// (`VectorSubsystem` + `SearchSubsystem`). The recommended path is:
-    ///
-    /// ```text
-    /// use strata_engine::{DatabaseBuilder, SearchSubsystem};
-    /// use strata_vector::VectorSubsystem;
-    ///
-    /// let db = DatabaseBuilder::new()
-    ///     .with_subsystem(VectorSubsystem)
-    ///     .with_subsystem(SearchSubsystem)
-    ///     .open("/path/to/data")?;
-    /// let strata = Strata::from_database(db)?;
-    /// ```
-    ///
-    /// If you hand in a `Database` opened via `Database::open` or a
-    /// plain `DatabaseBuilder::new().open(...)` without
-    /// `VectorSubsystem`, vector recovery and drop-time freeze will
-    /// silently not run for this handle. A `tracing::warn!` is
-    /// emitted in that case so the misuse surfaces at runtime.
-    pub fn from_database(db: Arc<Database>) -> Result<Self> {
-        Self::from_database_with_mode(db, AccessMode::ReadWrite)
-    }
-
-    /// Create a new Strata instance from an existing database with a
-    /// specific access mode.
-    fn from_database_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Result<Self> {
-        // Mixed-opener detection (audit follow-up to #2354 Finding 2).
-        // A caller wrapping a bare `Database::open` / plain-builder
-        // result loses vector recovery + drop-freeze guarantees
-        // silently. We can't reject this — `new_handle` and test
-        // fixtures both route through here with already-valid dbs —
-        // but we can surface the mismatch. Skip for cache databases:
-        // they have no persistent vector state and their subsystems
-        // are no-ops by design, so test fixtures using
-        // `Database::cache()` should not trip the warning.
-        if !db.is_cache() {
-            let installed = db.installed_subsystem_names();
-            if !installed.contains(&"vector") {
-                tracing::warn!(
-                    target: "strata::executor",
-                    installed = ?installed,
-                    "Strata::from_database was handed a disk-backed Database \
-                     without VectorSubsystem installed. Vector recovery and \
-                     drop-time freeze will not run for this handle. If you \
-                     opened the Database via `Database::open` or plain \
-                     `DatabaseBuilder::new().open(...)` without explicitly \
-                     adding `VectorSubsystem`, vector state will not survive \
-                     drop+reopen. Prefer `Strata::open` / `Strata::open_with` \
-                     for the full production subsystem set. See audit \
-                     follow-up to #2354 Finding 2."
-                );
-            }
-        }
-
-        let executor = Executor::new_with_mode(db, access_mode);
-
-        match access_mode {
-            AccessMode::ReadWrite => Self::ensure_default_branch(&executor)?,
-            AccessMode::ReadOnly => Self::verify_default_branch(&executor)?,
-        }
-
-        Ok(Self {
-            backend: Backend::Local { executor },
-            current_branch: BranchId::default(),
-            current_space: "default".to_string(),
-            access_mode,
-        })
-    }
-
     /// Ensures the "default" branch exists in the database, creating it if
     /// missing.
     fn ensure_default_branch(executor: &Executor) -> Result<()> {

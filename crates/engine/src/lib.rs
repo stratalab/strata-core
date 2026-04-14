@@ -19,6 +19,13 @@
 //! ```bash
 //! cargo build --features perf-trace
 //! ```
+//!
+//! # API Stability
+//!
+//! `strata_engine` is a workspace-internal crate (`publish = false`). Application
+//! code should use `strata_executor::Strata::open()` as the only supported entry
+//! point. Direct use of `Database::open_runtime()` is for workspace-internal
+//! components only.
 
 pub mod background;
 pub mod coordinator;
@@ -31,7 +38,6 @@ pub mod transaction_ops; // TransactionOps Trait Definition
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
 pub use coordinator::{TransactionCoordinator, TransactionMetrics};
 pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
-pub use database::builder::DatabaseBuilder;
 pub use database::profile::{
     apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, HardwareInfo,
     Profile,

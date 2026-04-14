@@ -46,7 +46,10 @@ pub use observers::{
     CommitObserver, CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo,
     ReplayObserver, ReplayObserverRegistry,
 };
-pub use spec::{DatabaseMode, OpenSpec};
+pub use spec::{
+    search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
+    OpenSpec,
+};
 
 pub use config::{ModelConfig, StorageConfig, StrataConfig, SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 pub use profile::{
@@ -419,7 +422,7 @@ pub struct Database {
 
     /// Registered subsystems for recovery and shutdown hooks.
     ///
-    /// Populated by `DatabaseBuilder` or `Database::open()` (backward compat).
+    /// Populated by `OpenSpec::with_subsystem()` via `Database::open_runtime()`.
     /// Frozen in reverse order during shutdown/drop.
     subsystems: parking_lot::RwLock<Vec<Box<dyn crate::recovery::Subsystem>>>,
 
@@ -469,7 +472,6 @@ pub struct Database {
 }
 
 // Split impl blocks
-pub mod builder;
 mod compaction;
 mod lifecycle;
 mod open;
@@ -538,7 +540,7 @@ impl Database {
         self.coordinator.branch_commit_lock(branch_id)
     }
 
-    /// Set subsystems for this database (called by DatabaseBuilder).
+    /// Set subsystems for this database (called by `open_runtime()`).
     pub(crate) fn set_subsystems(&self, subsystems: Vec<Box<dyn crate::recovery::Subsystem>>) {
         *self.subsystems.write() = subsystems;
     }
@@ -547,15 +549,15 @@ impl Database {
     /// `Database`, in registration order.
     ///
     /// Used by `acquire_primary_db`'s fast-path mixed-opener detection
-    /// and by `Strata::from_database` to surface cases where a caller
-    /// wrapped a `Database` that was opened without the production
-    /// subsystem set (see audit follow-up to stratalab/strata-core#2354,
-    /// Finding 2). Also useful as a general diagnostic accessor.
+    /// to surface cases where a caller opened the same path with a
+    /// different subsystem set (see audit follow-up to
+    /// stratalab/strata-core#2354, Finding 2). Also useful as a general
+    /// diagnostic accessor.
     ///
     /// Returns an empty vec for cache databases or any `Database`
     /// whose subsystems have not yet been installed (e.g. a partially-
-    /// opened instance inside `acquire_primary_db` after `open_finish`
-    /// but before the recovery loop completes).
+    /// opened instance inside `acquire_primary_db` after creation but
+    /// before the recovery loop completes).
     pub fn installed_subsystem_names(&self) -> Vec<&'static str> {
         self.subsystems.read().iter().map(|s| s.name()).collect()
     }
