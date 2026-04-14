@@ -47,6 +47,11 @@ pub struct CompatibilitySignature {
     pub durability_mode: DurabilityMode,
     /// Codec version identifier.
     pub codec_id: u32,
+    /// Storage codec name (e.g., "identity", "aes-gcm-256").
+    ///
+    /// Different from `codec_id` which is the wire format version.
+    /// This is the encryption/encoding strategy from config.
+    pub codec_name: String,
     /// Default branch name (if any).
     pub default_branch: Option<String>,
     /// Fingerprint of runtime-identity/capability config.
@@ -57,21 +62,27 @@ pub struct CompatibilitySignature {
 }
 
 impl CompatibilitySignature {
-    /// Create a signature from an `OpenSpec`.
+    /// Create a signature from an `OpenSpec` and resolved config.
+    ///
+    /// The `codec_name` parameter should be the storage codec from config
+    /// (e.g., "identity", "aes-gcm-256").
     pub fn from_spec(
         mode: DatabaseMode,
         subsystem_names: Vec<&'static str>,
         durability_mode: DurabilityMode,
+        codec_name: String,
         default_branch: Option<String>,
     ) -> Self {
         // Compute fingerprint from known fields
-        let fingerprint = compute_fingerprint(&mode, &subsystem_names, &durability_mode);
+        let fingerprint =
+            compute_fingerprint(&mode, &subsystem_names, &durability_mode, &codec_name);
 
         Self {
             mode,
             subsystem_names: subsystem_names.into_iter().map(String::from).collect(),
             durability_mode,
             codec_id: CURRENT_CODEC_ID,
+            codec_name,
             default_branch,
             open_config_fingerprint: fingerprint,
         }
@@ -106,6 +117,13 @@ impl CompatibilitySignature {
             return Err(IncompatibleReason::CodecMismatch {
                 existing: self.codec_id,
                 requested: other.codec_id,
+            });
+        }
+
+        if self.codec_name != other.codec_name {
+            return Err(IncompatibleReason::CodecNameMismatch {
+                existing: self.codec_name.clone(),
+                requested: other.codec_name.clone(),
             });
         }
 
@@ -155,6 +173,13 @@ pub enum IncompatibleReason {
         existing: u32,
         /// The codec version requested by the new open call.
         requested: u32,
+    },
+    /// Storage codec names don't match (e.g., "identity" vs "aes-gcm-256").
+    CodecNameMismatch {
+        /// The codec name of the existing database instance.
+        existing: String,
+        /// The codec name requested by the new open call.
+        requested: String,
     },
     /// Default branch names don't match.
     DefaultBranchMismatch {
@@ -210,6 +235,16 @@ impl std::fmt::Display for IncompatibleReason {
                     existing, requested
                 )
             }
+            Self::CodecNameMismatch {
+                existing,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "storage codec mismatch: existing={:?}, requested={:?}",
+                    existing, requested
+                )
+            }
             Self::DefaultBranchMismatch {
                 existing,
                 requested,
@@ -237,11 +272,13 @@ fn compute_fingerprint(
     mode: &DatabaseMode,
     subsystem_names: &[&'static str],
     durability_mode: &DurabilityMode,
+    codec_name: &str,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut hasher = DefaultHasher::new();
     mode.hash(&mut hasher);
     subsystem_names.hash(&mut hasher);
+    codec_name.hash(&mut hasher);
     std::mem::discriminant(durability_mode).hash(&mut hasher);
     hasher.finish()
 }
@@ -260,6 +297,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph", "vector", "search"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             Some("main".to_string()),
         );
 
@@ -267,6 +305,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph", "vector", "search"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             Some("main".to_string()),
         );
 
@@ -280,6 +319,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
 
@@ -287,6 +327,7 @@ mod tests {
             DatabaseMode::Follower,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
 
@@ -303,6 +344,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph", "vector"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
 
@@ -310,6 +352,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
 
@@ -326,6 +369,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
 
@@ -333,6 +377,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::Always,
+            "identity".to_string(),
             None,
         );
 
@@ -349,6 +394,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             Some("main".to_string()),
         );
 
@@ -356,6 +402,7 @@ mod tests {
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             Some("develop".to_string()),
         );
 
@@ -367,11 +414,37 @@ mod tests {
     }
 
     #[test]
+    fn test_codec_name_mismatch() {
+        let sig1 = CompatibilitySignature::from_spec(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "identity".to_string(),
+            None,
+        );
+
+        let sig2 = CompatibilitySignature::from_spec(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "aes-gcm-256".to_string(),
+            None,
+        );
+
+        let result = sig1.check_compatible(&sig2);
+        assert!(matches!(
+            result,
+            Err(IncompatibleReason::CodecNameMismatch { .. })
+        ));
+    }
+
+    #[test]
     fn test_fingerprint_display() {
         let sig = CompatibilitySignature::from_spec(
             DatabaseMode::Primary,
             vec!["graph", "vector"],
             DurabilityMode::standard_default(),
+            "identity".to_string(),
             None,
         );
         // Just verify it doesn't panic

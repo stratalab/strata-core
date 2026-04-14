@@ -851,8 +851,11 @@ impl Database {
     /// This is an internal helper used by `open_runtime_cache()`. External
     /// callers should use `cache()` which adds SearchSubsystem, or
     /// `OpenSpec::cache().with_subsystem(...)` for custom subsystem sets.
-    fn create_ephemeral_bare() -> StrataResult<Arc<Self>> {
-        let mut cfg = StrataConfig::default();
+    ///
+    /// If `spec_config` is provided, it is used as the base config (with hardware
+    /// profile applied on top for sizing). If `None`, defaults are used.
+    fn create_ephemeral_bare(spec_config: Option<&StrataConfig>) -> StrataResult<Arc<Self>> {
+        let mut cfg = spec_config.cloned().unwrap_or_default();
         // Apply hardware profile so resource-constrained hosts (Pi Zero, etc.)
         // get appropriate sizing. Without this, cache() would inherit the
         // 256 MB DEFAULT_CAPACITY_BYTES from the global block cache singleton,
@@ -1023,12 +1026,14 @@ impl Database {
         };
 
         let durability_mode = resolved_cfg.durability_mode()?;
+        let codec_name = resolved_cfg.storage.codec.clone();
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Primary,
             subsystem_names,
             durability_mode,
+            codec_name,
             default_branch.clone(),
         );
 
@@ -1040,23 +1045,17 @@ impl Database {
             Some(requested_signature),
         )? {
             AcquiredDatabase::Existing(db) => {
-                // Ensure config file exists even on reuse (per documented contract).
-                // If caller provided an explicit config, write it. Otherwise ensure
-                // a default exists so subsequent opens find it.
-                if let Some(cfg) = config.as_ref() {
-                    cfg.write_to_file(&config_path)?;
-                } else {
-                    config::StrataConfig::write_default_if_missing(&config_path)?;
-                }
+                // On reuse, do NOT overwrite config — the existing DB's config is
+                // authoritative. Signature check ensures the caller's request is
+                // compatible with the running instance.
                 Self::wait_for_opened_db(db)
             }
             AcquiredDatabase::New { db, canonical_path } => {
                 Self::finish_opened_db(db, &canonical_path, |db| {
-                    if let Some(cfg) = config.as_ref() {
-                        cfg.write_to_file(&config_path)?;
-                    } else {
-                        config::StrataConfig::write_default_if_missing(&config_path)?;
-                    }
+                    // Write the *sanitized* resolved_cfg, not the original config.
+                    // This ensures persisted config matches runtime state (e.g.,
+                    // auto_embed=false when embed feature is not compiled).
+                    resolved_cfg.write_to_file(&config_path)?;
                     Self::run_lifecycle_hooks(db, true)?;
                     if let Some(branch_name) = &default_branch {
                         Self::ensure_default_branch(db, branch_name)?;
@@ -1094,11 +1093,13 @@ impl Database {
             config::StrataConfig::default()
         };
         let durability_mode = cfg.durability_mode()?;
+        let codec_name = cfg.storage.codec.clone();
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Follower,
             subsystem_names,
             durability_mode,
+            codec_name,
             default_branch,
         );
 
@@ -1139,9 +1140,9 @@ impl Database {
 
     /// Open a cache database from an `OpenSpec`.
     fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
-        // Create ephemeral database (config is applied internally by create_ephemeral_bare())
+        // Create ephemeral database with spec.config if provided.
         // Cache databases are not in the registry, so no reuse check needed.
-        let db = Self::create_ephemeral_bare()?;
+        let db = Self::create_ephemeral_bare(spec.config.as_ref())?;
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
         // and install subsystems for freeze-on-drop
