@@ -756,7 +756,7 @@ fn test_gc_safe_point_with_active_txn() {
     }
 
     // Start a transaction but don't commit it yet — pins version
-    let txn = db.begin_transaction(branch_id).unwrap();
+    let mut txn = db.begin_transaction(branch_id).unwrap();
     let txn_start_version = txn.start_version;
 
     // Commit two more transactions to advance version further
@@ -780,7 +780,7 @@ fn test_gc_safe_point_with_active_txn() {
     );
 
     // Abort the active transaction
-    db.coordinator.record_abort(txn.txn_id);
+    txn.abort();
 
     // Now safe point should advance to current - 1 since no active txns
     let sp_after = db.gc_safe_point();
@@ -1381,7 +1381,7 @@ fn test_put_direct_gc_safety_with_concurrent_reader() {
     assert!(v2 > v1, "versions must be monotonically increasing");
 
     // Start a snapshot reader that pins the version at v2
-    let reader_txn = db.begin_transaction(branch_id).unwrap();
+    let mut reader_txn = db.begin_transaction(branch_id).unwrap();
     let pinned_version = reader_txn.start_version;
 
     // Write more versions while reader holds its snapshot
@@ -1412,7 +1412,7 @@ fn test_put_direct_gc_safety_with_concurrent_reader() {
     assert_eq!(reader_val.unwrap().value, Value::Int(10));
 
     // Release the reader — gc_safe_version should now be free to advance
-    db.coordinator.record_abort(reader_txn.txn_id);
+    reader_txn.abort();
 
     let safe_point_after = db.gc_safe_point();
     assert!(
@@ -1510,7 +1510,7 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
     blind_write(&db, key.clone(), Value::Int(1));
 
     // Start a reader that pins the current snapshot
-    let reader = db.begin_read_only_transaction(branch_id).unwrap();
+    let mut reader = db.begin_read_only_transaction(branch_id).unwrap();
     let pinned_version = reader.start_version;
 
     // Write version 2 — now key has 2 versions, max_versions_per_key=1
@@ -1556,7 +1556,7 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
     assert_eq!(latest.unwrap().value, Value::Int(2));
 
     // Clean up reader
-    db.coordinator.record_abort(reader.txn_id);
+    reader.abort();
 }
 
 #[test]
