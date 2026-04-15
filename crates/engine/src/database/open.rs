@@ -81,7 +81,7 @@ fn restrict_file(_path: &Path) {}
 
 use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
-use super::{Database, PersistenceMode};
+use super::{Database, PersistenceMode, WalWriterHealth};
 
 enum AcquiredDatabase {
     Existing(Arc<Database>),
@@ -486,7 +486,8 @@ impl Database {
             persistence_mode: PersistenceMode::Disk,
             coordinator,
             durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant for follower
-            accepting_transactions: AtomicBool::new(true),
+            accepting_transactions: Arc::new(AtomicBool::new(true)),
+            wal_writer_health: Arc::new(ParkingMutex::new(WalWriterHealth::Healthy)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
@@ -502,6 +503,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: true,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
@@ -524,14 +526,25 @@ impl Database {
     /// Spawn the background WAL flush thread for Standard durability mode.
     ///
     /// Returns `None` for non-Standard modes (Cache, Always).
+    ///
+    /// # Arguments
+    /// * `durability_mode` - The durability mode (only Standard spawns a thread)
+    /// * `wal` - The WAL writer mutex
+    /// * `shutdown` - Signal to stop the flush thread
+    /// * `accepting_transactions` - Flag to disable when writer halts
+    /// * `wal_writer_health` - Health state to update on sync failure
     pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
         shutdown: &Arc<AtomicBool>,
+        accepting_transactions: &Arc<AtomicBool>,
+        wal_writer_health: &Arc<ParkingMutex<WalWriterHealth>>,
     ) -> StrataResult<Option<std::thread::JoinHandle<()>>> {
         if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
             let wal = Arc::clone(wal);
             let shutdown = Arc::clone(shutdown);
+            let accepting = Arc::clone(accepting_transactions);
+            let health = Arc::clone(wal_writer_health);
             let interval = std::time::Duration::from_millis(interval_ms);
 
             #[cfg(test)]
@@ -548,6 +561,9 @@ impl Database {
                         std::thread::park_timeout(interval);
                         if shutdown.load(Ordering::Relaxed) {
                             break;
+                        }
+                        if matches!(&*health.lock(), WalWriterHealth::Halted { .. }) {
+                            continue;
                         }
                         let sync_plan = {
                             let mut w = wal.lock();
@@ -582,6 +598,39 @@ impl Database {
                                     Err(e) => {
                                         tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                                         w.abort_background_sync(handle, e);
+
+                                        // Update health state with error details from WAL writer
+                                        let mut h = health.lock();
+                                        if let Some(bg_error) = w.bg_error() {
+                                            let reason = bg_error.message().to_string();
+                                            let failed_sync_count = bg_error.failed_sync_count();
+                                            *h = Self::halted_health_from_bg_error(bg_error);
+                                            tracing::error!(
+                                                target: "strata::wal",
+                                                reason = %reason,
+                                                failed_sync_count,
+                                                "WAL writer halted due to sync failure"
+                                            );
+                                        } else {
+                                            // Defensive: bg_error should always be Some after
+                                            // abort_background_sync, but ensure consistent state
+                                            *h = WalWriterHealth::Halted {
+                                                reason: "sync failure (details unavailable)".to_string(),
+                                                first_observed_at: std::time::SystemTime::now(),
+                                                failed_sync_count: 1,
+                                            };
+                                            tracing::error!(
+                                                target: "strata::wal",
+                                                "WAL writer halted due to sync failure (bg_error unexpectedly None)"
+                                            );
+                                        }
+                                        drop(h);
+
+                                        // Publish the halt after health is updated so
+                                        // new callers observe WriterHalted, not a
+                                        // generic shutdown-style rejection.
+                                        accepting.store(false, Ordering::Release);
+
                                         false
                                     }
                                 }
@@ -756,8 +805,9 @@ impl Database {
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
-        let flush_handle =
-            Self::spawn_wal_flush_thread(durability_mode, &wal_arc, &flush_shutdown)?;
+        // Pre-create Arc-wrapped fields that need to be shared with flush thread
+        let accepting_transactions = Arc::new(AtomicBool::new(true));
+        let wal_writer_health = Arc::new(ParkingMutex::new(WalWriterHealth::Healthy));
 
         // Create coordinator with write buffer limit from config (before moving result.storage)
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
@@ -799,15 +849,16 @@ impl Database {
             data_dir: canonical_path.clone(),
             database_uuid,
             storage,
-            wal_writer: Some(wal_arc),
+            wal_writer: Some(Arc::clone(&wal_arc)),
             persistence_mode: PersistenceMode::Disk,
             coordinator,
             durability_mode: parking_lot::RwLock::new(durability_mode),
-            accepting_transactions: AtomicBool::new(true),
+            accepting_transactions: Arc::clone(&accepting_transactions),
+            wal_writer_health: Arc::clone(&wal_writer_health),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
-            flush_shutdown,
-            flush_handle: ParkingMutex::new(flush_handle),
+            flush_shutdown: Arc::clone(&flush_shutdown),
+            flush_handle: ParkingMutex::new(None), // Spawned after construction
             scheduler: Arc::new(BackgroundScheduler::new(bg_threads, 4096)),
             flush_in_flight: Arc::new(AtomicBool::new(false)),
             compaction_in_flight: Arc::new(AtomicBool::new(false)),
@@ -819,6 +870,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: false,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
@@ -835,6 +887,17 @@ impl Database {
             runtime_signature: parking_lot::RwLock::new(None),
             merge_registry: super::MergeHandlerRegistry::new(),
         });
+
+        // Spawn flush thread now that Database is constructed (shares Arc fields)
+        if let Some(handle) = Self::spawn_wal_flush_thread(
+            durability_mode,
+            &wal_arc,
+            &flush_shutdown,
+            &accepting_transactions,
+            &wal_writer_health,
+        )? {
+            *db.flush_handle.lock() = Some(handle);
+        }
 
         // Trigger compaction if any levels have accumulated segments from
         // recovery. Without this, compaction only runs after the next write
@@ -936,7 +999,8 @@ impl Database {
             persistence_mode: PersistenceMode::Ephemeral,
             coordinator,
             durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant but set for consistency
-            accepting_transactions: AtomicBool::new(true),
+            accepting_transactions: Arc::new(AtomicBool::new(true)),
+            wal_writer_health: Arc::new(ParkingMutex::new(WalWriterHealth::Healthy)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
@@ -952,6 +1016,7 @@ impl Database {
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
             follower: false,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),

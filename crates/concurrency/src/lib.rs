@@ -18,6 +18,20 @@ pub mod recovery;
 pub mod transaction;
 pub mod validation;
 
+#[cfg(any(test, feature = "fault-injection"))]
+#[doc(hidden)]
+pub mod __internal {
+    /// Inject a single storage-apply failure after WAL commit.
+    pub fn inject_apply_failure_once(reason: impl Into<String>) {
+        crate::manager::inject_apply_failure_once(reason);
+    }
+
+    /// Clear any pending injected storage-apply failure.
+    pub fn clear_apply_failure_injection() {
+        crate::manager::clear_apply_failure_injection();
+    }
+}
+
 pub use manager::TransactionManager;
 pub use payload::TransactionPayload;
 pub use recovery::{RecoveryCoordinator, RecoveryResult, RecoveryStats};

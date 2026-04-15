@@ -188,8 +188,18 @@ impl Database {
     // ========================================================================
 
     /// Check if the database is accepting transactions.
+    ///
+    /// Returns an error if:
+    /// - The database is shutting down (`InvalidInput`)
+    /// - The WAL writer is halted due to sync failure (`WriterHalted`)
     fn check_accepting(&self) -> StrataResult<()> {
         if !self.accepting_transactions.load(Ordering::Acquire) {
+            // Check if writer is halted (more specific error)
+            if let Some(err) = self.writer_halted_error() {
+                return Err(err);
+            }
+
+            // Not halted, must be shutting down
             return Err(StrataError::invalid_input(
                 "Database is shutting down".to_string(),
             ));
@@ -777,6 +787,11 @@ impl Database {
         &self,
         txn: &mut TransactionContext,
     ) -> StrataResult<u64> {
+        if let Err(e) = self.ensure_writer_healthy() {
+            self.abort_transaction_in_place(txn, format!("Commit failed: {}", e));
+            return Err(e);
+        }
+
         if self.follower {
             let err = StrataError::internal(
                 "cannot commit: database opened in follower mode (read-only)",
@@ -797,13 +812,15 @@ impl Database {
         let version = match self.commit_internal(txn, self.current_durability_mode()) {
             Ok(version) => version,
             Err(e) => {
+                let should_record_coordinator_abort =
+                    txn.is_active() && matches!(&e, StrataError::WriterHalted { .. });
                 // `TransactionCoordinator::commit*` already decremented
                 // active_count on commit failure. Only mirror the terminal
                 // state into the pooled TransactionContext here.
                 self.finalize_aborted_transaction_in_place(
                     txn,
                     format!("Commit failed: {}", e),
-                    false,
+                    should_record_coordinator_abort,
                 );
                 return Err(e);
             }
@@ -838,6 +855,8 @@ impl Database {
         txn: &mut TransactionContext,
         durability: DurabilityMode,
     ) -> StrataResult<CommitVersion> {
+        self.ensure_writer_healthy()?;
+
         // Capture info needed for observer notification before commit
         // (txn state may be modified during commit)
         let txn_id = txn.txn_id;

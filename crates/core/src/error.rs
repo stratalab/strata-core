@@ -871,6 +871,76 @@ pub enum StrataError {
     },
 
     // =========================================================================
+    // Durability Errors
+    // =========================================================================
+    /// WAL writer is halted
+    ///
+    /// The WAL writer has halted due to a background sync failure (fsync error).
+    /// The database cannot accept new commits until the underlying issue is
+    /// resolved and `resume_wal_writer()` is called.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// # use std::time::SystemTime;
+    /// StrataError::WriterHalted {
+    ///     reason: "disk full".to_string(),
+    ///     first_observed_at: SystemTime::now(),
+    /// };
+    /// ```
+    #[error("WAL writer halted: {reason} (first observed: {first_observed_at:?})")]
+    WriterHalted {
+        /// Human-readable reason for the halt
+        reason: String,
+        /// When the first sync failure was observed
+        first_observed_at: std::time::SystemTime,
+    },
+
+    /// Durable but not visible
+    ///
+    /// The transaction was successfully written to the WAL (durable) but failed
+    /// to apply to in-memory storage (not visible). The data **will be recovered**
+    /// on restart.
+    ///
+    /// Callers should:
+    /// 1. **Not retry** - the data is already durable
+    /// 2. **Not assume visibility** - reads may not see the committed data
+    /// 3. **Consider graceful shutdown** - to trigger recovery
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::DurableButNotVisible {
+    ///     txn_id: 12345,
+    ///     commit_version: 67890,
+    /// };
+    /// ```
+    #[error("durable but not visible: txn {txn_id} at version {commit_version}")]
+    DurableButNotVisible {
+        /// Transaction ID that committed durably
+        txn_id: u64,
+        /// Commit version assigned to the transaction
+        commit_version: u64,
+    },
+
+    /// Shutdown timeout
+    ///
+    /// The database shutdown timed out waiting for active transactions to complete.
+    /// Freeze hooks were **not** run. The database is still usable; callers can
+    /// either complete their transactions and retry shutdown, or abandon them.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::ShutdownTimeout { active_txn_count: 3 };
+    /// ```
+    #[error("shutdown timeout: {active_txn_count} transaction(s) still active")]
+    ShutdownTimeout {
+        /// Number of transactions that were still active when timeout occurred
+        active_txn_count: u64,
+    },
+
+    // =========================================================================
     // Internal Errors
     // =========================================================================
     /// Internal error
