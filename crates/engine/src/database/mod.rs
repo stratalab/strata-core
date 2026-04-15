@@ -30,6 +30,9 @@ pub mod profile;
 mod registry;
 pub mod spec;
 
+#[cfg(test)]
+mod test_hooks;
+
 pub use branch_mutation::{BranchMutation, FailurePoint};
 pub use branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
@@ -342,8 +345,8 @@ pub struct Database {
     /// commit locks for TOCTOU prevention.
     coordinator: TransactionCoordinator,
 
-    /// Current durability mode
-    durability_mode: DurabilityMode,
+    /// Current durability mode.
+    durability_mode: parking_lot::RwLock<DurabilityMode>,
 
     /// Flag to track if database is accepting new transactions
     ///
@@ -366,8 +369,8 @@ pub struct Database {
 
     /// Handle for the background WAL flush thread
     ///
-    /// In Standard mode, a background thread periodically calls sync_if_overdue()
-    /// to flush WAL data to disk without blocking the write path (#969).
+    /// In Standard mode, a background thread runs the shared three-phase
+    /// background sync loop from `open.rs`.
     flush_handle: ParkingMutex<Option<std::thread::JoinHandle<()>>>,
 
     /// Background task scheduler for deferred work (embedding, GC, etc.)
@@ -491,6 +494,37 @@ impl Database {
     // ========================================================================
     // Accessors
     // ========================================================================
+
+    pub(crate) fn current_durability_mode(&self) -> DurabilityMode {
+        *self.durability_mode.read()
+    }
+
+    pub(crate) fn start_flush_thread(
+        &self,
+        mode: DurabilityMode,
+        wal: &Arc<ParkingMutex<WalWriter>>,
+    ) -> StrataResult<()> {
+        debug_assert!(matches!(mode, DurabilityMode::Standard { .. }));
+        self.flush_shutdown.store(false, Ordering::SeqCst);
+        if let Some(handle) = Self::spawn_wal_flush_thread(mode, wal, &self.flush_shutdown)? {
+            *self.flush_handle.lock() = Some(handle);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn stop_flush_thread(&self) {
+        self.flush_shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.flush_handle.lock().take() {
+            handle.thread().unpark();
+            let _ = handle.join();
+        }
+    }
+
+    fn update_runtime_signature_durability(&self, mode: DurabilityMode) {
+        if let Some(signature) = self.runtime_signature() {
+            self.set_runtime_signature(signature.with_durability_mode(mode));
+        }
+    }
 
     /// Get reference to the storage layer (internal use only)
     ///
@@ -1103,7 +1137,7 @@ impl Database {
                     (SubsystemStatus::Healthy, Some("running".into()))
                 }
             } else {
-                match self.durability_mode {
+                match self.current_durability_mode() {
                     DurabilityMode::Standard { .. } => (
                         SubsystemStatus::Degraded,
                         Some("flush thread not running (standard mode)".into()),
@@ -1329,8 +1363,8 @@ impl Database {
 
     /// Switch the durability mode at runtime (Standard ↔ Always only).
     ///
-    /// Updates the WAL writer's fsync policy. If switching to Standard mode
-    /// and no background flush thread exists, one is spawned.
+    /// Updates the WAL writer's fsync policy and restarts the shared
+    /// background flush thread when the Standard-mode configuration changes.
     pub fn set_durability_mode(&self, mode: DurabilityMode) -> StrataResult<()> {
         let wal = self.wal_writer.as_ref().ok_or_else(|| {
             StrataError::invalid_input(
@@ -1338,65 +1372,49 @@ impl Database {
             )
         })?;
 
-        // Apply to the WAL writer
-        wal.lock()
-            .set_durability_mode(mode)
-            .map_err(|e| StrataError::invalid_input(e.to_string()))?;
+        let old_mode = wal.lock().durability_mode();
+        if old_mode == mode {
+            *self.durability_mode.write() = mode;
+            self.update_runtime_signature_durability(mode);
+            return Ok(());
+        }
 
-        // If switching to Standard mode, ensure the background flush thread
-        // is running. When the database was opened in Always mode, no flush
-        // thread was started.
-        if let DurabilityMode::Standard { interval_ms, .. } = mode {
-            let mut handle_guard = self.flush_handle.lock();
-            if handle_guard.is_none() {
-                let wal_clone = Arc::clone(wal);
-                let shutdown = Arc::clone(&self.flush_shutdown);
-                let interval = std::time::Duration::from_millis(interval_ms);
-                // Reset the shutdown flag in case a previous thread was stopped
-                self.flush_shutdown.store(false, Ordering::SeqCst);
-                let handle = std::thread::Builder::new()
-                    .name("strata-wal-flush".to_string())
-                    .spawn(move || {
-                        while !shutdown.load(Ordering::Relaxed) {
-                            std::thread::sleep(interval);
-                            if shutdown.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            // Background sync: briefly lock for BufWriter flush,
-                            // then fdatasync outside the lock.
-                            let sync_fd = {
-                                let mut w = wal_clone.lock();
-                                w.flush_active_meta();
-                                match w.prepare_background_sync() {
-                                    Ok(Some(fd)) => Some(fd),
-                                    Ok(None) => None,
-                                    Err(e) => {
-                                        tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
-                                        None
-                                    }
-                                }
-                            };
-                            if let Some(fd) = sync_fd {
-                                if let Err(e) = fd.sync_all() {
-                                    tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
-                                }
-                            }
-                        }
-                        // Final sync
-                        let mut wal = wal_clone.lock();
-                        if let Err(e) = wal.flush() {
-                            tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
-                        }
-                    })
-                    .map_err(|e| {
-                        StrataError::internal(format!(
-                            "failed to spawn WAL flush thread: {}",
-                            e
-                        ))
-                    })?;
-                *handle_guard = Some(handle);
+        if matches!(mode, DurabilityMode::Cache) || matches!(old_mode, DurabilityMode::Cache) {
+            return Err(StrataError::invalid_input(
+                "Cannot switch to or from Cache mode at runtime".to_string(),
+            ));
+        }
+
+        let had_standard_thread = matches!(old_mode, DurabilityMode::Standard { .. });
+        if had_standard_thread {
+            self.stop_flush_thread();
+        }
+
+        if let Err(e) = wal.lock().set_durability_mode(mode) {
+            if had_standard_thread {
+                self.start_flush_thread(old_mode, wal)?;
+            }
+            return Err(StrataError::invalid_input(e.to_string()));
+        }
+
+        if matches!(mode, DurabilityMode::Standard { .. }) {
+            if let Err(e) = self.start_flush_thread(mode, wal) {
+                let rollback_err = wal.lock().set_durability_mode(old_mode);
+                if rollback_err.is_ok() && had_standard_thread {
+                    self.start_flush_thread(old_mode, wal)?;
+                }
+                if let Err(rollback_err) = rollback_err {
+                    return Err(StrataError::internal(format!(
+                        "failed to start flush thread after durability switch: {}; rollback failed: {}",
+                        e, rollback_err
+                    )));
+                }
+                return Err(e);
             }
         }
+
+        *self.durability_mode.write() = mode;
+        self.update_runtime_signature_durability(mode);
 
         Ok(())
     }
@@ -1463,10 +1481,7 @@ impl Drop for Database {
         self.scheduler.shutdown();
 
         // Stop the background flush thread
-        self.flush_shutdown.store(true, Ordering::SeqCst);
-        if let Some(handle) = self.flush_handle.lock().take() {
-            let _ = handle.join();
-        }
+        self.stop_flush_thread();
 
         // Skip flush/freeze if shutdown() already completed them.
         if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {

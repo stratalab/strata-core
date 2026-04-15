@@ -88,6 +88,19 @@ impl CompatibilitySignature {
         }
     }
 
+    /// Return an updated signature for a runtime durability-mode change.
+    pub fn with_durability_mode(&self, durability_mode: DurabilityMode) -> Self {
+        let mut signature = self.clone();
+        signature.durability_mode = durability_mode;
+        signature.open_config_fingerprint = compute_fingerprint(
+            &signature.mode,
+            &signature.subsystem_names,
+            &signature.durability_mode,
+            &signature.codec_name,
+        );
+        signature
+    }
+
     /// Check if this signature is compatible with another for reuse.
     ///
     /// Returns `Ok(())` if compatible, `Err` with reason if not.
@@ -268,9 +281,9 @@ impl std::error::Error for IncompatibleReason {}
 ///
 /// Uses FNV-1a for simplicity. T5 will replace this with a more
 /// sophisticated ControlRegistry-derived fingerprint.
-fn compute_fingerprint(
+fn compute_fingerprint<S: Hash>(
     mode: &DatabaseMode,
-    subsystem_names: &[&'static str],
+    subsystem_names: &[S],
     durability_mode: &DurabilityMode,
     codec_name: &str,
 ) -> u64 {

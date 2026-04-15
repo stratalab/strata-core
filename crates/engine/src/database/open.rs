@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_concurrency::RecoveryCoordinator;
+use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_durability::ManifestManager;
 use strata_storage::SegmentedStore;
@@ -484,7 +485,7 @@ impl Database {
 
             persistence_mode: PersistenceMode::Disk,
             coordinator,
-            durability_mode: DurabilityMode::Cache, // Irrelevant for follower
+            durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant for follower
             accepting_transactions: AtomicBool::new(true),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
@@ -523,7 +524,7 @@ impl Database {
     /// Spawn the background WAL flush thread for Standard durability mode.
     ///
     /// Returns `None` for non-Standard modes (Cache, Always).
-    fn spawn_wal_flush_thread(
+    pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
         shutdown: &Arc<AtomicBool>,
@@ -533,40 +534,65 @@ impl Database {
             let shutdown = Arc::clone(shutdown);
             let interval = std::time::Duration::from_millis(interval_ms);
 
+            #[cfg(test)]
+            if crate::database::test_hooks::take_flush_thread_spawn_failure() {
+                return Err(StrataError::internal(
+                    "injected flush thread spawn failure".to_string(),
+                ));
+            }
+
             let handle = std::thread::Builder::new()
                 .name("strata-wal-flush".to_string())
                 .spawn(move || {
                     while !shutdown.load(Ordering::Relaxed) {
-                        std::thread::sleep(interval);
+                        std::thread::park_timeout(interval);
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        // Background sync: briefly lock WAL to flush BufWriter
-                        // to OS page cache, then fdatasync outside the lock.
-                        // The lock hold is microseconds (BufWriter flush only),
-                        // not milliseconds (no fdatasync under lock).
-                        let (sync_fd, meta_snapshot) = {
+                        let sync_plan = {
                             let mut w = wal.lock();
-                            let fd = match w.prepare_background_sync() {
-                                Ok(Some(fd)) => Some(fd),
+                            match w.begin_background_sync() {
+                                Ok(Some(handle)) => Some((handle, w.snapshot_active_meta())),
                                 Ok(None) => None,
                                 Err(e) => {
                                     tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
                                     None
                                 }
-                            };
-                            let meta = w.snapshot_active_meta();
-                            (fd, meta)
-                        }; // WAL lock released — held only for BufWriter flush
-                        if let Some(fd) = sync_fd {
-                            if let Err(e) = fd.sync_all() {
-                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                             }
-                        }
-                        // Write .meta sidecar outside the lock (best-effort, 2 fsyncs).
-                        if let Some((meta, wal_dir)) = meta_snapshot {
-                            if let Err(e) = meta.write_to_file(&wal_dir) {
-                                tracing::debug!(target: "strata::wal", error = %e, "Background .meta write failed (non-fatal)");
+                        };
+
+                        if let Some((handle, meta_snapshot)) = sync_plan {
+                            #[cfg(test)]
+                            let sync_result = crate::database::test_hooks::maybe_inject_sync_failure()
+                                .map_or_else(|| handle.fd().sync_all(), Err);
+
+                            #[cfg(not(test))]
+                            let sync_result = handle.fd().sync_all();
+
+                            let committed = {
+                                let mut w = wal.lock();
+                                match sync_result {
+                                    Ok(()) => match w.commit_background_sync(handle) {
+                                        Ok(()) => true,
+                                        Err(e) => {
+                                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync bookkeeping failed");
+                                            false
+                                        }
+                                    },
+                                    Err(e) => {
+                                        tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                                        w.abort_background_sync(handle, e);
+                                        false
+                                    }
+                                }
+                            };
+
+                            if committed {
+                                if let Some((meta, wal_dir)) = meta_snapshot {
+                                    if let Err(e) = meta.write_to_file(&wal_dir) {
+                                        tracing::debug!(target: "strata::wal", error = %e, "Background .meta write failed (non-fatal)");
+                                    }
+                                }
                             }
                         }
                     }
@@ -776,7 +802,7 @@ impl Database {
             wal_writer: Some(wal_arc),
             persistence_mode: PersistenceMode::Disk,
             coordinator,
-            durability_mode,
+            durability_mode: parking_lot::RwLock::new(durability_mode),
             accepting_transactions: AtomicBool::new(true),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
@@ -909,7 +935,7 @@ impl Database {
 
             persistence_mode: PersistenceMode::Ephemeral,
             coordinator,
-            durability_mode: DurabilityMode::Cache, // Irrelevant but set for consistency
+            durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant but set for consistency
             accepting_transactions: AtomicBool::new(true),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),

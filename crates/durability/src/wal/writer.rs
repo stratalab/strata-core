@@ -13,8 +13,9 @@ use crate::format::{WalRecord, WalSegment, SEGMENT_HEADER_SIZE_V2};
 use crate::wal::config::WalConfig;
 use crate::wal::reader::WalReader;
 use std::fs::File;
+use std::io;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 use tracing::{debug, error, info, warn};
 
 /// WAL disk usage summary.
@@ -41,6 +42,63 @@ pub struct WalCounters {
     pub bytes_written: u64,
     /// Total nanoseconds spent in sync/fsync calls
     pub sync_nanos: u64,
+}
+
+/// Snapshot of the dirty WAL prefix captured at the start of a background sync.
+#[derive(Debug, Clone)]
+struct SyncSnapshot {
+    bytes_since_sync: u64,
+    writes_since_sync: usize,
+    last_sync_time: Instant,
+    has_unsynced_data: bool,
+}
+
+/// Handle representing an in-flight background sync.
+#[must_use = "SyncHandle must be consumed via commit_background_sync or abort_background_sync"]
+pub(crate) struct SyncHandle {
+    fd: File,
+    pending_snapshot: SyncSnapshot,
+    consumed: bool,
+}
+
+impl SyncHandle {
+    /// Returns the cloned file descriptor to fsync outside the WAL lock.
+    pub(crate) fn fd(&self) -> &File {
+        &self.fd
+    }
+
+    fn take_snapshot(mut self) -> SyncSnapshot {
+        self.consumed = true;
+        self.pending_snapshot.clone()
+    }
+}
+
+impl Drop for SyncHandle {
+    fn drop(&mut self) {
+        if !self.consumed {
+            #[cfg(debug_assertions)]
+            panic!("SyncHandle dropped without commit_background_sync or abort_background_sync");
+
+            #[cfg(not(debug_assertions))]
+            error!(
+                target: "strata::wal",
+                "SyncHandle dropped without being consumed"
+            );
+        }
+    }
+}
+
+/// Background sync error recorded after a failed out-of-lock fsync.
+#[derive(Debug, Clone)]
+pub(crate) struct BgError {
+    /// The underlying IO error category.
+    pub kind: io::ErrorKind,
+    /// Human-readable error message.
+    pub message: String,
+    /// Timestamp of the first observed failure in the current streak.
+    pub first_observed_at: SystemTime,
+    /// Number of consecutive failed sync attempts.
+    pub failed_sync_count: u64,
 }
 
 /// WAL writer with configurable durability modes.
@@ -92,6 +150,12 @@ pub struct WalWriter {
     /// Whether there is data written but not yet fsynced
     has_unsynced_data: bool,
 
+    /// Whether a background sync is currently in flight.
+    sync_in_flight: bool,
+
+    /// Background sync error recorded for Epic 2 halt/resume.
+    bg_error: Option<BgError>,
+
     /// In-memory metadata for the current active segment.
     /// `None` in Cache mode (no WAL persistence).
     current_segment_meta: Option<SegmentMeta>,
@@ -140,6 +204,8 @@ impl WalWriter {
                 current_segment_number: 0,
                 current_segment_meta: None,
                 has_unsynced_data: false,
+                sync_in_flight: false,
+                bg_error: None,
                 total_wal_appends: 0,
                 total_sync_calls: 0,
                 total_bytes_written: 0,
@@ -200,6 +266,8 @@ impl WalWriter {
             current_segment_number: segment_number,
             current_segment_meta,
             has_unsynced_data: false,
+            sync_in_flight: false,
+            bg_error: None,
             total_wal_appends: 0,
             total_sync_calls: 0,
             total_bytes_written: 0,
@@ -287,8 +355,11 @@ impl WalWriter {
             .as_mut()
             .expect("Segment should exist for non-Cache mode");
 
-        // Check if we need to rotate before writing
-        if segment.size() + encoded.len() as u64 > self.config.segment_size {
+        // Do not rotate away from a segment while a background sync is fsyncing
+        // a cloned descriptor for that same segment. The size limit is a soft
+        // threshold; we can rotate on the next append after the sync commits.
+        if !self.sync_in_flight && segment.size() + encoded.len() as u64 > self.config.segment_size
+        {
             self.rotate_segment()?;
         }
 
@@ -331,8 +402,6 @@ impl WalWriter {
             }
             DurabilityMode::Standard { interval_ms, .. } => {
                 // Standard mode: fsync is deferred to the background flush thread.
-                // The background thread calls sync_if_overdue() every interval_ms/2.
-                //
                 // The only inline trigger is the interval_ms safety net — if the
                 // background thread has stalled beyond the interval, we sync inline
                 // to bound the durability window. No batch_size trigger: at high
@@ -340,6 +409,9 @@ impl WalWriter {
                 // every 1000 writes = 40% overhead). The interval_ms bound is
                 // sufficient — it caps the wall-clock durability window regardless
                 // of write rate.
+                if self.sync_in_flight {
+                    return Ok(());
+                }
                 let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
                 if self.has_unsynced_data && elapsed_ms >= interval_ms {
                     debug!(target: "strata::wal",
@@ -380,6 +452,7 @@ impl WalWriter {
         self.writes_since_sync = 0;
         self.last_sync_time = Instant::now();
         self.has_unsynced_data = false;
+        self.bg_error = None;
     }
 
     /// Rotate to a new segment.
@@ -442,7 +515,7 @@ impl WalWriter {
     /// Standard mode honors its `interval_ms` even when no new writes arrive.
     /// Returns `true` if a sync was performed.
     pub fn sync_if_overdue(&mut self) -> std::io::Result<bool> {
-        if !self.has_unsynced_data {
+        if self.sync_in_flight || !self.has_unsynced_data {
             return Ok(false);
         }
 
@@ -458,39 +531,118 @@ impl WalWriter {
         Ok(false)
     }
 
-    /// Flush BufWriter and prepare for out-of-lock fsync.
-    ///
-    /// Returns `Some(File)` if there is unsynced data that needs fsync,
-    /// `None` if no sync is needed. The caller should:
-    /// 1. Call this under the WAL lock
-    /// 2. Release the lock
-    /// 3. Call `file.sync_all()` on the returned File (outside the lock)
-    ///
-    /// Sync counters are reset before returning so the inline `maybe_sync`
-    /// safety net doesn't trigger a redundant fsync while the background
-    /// fdatasync is in progress.
-    pub fn prepare_background_sync(&mut self) -> std::io::Result<Option<File>> {
-        if !self.has_unsynced_data {
+    /// Begin a background sync without clearing the dirty counters.
+    pub(crate) fn begin_background_sync(&mut self) -> io::Result<Option<SyncHandle>> {
+        if self.sync_in_flight || !self.has_unsynced_data {
             return Ok(None);
         }
 
         if let DurabilityMode::Standard { interval_ms, .. } = self.durability {
             if self.last_sync_time.elapsed().as_millis() as u64 >= interval_ms {
-                // Flush BufWriter to OS page cache (fast, microseconds)
                 if let Some(ref mut segment) = self.segment {
                     segment.flush_to_os()?;
                     let fd = segment.try_clone_fd()?;
-                    // Reset counters NOW (before releasing lock) so the inline
-                    // maybe_sync in append_pre_serialized doesn't see the stale
-                    // last_sync_time and trigger a redundant inline fsync while
-                    // the background fdatasync is in progress.
-                    self.reset_sync_counters();
-                    return Ok(Some(fd));
+                    let pending_snapshot = SyncSnapshot {
+                        bytes_since_sync: self.bytes_since_sync,
+                        writes_since_sync: self.writes_since_sync,
+                        last_sync_time: self.last_sync_time,
+                        has_unsynced_data: self.has_unsynced_data,
+                    };
+                    self.sync_in_flight = true;
+                    return Ok(Some(SyncHandle {
+                        fd,
+                        pending_snapshot,
+                        consumed: false,
+                    }));
                 }
             }
         }
 
         Ok(None)
+    }
+
+    /// Commit a successful background sync.
+    ///
+    /// The snapshot captured at begin-time is the synced prefix. Any writes
+    /// appended while `sync_in_flight` was true remain dirty after commit.
+    pub(crate) fn commit_background_sync(&mut self, handle: SyncHandle) -> io::Result<()> {
+        let snapshot = handle.take_snapshot();
+        self.sync_in_flight = false;
+
+        if !snapshot.has_unsynced_data {
+            return Err(io::Error::other(
+                "background sync committed without a dirty snapshot",
+            ));
+        }
+
+        if self.bytes_since_sync < snapshot.bytes_since_sync
+            || self.writes_since_sync < snapshot.writes_since_sync
+        {
+            return Err(io::Error::other(
+                "background sync snapshot exceeds current dirty counters",
+            ));
+        }
+
+        self.bytes_since_sync -= snapshot.bytes_since_sync;
+        self.writes_since_sync -= snapshot.writes_since_sync;
+        self.last_sync_time = Instant::now().max(snapshot.last_sync_time);
+        self.has_unsynced_data = self.bytes_since_sync > 0 || self.writes_since_sync > 0;
+        self.bg_error = None;
+
+        debug!(
+            target: "strata::wal",
+            remaining_bytes = self.bytes_since_sync,
+            remaining_writes = self.writes_since_sync,
+            "Background sync committed"
+        );
+
+        Ok(())
+    }
+
+    /// Abort a failed background sync while preserving the dirty counters.
+    pub(crate) fn abort_background_sync(&mut self, handle: SyncHandle, error: io::Error) {
+        let _snapshot = handle.take_snapshot();
+        self.sync_in_flight = false;
+
+        let failed_sync_count = self
+            .bg_error
+            .as_ref()
+            .map(|existing| existing.failed_sync_count.saturating_add(1))
+            .unwrap_or(1);
+        let first_observed_at = self
+            .bg_error
+            .as_ref()
+            .map(|existing| existing.first_observed_at)
+            .unwrap_or_else(SystemTime::now);
+
+        self.bg_error = Some(BgError {
+            kind: error.kind(),
+            message: error.to_string(),
+            first_observed_at,
+            failed_sync_count,
+        });
+
+        error!(
+            target: "strata::wal",
+            error = %error,
+            failed_sync_count,
+            "Background sync failed; dirty counters preserved for retry"
+        );
+    }
+
+    /// Returns the last background sync error, if any.
+    pub(crate) fn bg_error(&self) -> Option<&BgError> {
+        self.bg_error.as_ref()
+    }
+
+    /// Clears the last background sync error.
+    pub(crate) fn clear_bg_error(&mut self) {
+        self.bg_error = None;
+    }
+
+    /// Returns whether a background sync is currently in flight.
+    pub(crate) fn sync_in_flight(&self) -> bool {
+        self.sync_in_flight
     }
 
     /// Get the current durability mode.
@@ -784,8 +936,27 @@ mod tests {
         .unwrap()
     }
 
+    fn make_writer_with_config(
+        dir: &Path,
+        durability: DurabilityMode,
+        config: WalConfig,
+    ) -> WalWriter {
+        WalWriter::new(
+            dir.to_path_buf(),
+            [1u8; 16],
+            durability,
+            config,
+            Box::new(IdentityCodec),
+        )
+        .unwrap()
+    }
+
     fn make_record(txn_id: u64) -> WalRecord {
         WalRecord::new(TxnId(txn_id), [1u8; 16], 12345, vec![1, 2, 3])
+    }
+
+    fn make_record_with_payload(txn_id: u64, bytes: usize) -> WalRecord {
+        WalRecord::new(TxnId(txn_id), [1u8; 16], 12345 + txn_id, vec![7; bytes])
     }
 
     #[test]
@@ -1768,5 +1939,172 @@ mod tests {
         let usage = writer.wal_disk_usage();
         // Only the .seg file should be counted
         assert_eq!(usage.segment_count, 1);
+    }
+
+    #[test]
+    fn test_begin_background_sync_snapshots_without_clearing_dirty_state() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000,
+                batch_size: 1_000,
+            },
+        );
+
+        writer.append(&make_record(1)).unwrap();
+        let bytes_before = writer.bytes_since_sync;
+        let writes_before = writer.writes_since_sync;
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_secs(3600);
+
+        let handle = writer
+            .begin_background_sync()
+            .unwrap()
+            .expect("expected a sync handle");
+
+        assert!(writer.sync_in_flight());
+        assert!(writer.has_unsynced_data);
+        assert_eq!(writer.bytes_since_sync, bytes_before);
+        assert_eq!(writer.writes_since_sync, writes_before);
+
+        writer.abort_background_sync(handle, io::Error::other("test cleanup"));
+    }
+
+    #[test]
+    fn test_commit_background_sync_clears_synced_prefix_only() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000,
+                batch_size: 1_000,
+            },
+        );
+
+        writer.append(&make_record(1)).unwrap();
+        let synced_bytes = writer.bytes_since_sync;
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_secs(3600);
+
+        let handle = writer
+            .begin_background_sync()
+            .unwrap()
+            .expect("expected a sync handle");
+        writer.append(&make_record(2)).unwrap();
+        let dirty_after_late_write = writer.bytes_since_sync;
+
+        handle.fd().sync_all().unwrap();
+        writer.commit_background_sync(handle).unwrap();
+
+        assert!(!writer.sync_in_flight());
+        assert!(writer.has_unsynced_data);
+        assert_eq!(writer.writes_since_sync, 1);
+        assert_eq!(
+            writer.bytes_since_sync,
+            dirty_after_late_write - synced_bytes
+        );
+        assert!(writer.bg_error().is_none());
+    }
+
+    #[test]
+    fn test_abort_background_sync_preserves_dirty_counters_and_records_error() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000,
+                batch_size: 1_000,
+            },
+        );
+
+        writer.append(&make_record(1)).unwrap();
+        let bytes_before = writer.bytes_since_sync;
+        let writes_before = writer.writes_since_sync;
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_secs(3600);
+
+        let handle = writer
+            .begin_background_sync()
+            .unwrap()
+            .expect("expected a sync handle");
+        writer.abort_background_sync(handle, io::Error::other("disk full"));
+
+        assert!(!writer.sync_in_flight());
+        assert!(writer.has_unsynced_data);
+        assert_eq!(writer.bytes_since_sync, bytes_before);
+        assert_eq!(writer.writes_since_sync, writes_before);
+
+        let bg_error = writer.bg_error().expect("expected bg_error");
+        assert_eq!(bg_error.kind, io::ErrorKind::Other);
+        assert_eq!(bg_error.failed_sync_count, 1);
+    }
+
+    #[test]
+    fn test_append_during_inflight_sync_does_not_rotate_away_from_synced_segment() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let record = make_record_with_payload(1, 32);
+        let record_len = record.to_bytes().len() as u64;
+        let config = WalConfig::for_testing()
+            .with_segment_size(SEGMENT_HEADER_SIZE_V2 as u64 + record_len + 1);
+        let mut writer = make_writer_with_config(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000,
+                batch_size: 1_000,
+            },
+            config,
+        );
+
+        writer.append(&record).unwrap();
+        writer.last_sync_time = Instant::now() - std::time::Duration::from_secs(3600);
+        let active_segment = writer.current_segment();
+        let handle = writer
+            .begin_background_sync()
+            .unwrap()
+            .expect("expected a sync handle");
+
+        writer.append(&make_record_with_payload(2, 32)).unwrap();
+
+        assert_eq!(
+            writer.current_segment(),
+            active_segment,
+            "background sync in flight must pin the active segment"
+        );
+
+        handle.fd().sync_all().unwrap();
+        writer.commit_background_sync(handle).unwrap();
+        assert_eq!(writer.writes_since_sync, 1);
+    }
+
+    #[test]
+    fn test_source_no_longer_contains_old_background_sync_api() {
+        let source = include_str!("writer.rs");
+        let old_api = ["pub fn ", "prepare_background_sync("].concat();
+        assert!(
+            !source.contains(&old_api),
+            "writer.rs must not expose the old counter-reset sync API"
+        );
+    }
+
+    #[test]
+    fn test_three_phase_background_sync_api_is_not_public() {
+        let source = include_str!("writer.rs");
+        for public_signature in [
+            ["pub", " struct SyncHandle"].concat(),
+            ["pub", " struct BgError"].concat(),
+            ["pub", " fn begin_background_sync("].concat(),
+            ["pub", " fn commit_background_sync("].concat(),
+            ["pub", " fn abort_background_sync("].concat(),
+            ["pub", " fn bg_error("].concat(),
+            ["pub", " fn clear_bg_error("].concat(),
+            ["pub", " fn sync_in_flight("].concat(),
+        ] {
+            assert!(
+                !source.contains(&public_signature),
+                "writer.rs should keep the three-phase sync API internal: {public_signature}"
+            );
+        }
     }
 }
