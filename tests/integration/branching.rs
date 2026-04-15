@@ -3074,7 +3074,6 @@ fn test_issue_1695_parallel_leaf_reads_preserve_data() {
         .map(|_| {
             let db = db.clone();
             let barrier = barrier.clone();
-            let leaf_id = leaf_id;
             thread::spawn(move || {
                 let kv = KVStore::new(db);
                 barrier.wait();
