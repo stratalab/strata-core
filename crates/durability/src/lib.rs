@@ -179,6 +179,8 @@ pub mod __internal {
         fn abort_background_sync(&mut self, handle: BackgroundSyncHandle, error: io::Error);
         /// Returns the last background sync error, if any.
         fn bg_error(&self) -> Option<BackgroundSyncError>;
+        /// Clears the last background sync error.
+        fn clear_bg_error(&mut self);
         /// Returns whether a background sync is currently in flight.
         fn sync_in_flight(&self) -> bool;
     }
@@ -221,6 +223,10 @@ pub mod __internal {
 
         fn bg_error(&self) -> Option<BackgroundSyncError> {
             crate::wal::writer::WalWriter::bg_error(self).map(BackgroundSyncError::from)
+        }
+
+        fn clear_bg_error(&mut self) {
+            crate::wal::writer::WalWriter::clear_bg_error(self)
         }
 
         fn sync_in_flight(&self) -> bool {

@@ -74,6 +74,7 @@ use std::time::Instant;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, VersionedValue};
+use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::wal::{DurabilityMode, WalWriter};
 use strata_storage::{SegmentedStore, StorageIterator};
 
@@ -165,6 +166,55 @@ impl std::fmt::Display for SubsystemStatus {
             SubsystemStatus::Healthy => write!(f, "healthy"),
             SubsystemStatus::Degraded => write!(f, "degraded"),
             SubsystemStatus::Unhealthy => write!(f, "unhealthy"),
+        }
+    }
+}
+
+/// WAL writer health status.
+///
+/// The WAL writer can halt on background sync (fsync) failure to prevent
+/// data loss. This enum reports the current health state and, when halted,
+/// provides diagnostic information for recovery.
+///
+/// # Recovery
+///
+/// When halted, the writer refuses new commits until the underlying issue
+/// is resolved and [`Database::resume_wal_writer`] is called. A successful
+/// resume requires that a sync operation succeed, proving the underlying
+/// storage is healthy again.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum WalWriterHealth {
+    /// Writer is accepting transactions normally.
+    Healthy,
+    /// Writer has halted due to a background sync failure.
+    ///
+    /// No new commits will be accepted until [`Database::resume_wal_writer`]
+    /// is called and succeeds.
+    Halted {
+        /// Human-readable reason for the halt.
+        reason: String,
+        /// Timestamp of the first observed failure in the current streak.
+        first_observed_at: std::time::SystemTime,
+        /// Number of consecutive failed sync attempts.
+        failed_sync_count: u64,
+    },
+}
+
+impl Default for WalWriterHealth {
+    fn default() -> Self {
+        WalWriterHealth::Healthy
+    }
+}
+
+impl std::fmt::Display for WalWriterHealth {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WalWriterHealth::Healthy => write!(f, "healthy"),
+            WalWriterHealth::Halted {
+                reason,
+                failed_sync_count,
+                ..
+            } => write!(f, "halted: {} ({} failed syncs)", reason, failed_sync_count),
         }
     }
 }
@@ -351,7 +401,15 @@ pub struct Database {
     /// Flag to track if database is accepting new transactions
     ///
     /// Set to false during shutdown to reject new transactions.
-    accepting_transactions: AtomicBool,
+    /// Arc-wrapped to share with the flush thread (for halt behavior).
+    accepting_transactions: Arc<AtomicBool>,
+
+    /// WAL writer health state.
+    ///
+    /// Set to `Halted` when background sync fails; prevents new commits until
+    /// `resume_wal_writer()` succeeds. Per-database, not process-global.
+    /// Arc-wrapped to share with the flush thread (for halt behavior).
+    wal_writer_health: Arc<ParkingMutex<WalWriterHealth>>,
 
     /// Type-erased extension storage for primitive state
     ///
@@ -506,7 +564,13 @@ impl Database {
     ) -> StrataResult<()> {
         debug_assert!(matches!(mode, DurabilityMode::Standard { .. }));
         self.flush_shutdown.store(false, Ordering::SeqCst);
-        if let Some(handle) = Self::spawn_wal_flush_thread(mode, wal, &self.flush_shutdown)? {
+        if let Some(handle) = Self::spawn_wal_flush_thread(
+            mode,
+            wal,
+            &self.flush_shutdown,
+            &self.accepting_transactions,
+            &self.wal_writer_health,
+        )? {
             *self.flush_handle.lock() = Some(handle);
         }
         Ok(())
@@ -997,6 +1061,101 @@ impl Database {
     /// Check if the database is currently open and accepting transactions
     pub fn is_open(&self) -> bool {
         self.accepting_transactions.load(Ordering::Acquire)
+    }
+
+    // ========================================================================
+    // WAL Writer Health
+    // ========================================================================
+
+    /// Returns the current WAL writer health status.
+    ///
+    /// The WAL writer halts on background sync (fsync) failure to prevent
+    /// data loss. When halted, no new commits will be accepted until the
+    /// underlying issue is resolved and [`resume_wal_writer`](Self::resume_wal_writer)
+    /// is called.
+    ///
+    /// For ephemeral databases (no WAL), this always returns `Healthy`.
+    ///
+    /// # Example
+    /// ```text
+    /// match db.wal_writer_health() {
+    ///     WalWriterHealth::Healthy => println!("Writer healthy"),
+    ///     WalWriterHealth::Halted { reason, failed_sync_count, .. } => {
+    ///         eprintln!("Writer halted: {} ({} failed syncs)", reason, failed_sync_count);
+    ///     }
+    /// }
+    /// ```
+    pub fn wal_writer_health(&self) -> WalWriterHealth {
+        self.wal_writer_health.lock().clone()
+    }
+
+    /// Attempt to resume a halted WAL writer.
+    ///
+    /// When the WAL writer halts due to background sync failure, this method
+    /// attempts to resume normal operation. A successful resume requires that
+    /// a sync operation succeed, proving the underlying storage is healthy.
+    ///
+    /// # Arguments
+    ///
+    /// * `confirm_reason` - A brief description of what action was taken to
+    ///   resolve the underlying issue. This is logged for audit purposes.
+    ///
+    /// # Returns
+    ///
+    /// * `Ok(())` - Writer resumed successfully and is accepting commits
+    /// * `Err(WriterHalted)` - Sync still failing; writer remains halted
+    /// * `Err(Internal)` - No WAL writer (ephemeral database) or other error
+    ///
+    /// # Example
+    /// ```text
+    /// // After fixing disk space issue:
+    /// db.resume_wal_writer("freed 10GB disk space")?;
+    /// ```
+    pub fn resume_wal_writer(&self, confirm_reason: &str) -> StrataResult<()> {
+        let wal = self.wal_writer.as_ref().ok_or_else(|| {
+            StrataError::internal("cannot resume WAL writer on ephemeral database".to_string())
+        })?;
+
+        // Attempt a sync to prove storage is healthy
+        {
+            let mut writer = wal.lock();
+            if let Err(e) = writer.flush() {
+                // Sync still failing — update failed_sync_count but stay halted
+                let mut health = self.wal_writer_health.lock();
+                if let WalWriterHealth::Halted {
+                    failed_sync_count, ..
+                } = &mut *health
+                {
+                    *failed_sync_count += 1;
+                }
+                return Err(StrataError::storage(format!(
+                    "resume failed: sync still failing: {}",
+                    e
+                )));
+            }
+
+            // Clear any recorded background error in the writer
+            writer.clear_bg_error();
+        }
+
+        // Sync succeeded — restore healthy state
+        let mut health = self.wal_writer_health.lock();
+        let was_halted = matches!(&*health, WalWriterHealth::Halted { .. });
+        *health = WalWriterHealth::Healthy;
+        drop(health);
+
+        // Re-enable transactions
+        self.accepting_transactions.store(true, Ordering::Release);
+
+        if was_halted {
+            tracing::info!(
+                target: "strata::wal",
+                confirm_reason = confirm_reason,
+                "WAL writer resumed"
+            );
+        }
+
+        Ok(())
     }
 
     /// Returns a reference to the background task scheduler.

@@ -570,10 +570,11 @@ impl TransactionManager {
                         error = %e,
                         "Storage application failed after WAL commit - will be recovered on restart"
                     );
-                    return Err(CommitError::DurableButNotVisible(format!(
-                        "Storage application failed after WAL commit: {}",
-                        e
-                    )));
+                    return Err(CommitError::DurableButNotVisible {
+                        txn_id: txn.txn_id.as_u64(),
+                        commit_version: commit_version.as_u64(),
+                        reason: format!("Storage application failed: {}", e),
+                    });
                 } else {
                     txn.status = TransactionStatus::Aborted {
                         reason: format!("Storage application failed: {}", e),
@@ -2397,7 +2398,7 @@ mod tests {
         // Verify it's the right error variant
         let err = result.unwrap_err();
         assert!(
-            matches!(err, CommitError::DurableButNotVisible(_)),
+            matches!(err, CommitError::DurableButNotVisible { .. }),
             "Expected DurableButNotVisible error, got: {:?}",
             err
         );
@@ -2428,7 +2429,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, CommitError::DurableButNotVisible(_)),
+            matches!(err, CommitError::DurableButNotVisible { .. }),
             "Expected DurableButNotVisible error, got: {:?}",
             err
         );
@@ -2464,7 +2465,7 @@ mod tests {
 
         let err = result.unwrap_err();
         assert!(
-            matches!(err, CommitError::DurableButNotVisible(_)),
+            matches!(err, CommitError::DurableButNotVisible { .. }),
             "Expected DurableButNotVisible error, got: {:?}",
             err
         );

@@ -188,8 +188,29 @@ impl Database {
     // ========================================================================
 
     /// Check if the database is accepting transactions.
+    ///
+    /// Returns an error if:
+    /// - The database is shutting down (`InvalidInput`)
+    /// - The WAL writer is halted due to sync failure (`WriterHalted`)
     fn check_accepting(&self) -> StrataResult<()> {
         if !self.accepting_transactions.load(Ordering::Acquire) {
+            // Check if writer is halted (more specific error)
+            let health = self.wal_writer_health.lock();
+            if let super::WalWriterHealth::Halted {
+                reason,
+                first_observed_at,
+                failed_sync_count,
+            } = &*health
+            {
+                return Err(StrataError::WriterHalted {
+                    reason: reason.clone(),
+                    first_observed_at: *first_observed_at,
+                    failed_sync_count: *failed_sync_count,
+                });
+            }
+            drop(health);
+
+            // Not halted, must be shutting down
             return Err(StrataError::invalid_input(
                 "Database is shutting down".to_string(),
             ));

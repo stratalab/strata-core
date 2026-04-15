@@ -2463,11 +2463,12 @@ fn test_set_durability_mode_spawn_failure_rolls_back_state() {
     db.shutdown().unwrap();
 }
 
+/// T3-E2: Background sync failure halts the writer and rejects new transactions.
 #[test]
 #[serial]
-fn test_background_sync_failure_sets_bg_error_and_retries() {
+fn test_background_sync_failure_halts_writer() {
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("bg_sync_retry_db");
+    let db_path = temp_dir.path().join("bg_sync_halt_db");
     let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
     db.set_durability_mode(DurabilityMode::Standard {
         interval_ms: 10,
@@ -2478,32 +2479,184 @@ fn test_background_sync_failure_sets_bg_error_and_retries() {
     let branch_id = BranchId::new();
     let key = Key::new_kv(create_test_namespace(branch_id), "bg_sync_key");
 
+    // First transaction succeeds (before sync failure)
     super::test_hooks::clear_sync_failure();
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
-
     db.transaction(branch_id, |txn| {
         txn.put(key.clone(), Value::Int(7))?;
         Ok(())
     })
     .unwrap();
 
+    // Inject sync failure for the background flush
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+
+    // Wait for background sync to fail and halt the writer
     wait_until(Duration::from_secs(2), || {
-        db.wal_writer.as_ref().unwrap().lock().bg_error().is_some()
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        )
     });
 
-    let failure = db
-        .wal_writer
-        .as_ref()
-        .unwrap()
-        .lock()
-        .bg_error()
-        .expect("expected background sync failure");
-    assert_eq!(failure.kind(), std::io::ErrorKind::Other);
-    assert_eq!(failure.failed_sync_count(), 1);
+    // Verify health state shows halted
+    let health = db.wal_writer_health();
+    match health {
+        super::WalWriterHealth::Halted {
+            failed_sync_count, ..
+        } => {
+            assert!(failed_sync_count >= 1, "expected at least one failed sync");
+        }
+        super::WalWriterHealth::Healthy => {
+            panic!("expected writer to be halted after sync failure");
+        }
+    }
 
+    // Verify new transactions are rejected with WriterHalted error
+    let err = db
+        .transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(8))?;
+            Ok(())
+        })
+        .expect_err("transaction should be rejected when writer is halted");
+
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted error, got: {:?}",
+        err
+    );
+
+    // Clear the injected failure and resume
+    super::test_hooks::clear_sync_failure();
+    db.resume_wal_writer("test cleared injected failure")
+        .unwrap();
+
+    // Verify health is restored
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to be healthy after resume"
+    );
+
+    // Verify transactions work again
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(9))?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.shutdown().unwrap();
+}
+
+/// T3-E2: Sync failure sets initial failed_sync_count and can be resumed.
+#[test]
+#[serial]
+fn test_sync_failure_halt_and_resume() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("repeated_sync_fail_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 10,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let key = Key::new_kv(create_test_namespace(branch_id), "repeat_fail_key");
+
+    // First transaction
+    super::test_hooks::clear_sync_failure();
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Inject sync failure
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+
+    // Wait for writer to halt
     wait_until(Duration::from_secs(2), || {
-        db.wal_writer.as_ref().unwrap().lock().bg_error().is_none()
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        )
     });
+
+    // Verify health state shows halted with at least 1 failed sync
+    match db.wal_writer_health() {
+        super::WalWriterHealth::Halted {
+            failed_sync_count, ..
+        } => {
+            assert!(
+                failed_sync_count >= 1,
+                "expected at least 1 failed sync, got {}",
+                failed_sync_count
+            );
+        }
+        super::WalWriterHealth::Healthy => {
+            panic!("expected writer to be halted");
+        }
+    }
+
+    // Clean up and resume
+    super::test_hooks::clear_sync_failure();
+    db.resume_wal_writer("cleanup").unwrap();
+
+    // Verify health is restored
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to be healthy after resume"
+    );
+
+    db.shutdown().unwrap();
+}
+
+/// T3-E2: Resume on ephemeral database returns error.
+#[test]
+fn test_resume_ephemeral_database_returns_error() {
+    let db = Database::cache().unwrap();
+
+    // Ephemeral databases have no WAL writer, so resume should fail
+    let err = db
+        .resume_wal_writer("test")
+        .expect_err("resume on ephemeral should fail");
+
+    assert!(
+        matches!(err, StrataError::Internal { .. }),
+        "expected Internal error for ephemeral resume, got: {:?}",
+        err
+    );
+}
+
+/// T3-E2: Resume when already healthy is a no-op.
+#[test]
+fn test_resume_when_already_healthy_is_noop() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("resume_healthy_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    // Verify initially healthy
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to be healthy initially"
+    );
+
+    // Resume when already healthy should succeed (no-op)
+    db.resume_wal_writer("no-op test").unwrap();
+
+    // Still healthy
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to remain healthy"
+    );
+
+    // Transactions should still work
+    let branch_id = BranchId::new();
+    let key = Key::new_kv(create_test_namespace(branch_id), "noop_key");
+    db.transaction(branch_id, |txn| {
+        txn.put(key, Value::Int(42))?;
+        Ok(())
+    })
+    .unwrap();
 
     db.shutdown().unwrap();
 }

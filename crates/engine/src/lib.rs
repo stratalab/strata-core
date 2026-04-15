@@ -45,6 +45,7 @@ pub use database::profile::{
 pub use database::{
     CacheMetrics, Database, DatabaseDiskUsage, HealthReport, ModelConfig, StorageConfig,
     StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics,
+    WalWriterHealth,
 };
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;

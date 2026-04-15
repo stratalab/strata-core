@@ -58,7 +58,14 @@ pub enum CommitError {
     /// The transaction IS durable (WAL record written) and will be recovered
     /// on restart, but it is NOT visible to reads in the current process.
     /// The caller must not assume the data is immediately readable.
-    DurableButNotVisible(String),
+    DurableButNotVisible {
+        /// Transaction ID that committed durably
+        txn_id: u64,
+        /// Commit version assigned to the transaction
+        commit_version: u64,
+        /// Reason the storage apply failed
+        reason: String,
+    },
 
     /// Branch is being deleted (#1916)
     ///
@@ -77,11 +84,15 @@ impl std::fmt::Display for CommitError {
             CommitError::WALError(msg) => write!(f, "WAL error: {}", msg),
             CommitError::StorageError(msg) => write!(f, "Storage error during validation: {}", msg),
             CommitError::CounterOverflow(msg) => write!(f, "Counter overflow: {}", msg),
-            CommitError::DurableButNotVisible(msg) => {
+            CommitError::DurableButNotVisible {
+                txn_id,
+                commit_version,
+                reason,
+            } => {
                 write!(
                     f,
-                    "Durable but not visible (will recover on restart): {}",
-                    msg
+                    "Durable but not visible (will recover on restart): txn {} at version {} - {}",
+                    txn_id, commit_version, reason
                 )
             }
             CommitError::BranchDeleting(branch_id) => {
@@ -112,9 +123,14 @@ impl From<CommitError> for StrataError {
             CommitError::CounterOverflow(msg) => {
                 StrataError::capacity_exceeded(msg, usize::MAX, usize::MAX)
             }
-            CommitError::DurableButNotVisible(msg) => StrataError::Storage {
-                message: format!("Durable but not visible (will recover on restart): {}", msg),
-                source: None,
+            CommitError::DurableButNotVisible {
+                txn_id,
+                commit_version,
+                reason,
+            } => StrataError::DurableButNotVisible {
+                txn_id,
+                commit_version,
+                reason,
             },
             CommitError::BranchDeleting(branch_id) => StrataError::TransactionAborted {
                 reason: format!("Branch {} is being deleted", branch_id),
