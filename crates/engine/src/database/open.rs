@@ -54,6 +54,7 @@ fn restrict_dir(_path: &Path) {}
 /// Currently clamps `auto_embed` to `false` when the `embed` feature is not
 /// compiled. Called from primary, follower, and cache paths to ensure
 /// consistent behavior.
+#[allow(unused_mut)]
 fn sanitize_config(mut cfg: super::config::StrataConfig) -> super::config::StrataConfig {
     #[cfg(not(feature = "embed"))]
     if cfg.auto_embed {

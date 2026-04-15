@@ -447,7 +447,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         // Index updates happen inline during primitive operations; this observer
         // handles periodic seal operations for durability.
         let commit_observer = Arc::new(SearchCommitObserver {
-            db: Arc::downgrade(db),
+            _db: Arc::downgrade(db),
         });
         db.commit_observers().register(commit_observer);
 
@@ -455,7 +455,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         // Followers don't execute primitive operations (data arrives via WAL),
         // so this observer ensures the index stays consistent after replays.
         let replay_observer = Arc::new(SearchReplayObserver {
-            db: Arc::downgrade(db),
+            _db: Arc::downgrade(db),
         });
         db.replay_observers().register(replay_observer);
 
@@ -474,7 +474,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
 use crate::database::observers::{
     CommitInfo, CommitObserver, ObserverError, ReplayInfo, ReplayObserver,
 };
-use std::sync::{atomic::AtomicU64, Weak};
+use std::sync::Weak;
 
 /// Commit observer for search index maintenance.
 ///
@@ -498,7 +498,7 @@ use std::sync::{atomic::AtomicU64, Weak};
 /// This observer handles secondary concerns (metrics, periodic seal) rather
 /// than primary indexing.
 struct SearchCommitObserver {
-    db: Weak<Database>,
+    _db: Weak<Database>,
 }
 
 impl CommitObserver for SearchCommitObserver {
@@ -534,7 +534,7 @@ impl CommitObserver for SearchCommitObserver {
 /// For workloads requiring real-time follower search, a RefreshHook-based
 /// approach (like vector) could be implemented as a future enhancement.
 struct SearchReplayObserver {
-    db: Weak<Database>,
+    _db: Weak<Database>,
 }
 
 impl ReplayObserver for SearchReplayObserver {
