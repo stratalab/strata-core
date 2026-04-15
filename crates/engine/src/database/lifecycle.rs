@@ -1,12 +1,15 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
 use std::sync::atomic::Ordering;
-use strata_core::id::CommitVersion;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, TypeTag};
-use strata_core::{StrataError, StrataResult};
-use tracing::warn;
+use strata_core::StrataResult;
+use tracing::{info, warn};
 
+use super::refresh::{
+    BlockReason, BlockedTxn, FollowerStatus, RefreshGuard, RefreshOutcome, UnblockError,
+};
 use super::{Database, PersistenceMode};
 
 impl Database {
@@ -111,6 +114,87 @@ impl Database {
     // Follower Refresh
     // ========================================================================
 
+    /// Get the current status of this follower database.
+    ///
+    /// Returns information about watermarks, blocked state, and refresh progress.
+    /// For non-follower databases, returns a status with zero watermarks.
+    pub fn follower_status(&self) -> FollowerStatus {
+        FollowerStatus {
+            received_watermark: self.watermark.received(),
+            applied_watermark: self.watermark.applied(),
+            blocked_at: self.watermark.blocked(),
+            refresh_in_progress: self.refresh_gate.is_in_progress(),
+        }
+    }
+
+    /// Skip a blocked WAL record after manual intervention.
+    ///
+    /// This is an administrative operation for when a follower is stuck on a
+    /// problematic WAL record that cannot be processed. The operator must:
+    /// 1. Diagnose the issue using `follower_status().blocked_at`
+    /// 2. Manually remediate any downstream state if needed
+    /// 3. Call this method with the exact blocked transaction ID
+    ///
+    /// # Audit Trail
+    ///
+    /// This operation is logged to both:
+    /// - `tracing` target `strata::follower::audit`
+    /// - `{data_dir}/follower_audit.log` (durable, append-only)
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnblockError::Mismatch` if `txn_id` doesn't match the blocked
+    /// transaction, `UnblockError::NotBlocked` if the follower isn't blocked,
+    /// or `UnblockError::NotFollower` if this isn't a follower database.
+    pub fn admin_skip_blocked_record(
+        &self,
+        txn_id: TxnId,
+        reason: &str,
+    ) -> Result<(), UnblockError> {
+        if !self.follower {
+            return Err(UnblockError::NotFollower);
+        }
+
+        // Attempt the skip
+        self.watermark.admin_skip(txn_id)?;
+
+        // Log to tracing
+        info!(
+            target: "strata::follower::audit",
+            txn_id = %txn_id,
+            reason = %reason,
+            "Admin skipped blocked WAL record"
+        );
+
+        // Write durable audit log
+        let data_dir = self.data_dir();
+        if !data_dir.as_os_str().is_empty() {
+            let audit_path = data_dir.join("follower_audit.log");
+            let timestamp = chrono::Utc::now().to_rfc3339();
+            let entry = format!(
+                "{}\tSKIP\ttxn_id={}\treason={}\n",
+                timestamp,
+                txn_id.as_u64(),
+                reason
+            );
+            if let Err(e) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&audit_path)
+                .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()))
+            {
+                warn!(
+                    target: "strata::follower::audit",
+                    path = ?audit_path,
+                    error = %e,
+                    "Failed to write follower audit log"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     /// Refresh local storage by tailing new WAL entries from the primary.
     ///
     /// In follower mode, the primary process may have appended new WAL records
@@ -118,45 +202,98 @@ impl Database {
     /// and applies them to local in-memory storage, bringing this instance
     /// up-to-date with all committed writes.
     ///
-    /// Returns the number of new records applied.
+    /// Returns a `RefreshOutcome` describing what happened:
+    /// - `CaughtUp`: All available records were applied
+    /// - `Stuck`: Some records applied, then hit a blocking error
+    /// - `NoProgress`: Already blocked, no records applied
     ///
-    /// For non-follower databases, this is a no-op returning 0.
+    /// For non-follower databases, returns `CaughtUp { applied: 0, applied_through: TxnId::ZERO }`.
     ///
-    /// # Error recovery
+    /// # Single-flight semantics
     ///
-    /// Refresh is a best-effort operation:
-    /// - **Storage mutations** (`apply_recovery_atomic`): a failure on a single
-    ///   WAL record logs a warning and skips that record. Subsequent records are
-    ///   still applied so the follower converges as closely as possible.
-    /// - **Search index updates**: silently skip entries that fail to parse.
-    /// - **Refresh hooks** (`apply_refresh`): infallible by trait contract.
-    pub fn refresh(&self) -> StrataResult<usize> {
+    /// Only one refresh can be in progress at a time per database. Concurrent
+    /// calls serialize via the internal `RefreshGate`.
+    ///
+    /// # Blocking behavior
+    ///
+    /// Unlike the legacy best-effort refresh, this implementation blocks on
+    /// any failure and does NOT advance the contiguous watermark past the
+    /// failed record. This ensures:
+    /// - `applied_watermark` is always truthful
+    /// - Secondary indexes never silently fall behind
+    /// - Operators can diagnose and skip blocked records explicitly
+    pub fn refresh(&self) -> RefreshOutcome {
         if !self.follower || self.persistence_mode == PersistenceMode::Ephemeral {
-            return Ok(0);
+            return RefreshOutcome::CaughtUp {
+                applied: 0,
+                applied_through: TxnId::ZERO,
+            };
         }
 
-        let watermark = self.wal_watermark.load(std::sync::atomic::Ordering::SeqCst);
+        // Acquire single-flight gate FIRST to prevent TOCTOU races on blocked state
+        let _guard = match RefreshGuard::try_new(&self.refresh_gate) {
+            Some(g) => g,
+            None => {
+                // Another refresh is in progress; return current state
+                return if let Some(blocked) = self.watermark.blocked() {
+                    RefreshOutcome::NoProgress {
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked,
+                    }
+                } else {
+                    RefreshOutcome::CaughtUp {
+                        applied: 0,
+                        applied_through: self.watermark.applied(),
+                    }
+                };
+            }
+        };
+
+        // Now check if blocked (safe under gate protection)
+        if let Some(blocked) = self.watermark.blocked() {
+            return RefreshOutcome::NoProgress {
+                applied_through: self.watermark.applied(),
+                blocked_at: blocked,
+            };
+        }
+
+        let watermark = self.watermark.applied().as_u64();
 
         // Read all WAL records after our watermark
         let reader = strata_durability::wal::WalReader::new();
-        let records = reader
-            .read_all_after_watermark(&self.wal_dir, watermark)
-            .map_err(|e| StrataError::storage(format!("WAL refresh read failed: {}", e)))?;
+        let records = match reader.read_all_after_watermark(&self.wal_dir, watermark) {
+            Ok(r) => r,
+            Err(e) => {
+                let blocked = BlockedTxn {
+                    txn_id: TxnId(watermark + 1),
+                    reason: BlockReason::Decode {
+                        message: format!("WAL read failed: {}", e),
+                    },
+                };
+                self.watermark.set_blocked(blocked.clone());
+                return RefreshOutcome::Stuck {
+                    applied: 0,
+                    applied_through: TxnId(watermark),
+                    blocked_at: blocked,
+                };
+            }
+        };
 
         if records.is_empty() {
-            return Ok(0);
+            return RefreshOutcome::CaughtUp {
+                applied: 0,
+                applied_through: TxnId(watermark),
+            };
         }
 
         let mut applied = 0usize;
         let mut max_version = 0u64;
-        let mut max_txn_id = watermark;
 
         // Get search index (if available) for incremental updates
         let search_index = self.extension::<crate::search::InvertedIndex>().ok();
         let search_enabled = search_index.as_ref().is_some_and(|idx| idx.is_enabled());
 
-        // Get refresh hooks used for any subsystem that still relies on the
-        // legacy follower-refresh contract.
+        // Get refresh hooks
         let refresh_hooks = self
             .extension::<super::refresh::RefreshHooks>()
             .ok()
@@ -164,19 +301,28 @@ impl Database {
             .unwrap_or_default();
 
         for record in &records {
-            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
+            let txn_id = record.txn_id;
 
+            // Update received watermark (telemetry)
+            self.watermark.set_received(txn_id);
+
+            // Decode the payload
             let payload = match strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
             {
                 Ok(p) => p,
                 Err(e) => {
-                    warn!(
-                        target: "strata::db",
-                        txn_id = record.txn_id.as_u64(),
-                        error = %e,
-                        "Refresh: skipping WAL record with corrupt payload"
-                    );
-                    continue;
+                    let blocked = BlockedTxn {
+                        txn_id,
+                        reason: BlockReason::Decode {
+                            message: format!("corrupt payload: {}", e),
+                        },
+                    };
+                    self.watermark.set_blocked(blocked.clone());
+                    return RefreshOutcome::Stuck {
+                        applied,
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked,
+                    };
                 }
             };
 
@@ -194,25 +340,12 @@ impl Database {
                     |key| match self.storage.get_versioned(key, CommitVersion::MAX) {
                         Ok(Some(vv)) => Some((key.clone(), vv.value)),
                         Ok(None) => None,
-                        Err(e) => {
-                            warn!(
-                                target: "strata::db",
-                                txn_id = record.txn_id.as_u64(),
-                                version = payload.version,
-                                error = %e,
-                                "Refresh: skipping pre-delete value capture for key"
-                            );
-                            None
-                        }
+                        Err(_) => None,
                     },
                 )
                 .collect();
 
-            // Apply puts and deletes atomically with original WAL timestamp
-            // and TTL. Combines #1699 (preserve commit timestamp for time-travel),
-            // #1707 (defer version bump until all entries installed),
-            // #1734 (defer version bump until secondary indexes are updated),
-            // and #1740 (preserve TTL through WAL replay).
+            // Apply puts and deletes atomically
             {
                 let writes: Vec<_> = payload
                     .puts
@@ -227,14 +360,18 @@ impl Database {
                     record.timestamp,
                     &payload.put_ttls,
                 ) {
-                    warn!(
-                        target: "strata::db",
-                        txn_id = record.txn_id.as_u64(),
-                        version = payload.version,
-                        error = %e,
-                        "Refresh: skipping WAL record due to storage error"
-                    );
-                    continue;
+                    let blocked = BlockedTxn {
+                        txn_id,
+                        reason: BlockReason::StorageApply {
+                            message: format!("{}", e),
+                        },
+                    };
+                    self.watermark.set_blocked(blocked.clone());
+                    return RefreshOutcome::Stuck {
+                        applied,
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked,
+                    };
                 }
             }
 
@@ -357,16 +494,30 @@ impl Database {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (hook, pre_reads) in refresh_hooks.iter().zip(hook_pre_reads.iter()) {
-                hook.apply_refresh(&puts_slice, pre_reads);
+                if let Err(e) = hook.apply_refresh(&puts_slice, pre_reads) {
+                    let blocked = BlockedTxn {
+                        txn_id,
+                        reason: BlockReason::SecondaryIndex {
+                            hook_name: e.hook_name.clone(),
+                            message: e.message.clone(),
+                        },
+                    };
+                    self.watermark.set_blocked(blocked.clone());
+                    return RefreshOutcome::Stuck {
+                        applied,
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked,
+                    };
+                }
             }
 
-            // Issue #1734: Advance visible version AFTER secondary indexes are
-            // updated, so readers never see KV data without corresponding
-            // BM25/HNSW entries.
+            // Advance visible version AFTER secondary indexes are updated
             self.storage.advance_version(CommitVersion(payload.version));
 
+            // Advance the contiguous watermark
+            self.watermark.advance_applied(txn_id);
+
             // Notify replay observers (best-effort, errors logged not propagated)
-            // Extract branch_id from the first put or delete key
             let branch_id = payload
                 .puts
                 .first()
@@ -387,14 +538,14 @@ impl Database {
         }
 
         // Advance local counters so new transactions get unique IDs/versions
+        let applied_through = self.watermark.applied();
         self.coordinator.catch_up_version(max_version);
-        self.coordinator.catch_up_txn_id(max_txn_id);
+        self.coordinator.catch_up_txn_id(applied_through.as_u64());
 
-        // Update watermark
-        self.wal_watermark
-            .store(max_txn_id, std::sync::atomic::Ordering::SeqCst);
-
-        Ok(applied)
+        RefreshOutcome::CaughtUp {
+            applied,
+            applied_through,
+        }
     }
 
     // Graceful Shutdown

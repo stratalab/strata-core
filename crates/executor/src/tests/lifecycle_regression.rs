@@ -176,11 +176,15 @@ fn test_strata_follower_observes_primary_vector_writes_via_refresh() {
     // vector replay observer to be installed on the follower, which only
     // happens if `VectorSubsystem::initialize` ran during follower open —
     // which only happens if the production follower spec installed it.
-    let applied = follower.database().refresh().unwrap();
+    let outcome = follower.database().refresh();
     assert!(
-        applied > 0,
+        outcome.is_caught_up(),
+        "follower refresh should have caught up"
+    );
+    assert!(
+        outcome.applied_count() > 0,
         "follower refresh should have applied WAL records for the new vector, got {}",
-        applied
+        outcome.applied_count()
     );
 
     // Query for the "later" vector on the follower — must see it.

@@ -797,6 +797,10 @@ unsafe impl Send for VectorLifecycleHook {}
 unsafe impl Sync for VectorLifecycleHook {}
 
 impl strata_engine::RefreshHook for VectorLifecycleHook {
+    fn name(&self) -> &'static str {
+        "vector"
+    }
+
     fn pre_delete_read(
         &self,
         _db: &strata_engine::Database,
@@ -809,8 +813,9 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
         &self,
         _puts: &[(strata_core::types::Key, strata_core::value::Value)],
         _pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
-    ) {
+    ) -> Result<(), strata_engine::RefreshHookError> {
         // Follower-side vector maintenance now lives in VectorReplayObserver.
+        Ok(())
     }
 
     fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {

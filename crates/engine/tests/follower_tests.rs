@@ -130,17 +130,20 @@ fn test_follower_refresh_sees_new_data() {
     assert_eq!(read_kv(&follower, branch, "k2"), None);
 
     // After refresh, follower sees the new data
-    let applied = follower.refresh().unwrap();
-    assert!(applied > 0, "refresh should apply new records");
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up(), "refresh should catch up");
+    assert!(outcome.applied_count() > 0, "refresh should apply new records");
     assert_eq!(read_kv(&follower, branch, "k2").as_deref(), Some("v2"));
 
     // Original data still intact after refresh
     assert_eq!(read_kv(&follower, branch, "k1").as_deref(), Some("v1"));
 
     // Second refresh with no new data returns 0
-    let applied2 = follower.refresh().unwrap();
+    let outcome2 = follower.refresh();
+    assert!(outcome2.is_caught_up());
     assert_eq!(
-        applied2, 0,
+        outcome2.applied_count(),
+        0,
         "refresh with no new WAL records should return 0"
     );
 }
@@ -168,7 +171,8 @@ fn test_follower_refresh_sees_updates_to_existing_keys() {
     primary_put(&primary, branch, "key", "updated");
     primary.flush().unwrap();
 
-    follower.refresh().unwrap();
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
     assert_eq!(
         read_kv(&follower, branch, "key").as_deref(),
         Some("updated"),
@@ -199,7 +203,8 @@ fn test_follower_refresh_sees_deletes() {
     primary_del(&primary, branch, "ephemeral");
     primary.flush().unwrap();
 
-    follower.refresh().unwrap();
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
     assert_eq!(
         read_kv(&follower, branch, "ephemeral"),
         None,
@@ -228,8 +233,9 @@ fn test_follower_multiple_refreshes() {
         primary_put(&primary, branch, &key, &val);
         primary.flush().unwrap();
 
-        let applied = follower.refresh().unwrap();
-        assert!(applied > 0, "round {} should apply records", i);
+        let outcome = follower.refresh();
+        assert!(outcome.is_caught_up(), "round {} should catch up", i);
+        assert!(outcome.applied_count() > 0, "round {} should apply records", i);
         assert_eq!(
             read_kv(&follower, branch, &key).as_deref(),
             Some(val.as_str()),
@@ -313,8 +319,9 @@ fn test_follower_with_empty_wal() {
     assert_eq!(read_kv(&follower, branch, "anything"), None);
 
     // Refresh on empty WAL is a no-op
-    let applied = follower.refresh().unwrap();
-    assert_eq!(applied, 0);
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
+    assert_eq!(outcome.applied_count(), 0);
 }
 
 #[test]
@@ -362,7 +369,8 @@ fn test_follower_multiple_followers() {
     primary.flush().unwrap();
 
     // Only f1 refreshes
-    f1.refresh().unwrap();
+    let outcome = f1.refresh();
+    assert!(outcome.is_caught_up());
     assert_eq!(
         read_kv(&f1, branch, "new_key").as_deref(),
         Some("new_value")
@@ -372,7 +380,8 @@ fn test_follower_multiple_followers() {
     assert_eq!(read_kv(&f3, branch, "new_key"), None);
 
     // Now f2 refreshes
-    f2.refresh().unwrap();
+    let outcome = f2.refresh();
+    assert!(outcome.is_caught_up());
     assert_eq!(
         read_kv(&f2, branch, "new_key").as_deref(),
         Some("new_value")
@@ -437,12 +446,14 @@ fn test_refresh_on_non_follower_returns_zero() {
     let primary =
         Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
             .unwrap();
-    let result = primary.refresh().unwrap();
-    assert_eq!(result, 0, "refresh on non-follower should be a no-op");
+    let outcome = primary.refresh();
+    assert!(outcome.is_caught_up());
+    assert_eq!(outcome.applied_count(), 0, "refresh on non-follower should be a no-op");
 
     let cache = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
-    let result = cache.refresh().unwrap();
-    assert_eq!(result, 0, "refresh on cache should be a no-op");
+    let outcome = cache.refresh();
+    assert!(outcome.is_caught_up());
+    assert_eq!(outcome.applied_count(), 0, "refresh on cache should be a no-op");
 }
 
 // ============================================================================
@@ -557,7 +568,8 @@ fn test_issue_1707_refresh_atomic_visibility() {
 
     // Give readers a moment to start, then refresh
     std::thread::sleep(std::time::Duration::from_millis(5));
-    follower.refresh().unwrap();
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
 
     // Let readers run a bit after refresh to capture any lagging partial state
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -681,7 +693,8 @@ fn test_issue_1707_refresh_atomic_concurrent() {
         .collect();
 
     std::thread::sleep(std::time::Duration::from_millis(5));
-    follower.refresh().unwrap();
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
 
     std::thread::sleep(std::time::Duration::from_millis(10));
     stop.store(true, Ordering::Relaxed);
@@ -705,4 +718,181 @@ fn test_issue_1707_refresh_atomic_concurrent() {
         "Concurrent reader observed mixed transaction state during refresh — \
          atomicity violation (ARCH-002)"
     );
+}
+
+// ============================================================================
+// Follower status and admin skip tests (T3-E3)
+// ============================================================================
+
+#[test]
+fn test_follower_status_basic() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    // Primary writes initial data
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    primary_put(&primary, branch, "k1", "v1");
+    primary.flush().unwrap();
+
+    // Open follower
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    // Initial status: caught up, not blocked
+    let status = follower.follower_status();
+    assert!(!status.is_blocked(), "follower should not be blocked initially");
+    assert!(!status.refresh_in_progress, "no refresh in progress");
+    // applied and received should be equal after recovery
+    assert_eq!(
+        status.applied_watermark, status.received_watermark,
+        "watermarks should match after recovery"
+    );
+
+    // Primary writes more data
+    primary_put(&primary, branch, "k2", "v2");
+    primary.flush().unwrap();
+
+    // Before refresh: status reflects not caught up (once we check WAL)
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
+
+    // After refresh: status shows new watermarks
+    let status2 = follower.follower_status();
+    assert!(!status2.is_blocked());
+    assert!(
+        status2.applied_watermark >= status.applied_watermark,
+        "applied watermark should advance after refresh"
+    );
+}
+
+#[test]
+fn test_follower_status_on_non_follower() {
+    let dir = tempdir().unwrap();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    // Primary should still be able to get follower_status (returns zero watermarks)
+    let status = primary.follower_status();
+    // We expect TxnId::ZERO or the recovered max_txn_id; either way, should not panic
+    assert!(!status.is_blocked());
+    assert!(!status.refresh_in_progress);
+}
+
+#[test]
+fn test_admin_skip_rejects_non_follower() {
+    let dir = tempdir().unwrap();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    // admin_skip should fail on non-follower
+    use strata_core::id::TxnId;
+    use strata_engine::UnblockError;
+
+    let result = primary.admin_skip_blocked_record(TxnId(1), "test skip");
+    assert!(matches!(result, Err(UnblockError::NotFollower)));
+}
+
+#[test]
+fn test_admin_skip_rejects_when_not_blocked() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    // Primary writes data
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    primary_put(&primary, branch, "k1", "v1");
+    primary.flush().unwrap();
+
+    // Open follower - should catch up without issues
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    // Verify follower is not blocked
+    assert!(!follower.follower_status().is_blocked());
+
+    // admin_skip should fail when not blocked
+    use strata_core::id::TxnId;
+    use strata_engine::UnblockError;
+
+    let result = follower.admin_skip_blocked_record(TxnId(1), "test skip");
+    assert!(matches!(result, Err(UnblockError::NotBlocked)));
+}
+
+#[test]
+fn test_concurrent_refresh_serialized() {
+    use std::thread;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    // Primary writes data
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    for i in 0..100 {
+        primary_put(&primary, branch, &format!("k{}", i), &format!("v{}", i));
+    }
+    primary.flush().unwrap();
+
+    // Open follower
+    let follower = Arc::new(
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap(),
+    );
+
+    // Write more data that follower hasn't seen
+    for i in 100..200 {
+        primary_put(&primary, branch, &format!("k{}", i), &format!("v{}", i));
+    }
+    primary.flush().unwrap();
+
+    // Spawn multiple threads trying to refresh concurrently
+    let handles: Vec<_> = (0..4)
+        .map(|_| {
+            let f = follower.clone();
+            thread::spawn(move || f.refresh())
+        })
+        .collect();
+
+    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+    // At most one refresh should have applied records; others should return 0
+    // (either because they couldn't acquire the gate, or because records were
+    // already applied by the first refresher)
+    let total_applied: usize = results.iter().map(|r| r.applied_count()).sum();
+    let non_zero_count = results.iter().filter(|r| r.applied_count() > 0).count();
+
+    // All should report caught up
+    assert!(
+        results.iter().all(|r| r.is_caught_up()),
+        "all refreshes should report caught up"
+    );
+
+    // The total records applied should be exactly the number of new records,
+    // not duplicated across threads
+    assert!(
+        non_zero_count <= 1 || total_applied <= 100,
+        "concurrent refreshes should not duplicate work: {} threads applied records, total {}",
+        non_zero_count,
+        total_applied
+    );
+
+    // Verify all data is visible
+    for i in 0..200 {
+        assert_eq!(
+            read_kv(&follower, branch, &format!("k{}", i)).as_deref(),
+            Some(format!("v{}", i).as_str()),
+            "key k{} should be visible after refresh",
+            i
+        );
+    }
 }

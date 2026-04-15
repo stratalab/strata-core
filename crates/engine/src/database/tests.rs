@@ -1759,8 +1759,9 @@ fn test_issue_1699_refresh_preserves_wal_timestamp() {
     std::thread::sleep(Duration::from_millis(100));
 
     // 6. Follower refresh — applies the new WAL records via Database::refresh
-    let applied = follower.refresh().unwrap();
-    assert!(applied > 0, "follower should apply the new transaction");
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up(), "follower should catch up");
+    assert!(outcome.applied_count() > 0, "follower should apply the new transaction");
 
     // 7. Check: A's entry timestamp should come from the WAL record (near
     //    commit time), NOT from Timestamp::now() during refresh.

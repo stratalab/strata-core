@@ -76,8 +76,11 @@ pub use search::SearchSubsystem;
 // Re-export submodules for `strata_engine::extensions::*` access
 pub use primitives::extensions;
 
-// Re-export refresh hook trait for secondary index subsystems
-pub use database::refresh::{RefreshHook, RefreshHooks};
+// Re-export refresh types for secondary index subsystems and follower management
+pub use database::refresh::{
+    AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHook, RefreshHookError,
+    RefreshHooks, RefreshOutcome, UnblockError,
+};
 
 // Re-export primitive types at crate root for convenience
 pub use primitives::{
