@@ -129,7 +129,7 @@ formal scope amendment to the owning document — not just a code change.
 Adding a new public type to `strata_engine` requires a cross-scope amendment to ALL FIVE
 architecture scope documents. The current allowed surface:
 
-**Runtime:** `Database`, `DatabaseBuilder`, `DatabaseMode`, `OpenSpec`, `Transaction`,
+**Runtime:** `Database`, `DatabaseMode`, `OpenSpec`, `Transaction`,
 `Subsystem` trait, `CommitObserver`/`CommitInfo`, `ReplayObserver`/`ReplayInfo`,
 `BranchOpObserver`/`BranchOpEvent`, `ObserverError`/`ObserverErrorKind`
 

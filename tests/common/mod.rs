@@ -17,9 +17,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
 pub use strata_engine::database::OpenSpec;
-pub use strata_engine::{
-    BranchIndex, Database, EventLog, JsonStore, KVStore, SearchSubsystem, StrataConfig,
-};
+pub use strata_engine::{Database, EventLog, JsonStore, KVStore, SearchSubsystem, StrataConfig};
 pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
@@ -101,13 +99,12 @@ impl TestDb {
         TestDb { db, dir, branch_id }
     }
 
-    /// Get all 6 primitives.
+    /// Get the searchable/storage primitives used across integration tests.
     pub fn all_primitives(&self) -> AllPrimitives {
         AllPrimitives {
             kv: KVStore::new(self.db.clone()),
             json: JsonStore::new(self.db.clone()),
             event: EventLog::new(self.db.clone()),
-            branch: BranchIndex::new(self.db.clone()),
             vector: VectorStore::new(self.db.clone()),
             graph: GraphStore::new(self.db.clone()),
         }
@@ -123,10 +120,6 @@ impl TestDb {
 
     pub fn event(&self) -> EventLog {
         EventLog::new(self.db.clone())
-    }
-
-    pub fn branch_index(&self) -> BranchIndex {
-        BranchIndex::new(self.db.clone())
     }
 
     pub fn vector(&self) -> VectorStore {
@@ -178,12 +171,11 @@ impl Default for TestDb {
     }
 }
 
-/// Container for all 6 primitives.
+/// Container for the primitive handles commonly used in tests.
 pub struct AllPrimitives {
     pub kv: KVStore,
     pub json: JsonStore,
     pub event: EventLog,
-    pub branch: BranchIndex,
     pub vector: VectorStore,
     pub graph: GraphStore,
 }

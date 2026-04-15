@@ -523,7 +523,7 @@ fn test_spaces_independent_across_branches() {
 
     // Create and switch to a new branch
     db.set_space("default").unwrap();
-    db.create_branch("branch-2").unwrap();
+    db.branches().create("branch-2").unwrap();
     db.set_branch("branch-2").unwrap();
 
     // Write in branch-2, default space

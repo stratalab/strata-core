@@ -6,7 +6,7 @@ use crate::common::*;
 use strata_core::search_types::{DocRef, PrimitiveType, SearchRequest};
 use strata_core::types::{JsonDocId, BranchId};
 use strata_core::value::Value;
-use strata_engine::{KVStore, BranchIndex};
+use strata_engine::KVStore;
 use crate::common::search::substrate_search;
 use std::collections::HashSet;
 
@@ -134,9 +134,7 @@ fn test_tier6_within_primitive_no_duplicates() {
     let branch_id = test_branch_id();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
-
-    branch_index.create_branch(&branch_id.to_string()).unwrap();
+    db.branches().create(&branch_id.to_string()).unwrap();
 
     // Add multiple entries with overlapping content
     for i in 0..10 {

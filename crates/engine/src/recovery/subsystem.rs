@@ -37,6 +37,7 @@
 
 use crate::database::Database;
 use std::sync::Arc;
+use strata_core::types::BranchId;
 use strata_core::StrataResult;
 
 /// Trait for subsystems that need recovery on open and cleanup on shutdown.
@@ -107,6 +108,22 @@ pub trait Subsystem: Send + Sync + 'static {
     /// Default implementation does nothing.
     fn bootstrap(&self, db: &Arc<Database>) -> StrataResult<()> {
         let _ = db;
+        Ok(())
+    }
+
+    /// Called after a branch has been deleted and its storage has been cleared.
+    ///
+    /// Subsystems use this hook to purge any branch-owned in-memory state or
+    /// sidecar disk caches that are not part of the core storage namespace.
+    /// Implementations must be idempotent because the branch deletion is already
+    /// committed when this hook runs.
+    fn cleanup_deleted_branch(
+        &self,
+        db: &Arc<Database>,
+        branch_id: &BranchId,
+        branch_name: &str,
+    ) -> StrataResult<()> {
+        let _ = (db, branch_id, branch_name);
         Ok(())
     }
 

@@ -34,11 +34,12 @@
 //!
 //! ## Branch Context
 //!
-//! Data is isolated by "branches" (like git branches). Use `create_branch()` and `set_branch()`:
+//! Data is isolated by "branches" (like git branches). Use `db.branches().create()`
+//! and `set_branch()`:
 //!
 //! ```text
-//! db.create_branch("experiment-1")?;    // Create a new blank branch
-//! db.set_branch("experiment-1")?;       // Switch to it
+//! db.branches().create("experiment-1")?; // Create a new blank branch
+//! db.set_branch("experiment-1")?;        // Switch to it
 //! db.kv_put("key", Value::Int(42))?; // Data goes to experiment-1
 //!
 //! db.set_branch("default")?;            // Switch back

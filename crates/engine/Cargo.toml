@@ -15,6 +15,7 @@ workspace = true
 default = []
 perf-trace = ["strata-concurrency/perf-trace"]  # Enable per-operation timing instrumentation
 embed = []       # Marker feature: auto-embed runtime is available
+test-support = []  # Expose test helpers for downstream crates
 
 [dependencies]
 strata-core = { path = "../core" }

@@ -47,8 +47,9 @@ fn expected_vec_cache_path(data_dir: &std::path::Path, space: &str, collection: 
 /// `freeze_vector_heaps()` call), and `Strata::open` on reopen runs
 /// `VectorSubsystem::recover` to restore the heap from the `.vec` mmap.
 ///
-/// Empirical revert: delete `VectorSubsystem` from `strata_db_builder()`
-/// in `crates/executor/src/api/mod.rs` and this test fails — the
+/// Empirical revert: remove `VectorSubsystem` from the production
+/// `default_product_spec()` in `crates/executor/src/api/mod.rs` and this
+/// test fails — the
 /// `.vec` file does not exist after drop, and the reopened query
 /// returns no matches (vector state is gone).
 #[test]
@@ -132,8 +133,9 @@ fn test_strata_open_drop_reopen_preserves_vectors_through_drop_freeze() {
 /// vector updates incrementally via replay observers — not via full
 /// re-recovery.
 ///
-/// Empirical revert: drop `VectorSubsystem` from `strata_db_builder()`
-/// on the follower branch in `Strata::open_with` and this test fails —
+/// Empirical revert: drop `VectorSubsystem` from the follower-side
+/// `default_product_follower_spec()` in `Strata::open_with` and this
+/// test fails —
 /// the refresh hook is never registered, so the follower never sees
 /// the new vectors even after refresh.
 #[test]
@@ -173,7 +175,7 @@ fn test_strata_follower_observes_primary_vector_writes_via_refresh() {
     // Follower refresh must pick up the new vector. This requires the
     // vector replay observer to be installed on the follower, which only
     // happens if `VectorSubsystem::initialize` ran during follower open —
-    // which only happens if `strata_db_builder()` was used.
+    // which only happens if the production follower spec installed it.
     let applied = follower.database().refresh().unwrap();
     assert!(
         applied > 0,

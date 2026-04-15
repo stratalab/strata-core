@@ -12,7 +12,7 @@ use strata_engine::database::OpenSpec;
 use strata_engine::Database;
 use strata_engine::SearchSubsystem;
 use strata_engine::StrataConfig;
-use strata_engine::{BranchIndex, EventLog, KVStore};
+use strata_engine::{EventLog, KVStore};
 use tempfile::TempDir;
 
 /// Helper to create an empty object payload for EventLog
@@ -173,16 +173,16 @@ fn test_cross_branch_query_isolation() {
 fn test_branch_delete_isolation() {
     let (db, _temp) = setup();
 
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
     let kv = KVStore::new(db.clone());
     let event_log = EventLog::new(db.clone());
 
-    // Create two branches via BranchIndex
-    let meta1 = branch_index.create_branch("branch1").unwrap();
-    let meta2 = branch_index.create_branch("branch2").unwrap();
+    // Create two branches via the canonical branch service.
+    let meta1 = branches.create("branch1").unwrap();
+    let meta2 = branches.create("branch2").unwrap();
 
-    let branch1 = BranchId::from_string(&meta1.value.branch_id).unwrap();
-    let branch2 = BranchId::from_string(&meta2.value.branch_id).unwrap();
+    let branch1 = BranchId::from_string(&meta1.branch_id).unwrap();
+    let branch2 = BranchId::from_string(&meta2.branch_id).unwrap();
 
     // Write data to both branches
     kv.put(&branch1, "default", "key", Value::Int(1)).unwrap();
@@ -200,7 +200,7 @@ fn test_branch_delete_isolation() {
     assert!(kv.get(&branch2, "default", "key").unwrap().is_some());
 
     // Delete branch1 (cascading delete)
-    branch_index.delete_branch("branch1").unwrap();
+    branches.delete("branch1").unwrap();
 
     // branch1 data is GONE
     assert!(kv.get(&branch1, "default", "key").unwrap().is_none());
@@ -286,7 +286,7 @@ fn test_event_log_chain_isolation() {
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 2);
 }
 
-/// #1702: BranchIndex::delete_branch() must clean up storage-layer segment files.
+/// #1702: branch deletion must clean up storage-layer segment files.
 ///
 /// When a branch has been flushed to disk (producing .sst files), deleting the
 /// branch via the engine-level API must remove those files. Without the fix,
@@ -312,11 +312,11 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
     )
     .unwrap();
 
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
     let kv = KVStore::new(db.clone());
 
     // Create a branch and write data.
-    branch_index.create_branch("doomed").unwrap();
+    branches.create("doomed").unwrap();
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("doomed");
 
     // Each write triggers rotation → flush → .sst file on disk.
@@ -361,7 +361,7 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
     db.scheduler().drain();
 
     // Delete the branch through the engine-level API.
-    branch_index.delete_branch("doomed").unwrap();
+    branches.delete("doomed").unwrap();
 
     // Logical data should be gone.
     assert!(kv.get(&branch_id, "default", "key0").unwrap().is_none());
@@ -375,7 +375,7 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
         .collect();
     assert!(
         sst_after.is_empty(),
-        "Expected all .sst files to be cleaned up after delete_branch(), \
+        "Expected all .sst files to be cleaned up after branch delete, \
          but found {} files: {:?}",
         sst_after.len(),
         sst_after.iter().map(|e| e.path()).collect::<Vec<_>>(),

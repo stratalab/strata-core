@@ -425,8 +425,12 @@ fn format_raw(output: &Output) -> String {
         Output::TxnAborted => "OK".to_string(),
         Output::DatabaseInfo(info) => {
             format!(
-                "{}\t{}\t{}\t{}",
-                info.version, info.uptime_secs, info.branch_count, info.total_keys
+                "{}\t{}\t{}\t{}\t{}",
+                info.version,
+                info.uptime_secs,
+                info.branch_count,
+                info.total_keys,
+                info.default_branch
             )
         }
         Output::Described(_) => serde_json::to_string_pretty(output).unwrap_or_default(),
@@ -955,8 +959,12 @@ fn format_human(output: &Output) -> String {
         Output::TxnAborted => "OK".to_string(),
         Output::DatabaseInfo(info) => {
             format!(
-                "version: {}\nuptime_secs: {}\nbranches: {}\ntotal_keys: {}",
-                info.version, info.uptime_secs, info.branch_count, info.total_keys
+                "version: {}\nuptime_secs: {}\nbranches: {}\ntotal_keys: {}\ndefault_branch: {}",
+                info.version,
+                info.uptime_secs,
+                info.branch_count,
+                info.total_keys,
+                info.default_branch
             )
         }
         Output::Described(d) => {

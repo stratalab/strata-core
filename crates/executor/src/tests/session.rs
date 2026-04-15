@@ -37,6 +37,36 @@ fn test_begin_commit_lifecycle() {
 }
 
 #[test]
+fn test_session_uses_configured_default_branch_for_data_commands() {
+    let db = Database::open_runtime(search_only_cache_spec().with_default_branch("main")).unwrap();
+    let mut session = Session::new(db);
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "session-default".to_string(),
+            value: Value::String("main".into()),
+        })
+        .unwrap();
+
+    match session
+        .execute(Command::KvGet {
+            branch: Some(crate::types::BranchId::from("main")),
+            space: None,
+            key: "session-default".to_string(),
+            as_of: None,
+        })
+        .unwrap()
+    {
+        Output::MaybeVersioned(Some(vv)) => {
+            assert_eq!(vv.value, Value::String("main".into()));
+        }
+        other => panic!("expected MaybeVersioned(Some), got {:?}", other),
+    }
+}
+
+#[test]
 fn test_begin_abort_lifecycle() {
     let mut session = create_test_session();
 

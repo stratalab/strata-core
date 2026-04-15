@@ -28,7 +28,7 @@
 //! components only.
 
 pub mod background;
-pub mod coordinator;
+mod coordinator;
 pub mod database;
 pub mod instrumentation;
 pub mod recovery;
@@ -36,7 +36,7 @@ pub mod transaction;
 pub mod transaction_ops; // TransactionOps Trait Definition
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
-pub use coordinator::{TransactionCoordinator, TransactionMetrics};
+pub use coordinator::TransactionMetrics;
 pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use database::profile::{
     apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, HardwareInfo,
@@ -56,7 +56,7 @@ pub use strata_storage::VersionedEntry;
 pub use transaction::{ScopedTransaction, Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 
-pub mod branch_ops;
+mod branch_ops;
 pub mod bundle;
 pub mod primitives;
 pub mod recipe_store;
@@ -86,7 +86,6 @@ pub use primitives::{
     BM25LiteScorer,
     // Handles
     BranchHandle,
-    BranchIndex,
     BranchMetadata,
     BranchStatus,
     Event,
@@ -129,13 +128,6 @@ pub use branch_ops::{
 pub use branch_ops::primitive_merge::{
     GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan, VectorMergePostCommitFn,
     VectorMergePrecheckFn,
-};
-
-// Branch DAG hook types (legacy). The canonical path is now per-database
-// `BranchDagHook` installed by `GraphSubsystem::initialize()`.
-pub use branch_ops::{
-    BranchCherryPickHook, BranchCreateHook, BranchDagHooks, BranchDeleteHook, BranchForkHook,
-    BranchMergeHook, BranchRevertHook,
 };
 
 // Re-export branch_dag types from core at crate root for convenience

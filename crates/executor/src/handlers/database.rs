@@ -25,14 +25,18 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let follower = p.db.is_follower();
 
     // -- Branches --
-    // list_branches() only returns explicitly-created branches; the implicit
-    // "default" branch is always present, so ensure it appears in the list.
-    let mut branches = p.branch.list_branches().unwrap_or_else(|e| {
+    // list_branches() only returns explicitly-created branches; the executor
+    // still exposes an effective default branch even when it was not
+    // explicitly created, so ensure it appears in the list.
+    let mut branches = p.db.branches().list().unwrap_or_else(|e| {
         warn!("describe: list_branches failed: {}", e);
         Vec::new()
     });
-    if !branches.contains(&"default".to_string()) {
-        branches.insert(0, "default".to_string());
+    let default_branch =
+        p.db.default_branch_name()
+            .unwrap_or_else(|| "default".to_string());
+    if !branches.contains(&default_branch) {
+        branches.insert(0, default_branch);
     }
 
     // -- Spaces --

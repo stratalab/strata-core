@@ -20,7 +20,7 @@ use crate::validation::ConflictType;
 /// # Returns
 ///
 /// A vector of all detected write-write conflicts as `ConflictType`
-pub fn check_write_write_conflicts(writes: &[JsonPatchEntry]) -> Vec<ConflictType> {
+pub(crate) fn check_write_write_conflicts(writes: &[JsonPatchEntry]) -> Vec<ConflictType> {
     let mut conflicts = Vec::new();
 
     for (i, w1) in writes.iter().enumerate() {

@@ -15,7 +15,7 @@
 //! and deletes into the target database.
 
 use crate::database::Database;
-use crate::BranchIndex;
+use crate::primitives::branch::BranchIndex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 

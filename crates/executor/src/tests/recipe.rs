@@ -184,7 +184,10 @@ fn test_recipe_seed_blocked_in_read_only_mode() {
     let executor = Executor::new_with_mode(db, AccessMode::ReadOnly);
 
     let result = executor.execute(Command::RecipeSeed);
-    assert!(result.is_err(), "RecipeSeed should be rejected in read-only mode");
+    assert!(
+        result.is_err(),
+        "RecipeSeed should be rejected in read-only mode"
+    );
 
     // Verify error message mentions read-only
     let err = result.unwrap_err();

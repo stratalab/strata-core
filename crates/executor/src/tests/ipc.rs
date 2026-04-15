@@ -4,10 +4,14 @@ use crate::ipc::client::IpcClient;
 use crate::ipc::protocol::{self, Request, Response};
 use crate::ipc::server::IpcServer;
 use crate::ipc::wire;
-use crate::{Command, Output, Session, Value};
+use crate::{Command, Output, Session, Strata, Value};
 use strata_engine::database::search_only_primary_spec;
+use strata_engine::database::OPEN_DATABASES;
 use strata_engine::Database;
+use strata_engine::SearchSubsystem;
+use strata_graph::GraphSubsystem;
 use strata_security::AccessMode;
+use strata_vector::VectorSubsystem;
 
 // =========================================================================
 // Wire protocol tests
@@ -112,6 +116,20 @@ fn setup_server() -> (tempfile::TempDir, IpcServer) {
             .ok(); // ignore if exists
     }
 
+    let server = IpcServer::start(dir.path(), db, AccessMode::ReadWrite).unwrap();
+    (dir, server)
+}
+
+fn setup_server_with_default_branch(default_branch: &str) -> (tempfile::TempDir, IpcServer) {
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open_runtime(
+        strata_engine::database::OpenSpec::primary(dir.path())
+            .with_subsystem(GraphSubsystem)
+            .with_subsystem(VectorSubsystem)
+            .with_subsystem(SearchSubsystem)
+            .with_default_branch(default_branch),
+    )
+    .unwrap();
     let server = IpcServer::start(dir.path(), db, AccessMode::ReadWrite).unwrap();
     (dir, server)
 }
@@ -227,6 +245,48 @@ fn ipc_transaction() {
 }
 
 #[test]
+fn ipc_strata_open_uses_remote_configured_default_branch() {
+    let (dir, mut server) = setup_server_with_default_branch("main");
+    OPEN_DATABASES.lock().clear();
+
+    let db = Strata::open(dir.path()).unwrap();
+    assert!(db.is_ipc());
+    assert_eq!(db.current_branch(), "main");
+    assert_eq!(db.info().unwrap().default_branch, "main");
+
+    db.kv_put("ipc-default", "hello").unwrap();
+
+    let socket_path = server.socket_path().to_path_buf();
+    let mut client = IpcClient::connect(&socket_path).unwrap();
+
+    assert!(matches!(
+        client
+            .execute(Command::KvGet {
+                branch: Some(crate::types::BranchId::from("main")),
+                space: None,
+                key: "ipc-default".to_string(),
+                as_of: None,
+            })
+            .unwrap(),
+        Output::MaybeVersioned(Some(_))
+    ));
+
+    assert!(matches!(
+        client
+            .execute(Command::KvGet {
+                branch: Some(crate::types::BranchId::from("default")),
+                space: None,
+                key: "ipc-default".to_string(),
+                as_of: None,
+            })
+            .unwrap(),
+        Output::MaybeVersioned(None)
+    ));
+
+    server.shutdown();
+}
+
+#[test]
 fn ipc_multiple_clients() {
     let (_dir, mut server) = setup_server();
     let socket_path = server.socket_path().to_path_buf();
@@ -288,7 +348,10 @@ fn ipc_session_has_no_local_executor() {
     assert!(matches!(session, Session::Ipc(_)));
     assert!(session.executor().is_none());
     assert!(!session.in_transaction());
-    assert!(matches!(session.execute(Command::Ping).unwrap(), Output::Pong { .. }));
+    assert!(matches!(
+        session.execute(Command::Ping).unwrap(),
+        Output::Pong { .. }
+    ));
 
     server.shutdown();
 }
