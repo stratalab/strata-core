@@ -70,9 +70,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@cargo-hack
       - name: Feature powerset check
-        run: cargo hack --feature-powerset --depth 2 check --workspace --exclude strata-inference
+        # usearch-enabled is root-crate only, not forwarded through workspace
+        run: cargo hack --feature-powerset --depth 2 --exclude-features usearch-enabled check --workspace --exclude strata-inference
       - name: Per-feature test
-        run: cargo hack --each-feature test --workspace --exclude strata-inference
+        run: cargo hack --each-feature --exclude-features usearch-enabled test --workspace --exclude strata-inference
 
   build:
     needs: test
