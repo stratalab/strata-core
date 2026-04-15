@@ -570,8 +570,14 @@ fn test_ephemeral_not_registered() {
 
 #[test]
 fn test_open_uses_registry() {
+    use std::time::{SystemTime, UNIX_EPOCH};
     let temp_dir = TempDir::new().unwrap();
-    let db_path = temp_dir.path().join("singleton_via_open");
+    // Use a unique subdir name to avoid registry collisions in parallel tests
+    let unique_id = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let db_path = temp_dir.path().join(format!("singleton_via_open_{}", unique_id));
 
     // Open via Database::open twice
     let db1 = Database::open(&db_path).unwrap();
