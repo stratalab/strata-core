@@ -499,11 +499,30 @@ impl Database {
         *self.durability_mode.read()
     }
 
+    pub(crate) fn start_flush_thread(
+        &self,
+        mode: DurabilityMode,
+        wal: &Arc<ParkingMutex<WalWriter>>,
+    ) -> StrataResult<()> {
+        debug_assert!(matches!(mode, DurabilityMode::Standard { .. }));
+        self.flush_shutdown.store(false, Ordering::SeqCst);
+        if let Some(handle) = Self::spawn_wal_flush_thread(mode, wal, &self.flush_shutdown)? {
+            *self.flush_handle.lock() = Some(handle);
+        }
+        Ok(())
+    }
+
     pub(crate) fn stop_flush_thread(&self) {
         self.flush_shutdown.store(true, Ordering::SeqCst);
         if let Some(handle) = self.flush_handle.lock().take() {
             handle.thread().unpark();
             let _ = handle.join();
+        }
+    }
+
+    fn update_runtime_signature_durability(&self, mode: DurabilityMode) {
+        if let Some(signature) = self.runtime_signature() {
+            self.set_runtime_signature(signature.with_durability_mode(mode));
         }
     }
 
@@ -1354,32 +1373,48 @@ impl Database {
         })?;
 
         let old_mode = wal.lock().durability_mode();
+        if old_mode == mode {
+            *self.durability_mode.write() = mode;
+            self.update_runtime_signature_durability(mode);
+            return Ok(());
+        }
 
-        // Stop the existing Standard-mode flush thread before changing modes or
-        // respawning with a new interval.
-        if matches!(old_mode, DurabilityMode::Standard { .. }) && old_mode != mode {
+        if matches!(mode, DurabilityMode::Cache) || matches!(old_mode, DurabilityMode::Cache) {
+            return Err(StrataError::invalid_input(
+                "Cannot switch to or from Cache mode at runtime".to_string(),
+            ));
+        }
+
+        let had_standard_thread = matches!(old_mode, DurabilityMode::Standard { .. });
+        if had_standard_thread {
             self.stop_flush_thread();
         }
 
-        // Apply to the WAL writer
-        wal.lock()
-            .set_durability_mode(mode)
-            .map_err(|e| StrataError::invalid_input(e.to_string()))?;
-        *self.durability_mode.write() = mode;
+        if let Err(e) = wal.lock().set_durability_mode(mode) {
+            if had_standard_thread {
+                self.start_flush_thread(old_mode, wal)?;
+            }
+            return Err(StrataError::invalid_input(e.to_string()));
+        }
 
         if matches!(mode, DurabilityMode::Standard { .. }) {
-            let mut handle_guard = self.flush_handle.lock();
-            if handle_guard.is_none() {
-                // Reset the shutdown flag in case a previous thread was stopped
-                self.flush_shutdown.store(false, Ordering::SeqCst);
-                if let Some(handle) = Self::spawn_wal_flush_thread(mode, wal, &self.flush_shutdown)?
-                {
-                    *handle_guard = Some(handle);
+            if let Err(e) = self.start_flush_thread(mode, wal) {
+                let rollback_err = wal.lock().set_durability_mode(old_mode);
+                if rollback_err.is_ok() && had_standard_thread {
+                    self.start_flush_thread(old_mode, wal)?;
                 }
+                if let Err(rollback_err) = rollback_err {
+                    return Err(StrataError::internal(format!(
+                        "failed to start flush thread after durability switch: {}; rollback failed: {}",
+                        e, rollback_err
+                    )));
+                }
+                return Err(e);
             }
-        } else {
-            self.stop_flush_thread();
         }
+
+        *self.durability_mode.write() = mode;
+        self.update_runtime_signature_durability(mode);
 
         Ok(())
     }

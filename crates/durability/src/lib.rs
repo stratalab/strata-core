@@ -133,15 +133,16 @@ pub mod __internal {
 
     /// Snapshot of the last background sync failure.
     #[derive(Debug, Clone)]
+    #[doc(hidden)]
     pub struct BackgroundSyncError {
         /// The underlying IO error category.
-        pub kind: io::ErrorKind,
+        kind: io::ErrorKind,
         /// Human-readable error message.
-        pub message: String,
+        message: String,
         /// Timestamp of the first observed failure in the current streak.
-        pub first_observed_at: SystemTime,
+        first_observed_at: SystemTime,
         /// Number of consecutive failed sync attempts.
-        pub failed_sync_count: u64,
+        failed_sync_count: u64,
     }
 
     impl From<&WriterBgError> for BackgroundSyncError {
@@ -157,6 +158,7 @@ pub mod __internal {
 
     /// Handle for an in-flight background sync.
     #[must_use = "BackgroundSyncHandle must be consumed via commit_background_sync or abort_background_sync"]
+    #[doc(hidden)]
     pub struct BackgroundSyncHandle(pub(crate) WriterSyncHandle);
 
     impl BackgroundSyncHandle {
@@ -167,6 +169,7 @@ pub mod __internal {
     }
 
     /// Engine-only extension trait for the three-phase background sync API.
+    #[doc(hidden)]
     pub trait WalWriterEngineExt {
         /// Starts a background sync if one is due.
         fn begin_background_sync(&mut self) -> io::Result<Option<BackgroundSyncHandle>>;
@@ -176,10 +179,30 @@ pub mod __internal {
         fn abort_background_sync(&mut self, handle: BackgroundSyncHandle, error: io::Error);
         /// Returns the last background sync error, if any.
         fn bg_error(&self) -> Option<BackgroundSyncError>;
-        /// Clears the last background sync error.
-        fn clear_bg_error(&mut self);
         /// Returns whether a background sync is currently in flight.
         fn sync_in_flight(&self) -> bool;
+    }
+
+    impl BackgroundSyncError {
+        /// Returns the underlying IO error category.
+        pub fn kind(&self) -> io::ErrorKind {
+            self.kind
+        }
+
+        /// Returns the human-readable error message.
+        pub fn message(&self) -> &str {
+            &self.message
+        }
+
+        /// Returns the first-observed timestamp for the current failure streak.
+        pub fn first_observed_at(&self) -> SystemTime {
+            self.first_observed_at
+        }
+
+        /// Returns the number of consecutive failed sync attempts.
+        pub fn failed_sync_count(&self) -> u64 {
+            self.failed_sync_count
+        }
     }
 
     impl WalWriterEngineExt for WalWriter {
@@ -198,10 +221,6 @@ pub mod __internal {
 
         fn bg_error(&self) -> Option<BackgroundSyncError> {
             crate::wal::writer::WalWriter::bg_error(self).map(BackgroundSyncError::from)
-        }
-
-        fn clear_bg_error(&mut self) {
-            crate::wal::writer::WalWriter::clear_bg_error(self)
         }
 
         fn sync_in_flight(&self) -> bool {

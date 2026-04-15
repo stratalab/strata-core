@@ -534,6 +534,13 @@ impl Database {
             let shutdown = Arc::clone(shutdown);
             let interval = std::time::Duration::from_millis(interval_ms);
 
+            #[cfg(test)]
+            if crate::database::test_hooks::take_flush_thread_spawn_failure() {
+                return Err(StrataError::internal(
+                    "injected flush thread spawn failure".to_string(),
+                ));
+            }
+
             let handle = std::thread::Builder::new()
                 .name("strata-wal-flush".to_string())
                 .spawn(move || {

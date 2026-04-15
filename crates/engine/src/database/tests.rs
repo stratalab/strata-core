@@ -2331,6 +2331,139 @@ fn test_set_durability_mode_updates_database_state() {
 }
 
 #[test]
+#[serial(open_databases)]
+fn test_set_durability_mode_updates_runtime_signature_for_reuse_checks() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("runtime_signature_durability");
+    let db = Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
+    )
+    .unwrap();
+
+    db.set_durability_mode(DurabilityMode::Always).unwrap();
+    assert_eq!(
+        db.runtime_signature().unwrap().durability_mode,
+        DurabilityMode::Always,
+        "runtime signature must track live durability mode"
+    );
+
+    let err = match Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
+    ) {
+        Ok(_) => panic!("reopen with stale config should not reuse a live-switched database"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::IncompatibleReuse { .. }),
+        "expected IncompatibleReuse, got {:?}",
+        err
+    );
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+#[serial]
+fn test_set_durability_mode_cache_error_preserves_flush_thread() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("durability_cache_reject_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    let original_thread_id = db
+        .flush_handle
+        .lock()
+        .as_ref()
+        .expect("standard mode should start a flush thread")
+        .thread()
+        .id();
+
+    assert!(db.set_durability_mode(DurabilityMode::Cache).is_err());
+    assert_eq!(
+        *db.durability_mode.read(),
+        DurabilityMode::standard_default(),
+        "rejected runtime switch must leave database durability state unchanged"
+    );
+    assert_eq!(
+        db.runtime_signature().unwrap().durability_mode,
+        DurabilityMode::standard_default(),
+        "rejected runtime switch must not mutate registry compatibility state"
+    );
+
+    {
+        let guard = db.flush_handle.lock();
+        let handle = guard
+            .as_ref()
+            .expect("rejected runtime switch must keep the existing flush thread");
+        assert_eq!(
+            handle.thread().id(),
+            original_thread_id,
+            "rejected runtime switch should not tear down the existing flush thread"
+        );
+        assert!(
+            !handle.is_finished(),
+            "rejected runtime switch must leave the existing flush thread running"
+        );
+    }
+
+    db.shutdown().unwrap();
+}
+
+#[test]
+#[serial]
+fn test_set_durability_mode_spawn_failure_rolls_back_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("durability_spawn_failure_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    super::test_hooks::clear_flush_thread_spawn_failure();
+    super::test_hooks::inject_flush_thread_spawn_failure();
+
+    let err = db
+        .set_durability_mode(DurabilityMode::Standard {
+            interval_ms: 1,
+            batch_size: 64,
+        })
+        .expect_err("injected spawn failure should bubble up");
+
+    super::test_hooks::clear_flush_thread_spawn_failure();
+
+    assert!(
+        matches!(err, StrataError::Internal { .. }),
+        "expected internal error from injected spawn failure, got {:?}",
+        err
+    );
+    assert_eq!(
+        *db.durability_mode.read(),
+        DurabilityMode::standard_default(),
+        "spawn failure must roll database durability state back"
+    );
+    assert_eq!(
+        db.wal_writer.as_ref().unwrap().lock().durability_mode(),
+        DurabilityMode::standard_default(),
+        "spawn failure must roll WAL writer durability mode back"
+    );
+    assert_eq!(
+        db.runtime_signature().unwrap().durability_mode,
+        DurabilityMode::standard_default(),
+        "spawn failure must roll registry compatibility state back"
+    );
+    assert!(
+        db.flush_handle
+            .lock()
+            .as_ref()
+            .is_some_and(|handle| !handle.is_finished()),
+        "spawn failure must restore the prior standard-mode flush thread"
+    );
+
+    db.shutdown().unwrap();
+}
+
+#[test]
 #[serial]
 fn test_background_sync_failure_sets_bg_error_and_retries() {
     let temp_dir = TempDir::new().unwrap();
@@ -2365,8 +2498,8 @@ fn test_background_sync_failure_sets_bg_error_and_retries() {
         .lock()
         .bg_error()
         .expect("expected background sync failure");
-    assert_eq!(failure.kind, std::io::ErrorKind::Other);
-    assert_eq!(failure.failed_sync_count, 1);
+    assert_eq!(failure.kind(), std::io::ErrorKind::Other);
+    assert_eq!(failure.failed_sync_count(), 1);
 
     wait_until(Duration::from_secs(2), || {
         db.wal_writer.as_ref().unwrap().lock().bg_error().is_none()
