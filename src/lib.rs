@@ -23,7 +23,7 @@
 //!     db.event_append("tool_call", serde_json::json!({"tool": "search"}).into())?;
 //!
 //!     // Branch isolation (like git branches)
-//!     db.create_branch("experiment")?;
+//!     db.branches().create("experiment")?;
 //!     db.set_branch("experiment")?;
 //!     assert!(db.kv_get("user:name")?.is_none()); // isolated
 //!
@@ -44,7 +44,7 @@
 //! | **State Cell** | CAS-based coordination | `state_set`, `state_get`, `state_cas` |
 //! | **JSON Store** | Structured documents | `json_set`, `json_get`, `json_delete` |
 //! | **Vector Store** | Embeddings, similarity search | `vector_upsert`, `vector_query` |
-//! | **Branch** | Data isolation | `create_branch`, `set_branch`, `list_branches` |
+//! | **Branch** | Data isolation | `branches().create()`, `set_branch`, `branches().list()` |
 //!
 //! # Architecture
 //!
