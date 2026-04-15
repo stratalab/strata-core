@@ -93,6 +93,53 @@ fn test_kv_put_get_parity() {
 }
 
 #[test]
+fn test_executor_uses_configured_default_branch() {
+    let db = Database::open_runtime(search_only_cache_spec().with_default_branch("main")).unwrap();
+    let executor = Executor::new(db);
+
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "configured-default".to_string(),
+            value: Value::String("main".into()),
+        })
+        .unwrap();
+
+    match executor
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("main")),
+            space: None,
+            key: "configured-default".to_string(),
+            as_of: None,
+        })
+        .unwrap()
+    {
+        Output::MaybeVersioned(Some(vv)) => {
+            assert_eq!(vv.value, Value::String("main".into()));
+        }
+        other => panic!("expected MaybeVersioned(Some), got {:?}", other),
+    }
+
+    assert!(matches!(
+        executor
+            .execute(Command::KvGet {
+                branch: Some(BranchId::from("default")),
+                space: None,
+                key: "configured-default".to_string(),
+                as_of: None,
+            })
+            .unwrap(),
+        Output::MaybeVersioned(None)
+    ));
+
+    match executor.execute(Command::Info).unwrap() {
+        Output::DatabaseInfo(info) => assert_eq!(info.default_branch, "main"),
+        other => panic!("expected DatabaseInfo, got {:?}", other),
+    }
+}
+
+#[test]
 fn test_kv_delete_parity() {
     let (executor, p) = create_test_environment();
     let branch_id = strata_core::types::BranchId::from_bytes([0u8; 16]);

@@ -43,7 +43,7 @@ use strata_core::{Event, JsonPath, JsonValue, StrataError, Value, Version, Versi
 /// ## Not Supported in Transactions
 ///
 /// - **Vector**: requires in-memory index backends; use `VectorStore` directly
-/// - **Branch**: metadata/status operations; use `BranchIndex` directly
+/// - **Branch**: metadata/status operations; use `Database::branches()`
 ///
 /// These return `Err(StrataError::InvalidInput)` with guidance on the
 /// correct API to use.

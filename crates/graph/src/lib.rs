@@ -27,11 +27,11 @@ pub mod traversal;
 pub mod types;
 
 pub use branch_dag::GraphSubsystem;
+pub use store::{GraphBackendState, StagedGraphOp};
 pub use strata_core::branch_dag::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
     BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
-pub use store::{GraphBackendState, StagedGraphOp};
 
 use std::sync::Arc;
 

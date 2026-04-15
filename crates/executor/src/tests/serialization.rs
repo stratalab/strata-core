@@ -469,6 +469,7 @@ fn test_output_database_info() {
         uptime_secs: 3600,
         branch_count: 10,
         total_keys: 1000,
+        default_branch: "default".to_string(),
     }));
 }
 
@@ -993,7 +994,7 @@ fn test_command_durability_counters() {
 
 #[test]
 fn test_output_branch_forked() {
-    test_output_round_trip(Output::BranchForked(strata_engine::branch_ops::ForkInfo {
+    test_output_round_trip(Output::BranchForked(strata_engine::ForkInfo {
         source: "main".to_string(),
         destination: "experiment".to_string(),
         keys_copied: 0,
@@ -1004,7 +1005,7 @@ fn test_output_branch_forked() {
 
 #[test]
 fn test_output_branch_diff() {
-    use strata_engine::branch_ops::*;
+    use strata_engine::*;
     test_output_round_trip(Output::BranchDiff(BranchDiffResult {
         branch_a: "main".to_string(),
         branch_b: "experiment".to_string(),
@@ -1034,7 +1035,7 @@ fn test_output_branch_diff() {
 
 #[test]
 fn test_output_branch_merged() {
-    test_output_round_trip(Output::BranchMerged(strata_engine::branch_ops::MergeInfo {
+    test_output_round_trip(Output::BranchMerged(strata_engine::MergeInfo {
         source: "experiment".to_string(),
         target: "main".to_string(),
         keys_applied: 5,

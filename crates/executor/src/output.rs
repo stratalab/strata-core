@@ -6,8 +6,9 @@
 
 use serde::{Deserialize, Serialize};
 use strata_core::Value;
-use strata_engine::branch_ops::{
-    BranchDiffResult, CherryPickInfo, ForkInfo, MergeInfo, NoteInfo, RevertInfo, TagInfo,
+use strata_engine::{
+    BranchDiffResult, CherryPickInfo, ForkInfo, MergeBaseInfo, MergeInfo, NoteInfo, RevertInfo,
+    TagInfo, ThreeWayDiffResult,
 };
 use strata_engine::{HealthReport, StrataConfig, SystemMetrics, WalCounters};
 
@@ -203,10 +204,10 @@ pub enum Output {
     BranchMerged(MergeInfo),
 
     /// Three-way diff result
-    ThreeWayDiff(strata_engine::branch_ops::ThreeWayDiffResult),
+    ThreeWayDiff(ThreeWayDiffResult),
 
     /// Merge base info result
-    MergeBaseInfo(Option<strata_engine::branch_ops::MergeBaseInfo>),
+    MergeBaseInfo(Option<MergeBaseInfo>),
 
     /// Branch revert result
     BranchReverted(RevertInfo),

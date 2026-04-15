@@ -42,10 +42,9 @@ pub use merge_registry::{
     VectorMergePrecheckFn,
 };
 pub use observers::{
-    AbortInfo, AbortObserver, AbortObserverRegistry, BranchOpEvent, BranchOpKind,
-    BranchOpObserver, BranchOpObserverRegistry, CommitInfo, CommitObserver,
-    CommitObserverRegistry, ObserverError, ObserverErrorKind, ReplayInfo, ReplayObserver,
-    ReplayObserverRegistry,
+    AbortInfo, AbortObserver, AbortObserverRegistry, BranchOpEvent, BranchOpKind, BranchOpObserver,
+    BranchOpObserverRegistry, CommitInfo, CommitObserver, CommitObserverRegistry, ObserverError,
+    ObserverErrorKind, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
 };
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
@@ -715,6 +714,32 @@ impl Database {
         self.runtime_signature.read().clone()
     }
 
+    pub(crate) fn configured_default_branch(&self) -> Option<String> {
+        self.runtime_signature()
+            .and_then(|signature| signature.default_branch)
+    }
+
+    /// Return the runtime-configured default branch, if any.
+    ///
+    /// This is populated by `Database::open_runtime()` from the compatibility
+    /// signature and may differ from the legacy executor fallback of
+    /// literal `"default"`.
+    pub fn default_branch_name(&self) -> Option<String> {
+        self.configured_default_branch().or_else(|| {
+            crate::primitives::branch::read_default_branch_marker(self)
+                .map_err(|error| {
+                    tracing::warn!(
+                        target: "strata::db",
+                        error = %error,
+                        "Failed to read persisted default-branch marker"
+                    );
+                    error
+                })
+                .ok()
+                .flatten()
+        })
+    }
+
     // =========================================================================
     // Merge Handler Registry
     // =========================================================================
@@ -746,6 +771,20 @@ impl Database {
     /// ```
     pub fn branches(self: &Arc<Self>) -> BranchService {
         BranchService::new(self.clone())
+    }
+
+    /// Ensure the reserved `_system_` branch exists for subsystem bootstrap.
+    ///
+    /// This is a narrow lifecycle helper for workspace-internal subsystem
+    /// initialization. User-visible branch management should go through
+    /// `db.branches()`.
+    #[doc(hidden)]
+    pub fn ensure_system_branch_exists(self: &Arc<Self>) -> StrataResult<()> {
+        let index = crate::primitives::branch::BranchIndex::new(self.clone());
+        if index.exists(crate::SYSTEM_BRANCH)? {
+            return Ok(());
+        }
+        index.create_branch(crate::SYSTEM_BRANCH).map(|_| ())
     }
 
     /// Run freeze hooks on all registered subsystems.

@@ -128,9 +128,7 @@ mod invariant_1_addressable {
     #[test]
     fn branch_has_stable_entity_ref() {
         let (db, branch_id) = setup();
-        let index = BranchIndex::new(db);
-
-        index.create_branch("test-branch").unwrap();
+        db.branches().create("test-branch").unwrap();
 
         // For branches, the EntityRef uses the BranchId (UUID), not the name
         let entity_ref = EntityRef::branch(branch_id);
@@ -264,25 +262,25 @@ mod invariant_2_versioned {
         assert!(matches!(version, Version::Counter(2)));
     }
 
-    // --- BranchIndex ---
+    // --- Branch metadata ---
     #[test]
     fn branch_get_returns_versioned() {
         let (db, _) = setup();
-        let index = BranchIndex::new(db);
+        db.branches().create("test-branch").unwrap();
 
-        index.create_branch("test-branch").unwrap();
-
-        let versioned = index.get_branch("test-branch").unwrap().unwrap();
+        let versioned = db
+            .branches()
+            .info_versioned("test-branch")
+            .unwrap()
+            .unwrap();
         assert_eq!(versioned.value.name, "test-branch");
     }
 
     #[test]
-    fn branch_create_returns_versioned() {
+    fn branch_create_returns_metadata() {
         let (db, _) = setup();
-        let index = BranchIndex::new(db);
-
-        let versioned = index.create_branch("test-branch").unwrap();
-        assert_eq!(versioned.value.name, "test-branch");
+        let metadata = db.branches().create("test-branch").unwrap();
+        assert_eq!(metadata.name, "test-branch");
     }
 }
 
@@ -480,24 +478,24 @@ mod invariant_4_lifecycle {
     #[test]
     fn branch_full_lifecycle() {
         let (db, _) = setup();
-        let index = BranchIndex::new(db);
+        let branches = db.branches();
 
         // Create
-        let created = index.create_branch("lifecycle-branch").unwrap();
-        let branch_name = &created.value.name;
+        let created = branches.create("lifecycle-branch").unwrap();
+        let branch_name = created.name.clone();
 
         // Exist
-        assert!(index.exists(branch_name).unwrap());
+        assert!(branches.exists(&branch_name).unwrap());
 
         // Read back
-        let branch = index.get_branch(branch_name).unwrap().unwrap();
-        assert_eq!(branch.value.name, *branch_name);
+        let branch = branches.info_versioned(&branch_name).unwrap().unwrap();
+        assert_eq!(branch.value.name, branch_name);
 
         // Note: update_status() removed in MVP simplification
 
         // Destroy
-        index.delete_branch(branch_name).unwrap();
-        assert!(!index.exists(branch_name).unwrap());
+        branches.delete(&created.name).unwrap();
+        assert!(!branches.exists(&created.name).unwrap());
     }
 }
 
@@ -658,13 +656,13 @@ mod invariant_6_introspectable {
     #[test]
     fn branch_has_exists_check() {
         let (db, _) = setup();
-        let index = BranchIndex::new(db);
+        let branches = db.branches();
 
-        assert!(!index.exists("test-branch").unwrap());
+        assert!(!branches.exists("test-branch").unwrap());
 
-        index.create_branch("test-branch").unwrap();
+        branches.create("test-branch").unwrap();
 
-        assert!(index.exists("test-branch").unwrap());
+        assert!(branches.exists("test-branch").unwrap());
     }
 }
 

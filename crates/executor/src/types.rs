@@ -12,7 +12,8 @@ use strata_core::Value;
 
 /// Branch identifier.
 ///
-/// Can be "default" for the default branch, or a UUID string for named branches.
+/// This is typically a user-visible branch name such as `"default"` or
+/// `"main"`, but may also be a UUID string for generated branches.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BranchId(
     /// The underlying string identifier.
@@ -26,7 +27,7 @@ impl Default for BranchId {
 }
 
 impl BranchId {
-    /// Check if this is the default branch.
+    /// Check if this is the literal legacy `"default"` branch name.
     pub fn is_default(&self) -> bool {
         self.0 == "default"
     }
@@ -356,6 +357,8 @@ pub struct DatabaseInfo {
     pub branch_count: u64,
     /// Total number of keys across all branches.
     pub total_keys: u64,
+    /// Effective default branch used when commands omit a branch.
+    pub default_branch: String,
 }
 
 // =============================================================================

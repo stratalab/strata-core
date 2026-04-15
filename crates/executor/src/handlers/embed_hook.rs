@@ -735,7 +735,7 @@ mod tests {
         db.set_auto_embed(true);
         let p = Arc::new(Primitives::new(db));
         // Ensure the default branch exists.
-        let _ = p.branch.create_branch(&BranchId::default().to_string());
+        let _ = p.db.branches().create(&BranchId::default().to_string());
         p
     }
 

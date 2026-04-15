@@ -252,6 +252,36 @@ impl VectorStore {
         Ok(n)
     }
 
+    /// Purge every loaded collection for a branch, across all spaces.
+    ///
+    /// Used during branch deletion so recreated branches cannot recover stale
+    /// vectors from orphaned in-memory backends or sidecar disk caches.
+    pub fn purge_collections_in_branch(&self, branch_id: BranchId) -> VectorResult<usize> {
+        let state = self.state()?;
+        let target_cids: Vec<CollectionId> = state
+            .backends
+            .iter()
+            .filter(|entry| entry.key().branch_id == branch_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        let n = target_cids.len();
+        let data_dir = self.db.data_dir().to_path_buf();
+        for cid in &target_cids {
+            state.backends.remove(cid);
+            crate::recovery::purge_collection_disk_cache(&data_dir, cid);
+        }
+        if n > 0 {
+            info!(
+                target: "strata::vector",
+                branch_id = %branch_id,
+                purged = n,
+                "Purged vector collections during branch delete"
+            );
+        }
+        Ok(n)
+    }
+
     /// List all collections for a branch
     ///
     /// Returns CollectionInfo for each collection, including current vector count.

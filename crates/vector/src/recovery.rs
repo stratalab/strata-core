@@ -63,12 +63,20 @@ pub(crate) fn mmap_path(
     space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {
-    let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
-    data_dir
-        .join("vectors")
-        .join(branch_hex)
+    branch_cache_dir(data_dir, branch_id)
         .join(space)
         .join(format!("{}.vec", collection_name))
+}
+
+/// Compute the on-disk cache directory for a branch.
+///
+/// Layout: `{data_dir}/vectors/{branch_hex}/`.
+pub(crate) fn branch_cache_dir(
+    data_dir: &std::path::Path,
+    branch_id: strata_core::types::BranchId,
+) -> std::path::PathBuf {
+    let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
+    data_dir.join("vectors").join(branch_hex)
 }
 
 /// Wipe the on-disk vector caches (`.vec` heap mmap and `_graphs/` graph
@@ -102,6 +110,31 @@ pub(crate) fn purge_collection_disk_cache(data_dir: &std::path::Path, cid: &supe
                 path = ?gdir,
                 error = %e,
                 "Failed to remove vector graph dir during purge"
+            );
+        }
+    }
+}
+
+/// Wipe the entire on-disk vector cache tree for a branch.
+///
+/// This is stronger than per-collection purge and is used during branch delete
+/// to remove orphan sidecar files that no longer have a loaded backend.
+pub(crate) fn purge_branch_disk_cache(
+    data_dir: &std::path::Path,
+    branch_id: strata_core::types::BranchId,
+) {
+    if data_dir.as_os_str().is_empty() {
+        return;
+    }
+
+    let branch_dir = branch_cache_dir(data_dir, branch_id);
+    if branch_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&branch_dir) {
+            tracing::warn!(
+                target: "strata::vector",
+                path = ?branch_dir,
+                error = %e,
+                "Failed to remove vector branch cache dir during purge"
             );
         }
     }
@@ -486,6 +519,20 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         Ok(())
     }
 
+    fn cleanup_deleted_branch(
+        &self,
+        db: &std::sync::Arc<strata_engine::Database>,
+        branch_id: &strata_core::types::BranchId,
+        _branch_name: &str,
+    ) -> strata_core::StrataResult<()> {
+        let store = crate::VectorStore::new(db.clone());
+        store
+            .purge_collections_in_branch(*branch_id)
+            .map_err(|e| strata_core::StrataError::internal(e.to_string()))?;
+        purge_branch_disk_cache(db.data_dir(), *branch_id);
+        Ok(())
+    }
+
     fn freeze(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
         db.freeze_vector_heaps()
     }
@@ -806,6 +853,9 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DistanceMetric, VectorStore};
+    use strata_engine::database::OpenSpec;
+    use strata_engine::Database;
 
     /// Two collections with the same `(branch, name)` in different
     /// spaces must produce distinct on-disk paths. Without this, the
@@ -829,5 +879,134 @@ mod tests {
         assert_ne!(ga, gb);
         assert!(ga.to_string_lossy().contains("tenant_a"));
         assert!(gb.to_string_lossy().contains("tenant_b"));
+    }
+
+    #[test]
+    fn test_branch_delete_purges_vector_caches_and_prevents_recovery_resurrection() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_name = "feature";
+        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+        let vec_path = mmap_path(temp.path(), branch_id, "default", "embeddings");
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(temp.path())
+                    .with_subsystem(VectorSubsystem)
+                    .with_subsystem(strata_engine::SearchSubsystem),
+            )
+            .unwrap();
+            let store = VectorStore::new(db.clone());
+
+            db.branches().create(branch_name).unwrap();
+            store
+                .create_collection(
+                    branch_id,
+                    "default",
+                    "embeddings",
+                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                )
+                .unwrap();
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "embeddings",
+                    "v1",
+                    &[1.0, 0.0, 0.0],
+                    None,
+                )
+                .unwrap();
+
+            db.flush().unwrap();
+            db.freeze_vector_heaps().unwrap();
+            assert!(
+                vec_path.exists(),
+                "expected branch collection mmap cache to exist before delete"
+            );
+
+            db.branches().delete(branch_name).unwrap();
+            assert!(
+                !vec_path.exists(),
+                "branch delete must purge stale vector mmap caches"
+            );
+        }
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(temp.path())
+                    .with_subsystem(VectorSubsystem)
+                    .with_subsystem(strata_engine::SearchSubsystem),
+            )
+            .unwrap();
+            let store = VectorStore::new(db.clone());
+
+            db.branches().create(branch_name).unwrap();
+            store
+                .create_collection(
+                    branch_id,
+                    "default",
+                    "embeddings",
+                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                )
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        let reopened = Database::open_runtime(
+            OpenSpec::primary(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(strata_engine::SearchSubsystem),
+        )
+        .unwrap();
+        let store = VectorStore::new(reopened);
+        let matches = store
+            .search(
+                branch_id,
+                "default",
+                "embeddings",
+                &[1.0, 0.0, 0.0],
+                10,
+                None,
+            )
+            .unwrap();
+        assert!(
+            matches.is_empty(),
+            "recreated branch collection must not recover stale vectors after restart"
+        );
+    }
+
+    #[test]
+    fn test_branch_delete_purges_orphan_branch_cache_dir() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_name = "feature";
+        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+        let branch_dir = branch_cache_dir(temp.path(), branch_id);
+        let orphan_file = branch_dir.join("default").join("orphan.vec");
+        let orphan_graph = branch_dir
+            .join("default")
+            .join("embeddings_graphs")
+            .join("seg_0.hgr");
+
+        let db = Database::open_runtime(
+            OpenSpec::primary(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(strata_engine::SearchSubsystem),
+        )
+        .unwrap();
+
+        db.branches().create(branch_name).unwrap();
+
+        std::fs::create_dir_all(orphan_file.parent().unwrap()).unwrap();
+        std::fs::write(&orphan_file, b"stale mmap cache").unwrap();
+        std::fs::create_dir_all(orphan_graph.parent().unwrap()).unwrap();
+        std::fs::write(&orphan_graph, b"stale graph cache").unwrap();
+        assert!(branch_dir.exists(), "expected synthetic branch cache dir");
+
+        db.branches().delete(branch_name).unwrap();
+
+        assert!(
+            !branch_dir.exists(),
+            "branch delete must purge the entire branch cache tree, including orphan files"
+        );
     }
 }

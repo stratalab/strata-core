@@ -69,7 +69,7 @@ use crate::{Command, Error, Executor, Output, Result};
 /// per-connection Session, so transaction state is managed server-side.
 pub enum Session {
     /// Database-backed local session state.
-    Local(LocalSession),
+    Local(Box<LocalSession>),
     /// IPC-backed remote session state.
     Ipc(IpcSession),
 }
@@ -90,20 +90,20 @@ pub struct IpcSession {
 impl Session {
     /// Create a new session.
     pub fn new(db: Arc<Database>) -> Self {
-        Self::Local(LocalSession {
+        Self::Local(Box::new(LocalSession {
             executor: Executor::new(db.clone()),
             db,
             txn: None,
-        })
+        }))
     }
 
     /// Create a new session with an explicit access mode.
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
-        Self::Local(LocalSession {
+        Self::Local(Box::new(LocalSession {
             executor: Executor::new_with_mode(db.clone(), access_mode),
             db,
             txn: None,
-        })
+        }))
     }
 
     /// Create a new IPC-backed session.
@@ -200,7 +200,7 @@ impl LocalSession {
             });
         }
 
-        cmd.resolve_defaults();
+        cmd.resolve_defaults_with(self.executor.default_branch());
 
         match &cmd {
             // Transaction lifecycle commands

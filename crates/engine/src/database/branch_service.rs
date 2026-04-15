@@ -172,8 +172,8 @@ fn reject_system_branch(name: &str, operation: &str) -> StrataResult<()> {
     Ok(())
 }
 
-fn reject_default_branch(name: &str, operation: &str) -> StrataResult<()> {
-    if name == "default" {
+fn reject_default_branch(db: &Database, name: &str, operation: &str) -> StrataResult<()> {
+    if db.default_branch_name().as_deref() == Some(name) {
         return Err(StrataError::invalid_operation(
             EntityRef::branch(resolve_branch_name(name)),
             format!("cannot {} the default branch", operation),
@@ -235,7 +235,7 @@ impl BranchService {
     /// Emits a DAG delete event if a DAG hook is installed.
     pub fn delete(&self, name: &str) -> StrataResult<()> {
         reject_system_branch(name, "delete")?;
-        reject_default_branch(name, "delete")?;
+        reject_default_branch(&self.db, name, "delete")?;
 
         let mut mutation = BranchMutation::new(&self.db);
         let branch_id = resolve_branch_name(name);
@@ -271,6 +271,15 @@ impl BranchService {
     pub fn info(&self, name: &str) -> StrataResult<Option<BranchMetadata>> {
         let index = BranchIndex::new(self.db.clone());
         index.get_branch(name).map(|opt| opt.map(|v| v.value))
+    }
+
+    /// Get branch metadata with version/timestamp details.
+    pub fn info_versioned(
+        &self,
+        name: &str,
+    ) -> StrataResult<Option<strata_core::Versioned<BranchMetadata>>> {
+        let index = BranchIndex::new(self.db.clone());
+        index.get_branch(name)
     }
 
     /// List all branch names.
@@ -904,6 +913,7 @@ fn dag_to_strata(e: BranchDagError) -> StrataError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::OpenSpec;
 
     #[test]
     fn test_validate_branch_name() {
@@ -945,9 +955,20 @@ mod tests {
 
     #[test]
     fn test_delete_default_branch_is_rejected_by_service() {
-        let db = Database::cache().unwrap();
-        let err = db.branches().delete("default").unwrap_err();
+        let db = Database::open_runtime(
+            OpenSpec::cache()
+                .with_subsystem(crate::search::SearchSubsystem)
+                .with_default_branch("main"),
+        )
+        .unwrap();
+        let err = db.branches().delete("main").unwrap_err();
         assert!(matches!(err, StrataError::InvalidOperation { .. }));
+    }
+
+    #[test]
+    fn test_literal_default_branch_is_not_special_without_runtime_config() {
+        let db = Database::cache().unwrap();
+        assert!(reject_default_branch(&db, "default", "delete").is_ok());
     }
 
     #[test]

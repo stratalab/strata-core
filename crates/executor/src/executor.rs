@@ -49,6 +49,7 @@ use crate::{Command, Error, Output, Result};
 pub struct Executor {
     primitives: Arc<Primitives>,
     access_mode: AccessMode,
+    default_branch: BranchId,
     /// Shared state for the embed refresh timer thread (condvar for instant shutdown).
     embed_refresh_state: Arc<EmbedRefreshState>,
     /// Handle for the embed refresh timer thread (joined on drop).
@@ -68,6 +69,13 @@ struct EmbedRefreshState {
 }
 
 impl Executor {
+    fn runtime_default_branch(db: &Database) -> BranchId {
+        BranchId::from(
+            db.default_branch_name()
+                .unwrap_or_else(|| "default".to_string()),
+        )
+    }
+
     /// Create a new executor from a database instance.
     pub fn new(db: Arc<Database>) -> Self {
         Self::new_with_mode(db, AccessMode::ReadWrite)
@@ -75,6 +83,7 @@ impl Executor {
 
     /// Create a new executor with an explicit access mode.
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
+        let default_branch = Self::runtime_default_branch(&db);
         let primitives = Arc::new(Primitives::new(db));
 
         // Log a startup hint when auto_embed is on but the model isn't downloaded yet.
@@ -107,6 +116,7 @@ impl Executor {
         Self {
             primitives,
             access_mode,
+            default_branch,
             embed_refresh_state: state,
             embed_refresh_handle: Some(handle),
         }
@@ -159,6 +169,11 @@ impl Executor {
         self.access_mode
     }
 
+    /// Returns the effective default branch used when commands omit a branch.
+    pub fn default_branch(&self) -> &BranchId {
+        &self.default_branch
+    }
+
     /// Auto-register a space on first write to a non-default space.
     ///
     /// This is idempotent: calling it on an already-registered space just
@@ -191,7 +206,7 @@ impl Executor {
             });
         }
 
-        cmd.resolve_defaults();
+        cmd.resolve_defaults_with(self.default_branch());
 
         // Reject data commands targeting reserved _system branches
         if let Some(branch) = cmd.resolved_branch() {
@@ -220,7 +235,7 @@ impl Executor {
             });
         }
 
-        cmd.resolve_defaults();
+        cmd.resolve_defaults_with(self.default_branch());
         self.dispatch(cmd)
     }
 
@@ -237,15 +252,20 @@ impl Executor {
             Command::Info => {
                 let branch_count = self
                     .primitives
-                    .branch
-                    .list_branches()
-                    .map(|ids| ids.len() as u64)
+                    .db
+                    .branches()
+                    .list()
+                    .map(|ids| {
+                        let has_default = ids.iter().any(|id| id == self.default_branch.as_str());
+                        ids.len() as u64 + u64::from(!has_default)
+                    })
                     .unwrap_or(0);
                 Ok(Output::DatabaseInfo(crate::types::DatabaseInfo {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     uptime_secs: self.primitives.db.uptime_secs(),
                     branch_count,
                     total_keys: self.primitives.db.approximate_total_keys(),
+                    default_branch: self.default_branch.as_str().to_string(),
                 }))
             }
             Command::Health => {

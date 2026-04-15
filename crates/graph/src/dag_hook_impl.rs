@@ -18,7 +18,7 @@
 //!
 //! Every hook early-returns for branch names that match
 //! `is_system_branch` (anything starting with `_system`). This is critical
-//! because `init_system_branch` calls `BranchIndex::create_branch(SYSTEM_BRANCH)`
+//! because `init_system_branch` ensures the reserved `_system_` branch exists
 //! during `Database::open` to create the `_system_` branch *before* the
 //! `_branch_dag` graph itself exists. Without the guard, the hook would
 //! try to write a node to a graph that doesn't exist yet, logging a noisy
