@@ -13,18 +13,18 @@ use rand::RngCore;
 use super::traits::{CodecError, StorageCodec};
 
 /// AES-256-GCM authenticated encryption codec.
-pub struct AesGcmCodec {
+pub(super) struct AesGcmCodec {
     key: [u8; 32],
 }
 
 impl AesGcmCodec {
     /// Create a new codec with the given 32-byte key.
-    pub fn new(key: [u8; 32]) -> Self {
+    pub(super) fn new(key: [u8; 32]) -> Self {
         AesGcmCodec { key }
     }
 
     /// Parse a 64-character hex string into a 32-byte key.
-    pub fn key_from_hex(hex: &str) -> Result<[u8; 32], CodecError> {
+    pub(super) fn key_from_hex(hex: &str) -> Result<[u8; 32], CodecError> {
         let hex = hex.trim();
         if hex.len() != 64 {
             return Err(CodecError::DecodeError {
@@ -55,7 +55,7 @@ impl StorageCodec for AesGcmCodec {
         let cipher = Aes256Gcm::new((&self.key).into());
 
         let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        rand::rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
 
         let ciphertext = cipher

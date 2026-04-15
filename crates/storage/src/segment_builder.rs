@@ -639,7 +639,7 @@ pub(crate) struct EntryHeaderRef<'a> {
 impl<'a> EntryHeaderRef<'a> {
     /// Typed key prefix (everything except trailing 8-byte commit_id).
     #[inline]
-    pub fn typed_key_prefix(&self) -> &[u8] {
+    pub(crate) fn typed_key_prefix(&self) -> &[u8] {
         &self.ik_bytes[..self.ik_bytes.len() - COMMIT_ID_SUFFIX_LEN]
     }
 }
