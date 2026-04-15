@@ -30,6 +30,9 @@ pub mod profile;
 mod registry;
 pub mod spec;
 
+#[cfg(test)]
+pub mod test_hooks;
+
 pub use branch_mutation::{BranchMutation, FailurePoint};
 pub use branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
@@ -1346,55 +1349,17 @@ impl Database {
         // If switching to Standard mode, ensure the background flush thread
         // is running. When the database was opened in Always mode, no flush
         // thread was started.
-        if let DurabilityMode::Standard { interval_ms, .. } = mode {
+        if matches!(mode, DurabilityMode::Standard { .. }) {
             let mut handle_guard = self.flush_handle.lock();
             if handle_guard.is_none() {
-                let wal_clone = Arc::clone(wal);
-                let shutdown = Arc::clone(&self.flush_shutdown);
-                let interval = std::time::Duration::from_millis(interval_ms);
                 // Reset the shutdown flag in case a previous thread was stopped
                 self.flush_shutdown.store(false, Ordering::SeqCst);
-                let handle = std::thread::Builder::new()
-                    .name("strata-wal-flush".to_string())
-                    .spawn(move || {
-                        while !shutdown.load(Ordering::Relaxed) {
-                            std::thread::sleep(interval);
-                            if shutdown.load(Ordering::Relaxed) {
-                                break;
-                            }
-                            // Background sync: briefly lock for BufWriter flush,
-                            // then fdatasync outside the lock.
-                            let sync_fd = {
-                                let mut w = wal_clone.lock();
-                                w.flush_active_meta();
-                                match w.prepare_background_sync() {
-                                    Ok(Some(fd)) => Some(fd),
-                                    Ok(None) => None,
-                                    Err(e) => {
-                                        tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
-                                        None
-                                    }
-                                }
-                            };
-                            if let Some(fd) = sync_fd {
-                                if let Err(e) = fd.sync_all() {
-                                    tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
-                                }
-                            }
-                        }
-                        // Final sync
-                        let mut wal = wal_clone.lock();
-                        if let Err(e) = wal.flush() {
-                            tracing::error!(target: "strata::wal", error = %e, "Final WAL flush failed during shutdown");
-                        }
-                    })
-                    .map_err(|e| {
-                        StrataError::internal(format!(
-                            "failed to spawn WAL flush thread: {}",
-                            e
-                        ))
-                    })?;
-                *handle_guard = Some(handle);
+                // Use the shared flush thread implementation (avoids code duplication)
+                if let Some(handle) =
+                    Self::spawn_wal_flush_thread(mode, wal, &self.flush_shutdown)?
+                {
+                    *handle_guard = Some(handle);
+                }
             }
         }
 

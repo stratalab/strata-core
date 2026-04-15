@@ -522,7 +522,12 @@ impl Database {
     /// Spawn the background WAL flush thread for Standard durability mode.
     ///
     /// Returns `None` for non-Standard modes (Cache, Always).
-    fn spawn_wal_flush_thread(
+    ///
+    /// Uses the three-phase sync API to avoid the counter-reset data-loss bug:
+    /// 1. `begin_background_sync` - snapshot state, flush BufWriter (inside lock)
+    /// 2. `sync_all` - fsync the file (outside lock)
+    /// 3. `commit_background_sync` or `abort_background_sync` (inside lock)
+    pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
         shutdown: &Arc<AtomicBool>,
@@ -540,14 +545,13 @@ impl Database {
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
-                        // Background sync: briefly lock WAL to flush BufWriter
-                        // to OS page cache, then fdatasync outside the lock.
-                        // The lock hold is microseconds (BufWriter flush only),
-                        // not milliseconds (no fdatasync under lock).
-                        let (sync_fd, meta_snapshot) = {
+
+                        // Phase 1: Begin background sync (inside lock)
+                        // Flushes BufWriter to OS page cache and returns a SyncHandle
+                        let (sync_handle, meta_snapshot) = {
                             let mut w = wal.lock();
-                            let fd = match w.prepare_background_sync() {
-                                Ok(Some(fd)) => Some(fd),
+                            let handle = match w.begin_background_sync() {
+                                Ok(Some(h)) => Some(h),
                                 Ok(None) => None,
                                 Err(e) => {
                                     tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
@@ -555,13 +559,32 @@ impl Database {
                                 }
                             };
                             let meta = w.snapshot_active_meta();
-                            (fd, meta)
+                            (handle, meta)
                         }; // WAL lock released — held only for BufWriter flush
-                        if let Some(fd) = sync_fd {
-                            if let Err(e) = fd.sync_all() {
-                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+
+                        // Phase 2: Perform sync_all outside the lock
+                        if let Some(handle) = sync_handle {
+                            // Fault injection point for testing
+                            #[cfg(test)]
+                            let sync_result = crate::database::test_hooks::maybe_inject_sync_failure()
+                                .map_or_else(|| handle.fd().sync_all(), Err);
+
+                            #[cfg(not(test))]
+                            let sync_result = handle.fd().sync_all();
+
+                            // Phase 3: Commit or abort (inside lock)
+                            let mut w = wal.lock();
+                            match sync_result {
+                                Ok(()) => {
+                                    w.commit_background_sync(handle);
+                                }
+                                Err(e) => {
+                                    tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
+                                    w.abort_background_sync(handle, e);
+                                }
                             }
                         }
+
                         // Write .meta sidecar outside the lock (best-effort, 2 fsyncs).
                         if let Some((meta, wal_dir)) = meta_snapshot {
                             if let Err(e) = meta.write_to_file(&wal_dir) {

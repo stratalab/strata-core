@@ -52,8 +52,8 @@ Planning:
 > **UPDATE THIS SECTION when starting a new tranche via `/tranche-setup`.**
 
 ```
-tranche: 2
-name: Runtime Authority
+tranche: 3
+name: Durability and Lifecycle
 change_class: cutover
 assurance_class: S4
 benchmark_required: true
