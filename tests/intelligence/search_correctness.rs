@@ -6,7 +6,7 @@ use crate::common::*;
 use strata_core::search_types::{PrimitiveType, SearchRequest};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_engine::{KVStore, BranchIndex};
+use strata_engine::KVStore;
 use crate::common::search::{substrate_search, verify_substrate_scores_decreasing};
 
 // ============================================================================
@@ -83,10 +83,9 @@ fn test_tier2_search_respects_branch_id() {
     let branch2 = BranchId::new();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
 
-    branch_index.create_branch(&branch1.to_string()).unwrap();
-    branch_index.create_branch(&branch2.to_string()).unwrap();
+    db.branches().create(&branch1.to_string()).unwrap();
+    db.branches().create(&branch2.to_string()).unwrap();
 
     // Add shared term to both branches
     kv.put(&branch1, "key1", Value::String("shared test term".into()))
@@ -110,10 +109,9 @@ fn test_tier2_branch_isolation() {
     let branch2 = BranchId::new();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
 
-    branch_index.create_branch(&branch1.to_string()).unwrap();
-    branch_index.create_branch(&branch2.to_string()).unwrap();
+    db.branches().create(&branch1.to_string()).unwrap();
+    db.branches().create(&branch2.to_string()).unwrap();
 
     // Add same key with different values to different branches
     kv.put(&branch1, "key", Value::String("branch1 test value".into()))

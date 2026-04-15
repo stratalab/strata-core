@@ -7,7 +7,7 @@ use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_core::id::CommitVersion;
-use strata_engine::branch_ops::{self, MergeStrategy};
+use strata_engine::{ForkOptions, MergeOptions, MergeStrategy};
 use strata_engine::SpaceIndex;
 
 // ============================================================================
@@ -189,15 +189,15 @@ fn many_concurrent_branches() {
 #[test]
 fn create_and_list_branches() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
     // Create some branches
-    branch_index.create_branch("branch_1").unwrap();
-    branch_index.create_branch("branch_2").unwrap();
-    branch_index.create_branch("branch_3").unwrap();
+    branches.create("branch_1").unwrap();
+    branches.create("branch_2").unwrap();
+    branches.create("branch_3").unwrap();
 
     // List all branches
-    let branches = branch_index.list_branches().unwrap();
+    let branches = branches.list().unwrap();
     assert!(branches.len() >= 3);
 
     // Verify our branches exist
@@ -209,13 +209,13 @@ fn create_and_list_branches() {
 #[test]
 fn branch_with_metadata() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
     // create_branch creates a branch with default metadata;
     // verify we can retrieve the branch and it has the expected fields.
-    branch_index.create_branch("with_metadata").unwrap();
+    branches.create("with_metadata").unwrap();
 
-    let branch = branch_index.get_branch("with_metadata").unwrap().unwrap();
+    let branch = branches.info_versioned("with_metadata").unwrap().unwrap();
     assert_eq!(branch.value.name, "with_metadata");
 }
 
@@ -355,12 +355,12 @@ fn json_documents_isolated_per_branch() {
 #[test]
 fn child_branch_does_not_inherit_parent_data_currently() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create parent branch and get its branch_id
-    let parent_meta = branch_index.create_branch("parent").unwrap();
-    let parent_branch_id = BranchId::from_string(&parent_meta.value.branch_id).unwrap();
+    let parent_meta = branches.create("parent").unwrap();
+    let parent_branch_id = BranchId::from_string(&parent_meta.branch_id).unwrap();
 
     kv.put(
         &parent_branch_id,
@@ -371,8 +371,8 @@ fn child_branch_does_not_inherit_parent_data_currently() {
     .unwrap();
 
     // Create child branch (create_branch makes a blank branch, not a fork)
-    let child_meta = branch_index.create_branch("child").unwrap();
-    let child_branch_id = BranchId::from_string(&child_meta.value.branch_id).unwrap();
+    let child_meta = branches.create("child").unwrap();
+    let child_branch_id = BranchId::from_string(&child_meta.branch_id).unwrap();
 
     // create_branch does NOT inherit parent's data — use fork_branch for that
     let child_value = kv.get(&child_branch_id, "default", "parent_key").unwrap();
@@ -397,18 +397,18 @@ fn child_branch_does_not_inherit_parent_data_currently() {
 #[test]
 fn test_fork_branch() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create source branch with data
-    branch_index.create_branch("source").unwrap();
+    branches.create("source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
     kv.put(&source_id, "default", "k1", Value::String("hello".into()))
         .unwrap();
     kv.put(&source_id, "default", "k2", Value::Int(42)).unwrap();
 
     // Fork it (no data copy)
-    let info = branch_ops::fork_branch(&test_db.db, "source", "forked").unwrap();
+    let info = test_db.db.branches().fork( "source", "forked").unwrap();
     assert_eq!(info.source, "source");
     assert_eq!(info.destination, "forked");
     assert_eq!(info.keys_copied, 0, "fork copies zero keys");
@@ -435,12 +435,12 @@ fn test_fork_branch() {
 #[test]
 fn test_fork_with_spaces() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let space_index = SpaceIndex::new(test_db.db.clone());
     let kv = test_db.kv();
 
     // Create source branch with multiple spaces
-    branch_index.create_branch("src").unwrap();
+    branches.create("src").unwrap();
     let src_id = strata_engine::primitives::branch::resolve_branch_name("src");
     space_index.register(src_id, "alpha").unwrap();
     space_index.register(src_id, "beta").unwrap();
@@ -450,7 +450,7 @@ fn test_fork_with_spaces() {
     kv.put(&src_id, "beta", "b-key", Value::Int(3)).unwrap();
 
     // Fork
-    let info = branch_ops::fork_branch(&test_db.db, "src", "dst").unwrap();
+    let info = test_db.db.branches().fork( "src", "dst").unwrap();
     assert!(info.spaces_copied >= 3);
 
     let dst_id = strata_engine::primitives::branch::resolve_branch_name("dst");
@@ -481,11 +481,11 @@ fn test_fork_with_spaces() {
 #[test]
 fn test_diff_branches() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("a").unwrap();
-    branch_index.create_branch("b").unwrap();
+    branches.create("a").unwrap();
+    branches.create("b").unwrap();
     let id_a = strata_engine::primitives::branch::resolve_branch_name("a");
     let id_b = strata_engine::primitives::branch::resolve_branch_name("b");
 
@@ -499,7 +499,7 @@ fn test_diff_branches() {
     kv.put(&id_b, "default", "only-b", Value::String("b".into()))
         .unwrap();
 
-    let diff = branch_ops::diff_branches(&test_db.db, "a", "b").unwrap();
+    let diff = test_db.db.branches().diff( "a", "b").unwrap();
     assert_eq!(diff.branch_a, "a");
     assert_eq!(diff.branch_b, "b");
     assert_eq!(diff.summary.total_modified, 1, "shared key is modified");
@@ -513,11 +513,11 @@ fn test_diff_branches() {
 #[test]
 fn test_diff_with_all_primitives() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("x").unwrap();
-    branch_index.create_branch("y").unwrap();
+    branches.create("x").unwrap();
+    branches.create("y").unwrap();
     let id_x = strata_engine::primitives::branch::resolve_branch_name("x");
     let id_y = strata_engine::primitives::branch::resolve_branch_name("y");
 
@@ -540,7 +540,7 @@ fn test_diff_with_all_primitives() {
     p.kv.put(&id_y, "default", "shared-key", Value::Int(20))
         .unwrap();
 
-    let diff = branch_ops::diff_branches(&test_db.db, "x", "y").unwrap();
+    let diff = test_db.db.branches().diff( "x", "y").unwrap();
 
     // kv-key is only in x → removed
     // doc is only in y → added
@@ -560,10 +560,10 @@ fn test_diff_with_all_primitives() {
 #[test]
 fn test_merge_branches_lww() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Write initial data before fork
@@ -571,7 +571,7 @@ fn test_merge_branches_lww() {
         .unwrap();
 
     // Fork target → source
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both modify "shared" (conflict), source adds a new key
@@ -587,13 +587,7 @@ fn test_merge_branches_lww() {
     )
     .unwrap();
 
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert!(info.keys_applied >= 2);
 
@@ -612,10 +606,10 @@ fn test_merge_branches_lww() {
 #[test]
 fn test_merge_branches_strict() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Write initial data before fork
@@ -623,7 +617,7 @@ fn test_merge_branches_strict() {
         .unwrap();
 
     // Fork target → source
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both modify "shared" to different values (conflict)
@@ -634,7 +628,7 @@ fn test_merge_branches_strict() {
 
     // Strict merge should fail with conflicts
     let result =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict));
     assert!(result.is_err());
 
     // Target should be unchanged
@@ -647,11 +641,11 @@ fn test_merge_branches_strict() {
 #[test]
 fn test_fork_diff_merge_roundtrip() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create original branch with data
-    branch_index.create_branch("original").unwrap();
+    branches.create("original").unwrap();
     let original_id = strata_engine::primitives::branch::resolve_branch_name("original");
     kv.put(&original_id, "default", "base", Value::Int(1))
         .unwrap();
@@ -659,7 +653,7 @@ fn test_fork_diff_merge_roundtrip() {
         .unwrap();
 
     // Fork it
-    branch_ops::fork_branch(&test_db.db, "original", "fork").unwrap();
+    test_db.db.branches().fork( "original", "fork").unwrap();
     let fork_id = strata_engine::primitives::branch::resolve_branch_name("fork");
 
     // Diverge: modify both branches
@@ -681,7 +675,7 @@ fn test_fork_diff_merge_roundtrip() {
         .unwrap();
 
     // Diff: original vs fork
-    let diff = branch_ops::diff_branches(&test_db.db, "original", "fork").unwrap();
+    let diff = test_db.db.branches().diff( "original", "fork").unwrap();
     assert!(
         diff.summary.total_modified >= 1,
         "shared should be modified"
@@ -690,13 +684,7 @@ fn test_fork_diff_merge_roundtrip() {
     assert!(diff.summary.total_added >= 1, "fork-only in B not A");
 
     // Merge fork → original (LWW)
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "fork",
-        "original",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("fork", "original", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert!(info.keys_applied >= 2, "Should apply fork-only and shared");
 
@@ -778,11 +766,11 @@ fn verify_event_chain(event_log: &EventLog, branch: &BranchId, space: &str) -> R
 #[test]
 fn event_merge_divergent_rejects() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let event = test_db.event();
 
     // Seed target with 3 events before fork so ancestor next_sequence=3.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     event
         .append(&target_id, "default", "t0", int_payload(0))
@@ -796,7 +784,7 @@ fn event_merge_divergent_rejects() {
     assert_eq!(event.len(&target_id, "default").unwrap(), 3);
 
     // Fork target → source (source inherits the 3 events).
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source appends 1 event of its own type.
@@ -816,13 +804,7 @@ fn event_merge_divergent_rejects() {
     assert_eq!(event.len(&target_id, "default").unwrap(), 5);
 
     // LWW merge must be rejected.
-    let err = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let err = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect_err("divergent event merge must be rejected");
     let msg = err.to_string();
     assert!(
@@ -837,7 +819,7 @@ fn event_merge_divergent_rejects() {
     // Strict merge must also be rejected (the divergence check fires
     // regardless of strategy, before the strategy-specific branch runs).
     let err =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect_err("divergent event merge must be rejected under Strict");
     assert!(
         err.to_string()
@@ -868,11 +850,11 @@ fn event_merge_divergent_rejects() {
 #[test]
 fn event_merge_single_sided_same_space_succeeds() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let event = test_db.event();
 
     // Seed target with 3 events before fork.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     event
         .append(&target_id, "default", "t0", int_payload(0))
@@ -885,7 +867,7 @@ fn event_merge_single_sided_same_space_succeeds() {
         .unwrap();
 
     // Fork, then append only on source.
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
     event
         .append(&source_id, "default", "src_a", int_payload(100))
@@ -897,13 +879,7 @@ fn event_merge_single_sided_same_space_succeeds() {
     assert_eq!(event.len(&target_id, "default").unwrap(), 3);
 
     // Single-sided merge should succeed through the generic path.
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("single-sided event merge should succeed");
     assert!(
         info.keys_applied > 0,
@@ -946,10 +922,10 @@ fn event_merge_target_only_appends_succeeds() {
     // the generic path because source's meta matches ancestor → `SourceChanged`
     // is never produced, and target's own additions classify as `TargetAdded`).
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let event = test_db.event();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     event
         .append(&target_id, "default", "t0", int_payload(0))
@@ -961,7 +937,7 @@ fn event_merge_target_only_appends_succeeds() {
         .append(&target_id, "default", "t2", int_payload(2))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Target only: append two events. Source is untouched.
@@ -976,13 +952,7 @@ fn event_merge_target_only_appends_succeeds() {
 
     // Merge source → target with LWW. Check must not falsely fire (source
     // did not diverge from ancestor).
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("target-only event merge should succeed");
 
     // Target's new events must still be present and walkable end-to-end.
@@ -1007,11 +977,11 @@ fn event_append_auto_registers_space() {
     // so that `branch_ops::merge_branches` (which iterates via
     // `SpaceIndex::list`) and other space-aware callers can see them.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let space_index = SpaceIndex::new(test_db.db.clone());
     let event = test_db.event();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Spaces are absent from the index before any append.
@@ -1078,14 +1048,14 @@ fn event_append_auto_registers_space() {
 #[test]
 fn event_merge_cross_space_divergence_succeeds() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let event = test_db.event();
 
     // Seed both spaces on target before fork. With EventLog auto-registering
     // spaces on first append, no explicit `space_index.register` is needed
     // for `merge_branches` to discover these spaces — this test exercises
     // the auto-registration end-to-end through the merge path.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     event
         .append(&target_id, "orders", "created", int_payload(0))
@@ -1101,7 +1071,7 @@ fn event_merge_cross_space_divergence_succeeds() {
         .unwrap();
 
     // Fork.
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source appends only in "orders"; target appends only in "users".
@@ -1114,13 +1084,7 @@ fn event_merge_cross_space_divergence_succeeds() {
         .unwrap();
 
     // Merge should succeed: per-space divergence check allows this shape.
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("cross-space divergent event merge should succeed");
 
     // "orders" space on target got source's new event.
@@ -1164,11 +1128,11 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
     // Seed the target branch with two nodes before fork.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1181,7 +1145,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
         .unwrap();
 
     // Fork target → source.
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both branches modify graph state since the fork.
@@ -1220,13 +1184,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
     // tactical refusal would have rejected this scenario; the semantic
     // merge correctly recognizes that source's "carol+alice→carol" and
     // target's "dave+bob→dave" are independent and combinable.
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("disjoint divergent graph merge should succeed");
 
     // After the merge, target has BOTH source's additions AND its own.
@@ -1297,11 +1255,11 @@ fn graph_merge_single_sided_source_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
     // Seed target with two pre-fork nodes.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1314,7 +1272,7 @@ fn graph_merge_single_sided_source_succeeds() {
         .unwrap();
 
     // Fork.
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Only source modifies graph state — adds carol and an edge alice→carol.
@@ -1346,13 +1304,7 @@ fn graph_merge_single_sided_source_succeeds() {
         .unwrap();
 
     // Single-sided merge must succeed (graph divergence check is per-side).
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("single-sided graph merge should succeed");
 
     // Target now has carol.
@@ -1411,10 +1363,10 @@ fn graph_merge_single_sided_target_succeeds() {
     // (every cell classifies as TargetAdded/TargetChanged → no action), and
     // the divergence check must not fire because source did not diverge.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1423,7 +1375,7 @@ fn graph_merge_single_sided_target_succeeds() {
         .add_node(target_id, "default", "g", "alice", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
 
     // Only target modifies graph state.
     p.graph
@@ -1441,13 +1393,7 @@ fn graph_merge_single_sided_target_succeeds() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("target-only graph merge should succeed");
 
     // Target's post-fork additions must still be present and bidirectionally
@@ -1477,15 +1423,15 @@ fn graph_merge_no_changes_does_not_block_kv_merge() {
     // sides make divergent KV writes, must not falsely trip the graph
     // divergence check. The KV LWW resolution should run normally.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     kv.put(&target_id, "default", "shared", Value::Int(1))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both sides modify the same KV key — generates a conflict that LWW
@@ -1495,13 +1441,7 @@ fn graph_merge_no_changes_does_not_block_kv_merge() {
     kv.put(&source_id, "default", "shared", Value::Int(20))
         .unwrap();
 
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("KV merge with empty graph state must not be blocked by graph check");
     assert!(info.keys_applied >= 1);
     assert_eq!(
@@ -1524,10 +1464,10 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     // fatal regardless of strategy, so the merge is refused with a
     // structured error before any writes happen.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1539,7 +1479,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
         .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes alice.
@@ -1562,13 +1502,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
     // LWW must reject — referential integrity is fatal regardless of
     // strategy. The graph plan function emits a structured error naming
     // the violation.
-    let err = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let err = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect_err("dangling edge / orphan reference must be rejected even under LWW");
     let msg = err.to_string();
     assert!(
@@ -1582,7 +1516,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
 
     // Strict must also reject (same error path).
     let err =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect_err("dangling edge / orphan reference must reject under Strict too");
     assert!(
         err.to_string()
@@ -1617,10 +1551,10 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
     // The earlier tactical refusal would have rejected this; the
     // semantic merge combines the disjoint edges additively.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1631,7 +1565,7 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
             .unwrap();
     }
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     p.graph
@@ -1657,13 +1591,7 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("disjoint edge additions on both sides should merge cleanly");
 
     // Both edges present and bidirectionally consistent on target.
@@ -1706,10 +1634,10 @@ fn graph_merge_dangling_edge_rejected() {
     // Result: projected edges has alice→carol but projected nodes lacks
     // carol → DanglingEdge → fatal regardless of strategy.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1721,7 +1649,7 @@ fn graph_merge_dangling_edge_rejected() {
         .add_node(target_id, "default", "g", "carol", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     p.graph
@@ -1739,13 +1667,7 @@ fn graph_merge_dangling_edge_rejected() {
         .remove_node(target_id, "default", "g", "carol")
         .unwrap();
 
-    let err = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let err = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect_err("dangling edge must be rejected");
     let msg = err.to_string();
     assert!(
@@ -1767,10 +1689,10 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
     // Target modifies alice's properties to role=guest.
     // Under LWW, source wins; under Strict, the merge rejects.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1784,7 +1706,7 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
         .add_node(target_id, "default", "g", "alice", original)
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     let source_data = NodeData {
@@ -1804,13 +1726,7 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
         .add_node(target_id, "default", "g", "alice", target_data)
         .unwrap();
 
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW node prop conflict should resolve, not error");
 
     // Conflict was reported in MergeInfo.conflicts even though merge succeeded.
@@ -1833,10 +1749,10 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1850,7 +1766,7 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
         .add_node(target_id, "default", "g", "alice", original.clone())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     p.graph
@@ -1881,7 +1797,7 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
         .unwrap();
 
     let err =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect_err("Strict must reject node property conflicts");
     assert!(
         err.to_string().contains("Merge conflict"),
@@ -1898,15 +1814,15 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
 /// scenario was rejected by the tactical refusal.
 #[test]
 fn cherry_pick_graph_disjoint_node_additions_succeeds() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
     // Pre-fork: target has alice and bob.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -1918,7 +1834,7 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
         .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: adds carol + alice→carol.
@@ -1955,8 +1871,7 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     // Cherry-pick with no filter (default = include everything). The
     // cherry-pick path hands this off to the per-handler plan dispatch,
     // which produces the same semantic merge result as `merge_branches`.
-    branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    test_db.db.branches().cherry_pick_from_diff(
         "source",
         "target",
         CherryPickFilter::default(),
@@ -2009,14 +1924,14 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
 /// propagate as `Err`.
 #[test]
 fn cherry_pick_graph_dangling_edge_rejected() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -2028,7 +1943,7 @@ fn cherry_pick_graph_dangling_edge_rejected() {
         .add_node(target_id, "default", "g", "carol", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: adds edge alice→carol.
@@ -2050,8 +1965,7 @@ fn cherry_pick_graph_dangling_edge_rejected() {
         .remove_node(target_id, "default", "g", "carol")
         .unwrap();
 
-    let err = branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    let err = test_db.db.branches().cherry_pick_from_diff(
         "source",
         "target",
         CherryPickFilter::default(),
@@ -2073,14 +1987,14 @@ fn cherry_pick_graph_dangling_edge_rejected() {
 /// consistency.
 #[test]
 fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -2092,7 +2006,7 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
         .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: add a new node carol AND a new edge alice→carol. The plan
@@ -2120,7 +2034,7 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
         keys: Some(vec!["g/n/carol".to_string()]),
         primitives: None,
     };
-    let err = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+    let err = test_db.db.branches().cherry_pick_from_diff( "source", "target", filter, None)
         .expect_err("partial graph key filter must be rejected");
     let msg = err.to_string();
     assert!(
@@ -2135,16 +2049,16 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
 #[test]
 fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     use strata_core::PrimitiveType;
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_engine::primitives::kv::KVStore;
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
     let kv: &KVStore = &p.kv;
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -2155,7 +2069,7 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     kv.put(&target_id, "default", "before_fork", Value::Int(1))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: divergent graph + new KV.
@@ -2183,7 +2097,7 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
         keys: None,
         primitives: Some(vec![PrimitiveType::Kv]),
     };
-    let info = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+    let info = test_db.db.branches().cherry_pick_from_diff( "source", "target", filter, None)
         .expect("KV-only cherry-pick must succeed even with divergent graph");
     assert!(info.keys_applied >= 1, "expected the kv_only put to apply");
 
@@ -2210,16 +2124,16 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
 /// the early-return path because `filter.keys` is None there.
 #[test]
 fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_engine::primitives::kv::KVStore;
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
     let kv: &KVStore = &p.kv;
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -2230,7 +2144,7 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     kv.put(&target_id, "default", "doc/foo", Value::Int(1))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source diverges in BOTH graph (adds carol + alice→carol) AND KV
@@ -2260,7 +2174,7 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
         keys: Some(vec!["doc/bar".to_string()]),
         primitives: None,
     };
-    let info = branch_ops::cherry_pick_from_diff(&test_db.db, "source", "target", filter, None)
+    let info = test_db.db.branches().cherry_pick_from_diff( "source", "target", filter, None)
         .expect("filter that drops all graph actions atomically must NOT raise atomicity error");
     assert_eq!(info.keys_applied, 1, "only doc/bar should have applied");
 
@@ -2284,25 +2198,24 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
 /// actions in the plan).
 #[test]
 fn cherry_pick_kv_only_no_graph_changes_works() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_engine::primitives::kv::KVStore;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
     let kv: &KVStore = &p.kv;
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     kv.put(&target_id, "default", "k1", Value::Int(1)).unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     kv.put(&source_id, "default", "k2", Value::Int(2)).unwrap();
 
-    let info = branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    let info = test_db.db.branches().cherry_pick_from_diff(
         "source",
         "target",
         CherryPickFilter::default(),
@@ -2325,10 +2238,10 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g_pre", None)
@@ -2337,7 +2250,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
         .add_node(target_id, "default", "g_pre", "x", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source creates a brand new graph "g_src".
@@ -2367,13 +2280,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("additive catalog must merge concurrent creates of different graphs");
 
     // Target now lists all three graphs.
@@ -2405,10 +2312,10 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g_keep", None)
@@ -2420,7 +2327,7 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
         .create_graph(target_id, "default", "g_drop", None)
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes g_drop.
@@ -2432,13 +2339,7 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
         .create_graph(target_id, "default", "g_new", None)
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("additive catalog must handle mixed delete + create");
 
     let graphs: std::collections::HashSet<String> = p
@@ -2466,18 +2367,18 @@ fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
 #[test]
 fn cow_diff_across_inherited_layers() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // 1. Create parent with keys {a: 1, b: 2, c: 3}
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
     kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
     kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
 
     // 2. COW fork parent → child
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // 3. Child modifies b and deletes c
@@ -2485,7 +2386,7 @@ fn cow_diff_across_inherited_layers() {
     kv.delete(&child_id, "default", "c").unwrap();
 
     // 4. diff_branches(parent, child): b modified, c removed
-    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+    let diff = test_db.db.branches().diff( "parent", "child").unwrap();
     assert_eq!(
         diff.summary.total_modified, 1,
         "b should be modified (2 → 20)"
@@ -2497,7 +2398,7 @@ fn cow_diff_across_inherited_layers() {
     assert_eq!(diff.summary.total_added, 0, "no new keys added in child");
 
     // 5. Inverse diff: diff_branches(child, parent)
-    let inv = branch_ops::diff_branches(&test_db.db, "child", "parent").unwrap();
+    let inv = test_db.db.branches().diff( "child", "parent").unwrap();
     assert_eq!(inv.summary.total_modified, 1, "b modified in inverse");
     assert_eq!(
         inv.summary.total_added, 1,
@@ -2513,18 +2414,18 @@ fn cow_diff_across_inherited_layers() {
 #[test]
 fn cow_diff_no_changes_is_empty() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "x", Value::Int(1)).unwrap();
     kv.put(&parent_id, "default", "y", Value::Int(2)).unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
 
     // No modifications — diff should be empty
-    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+    let diff = test_db.db.branches().diff( "parent", "child").unwrap();
     assert_eq!(diff.summary.total_added, 0);
     assert_eq!(diff.summary.total_removed, 0);
     assert_eq!(diff.summary.total_modified, 0);
@@ -2538,18 +2439,18 @@ fn cow_diff_no_changes_is_empty() {
 #[test]
 fn cow_merge_lww_with_inherited_layers() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // 1. Create parent with keys {a: 1, b: 2, c: 3}
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
     kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
     kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
 
     // 2. COW fork parent → child
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // 3. Diverge: parent writes a: 10, child writes b: 20
@@ -2557,13 +2458,7 @@ fn cow_merge_lww_with_inherited_layers() {
     kv.put(&child_id, "default", "b", Value::Int(20)).unwrap();
 
     // 4. Merge child → parent (LWW)
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "child",
-        "parent",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("child", "parent", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert!(info.keys_applied >= 1, "at least b should be applied");
 
@@ -2593,18 +2488,18 @@ fn cow_merge_lww_with_inherited_layers() {
 #[test]
 fn cow_three_way_merge_with_inherited_layers() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // 1. Create parent with keys {a: 1, b: 2, c: 3}
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "a", Value::Int(1)).unwrap();
     kv.put(&parent_id, "default", "b", Value::Int(2)).unwrap();
     kv.put(&parent_id, "default", "c", Value::Int(3)).unwrap();
 
     // 2. COW fork parent → child
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // 3. Diverge: parent writes a: 10, child writes b: 20
@@ -2614,12 +2509,10 @@ fn cow_three_way_merge_with_inherited_layers() {
     // 4. Three-way merge: ancestor is {a: 1, b: 2, c: 3}
     //    Parent changed a (1→10), child changed b (2→20), neither changed c.
     //    Expected result: {a: 10, b: 20, c: 3}
-    let _info = branch_ops::merge_branches(
-        &test_db.db,
+    let _info = test_db.db.branches().merge_with_options(
         "child",
         "parent",
-        MergeStrategy::LastWriterWins, // TODO: ThreeWay strategy
-        None,
+        MergeOptions::with_strategy(MergeStrategy::LastWriterWins),
     )
     .unwrap();
 
@@ -2644,26 +2537,20 @@ fn cow_three_way_merge_with_inherited_layers() {
 #[test]
 fn cow_repeated_merge_after_fork() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "k", Value::Int(1)).unwrap();
 
     // Fork
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // First round: child modifies, merge into parent
     kv.put(&child_id, "default", "k", Value::Int(10)).unwrap();
-    branch_ops::merge_branches(
-        &test_db.db,
-        "child",
-        "parent",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("child", "parent", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert_eq!(
         kv.get(&parent_id, "default", "k").unwrap(),
@@ -2672,13 +2559,7 @@ fn cow_repeated_merge_after_fork() {
 
     // Second round: child modifies again, merge into parent again
     kv.put(&child_id, "default", "k", Value::Int(100)).unwrap();
-    branch_ops::merge_branches(
-        &test_db.db,
-        "child",
-        "parent",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("child", "parent", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert_eq!(
         kv.get(&parent_id, "default", "k").unwrap(),
@@ -2780,11 +2661,11 @@ fn test_issue_1695_fork_vs_parent_write_race() {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     let test_db = TestDb::new_strict();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create parent branch with initial data
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     for i in 0..10 {
         kv.put(
@@ -2822,7 +2703,7 @@ fn test_issue_1695_fork_vs_parent_write_race() {
     let mut fork_results = Vec::new();
     for fork_idx in 0..10u32 {
         let fork_name = format!("child_{}", fork_idx);
-        if let Ok(info) = branch_ops::fork_branch(&db, "parent", &fork_name) {
+        if let Ok(info) = db.branches().fork( "parent", &fork_name) {
             fork_results.push((fork_name, info));
         }
         thread::yield_now();
@@ -2898,11 +2779,11 @@ fn test_issue_1695_fork_vs_parent_write_race() {
 #[test]
 fn test_issue_1695_fork_compact_parent_restart() {
     let mut test_db = TestDb::new_strict();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create parent with multiple batches of data (so compaction has work)
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
 
     for i in 0..50 {
@@ -2916,7 +2797,7 @@ fn test_issue_1695_fork_compact_parent_restart() {
     }
 
     // Fork parent → child
-    let fork_info = branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    let fork_info = test_db.db.branches().fork( "parent", "child").unwrap();
     assert!(fork_info.fork_version.is_some());
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
@@ -2984,24 +2865,22 @@ fn test_issue_1695_fork_compact_parent_restart() {
 }
 
 /// Issue #1695, test 3: Race background materialization against explicit
-/// materialize_branch() API call.
+/// concurrent access.
 ///
-/// Creates a deeply-forked branch (exceeding MAX_INHERITED_LAYERS) so the
-/// background scheduler will attempt materialization. Simultaneously calls
-/// materialize_branch() from the test thread. Verifies single output and
-/// no data corruption.
-///
-/// Validates fix for #1693 (concurrent materialization guard).
+/// Builds a deeply-forked branch (exceeding MAX_INHERITED_LAYERS) and then
+/// hammers the leaf branch from multiple threads using the supported public
+/// API surface. This keeps the regression on public behavior after the
+/// explicit `materialize_branch()` entry point was made internal.
 #[test]
-fn test_issue_1695_concurrent_bg_vs_explicit_materialization() {
+fn test_issue_1695_parallel_leaf_reads_preserve_data() {
     let test_db = TestDb::new_strict();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let db = test_db.db.clone();
 
     // Build a chain of forks: root → a → b → c → d → e → leaf
     // This creates 6 inherited layers on leaf (exceeds MAX_INHERITED_LAYERS=4)
-    branch_index.create_branch("root").unwrap();
+    branches.create("root").unwrap();
     let root_id = strata_engine::primitives::branch::resolve_branch_name("root");
     for i in 0..20 {
         kv.put(
@@ -3016,49 +2895,42 @@ fn test_issue_1695_concurrent_bg_vs_explicit_materialization() {
     let chain = ["a", "b", "c", "d", "e", "leaf"];
     let mut prev = "root";
     for name in &chain {
-        branch_ops::fork_branch(&db, prev, name).unwrap();
+        db.branches().fork( prev, name).unwrap();
         prev = name;
     }
 
     let leaf_id = strata_engine::primitives::branch::resolve_branch_name("leaf");
 
-    // Verify leaf can read inherited data before materialization
+    // Verify leaf can read inherited data before the concurrent access.
     assert_eq!(
         kv.get(&leaf_id, "default", "root_k0").unwrap(),
         Some(Value::Int(0)),
         "leaf should read root data through inheritance chain"
     );
 
-    // Race: explicit materialize_branch in parallel threads
+    // Read the leaf through separate handles in parallel.
     let barrier = Arc::new(Barrier::new(4));
     let handles: Vec<_> = (0..4)
         .map(|_| {
             let db = db.clone();
             let barrier = barrier.clone();
+            let leaf_id = leaf_id;
             thread::spawn(move || {
+                let kv = KVStore::new(db);
                 barrier.wait();
-                branch_ops::materialize_branch(&db, "leaf")
+                for i in 0..20 {
+                    assert_eq!(
+                        kv.get(&leaf_id, "default", &format!("root_k{}", i)).unwrap(),
+                        Some(Value::Int(i as i64))
+                    );
+                }
             })
         })
         .collect();
 
-    let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
-
-    // All calls must succeed (no panics)
-    for (i, r) in results.iter().enumerate() {
-        assert!(r.is_ok(), "thread {} failed: {:?}", i, r);
+    for handle in handles {
+        handle.join().unwrap();
     }
-
-    // At most one thread should have actually materialized entries
-    let workers: Vec<_> = results
-        .iter()
-        .filter(|r| r.as_ref().unwrap().entries_materialized > 0)
-        .collect();
-    assert!(
-        workers.len() <= 1,
-        "at most 1 thread should materialize entries, got {}",
-        workers.len()
-    );
 
     // Data must still be correct
     for i in 0..20 {
@@ -3066,7 +2938,7 @@ fn test_issue_1695_concurrent_bg_vs_explicit_materialization() {
             kv.get(&leaf_id, "default", &format!("root_k{}", i))
                 .unwrap(),
             Some(Value::Int(i as i64)),
-            "leaf should still read root_k{} after materialization",
+            "leaf should still read root_k{} after concurrent access",
             i
         );
     }
@@ -3082,11 +2954,11 @@ fn test_issue_1695_concurrent_bg_vs_explicit_materialization() {
 #[test]
 fn test_issue_1695_fork_clear_child_restart() {
     let mut test_db = TestDb::new_strict();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create parent with data
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     for i in 0..20 {
         kv.put(
@@ -3099,7 +2971,7 @@ fn test_issue_1695_fork_clear_child_restart() {
     }
 
     // Fork parent → child
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // Verify child has data
@@ -3114,22 +2986,22 @@ fn test_issue_1695_fork_clear_child_restart() {
         .unwrap();
 
     // Delete the child branch
-    branch_index.delete_branch("child").unwrap();
+    branches.delete("child").unwrap();
 
     // Verify child is gone
     assert!(
-        branch_index.get_branch("child").unwrap().is_none(),
+        branches.info_versioned("child").unwrap().is_none(),
         "child branch should be deleted"
     );
 
     // Restart the database
     test_db.reopen();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Child must still be deleted after restart
     assert!(
-        branch_index.get_branch("child").unwrap().is_none(),
+        branches.info_versioned("child").unwrap().is_none(),
         "child branch must stay deleted after restart"
     );
 
@@ -3158,17 +3030,17 @@ fn test_issue_1695_fork_clear_child_restart() {
 #[test]
 fn test_issue_1695_fork_disjoint_changes_merge() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // Create parent with shared baseline
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "base", Value::Int(100))
         .unwrap();
 
     // Fork parent → child
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // Make DISJOINT changes: parent modifies "parent_only", child modifies "child_only"
@@ -3198,13 +3070,7 @@ fn test_issue_1695_fork_disjoint_changes_merge() {
     );
 
     // Merge child → parent (LWW)
-    let merge_info = branch_ops::merge_branches(
-        &test_db.db,
-        "child",
-        "parent",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let merge_info = test_db.db.branches().merge_with_options("child", "parent", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
 
     // child_only should be applied to parent (it's "added" in child vs parent)
@@ -3239,11 +3105,11 @@ fn test_issue_1695_fork_disjoint_changes_merge() {
 #[test]
 fn cow_diff_matches_expected_complex() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
     // 1. Parent with 5 keys
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
     kv.put(&parent_id, "default", "shared", Value::Int(1))
         .unwrap();
@@ -3257,7 +3123,7 @@ fn cow_diff_matches_expected_complex() {
         .unwrap();
 
     // 2. Fork
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // 3. Child: modify, delete, add
@@ -3278,7 +3144,7 @@ fn cow_diff_matches_expected_complex() {
         .unwrap();
 
     // 5. Diff parent → child
-    let diff = branch_ops::diff_branches(&test_db.db, "parent", "child").unwrap();
+    let diff = test_db.db.branches().diff( "parent", "child").unwrap();
 
     // Collect into maps for easy assertion
     let space = diff.spaces.iter().find(|s| s.space == "default").unwrap();
@@ -3345,10 +3211,10 @@ fn graph_in_user_space_create_and_query_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("main").unwrap();
+    branches.create("main").unwrap();
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
 
     // Create the graph in "tenant_a" space.
@@ -3407,10 +3273,10 @@ fn graph_in_two_spaces_independent() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("main").unwrap();
+    branches.create("main").unwrap();
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
 
     let alice_a = NodeData {
@@ -3461,10 +3327,10 @@ fn graph_in_user_space_survives_fork() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("parent").unwrap();
+    branches.create("parent").unwrap();
     let parent_id = strata_engine::primitives::branch::resolve_branch_name("parent");
 
     p.graph
@@ -3474,7 +3340,7 @@ fn graph_in_user_space_survives_fork() {
         .add_node(parent_id, "tenant_a", "g", "alice", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "parent", "child").unwrap();
+    test_db.db.branches().fork( "parent", "child").unwrap();
     let child_id = strata_engine::primitives::branch::resolve_branch_name("child");
 
     // Child inherits the parent's graph in tenant_a space.
@@ -3509,10 +3375,10 @@ fn graph_in_user_space_semantic_merge_succeeds() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "tenant_a", "g", None)
@@ -3524,7 +3390,7 @@ fn graph_in_user_space_semantic_merge_succeeds() {
         .add_node(target_id, "tenant_a", "g", "bob", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Disjoint additions on both sides.
@@ -3557,13 +3423,7 @@ fn graph_in_user_space_semantic_merge_succeeds() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("semantic merge must work for user-space graphs");
 
     // All four nodes present after merge.
@@ -3601,10 +3461,10 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
     use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "tenant_a", "g", None)
@@ -3616,7 +3476,7 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
         .add_node(target_id, "tenant_a", "g", "carol", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source adds an edge alice→carol; target deletes carol.
@@ -3635,13 +3495,7 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
         .remove_node(target_id, "tenant_a", "g", "carol")
         .unwrap();
 
-    let err = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let err = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect_err("dangling edge in user-space graph must be rejected");
     let msg = err.to_string();
     assert!(
@@ -3663,10 +3517,10 @@ fn graph_store_accepts_reserved_system_dag_space() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("main").unwrap();
+    branches.create("main").unwrap();
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
 
     p.graph
@@ -3732,11 +3586,11 @@ fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
     // Pre-fork: target has graph "g" with alice.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -3745,7 +3599,7 @@ fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
         .add_node(target_id, "default", "g", "alice", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source wipes the whole graph.
@@ -3757,13 +3611,7 @@ fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
         .unwrap();
 
     // Merge under LWW.
-    let result = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    );
+    let result = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins));
 
     // The merge should either succeed atomically (one side wins fully) or
     // be rejected with a structured error. Whatever it does, the result
@@ -3827,11 +3675,11 @@ fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
     use strata_graph::types::NodeData;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let p = test_db.all_primitives();
 
     // Pre-fork: alice with refs/type set.
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     p.graph
         .create_graph(target_id, "default", "g", None)
@@ -3845,7 +3693,7 @@ fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
         .add_node(target_id, "default", "g", "alice", alice_pre.clone())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: change properties only.
@@ -3870,13 +3718,7 @@ fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
 
     // Merge under LWW. With both sides differing from ancestor and from
     // each other, the node lands as a Conflict and source wins.
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("merge with concurrent node edits should succeed under LWW");
 
     // The merged node JSON: source won, so entity_ref=p1, type=Patient.
@@ -3981,11 +3823,11 @@ fn vector_merge_disjoint_collections() {
     // After merge, target sees both collections with their respective
     // vectors searchable.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed target with a placeholder write so the storage layer knows
@@ -3993,7 +3835,7 @@ fn vector_merge_disjoint_collections() {
     kv.put(&target_id, "default", "_seed", Value::Int(0))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: create "alpha" and add a vector.
@@ -4012,13 +3854,7 @@ fn vector_merge_disjoint_collections() {
         .insert(target_id, "default", "beta", "v1", &[0.0, 1.0, 0.0], None)
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("disjoint-collection vector merge should succeed");
 
     // After merge, target sees both collections.
@@ -4063,10 +3899,10 @@ fn vector_merge_same_collection_disjoint_ids() {
     // keys. After merge, target sees the union of both sets and all
     // four vectors are searchable.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed the collection on target before fork so both branches share it.
@@ -4074,7 +3910,7 @@ fn vector_merge_same_collection_disjoint_ids() {
         .create_collection(target_id, "default", "shared", config_small())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: add vec1, vec2 with disjoint embeddings.
@@ -4121,13 +3957,7 @@ fn vector_merge_same_collection_disjoint_ids() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("disjoint-id vector merge should succeed");
 
     // All four vectors are present post-merge.
@@ -4166,17 +3996,17 @@ fn vector_merge_conflicting_id_lww() {
     // Both branches write the same (collection, key) with different
     // embeddings. Under LWW the source value wins.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     vector
         .create_collection(target_id, "default", "shared", config_small())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both sides write the same key with different embeddings.
@@ -4201,13 +4031,7 @@ fn vector_merge_conflicting_id_lww() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW vector conflict should resolve cleanly");
 
     // LWW: source wins. Target now reads source's embedding.
@@ -4229,16 +4053,16 @@ fn vector_merge_dimension_mismatch_rejected() {
     // combining mismatched-dimension vectors into one HNSW would
     // corrupt the index.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     kv.put(&target_id, "default", "_seed", Value::Int(0))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: 3-dim collection.
@@ -4271,13 +4095,7 @@ fn vector_merge_dimension_mismatch_rejected() {
 
     // LWW should refuse the merge — dimension mismatch is fatal regardless
     // of strategy.
-    let lww_result = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    );
+    let lww_result = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins));
     assert!(
         lww_result.is_err(),
         "LWW merge with dimension mismatch must fail; got {:?}",
@@ -4291,7 +4109,7 @@ fn vector_merge_dimension_mismatch_rejected() {
 
     // Strict should also refuse.
     let strict_result =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict));
     assert!(
         strict_result.is_err(),
         "Strict merge with dimension mismatch must fail; got {:?}",
@@ -4317,16 +4135,16 @@ fn vector_merge_metric_mismatch_rejected() {
     // would silently change search semantics for already-indexed
     // vectors.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
     kv.put(&target_id, "default", "_seed", Value::Int(0))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source: Cosine metric.
@@ -4349,13 +4167,7 @@ fn vector_merge_metric_mismatch_rejected() {
         )
         .unwrap();
 
-    let result = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    );
+    let result = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins));
     assert!(
         result.is_err(),
         "merge with metric mismatch must fail; got {:?}",
@@ -4375,17 +4187,17 @@ fn vector_merge_hnsw_search_correct_after_merge() {
     // ranking. This proves the per-collection HNSW rebuild produced a
     // searchable index without a full backend reload.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     vector
         .create_collection(target_id, "default", "shared", config_small())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source adds 3 vectors near [1, 0, 0]
@@ -4452,13 +4264,7 @@ fn vector_merge_hnsw_search_correct_after_merge() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("disjoint-id vector merge should succeed");
 
     // Search for [1, 0, 0] with k=3. Top results must come from BOTH
@@ -4504,10 +4310,10 @@ fn vector_merge_does_not_touch_unaffected_collections() {
     // collection → no rebuild fires), all VectorIds stay byte-for-byte
     // identical to their pre-merge values.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Create two collections on target before fork.
@@ -4557,7 +4363,7 @@ fn vector_merge_does_not_touch_unaffected_collections() {
         "test setup invariant: 'a' was inserted third, so its VectorId must not be 0"
     );
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source touches ONLY the "touched" collection.
@@ -4572,13 +4378,7 @@ fn vector_merge_does_not_touch_unaffected_collections() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("single-side vector merge should succeed");
 
     // The touched collection sees the new vector.
@@ -4630,13 +4430,13 @@ fn vector_cherry_pick_refreshes_hnsw_backend() {
     // This test cherry-picks a new vector from source to target and
     // asserts that searching for that vector's embedding returns the
     // new key (not the old one).
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let vector = test_db.vector();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed target with a collection and one vector at [0, 1, 0].
@@ -4664,7 +4464,7 @@ fn vector_cherry_pick_refreshes_hnsw_backend() {
 
     // Fork target → source, source adds a vector at [1, 0, 0]
     // (closer to the query than "old").
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     vector
@@ -4679,8 +4479,7 @@ fn vector_cherry_pick_refreshes_hnsw_backend() {
         .unwrap();
 
     // Cherry-pick everything from source to target.
-    branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    test_db.db.branches().cherry_pick_from_diff(
         "source",
         "target",
         CherryPickFilter::default(),
@@ -4731,10 +4530,10 @@ fn json_merge_disjoint_paths_auto_merges() {
     // keys. The path-level merge combines both edits without raising
     // a conflict.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -4745,7 +4544,7 @@ fn json_merge_disjoint_paths_auto_merges() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source modifies "a", target modifies "b" — disjoint edits.
@@ -4767,7 +4566,7 @@ fn json_merge_disjoint_paths_auto_merges() {
     .unwrap();
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("disjoint path merge should succeed under Strict (no conflicts)");
     assert_eq!(
         info.conflicts.len(),
@@ -4791,10 +4590,10 @@ fn json_merge_same_path_same_value_no_conflict() {
     // Both branches edit the same path to the same new value. The merge
     // should converge silently — no conflict, no LWW arbitration.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -4805,7 +4604,7 @@ fn json_merge_same_path_same_value_no_conflict() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     json.set(
@@ -4826,7 +4625,7 @@ fn json_merge_same_path_same_value_no_conflict() {
     .unwrap();
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("same-path same-value merge should be conflict-free under Strict");
     assert_eq!(info.conflicts.len(), 0);
 
@@ -4845,10 +4644,10 @@ fn json_merge_same_path_different_values_lww() {
     // Both branches edit the same path to different values. Strict
     // mode rejects with a conflict; LWW resolves source-wins.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -4859,7 +4658,7 @@ fn json_merge_same_path_different_values_lww() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both sides edit "name" — same path, different values → conflict.
@@ -4882,7 +4681,7 @@ fn json_merge_same_path_different_values_lww() {
 
     // Strict refuses.
     let strict =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict));
     assert!(
         strict.is_err(),
         "same-path different-values merge must be rejected under Strict"
@@ -4901,13 +4700,7 @@ fn json_merge_same_path_different_values_lww() {
 
     // LWW resolves source-wins on the conflicting path. The merged
     // document still has age=30 (unchanged on both sides).
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW merge should succeed despite the path-level conflict");
     assert!(
         !info.conflicts.is_empty(),
@@ -4930,10 +4723,10 @@ fn json_merge_subtree_delete_vs_edit_conflict() {
     // edits within that subtree. The handler reports this as a
     // path-level conflict — there is no obvious correct merge.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -4947,7 +4740,7 @@ fn json_merge_subtree_delete_vs_edit_conflict() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes the entire user.email key.
@@ -4970,20 +4763,14 @@ fn json_merge_subtree_delete_vs_edit_conflict() {
 
     // Strict mode rejects with the conflict surfaced.
     let strict =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict));
     assert!(
         strict.is_err(),
         "delete-vs-edit on the same path must be rejected under Strict"
     );
 
     // LWW: source-wins → email is removed in the merged result.
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW merge should succeed for delete-vs-edit");
     assert!(
         !info.conflicts.is_empty(),
@@ -5009,10 +4796,10 @@ fn json_merge_nested_disjoint_paths_auto_merge() {
     // Disjoint edits inside the same nested object — exercises the
     // recursive object-walk path of `merge_json_values`.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5026,7 +4813,7 @@ fn json_merge_nested_disjoint_paths_auto_merge() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     json.set(
@@ -5047,7 +4834,7 @@ fn json_merge_nested_disjoint_paths_auto_merge() {
     .unwrap();
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("disjoint nested path edits should be conflict-free");
     assert_eq!(info.conflicts.len(), 0);
 
@@ -5072,10 +4859,10 @@ fn json_merge_secondary_index_refreshed_post_commit() {
     use strata_engine::primitives::json::index::IndexType;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5105,7 +4892,7 @@ fn json_merge_secondary_index_refreshed_post_commit() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source updates price 10 → 25. Target leaves it alone.
@@ -5118,13 +4905,7 @@ fn json_merge_secondary_index_refreshed_post_commit() {
     )
     .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("merge with index-touching change should succeed");
 
     // The merged target's doc value should be the source's update.
@@ -5175,10 +4956,10 @@ fn json_merge_source_only_new_doc_propagates() {
     use strata_engine::primitives::json::index::IndexType;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Create the index on target BEFORE forking so source inherits it.
@@ -5191,7 +4972,7 @@ fn json_merge_source_only_new_doc_propagates() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source creates a new doc — target has nothing.
@@ -5204,7 +4985,7 @@ fn json_merge_source_only_new_doc_propagates() {
     .unwrap();
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("source-only new doc merge should succeed under Strict");
     assert_eq!(info.conflicts.len(), 0);
     assert!(info.keys_applied >= 1);
@@ -5247,10 +5028,10 @@ fn json_merge_source_deletes_doc_propagates() {
     use strata_engine::primitives::json::index::IndexType;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5278,7 +5059,7 @@ fn json_merge_source_deletes_doc_propagates() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source destroys the doc; target leaves it alone.
@@ -5286,7 +5067,7 @@ fn json_merge_source_deletes_doc_propagates() {
     assert!(existed);
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("source-delete merge should succeed under Strict");
     assert_eq!(info.conflicts.len(), 0);
     assert!(info.keys_deleted >= 1);
@@ -5326,10 +5107,10 @@ fn json_merge_multiple_docs_in_one_pass() {
     // touches several distinct documents must produce one merge action
     // per affected doc and refresh all of them.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Three docs on the target side, each with the same shape.
@@ -5343,7 +5124,7 @@ fn json_merge_multiple_docs_in_one_pass() {
         .unwrap();
     }
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source modifies each doc's "a" field; target modifies each doc's
@@ -5369,7 +5150,7 @@ fn json_merge_multiple_docs_in_one_pass() {
     }
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("multi-doc disjoint-path merge should succeed under Strict");
     assert_eq!(info.conflicts.len(), 0);
     assert!(
@@ -5405,14 +5186,14 @@ fn json_merge_path_level_via_cherry_pick() {
     // classifier, which writes source's whole doc verbatim and never
     // refreshes the index. (Mirrors the
     // `vector_cherry_pick_refreshes_hnsw_backend` regression test.)
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
     use strata_engine::primitives::json::index::IndexType;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5439,7 +5220,7 @@ fn json_merge_path_level_via_cherry_pick() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source edits "a" and "price"; target edits "b" — three disjoint
@@ -5470,8 +5251,7 @@ fn json_merge_path_level_via_cherry_pick() {
     )
     .unwrap();
 
-    branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    test_db.db.branches().cherry_pick_from_diff(
         "source",
         "target",
         CherryPickFilter::default(),
@@ -5527,10 +5307,10 @@ fn json_merge_both_sides_deleted_doc_no_action() {
     use strata_engine::primitives::json::index::IndexType;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5558,7 +5338,7 @@ fn json_merge_both_sides_deleted_doc_no_action() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Both sides destroy the doc independently.
@@ -5584,7 +5364,7 @@ fn json_merge_both_sides_deleted_doc_no_action() {
     );
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("both-sides-deleted merge should succeed under Strict");
     // The merge produces no actions for the JSON cell (both sides agree
     // the doc is gone). It may produce an empty merge_version because
@@ -5620,10 +5400,10 @@ fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
     // at the child path that target edited. LWW source-wins drops the
     // entire subtree.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let json = test_db.json();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     json.create(
@@ -5637,7 +5417,7 @@ fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
     )
     .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Source deletes the WHOLE user object (the parent subtree).
@@ -5655,20 +5435,14 @@ fn json_merge_parent_subtree_deleted_vs_child_edited_conflicts() {
 
     // Strict mode rejects.
     let strict =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None);
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict));
     assert!(
         strict.is_err(),
         "parent-subtree-delete vs child-edit must be rejected under Strict"
     );
 
     // LWW: source-wins drops the entire user subtree.
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW should succeed for parent-delete-vs-child-edit");
     assert!(
         !info.conflicts.is_empty(),
@@ -5777,9 +5551,9 @@ fn cross_primitive_fork_isolation() {
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed every primitive on target before fork.
@@ -5816,7 +5590,7 @@ fn cross_primitive_fork_isolation() {
         .unwrap();
 
     // Fork.
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Mutate every primitive on source only. Target stays untouched.
@@ -5917,9 +5691,9 @@ fn cross_primitive_merge_disjoint() {
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed shared baseline state on target.
@@ -5943,7 +5717,7 @@ fn cross_primitive_merge_disjoint() {
         .add_node(target_id, "default", "g", "root", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // SOURCE mutates KV / JSON / Vector. TARGET mutates Event / Graph.
@@ -5978,7 +5752,7 @@ fn cross_primitive_merge_disjoint() {
         .unwrap();
 
     let info =
-        branch_ops::merge_branches(&test_db.db, "source", "target", MergeStrategy::Strict, None)
+        test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::Strict))
             .expect("disjoint cross-primitive merge should succeed under Strict");
     assert_eq!(info.conflicts.len(), 0);
     assert!(
@@ -6040,9 +5814,9 @@ fn cross_primitive_merge_overlapping_lww() {
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed shared state.
@@ -6072,7 +5846,7 @@ fn cross_primitive_merge_overlapping_lww() {
         )
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // OVERLAP: both sides mutate the same KV key, JSON doc paths, vector
@@ -6156,13 +5930,7 @@ fn cross_primitive_merge_overlapping_lww() {
         .add_node(target_id, "default", "g", "n-target", NodeData::default())
         .unwrap();
 
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("LWW merge should succeed even with overlapping conflicts");
 
     // KV: source-wins on "shared".
@@ -6248,9 +6016,9 @@ fn cross_primitive_merge_invariant_sweep() {
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // ==== Seed baseline state ====
@@ -6303,7 +6071,7 @@ fn cross_primitive_merge_invariant_sweep() {
         .unwrap();
 
     // ==== Fork ====
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // ==== Source-side mutations ====
@@ -6380,13 +6148,7 @@ fn cross_primitive_merge_invariant_sweep() {
         .unwrap();
 
     // ==== Merge ====
-    let info = branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let info = test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("cross-primitive invariant-sweep merge should succeed");
     assert_eq!(
         info.conflicts.len(),
@@ -6522,9 +6284,9 @@ fn cross_primitive_merge_rollback_via_reopen() {
     // before reopen — mirrors `always_mode_all_primitives_survive_reopen`.
     let mut test_db = TestDb::new_strict();
     let p = test_db.all_primitives();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
 
-    branch_index.create_branch("target").unwrap();
+    branches.create("target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
     // Seed the same baseline state as the invariant-sweep test.
@@ -6575,7 +6337,7 @@ fn cross_primitive_merge_rollback_via_reopen() {
         .add_node(target_id, "default", "g", "bob", NodeData::default())
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+    test_db.db.branches().fork( "target", "source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
     // Mutate every primitive on both sides.
@@ -6644,13 +6406,7 @@ fn cross_primitive_merge_rollback_via_reopen() {
         )
         .unwrap();
 
-    branch_ops::merge_branches(
-        &test_db.db,
-        "source",
-        "target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("source", "target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .expect("rollback merge should commit before reopen");
 
     // ==== Drop and reopen — simulates a clean restart. After Step 1,
@@ -6819,15 +6575,15 @@ fn dag_outgoing(
 #[test]
 fn dag_records_fork_with_version() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_fork_src").unwrap();
+    branches.create("dag_fork_src").unwrap();
     let src_id = strata_engine::primitives::branch::resolve_branch_name("dag_fork_src");
     // Storage needs at least one write to register the branch for forking.
     kv.put(&src_id, "default", "seed", Value::Int(1)).unwrap();
-    branch_ops::fork_branch(&test_db.db, "dag_fork_src", "dag_fork_dst").unwrap();
+    test_db.db.branches().fork( "dag_fork_src", "dag_fork_dst").unwrap();
 
     // Both branch nodes should now exist in the DAG.
     assert!(
@@ -6877,16 +6633,16 @@ fn dag_records_fork_with_version() {
 #[test]
 fn dag_records_merge_with_version_and_keys() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_merge_target").unwrap();
+    branches.create("dag_merge_target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_merge_target");
     kv.put(&target_id, "default", "shared", Value::Int(1))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "dag_merge_target", "dag_merge_source").unwrap();
+    test_db.db.branches().fork( "dag_merge_target", "dag_merge_source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_merge_source");
 
     // Diverge: source updates "shared" and adds a new key.
@@ -6895,13 +6651,7 @@ fn dag_records_merge_with_version_and_keys() {
     kv.put(&source_id, "default", "new_key", Value::Int(99))
         .unwrap();
 
-    let merge_info = branch_ops::merge_branches(
-        &test_db.db,
-        "dag_merge_source",
-        "dag_merge_target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    let merge_info = test_db.db.branches().merge_with_options("dag_merge_source", "dag_merge_target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     assert!(
         merge_info.keys_applied >= 2,
@@ -6944,11 +6694,11 @@ fn dag_records_merge_with_version_and_keys() {
 #[test]
 fn dag_records_revert() {
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_revert_branch").unwrap();
+    branches.create("dag_revert_branch").unwrap();
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("dag_revert_branch");
 
     // Write a few versions so we have a non-trivial range to revert.
@@ -6958,8 +6708,7 @@ fn dag_records_revert() {
     kv.put(&branch_id, "default", "k1", Value::Int(99)).unwrap();
     let v_after = test_db.db.current_version().as_u64();
 
-    let revert_info = branch_ops::revert_version_range(
-        &test_db.db,
+    let revert_info = test_db.db.branches().revert(
         "dag_revert_branch",
         CommitVersion(v_before + 1),
         CommitVersion(v_after),
@@ -7032,27 +6781,26 @@ fn dag_records_revert() {
 
 #[test]
 fn dag_records_cherry_pick() {
-    use strata_engine::branch_ops::CherryPickFilter;
+    use strata_engine::CherryPickFilter;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_cp_target").unwrap();
+    branches.create("dag_cp_target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_cp_target");
     kv.put(&target_id, "default", "base", Value::Int(0))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "dag_cp_target", "dag_cp_source").unwrap();
+    test_db.db.branches().fork( "dag_cp_target", "dag_cp_source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_cp_source");
 
     // Source-only divergence: a single new key to cherry-pick.
     kv.put(&source_id, "default", "picked", Value::Int(42))
         .unwrap();
 
-    let cp_info = branch_ops::cherry_pick_from_diff(
-        &test_db.db,
+    let cp_info = test_db.db.branches().cherry_pick_from_diff(
         "dag_cp_source",
         "dag_cp_target",
         CherryPickFilter::default(),
@@ -7173,27 +6921,21 @@ fn dag_repeated_merge_advances_merge_base() {
     use strata_graph::branch_dag::find_last_merge_version;
 
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
 
-    branch_index.create_branch("dag_rep_target").unwrap();
+    branches.create("dag_rep_target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_rep_target");
     kv.put(&target_id, "default", "base", Value::Int(0))
         .unwrap();
 
-    branch_ops::fork_branch(&test_db.db, "dag_rep_target", "dag_rep_source").unwrap();
+    test_db.db.branches().fork( "dag_rep_target", "dag_rep_source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_rep_source");
 
     // First divergence + merge.
     kv.put(&source_id, "default", "round1", Value::Int(1))
         .unwrap();
-    branch_ops::merge_branches(
-        &test_db.db,
-        "dag_rep_source",
-        "dag_rep_target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("dag_rep_source", "dag_rep_target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     let first_mv = find_last_merge_version(&test_db.db, "dag_rep_source", "dag_rep_target")
         .unwrap()
@@ -7202,13 +6944,7 @@ fn dag_repeated_merge_advances_merge_base() {
     // Second divergence + merge.
     kv.put(&source_id, "default", "round2", Value::Int(2))
         .unwrap();
-    branch_ops::merge_branches(
-        &test_db.db,
-        "dag_rep_source",
-        "dag_rep_target",
-        MergeStrategy::LastWriterWins,
-        None,
-    )
+    test_db.db.branches().merge_with_options("dag_rep_source", "dag_rep_target", MergeOptions::with_strategy(MergeStrategy::LastWriterWins))
     .unwrap();
     let second_mv = find_last_merge_version(&test_db.db, "dag_rep_source", "dag_rep_target")
         .unwrap()
@@ -7274,14 +7010,14 @@ fn dag_skips_system_branch() {
 fn dag_survives_database_reopen() {
     let mut test_db = TestDb::new();
     {
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
-        branch_index.create_branch("dag_persist").unwrap();
+        branches.create("dag_persist").unwrap();
         let persist_id = strata_engine::primitives::branch::resolve_branch_name("dag_persist");
         // Storage requires at least one write to register the branch for forking.
         kv.put(&persist_id, "default", "seed", Value::Int(1))
             .unwrap();
-        branch_ops::fork_branch(&test_db.db, "dag_persist", "dag_persist_fork").unwrap();
+        test_db.db.branches().fork( "dag_persist", "dag_persist_fork").unwrap();
     }
 
     // Reopen — DAG state lives on the durable `_system_` branch and must
@@ -7338,20 +7074,20 @@ fn dag_records_fork_metadata_end_to_end() {
     // anywhere along the chain would silently lose audit metadata; this
     // test catches that.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_meta_src").unwrap();
+    branches.create("dag_meta_src").unwrap();
     let src_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_src");
     kv.put(&src_id, "default", "seed", Value::Int(1)).unwrap();
 
-    strata_engine::branch_ops::fork_branch_with_metadata(
-        &test_db.db,
+    test_db.db.branches().fork_with_options(
         "dag_meta_src",
         "dag_meta_dst",
-        Some("releasing v1.2"),
-        Some("alice@example.com"),
+        ForkOptions::default()
+            .with_message("releasing v1.2")
+            .with_creator("alice@example.com"),
     )
     .unwrap();
 
@@ -7375,26 +7111,24 @@ fn dag_records_fork_metadata_end_to_end() {
 fn dag_records_merge_metadata_end_to_end() {
     // Mirror of `dag_records_fork_metadata_end_to_end` for merge.
     let test_db = TestDb::new();
-    let branch_index = test_db.branch_index();
+    let branches = test_db.db.branches();
     let kv = test_db.kv();
     let p = test_db.all_primitives();
 
-    branch_index.create_branch("dag_meta_target").unwrap();
+    branches.create("dag_meta_target").unwrap();
     let target_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_target");
     kv.put(&target_id, "default", "base", Value::Int(0))
         .unwrap();
-    branch_ops::fork_branch(&test_db.db, "dag_meta_target", "dag_meta_source").unwrap();
+    test_db.db.branches().fork( "dag_meta_target", "dag_meta_source").unwrap();
     let source_id = strata_engine::primitives::branch::resolve_branch_name("dag_meta_source");
     kv.put(&source_id, "default", "new", Value::Int(1)).unwrap();
 
-    strata_engine::branch_ops::merge_branches_with_metadata(
-        &test_db.db,
+    test_db.db.branches().merge_with_options(
         "dag_meta_source",
         "dag_meta_target",
-        MergeStrategy::LastWriterWins,
-        None,
-        Some("hotfix release"),
-        Some("bob@example.com"),
+        MergeOptions::with_strategy(MergeStrategy::LastWriterWins)
+            .with_message("hotfix release")
+            .with_creator("bob@example.com"),
     )
     .unwrap();
 

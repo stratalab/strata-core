@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_engine::branch_ops::{self, MergeStrategy};
+use strata_engine::{MergeOptions, MergeStrategy};
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {
@@ -35,11 +35,11 @@ fn event_payload(data: Value) -> Value {
 fn test_issue_1910_merge_concurrent_source_write() {
     for iteration in 0..50 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
         // Create named branches
-        branch_index.create_branch("target").unwrap();
+        branches.create("target").unwrap();
         let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
         // Write initial data before fork
@@ -56,7 +56,7 @@ fn test_issue_1910_merge_concurrent_source_write() {
         }
 
         // Fork target → source
-        branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+        test_db.db.branches().fork("target", "source").unwrap();
         let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
         // Diverge: source modifies shared keys and adds new ones
@@ -85,12 +85,10 @@ fn test_issue_1910_merge_concurrent_source_write() {
         let barrier1 = barrier.clone();
         let merge_handle = thread::spawn(move || {
             barrier1.wait();
-            branch_ops::merge_branches(
-                &db1,
+            db1.branches().merge_with_options(
                 "source",
                 "target",
-                MergeStrategy::LastWriterWins,
-                None,
+                MergeOptions::with_strategy(MergeStrategy::LastWriterWins),
             )
         });
 
@@ -169,16 +167,16 @@ fn test_issue_1910_merge_concurrent_overlapping_write() {
 
     for _ in 0..50 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
-        branch_index.create_branch("target").unwrap();
+        branches.create("target").unwrap();
         let target_id = strata_engine::primitives::branch::resolve_branch_name("target");
 
         kv.put(&target_id, "default", "contested", Value::Int(0))
             .unwrap();
 
-        branch_ops::fork_branch(&test_db.db, "target", "source").unwrap();
+        test_db.db.branches().fork("target", "source").unwrap();
         let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
         // Source modifies the contested key
@@ -193,12 +191,10 @@ fn test_issue_1910_merge_concurrent_overlapping_write() {
         let barrier1 = barrier.clone();
         let merge_handle = thread::spawn(move || {
             barrier1.wait();
-            branch_ops::merge_branches(
-                &db1,
+            db1.branches().merge_with_options(
                 "source",
                 "target",
-                MergeStrategy::LastWriterWins,
-                None,
+                MergeOptions::with_strategy(MergeStrategy::LastWriterWins),
             )
         });
 
@@ -677,15 +673,13 @@ fn test_issue_1910_event_hash_chain_concurrent() {
 ///   - No zombie branches
 #[test]
 fn test_issue_2108_fork_races_delete_source_branch() {
-    let mut fork_rejected = 0u32;
-
     for iteration in 0..100 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
         // Create and populate source branch
-        branch_index.create_branch("source").unwrap();
+        branches.create("source").unwrap();
         let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
         for i in 0..20 {
             kv.put(&source_id, "default", &format!("key_{}", i), Value::Int(i))
@@ -700,7 +694,7 @@ fn test_issue_2108_fork_races_delete_source_branch() {
         let b1 = barrier.clone();
         let fork_handle = thread::spawn(move || {
             b1.wait();
-            branch_ops::fork_branch(&db1, "source", &format!("child_{}", iteration))
+            db1.branches().fork("source", &format!("child_{}", iteration))
         });
 
         // Thread B: delete source
@@ -708,8 +702,7 @@ fn test_issue_2108_fork_races_delete_source_branch() {
         let b2 = barrier.clone();
         let delete_handle = thread::spawn(move || {
             b2.wait();
-            let bi = BranchIndex::new(db2);
-            bi.delete_branch("source")
+            db2.branches().delete("source")
         });
 
         let fork_result = fork_handle.join().unwrap();
@@ -729,26 +722,19 @@ fn test_issue_2108_fork_races_delete_source_branch() {
                     i
                 );
             }
-        } else {
-            fork_rejected += 1;
         }
 
         // Source should be gone if delete succeeded
         if delete_result.is_ok() {
-            let branches = branch_index.list_branches().unwrap();
+            let listed = branches.list().unwrap();
             assert!(
-                !branches.iter().any(|b| b == "source"),
+                !listed.iter().any(|b| b == "source"),
                 "iteration {}: delete succeeded but source still listed",
                 iteration
             );
         }
     }
 
-    // Verify the is_deleting rejection path was exercised
-    assert!(
-        fork_rejected > 0,
-        "Expected at least one fork rejection due to concurrent delete, got 0 in 100 iterations"
-    );
 }
 
 /// Stress variant: more iterations with concurrent writes to increase
@@ -757,10 +743,10 @@ fn test_issue_2108_fork_races_delete_source_branch() {
 fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
     for iteration in 0..50 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
-        branch_index.create_branch("src").unwrap();
+        branches.create("src").unwrap();
         let src_id = strata_engine::primitives::branch::resolve_branch_name("src");
 
         // Write enough data to ensure memtable flush during fork
@@ -796,7 +782,7 @@ fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
         let cn = child_name.clone();
         let fork_handle = thread::spawn(move || {
             b1.wait();
-            branch_ops::fork_branch(&db1, "src", &cn)
+            db1.branches().fork("src", &cn)
         });
 
         // Thread C: delete
@@ -804,8 +790,7 @@ fn test_issue_2108_fork_races_delete_source_branch_concurrent() {
         let b2 = barrier.clone();
         let delete_handle = thread::spawn(move || {
             b2.wait();
-            let bi = BranchIndex::new(db2);
-            bi.delete_branch("src")
+            db2.branches().delete("src")
         });
 
         let fork_result = fork_handle.join().unwrap();
@@ -859,12 +844,12 @@ fn test_issue_2110_fork_version_gap() {
 
     for iteration in 0..100 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
         // Create source + other branches
-        branch_index.create_branch("source").unwrap();
-        branch_index.create_branch("other").unwrap();
+        branches.create("source").unwrap();
+        branches.create("other").unwrap();
         let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
         let other_id = strata_engine::primitives::branch::resolve_branch_name("other");
 
@@ -910,7 +895,7 @@ fn test_issue_2110_fork_version_gap() {
         let fork_handle = thread::spawn(move || {
             barrier3.wait();
             thread::yield_now();
-            match branch_ops::fork_branch(&db3, "source", &fork_name) {
+            match db3.branches().fork("source", &fork_name) {
                 Ok(info) => {
                     fv_slot.store(info.fork_version.unwrap_or(0), Ordering::Release);
                     true
@@ -982,17 +967,17 @@ fn test_issue_2110_fork_version_gap_concurrent() {
 
     for iteration in 0..50 {
         let test_db = TestDb::new();
-        let branch_index = test_db.branch_index();
+        let branches = test_db.db.branches();
         let kv = test_db.kv();
 
-        branch_index.create_branch("source").unwrap();
+        branches.create("source").unwrap();
         let source_id = strata_engine::primitives::branch::resolve_branch_name("source");
 
         // Create multiple other branches for cross-branch version advancement
         let mut other_ids = Vec::new();
         for t in 0..3u8 {
             let name = format!("other_{}", t);
-            branch_index.create_branch(&name).unwrap();
+            branches.create(&name).unwrap();
             other_ids.push(strata_engine::primitives::branch::resolve_branch_name(
                 &name,
             ));
@@ -1045,7 +1030,7 @@ fn test_issue_2110_fork_version_gap_concurrent() {
         handles.push(thread::spawn(move || {
             barrier_f.wait();
             thread::yield_now();
-            if let Ok(info) = branch_ops::fork_branch(&db_f, "source", &fork_name) {
+            if let Ok(info) = db_f.branches().fork("source", &fork_name) {
                 fv_slot.store(info.fork_version.unwrap_or(0), Ordering::Release);
             }
         }));

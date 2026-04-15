@@ -153,7 +153,7 @@ impl TransactionCoordinator {
     ///
     /// # Returns
     /// * `TransactionContext` - Active transaction ready for operations
-    pub fn start_transaction(
+    pub(crate) fn start_transaction(
         &self,
         branch_id: BranchId,
         storage: &Arc<SegmentedStore>,
@@ -240,7 +240,7 @@ impl TransactionCoordinator {
     /// # Returns
     /// * `Ok(commit_version)` - Transaction committed successfully
     /// * `Err(StrataError)` - Validation conflict, WAL error, or invalid state
-    pub fn commit<S: Storage>(
+    pub(crate) fn commit<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -255,7 +255,7 @@ impl TransactionCoordinator {
     ///
     /// Same as `commit()` but takes `Arc<Mutex<WalWriter>>` so the WAL lock
     /// is held only for the append I/O, not for validation or storage apply.
-    pub fn commit_with_wal_arc<S: Storage>(
+    pub(crate) fn commit_with_wal_arc<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -483,7 +483,7 @@ impl TransactionCoordinator {
     ///
     /// Used by the coordinated commit path where versions are allocated
     /// from the shared counter file under the WAL file lock.
-    pub fn commit_with_version<S: Storage>(
+    pub(crate) fn commit_with_version<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -664,6 +664,64 @@ mod tests {
         };
 
         let coordinator = TransactionCoordinator::from_recovery(&result);
+        assert_eq!(coordinator.current_version(), CommitVersion(100));
+    }
+
+    #[test]
+    fn test_issue_1726_version_counter_from_segments() {
+        use strata_concurrency::RecoveryCoordinator;
+        use strata_core::traits::WriteMode;
+        use strata_core::types::{Key, Namespace, TypeTag};
+        use strata_core::value::Value;
+
+        fn branch() -> BranchId {
+            BranchId::from_bytes([1; 16])
+        }
+
+        fn ns() -> Arc<Namespace> {
+            Arc::new(Namespace::new(branch(), "default".to_string()))
+        }
+
+        fn kv_key(name: &str) -> Key {
+            Key::new(ns(), TypeTag::KV, name.as_bytes().to_vec())
+        }
+
+        fn seed(store: &SegmentedStore, key: Key, value: Value, version: u64) {
+            store
+                .put_with_version_mode(key, value, CommitVersion(version), None, WriteMode::Append)
+                .unwrap();
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let wal_dir = dir.path().join("WAL");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+        let segments_dir = dir.path().join("segments");
+
+        let store = SegmentedStore::with_dir(segments_dir.clone(), 0);
+        for i in 1..=100u64 {
+            seed(
+                &store,
+                kv_key(&format!("k{:04}", i)),
+                Value::Int(i as i64),
+                i,
+            );
+        }
+        store.rotate_memtable(&branch());
+        store.flush_oldest_frozen(&branch()).unwrap();
+
+        assert_eq!(store.branch_segment_count(&branch()), 1);
+        drop(store);
+
+        let recovery = RecoveryCoordinator::new(wal_dir).with_segments(segments_dir, 0);
+        let result = recovery.recover().unwrap();
+        assert_eq!(result.stats.final_version, CommitVersion::ZERO);
+
+        let seg_info = result.storage.recover_segments().unwrap();
+        assert_eq!(seg_info.segments_loaded, 1);
+        assert_eq!(seg_info.max_commit_id, CommitVersion(100));
+
+        let coordinator = TransactionCoordinator::from_recovery_with_limits(&result, 0);
+        coordinator.bump_version_floor(seg_info.max_commit_id);
         assert_eq!(coordinator.current_version(), CommitVersion(100));
     }
 

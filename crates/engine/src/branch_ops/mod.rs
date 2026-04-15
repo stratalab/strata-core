@@ -24,14 +24,10 @@ pub(crate) use dag_hooks::{
     dispatch_cherry_pick_hook, dispatch_fork_hook, dispatch_merge_hook, dispatch_revert_hook,
     with_branch_dag_hooks_suppressed,
 };
-pub use dag_hooks::{
-    BranchCherryPickHook, BranchCreateHook, BranchDagHooks, BranchDeleteHook, BranchForkHook,
-    BranchMergeHook, BranchRevertHook,
-};
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
-use crate::BranchIndex;
+use crate::primitives::branch::BranchIndex;
 use crate::SpaceIndex;
 use primitive_merge::{
     build_merge_registry, MergeHandlerRegistry, MergePlanCtx, MergePostCommitCtx, MergePrecheckCtx,

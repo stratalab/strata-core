@@ -33,3 +33,4 @@ strata-inference = { path = "../inference", optional = true, features = ["local"
 
 [dev-dependencies]
 tempfile = { workspace = true }
+strata-graph = { path = "../graph" }

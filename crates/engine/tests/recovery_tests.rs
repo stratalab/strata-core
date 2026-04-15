@@ -13,8 +13,8 @@ use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::SearchSubsystem;
-use strata_engine::{BranchIndex, EventLog, KVStore};
 use strata_engine::{Database, SearchRequest};
+use strata_engine::{EventLog, KVStore};
 use tempfile::TempDir;
 
 /// Helper to create an object payload with a string value
@@ -270,7 +270,7 @@ fn test_event_log_multiple_events_survives_recovery() {
     );
 }
 
-/// Test BranchIndex survives recovery
+/// Test branch metadata survives recovery.
 #[test]
 fn test_branch_index_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
@@ -278,33 +278,32 @@ fn test_branch_index_survives_recovery() {
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
 
     // Create branch with metadata
-    let branch_meta = branch_index.create_branch("test-branch").unwrap();
-    let branch_name = branch_meta.value.name.clone();
+    let branch_meta = branches.create("test-branch").unwrap();
+    let branch_name = branch_meta.name.clone();
 
     // Note: update_status and add_tags removed in MVP simplification
 
     // Verify before crash
-    let branch = branch_index.get_branch(&branch_name).unwrap().unwrap();
+    let branch = branches.info_versioned(&branch_name).unwrap().unwrap();
     assert_eq!(branch.value.name, "test-branch");
 
     // Simulate crash
-    drop(branch_index);
     drop(db);
 
     // Recovery
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
 
     // Branch preserved
-    let recovered = branch_index.get_branch(&branch_name).unwrap().unwrap();
+    let recovered = branches.info_versioned(&branch_name).unwrap().unwrap();
     assert_eq!(recovered.value.name, "test-branch");
 }
 
-/// Test BranchIndex list survives recovery
+/// Test branch listing survives recovery.
 #[test]
 fn test_branch_index_list_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
@@ -312,37 +311,36 @@ fn test_branch_index_list_survives_recovery() {
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
 
     // Create multiple branches
-    branch_index.create_branch("branch1").unwrap();
-    branch_index.create_branch("branch2").unwrap();
-    branch_index.create_branch("branch3").unwrap();
+    branches.create("branch1").unwrap();
+    branches.create("branch2").unwrap();
+    branches.create("branch3").unwrap();
 
     // Note: update_status and query_by_status removed in MVP simplification
 
     // Simulate crash
-    drop(branch_index);
     drop(db);
 
     // Recovery
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
 
     // List all branches works (includes _system_ from init_system_branch)
-    let branches = branch_index.list_branches().unwrap();
-    let user_branches: Vec<_> = branches
+    let branch_names = branches.list().unwrap();
+    let user_branches: Vec<_> = branch_names
         .iter()
         .filter(|b| !b.starts_with("_system"))
         .collect();
     assert_eq!(user_branches.len(), 3);
-    assert!(branches.contains(&"branch1".to_string()));
-    assert!(branches.contains(&"branch2".to_string()));
-    assert!(branches.contains(&"branch3".to_string()));
+    assert!(branch_names.contains(&"branch1".to_string()));
+    assert!(branch_names.contains(&"branch2".to_string()));
+    assert!(branch_names.contains(&"branch3".to_string()));
 }
 
-/// Test BranchIndex cascading delete survives recovery
+/// Test branch delete survives recovery.
 #[test]
 fn test_branch_delete_survives_recovery() {
     let temp_dir = TempDir::new().unwrap();
@@ -350,39 +348,38 @@ fn test_branch_delete_survives_recovery() {
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
 
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
     let kv = KVStore::new(db.clone());
 
     // Create two branches
-    let meta1 = branch_index.create_branch("branch1").unwrap();
-    let meta2 = branch_index.create_branch("branch2").unwrap();
-    let branch1 = BranchId::from_string(&meta1.value.branch_id).unwrap();
-    let branch2 = BranchId::from_string(&meta2.value.branch_id).unwrap();
+    let meta1 = branches.create("branch1").unwrap();
+    let meta2 = branches.create("branch2").unwrap();
+    let branch1 = BranchId::from_string(&meta1.branch_id).unwrap();
+    let branch2 = BranchId::from_string(&meta2.branch_id).unwrap();
 
     // Write data to both
     kv.put(&branch1, "default", "key", Value::Int(1)).unwrap();
     kv.put(&branch2, "default", "key", Value::Int(2)).unwrap();
 
     // Delete branch1
-    branch_index.delete_branch("branch1").unwrap();
+    branches.delete("branch1").unwrap();
 
     // Simulate crash
-    drop(branch_index);
     drop(kv);
     drop(db);
 
     // Recovery
     let db =
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
-    let branch_index = BranchIndex::new(db.clone());
+    let branches = db.branches();
     let kv = KVStore::new(db.clone());
 
     // branch1 is still deleted
-    assert!(branch_index.get_branch("branch1").unwrap().is_none());
+    assert!(branches.info("branch1").unwrap().is_none());
     assert!(kv.get(&branch1, "default", "key").unwrap().is_none());
 
     // branch2 data preserved
-    assert!(branch_index.get_branch("branch2").unwrap().is_some());
+    assert!(branches.info("branch2").unwrap().is_some());
     assert_eq!(
         kv.get(&branch2, "default", "key").unwrap(),
         Some(Value::Int(2))
@@ -508,13 +505,13 @@ fn test_all_primitives_recover_together() {
     {
         let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
             .unwrap();
-        let branch_index = BranchIndex::new(db.clone());
+        let branches = db.branches();
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
 
         // Create branch
-        let branch_meta = branch_index.create_branch("full-test").unwrap();
-        branch_id = BranchId::from_string(&branch_meta.value.branch_id).unwrap();
+        let branch_meta = branches.create("full-test").unwrap();
+        branch_id = BranchId::from_string(&branch_meta.branch_id).unwrap();
 
         // Populate all primitives
         kv.put(
@@ -534,12 +531,12 @@ fn test_all_primitives_recover_together() {
     {
         let db = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
             .unwrap();
-        let branch_index = BranchIndex::new(db.clone());
+        let branches = db.branches();
         let kv = KVStore::new(db.clone());
         let event_log = EventLog::new(db.clone());
 
-        // BranchIndex
-        let branch = branch_index.get_branch("full-test").unwrap().unwrap();
+        // Branch metadata
+        let branch = branches.info_versioned("full-test").unwrap().unwrap();
         assert_eq!(branch.value.name, "full-test");
 
         // KV

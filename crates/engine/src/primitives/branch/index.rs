@@ -22,11 +22,13 @@ use crate::database::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
+use strata_core::id::CommitVersion;
+use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
-use tracing::info;
+use tracing::{info, warn};
 use uuid::Uuid;
 
 /// Namespace UUID for generating deterministic branch IDs from names.
@@ -34,6 +36,11 @@ use uuid::Uuid;
 const BRANCH_NAMESPACE: Uuid = Uuid::from_bytes([
     0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ]);
+
+/// Internal metadata key storing the effective default branch name for
+/// disk-backed databases. This lets follower and reopened primary handles
+/// recover branch semantics across process boundaries.
+const DEFAULT_BRANCH_MARKER_KEY: &str = "__default_branch__";
 
 /// Resolve a branch name to a core BranchId using the same logic as the executor.
 ///
@@ -64,6 +71,52 @@ fn global_branch_id() -> BranchId {
 /// Get the global namespace for BranchIndex operations
 fn global_namespace() -> Arc<Namespace> {
     Arc::new(Namespace::for_branch(global_branch_id()))
+}
+
+fn default_branch_marker_key() -> Key {
+    Key::new_branch_with_id(global_namespace(), DEFAULT_BRANCH_MARKER_KEY)
+}
+
+pub(crate) fn read_default_branch_marker(db: &Database) -> StrataResult<Option<String>> {
+    match db
+        .storage()
+        .get_versioned(&default_branch_marker_key(), CommitVersion::MAX)?
+    {
+        Some(entry) => match entry.value {
+            Value::String(name) => Ok(Some(name)),
+            _ => Err(StrataError::serialization(
+                "default branch marker must be stored as a string",
+            )),
+        },
+        None => Ok(None),
+    }
+}
+
+pub(crate) fn write_default_branch_marker(
+    db: &Arc<Database>,
+    branch_name: &str,
+) -> StrataResult<()> {
+    db.transaction(global_branch_id(), |txn| {
+        txn.put(
+            default_branch_marker_key(),
+            Value::String(branch_name.to_string()),
+        )?;
+        Ok(())
+    })
+}
+
+pub(crate) fn clear_default_branch_marker_if(
+    db: &Arc<Database>,
+    branch_name: &str,
+) -> StrataResult<()> {
+    db.transaction(global_branch_id(), |txn| {
+        let key = default_branch_marker_key();
+        let should_clear = matches!(txn.get(&key)?, Some(Value::String(name)) if name == branch_name);
+        if should_clear {
+            txn.delete(key)?;
+        }
+        Ok(())
+    })
 }
 
 // ========== BranchStatus Enum ==========
@@ -202,13 +255,13 @@ fn from_stored_value<T: for<'de> Deserialize<'de>>(
 /// ri.delete_branch("my-run")?;
 /// ```
 #[derive(Clone)]
-pub struct BranchIndex {
+pub(crate) struct BranchIndex {
     db: Arc<Database>,
 }
 
 impl BranchIndex {
     /// Create new BranchIndex instance
-    pub fn new(db: Arc<Database>) -> Self {
+    pub(crate) fn new(db: Arc<Database>) -> Self {
         Self { db }
     }
 
@@ -225,7 +278,7 @@ impl BranchIndex {
     ///
     /// ## Errors
     /// - `InvalidInput` if branch already exists
-    pub fn create_branch(&self, branch_id: &str) -> StrataResult<Versioned<BranchMetadata>> {
+    pub(crate) fn create_branch(&self, branch_id: &str) -> StrataResult<Versioned<BranchMetadata>> {
         let result = self.db.transaction(global_branch_id(), |txn| {
             let key = self.key_for(branch_id);
 
@@ -258,7 +311,10 @@ impl BranchIndex {
     /// ## Returns
     /// - `Some(Versioned<metadata>)` if branch exists
     /// - `None` if branch doesn't exist
-    pub fn get_branch(&self, branch_id: &str) -> StrataResult<Option<Versioned<BranchMetadata>>> {
+    pub(crate) fn get_branch(
+        &self,
+        branch_id: &str,
+    ) -> StrataResult<Option<Versioned<BranchMetadata>>> {
         self.db.transaction(global_branch_id(), |txn| {
             let key = self.key_for(branch_id);
             match txn.get(&key)? {
@@ -273,7 +329,7 @@ impl BranchIndex {
     }
 
     /// Check if a branch exists
-    pub fn exists(&self, branch_id: &str) -> StrataResult<bool> {
+    pub(crate) fn exists(&self, branch_id: &str) -> StrataResult<bool> {
         self.db.transaction(global_branch_id(), |txn| {
             let key = self.key_for(branch_id);
             Ok(txn.get(&key)?.is_some())
@@ -281,7 +337,7 @@ impl BranchIndex {
     }
 
     /// List all branch IDs
-    pub fn list_branches(&self) -> StrataResult<Vec<String>> {
+    pub(crate) fn list_branches(&self) -> StrataResult<Vec<String>> {
         self.db.transaction(global_branch_id(), |txn| {
             let prefix = Key::new_branch_with_id(global_namespace(), "");
             let results = txn.scan_prefix(&prefix)?;
@@ -292,6 +348,7 @@ impl BranchIndex {
                     let key_str = String::from_utf8(k.user_key.to_vec()).ok()?;
                     // Filter out index keys (legacy) and system branches
                     if key_str.contains("__idx_")
+                        || key_str == DEFAULT_BRANCH_MARKER_KEY
                         || strata_core::branch_dag::is_system_branch(&key_str)
                     {
                         None
@@ -310,7 +367,7 @@ impl BranchIndex {
     /// - All branch-scoped data (KV, Events, JSON, Vectors)
     ///
     /// USE WITH CAUTION - this is irreversible!
-    pub fn delete_branch(&self, branch_id: &str) -> StrataResult<()> {
+    pub(crate) fn delete_branch(&self, branch_id: &str) -> StrataResult<()> {
         // First get the branch metadata (read-only, no WAL after #970)
         let branch_meta = self
             .get_branch(branch_id)?
@@ -375,6 +432,15 @@ impl BranchIndex {
             return Err(e);
         }
 
+        if let Err(e) = clear_default_branch_marker_if(&self.db, branch_id) {
+            warn!(
+                target: "strata::branch",
+                branch = branch_id,
+                error = %e,
+                "Failed to clear persisted default-branch marker after delete"
+            );
+        }
+
         // Evict cached namespaces for the deleted branch to prevent unbounded
         // growth of the global NS_CACHE (SCALE-001).
         crate::primitives::kv::invalidate_kv_namespace_cache(&executor_branch_id);
@@ -399,6 +465,21 @@ impl BranchIndex {
         // retries directory removal after gc_orphan_segments as a safety
         // net for anything drain() may have missed.
         self.db.clear_branch_storage(&executor_branch_id);
+
+        let subsystems = self.db.installed_subsystems();
+        for subsystem in subsystems.iter() {
+            if let Err(e) =
+                subsystem.cleanup_deleted_branch(&self.db, &executor_branch_id, branch_id)
+            {
+                warn!(
+                    target: "strata::branch",
+                    subsystem = subsystem.name(),
+                    branch = branch_id,
+                    error = %e,
+                    "Subsystem branch cleanup failed after delete"
+                );
+            }
+        }
 
         // Remove commit lock entry. The deleting mark is intentionally
         // kept: any pre-existing transaction that tries to commit on

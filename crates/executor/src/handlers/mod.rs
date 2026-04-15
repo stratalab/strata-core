@@ -8,7 +8,7 @@
 //! | `json` | 17 | JsonStore |
 //! | `event` | 11 | EventLog |
 //! | `vector` | 19 | VectorStore |
-//! | `branch` | 24 | BranchIndex |
+//! | `branch` | 24 | BranchService |
 //! | `transaction` | 5 | TransactionControl |
 //! | `retention` | 3 | RetentionSubstrate |
 //! | `database` | 4 | Database-level |
@@ -58,18 +58,24 @@ pub(crate) fn reject_system_branch(branch: &BranchId) -> Result<()> {
 
 /// Validate that a branch exists before performing a write operation (#951).
 ///
-/// The default branch is always allowed (it is implicit and not stored in BranchIndex).
-/// For all other branches, checks `BranchIndex::exists()` and returns
+/// The effective runtime default branch is always allowed, even if it has not
+/// been explicitly materialized in branch metadata yet. For all other
+/// branches, checks `BranchService::exists()` and returns
 /// `Error::BranchNotFound` with a "did you mean?" suggestion if the branch does not exist.
 pub(crate) fn require_branch_exists(p: &Arc<Primitives>, branch: &BranchId) -> Result<()> {
-    if branch.is_default() {
+    let default_branch = p
+        .db
+        .default_branch_name()
+        .unwrap_or_else(|| "default".to_string());
+    if default_branch == branch.as_str() {
         return Ok(());
     }
-    let exists = convert_result(p.branch.exists(branch.as_str()))?;
+    let branches = p.db.branches();
+    let exists = convert_result(branches.exists(branch.as_str()))?;
     if !exists {
         let name = branch.as_str().to_string();
-        let branches = p.branch.list_branches().unwrap_or_default();
-        let hint = crate::suggest::format_hint("branches", &branches, &name, 2);
+        let branch_names = branches.list().unwrap_or_default();
+        let hint = crate::suggest::format_hint("branches", &branch_names, &name, 2);
         return Err(Error::BranchNotFound { branch: name, hint });
     }
     Ok(())

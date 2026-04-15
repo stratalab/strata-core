@@ -8,13 +8,14 @@
 //! Strata maintains a "current branch" context, similar to how git maintains
 //! a current branch. All data operations operate on the current branch.
 //!
-//! - Use `create_branch(name)` to create a new blank branch
+//! - Use `db.branches().create(name)` to create a new blank branch
 //! - Use `set_branch(name)` to switch to an existing branch
 //! - Use `current_branch()` to get the current branch name
-//! - Use `list_branches()` to see all available branches
-//! - Use `fork_branch(dest)` to copy the current branch to a new branch
+//! - Use `db.branches().list()` to see all available branches
+//! - Use `db.branches().fork(src, dest)` to copy a branch
 //!
-//! By default, Strata starts on the "default" branch.
+//! By default, Strata starts on the runtime-configured default branch
+//! (commonly `"default"`).
 //!
 //! # Example
 //!
@@ -23,15 +24,15 @@
 //!
 //! let mut db = Strata::open("/path/to/data")?;
 //!
-//! // Work on the default branch
+//! // Work on the runtime default branch
 //! db.kv_put("key", Value::String("hello".into()))?;
 //!
 //! // Create and switch to a different branch
-//! db.create_branch("experiment-1")?;
+//! db.branches().create("experiment-1")?;
 //! db.set_branch("experiment-1")?;
 //! db.kv_put("key", Value::String("different".into()))?;
 //!
-//! // Switch back to default
+//! // Switch back to the default branch
 //! db.set_branch("default")?;
 //! assert_eq!(db.kv_get("key")?, Some(Value::String("hello".into())));
 //! ```
@@ -47,7 +48,7 @@ mod system;
 mod vector;
 
 pub use branches::Branches;
-pub use strata_engine::branch_ops::{
+pub use strata_engine::{
     BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
     DiffOptions, DiffSummary, ForkInfo, MergeInfo, MergeStrategy, RevertInfo, SpaceDiff,
 };
@@ -121,15 +122,40 @@ pub(crate) fn default_product_cache_spec() -> OpenSpec {
 /// - **Strata** = working directory (stateful view into the repo)
 /// - **Branch** = branch (isolated namespace for data)
 ///
-/// Use `create_branch()` to create new branches and `set_branch()` to switch between them.
+/// Use `db.branches().create()` to create new branches and `set_branch()` to switch between them.
 pub struct Strata {
     backend: Backend,
+    default_branch: BranchId,
     current_branch: BranchId,
     current_space: String,
     access_mode: AccessMode,
 }
 
 impl Strata {
+    fn from_backend(backend: Backend, access_mode: AccessMode) -> Result<Self> {
+        let default_branch = Self::load_default_branch(&backend)?;
+        Ok(Self {
+            backend,
+            current_branch: default_branch.clone(),
+            default_branch,
+            current_space: "default".to_string(),
+            access_mode,
+        })
+    }
+
+    fn load_default_branch(backend: &Backend) -> Result<BranchId> {
+        match backend.execute(Command::Info)? {
+            Output::DatabaseInfo(info) => Ok(BranchId::from(info.default_branch)),
+            _ => Err(Error::Internal {
+                reason: "Unexpected output for Info".into(),
+                hint: Some(
+                    "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues"
+                        .to_string(),
+                ),
+            }),
+        }
+    }
+
     /// Open a database at the given path.
     ///
     /// This is the primary way to create a Strata instance. The database
@@ -171,22 +197,16 @@ impl Strata {
             })?;
             let access_mode = AccessMode::ReadOnly;
             let executor = Executor::new_with_mode(db, access_mode);
-            // NOTE: We deliberately skip `verify_default_branch` on the
-            // follower path. `BranchExists` goes through
-            // `BranchIndex::exists` which wraps its read in
-            // `db.transaction(...)`; every transaction runs through
+            // NOTE: We deliberately skip any follower-side default-branch
+            // existence probe here. `BranchService::exists()` still wraps its
+            // metadata read in `db.transaction(...)`; every transaction runs through
             // `commit_internal`, which unconditionally rejects follower
             // databases ("cannot commit: database opened in follower
-            // mode"). Verification is not load-bearing for followers:
+            // mode"). The probe is not load-bearing for followers:
             // they cannot write anyway, so if the default branch does
             // not yet exist on the primary, subsequent follower reads
             // simply return empty — no user-visible failure mode.
-            return Ok(Self {
-                backend: Backend::Local { executor },
-                current_branch: BranchId::default(),
-                current_space: "default".to_string(),
-                access_mode,
-            });
+            return Self::from_backend(Backend::Local { executor }, access_mode);
         }
 
         let access_mode = opts.access_mode;
@@ -208,12 +228,7 @@ impl Strata {
                     Self::ensure_default_branch(&executor)?;
                 }
                 // Read-only: no verification needed; operations fail gracefully
-                Ok(Self {
-                    backend: Backend::Local { executor },
-                    current_branch: BranchId::default(),
-                    current_space: "default".to_string(),
-                    access_mode,
-                })
+                Self::from_backend(Backend::Local { executor }, access_mode)
             }
             Err(e) => {
                 let err_msg = format!("{}", e);
@@ -235,12 +250,7 @@ impl Strata {
                                         reason: "Connected to IPC server but ping failed".into(),
                                         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
                                     })?;
-                                return Ok(Self {
-                                    backend,
-                                    current_branch: BranchId::default(),
-                                    current_space: "default".to_string(),
-                                    access_mode,
-                                });
+                                return Self::from_backend(backend, access_mode);
                             }
                             Err(_) => {
                                 // Stale socket — try to clean up and retry
@@ -260,12 +270,10 @@ impl Strata {
                                             Self::ensure_default_branch(&executor)?;
                                         }
                                         // Read-only: no verification needed
-                                        return Ok(Self {
-                                            backend: Backend::Local { executor },
-                                            current_branch: BranchId::default(),
-                                            current_space: "default".to_string(),
+                                        return Self::from_backend(
+                                            Backend::Local { executor },
                                             access_mode,
-                                        });
+                                        );
                                     }
                                     Err(_) => {
                                         return Err(Error::Internal {
@@ -321,20 +329,16 @@ impl Strata {
 
         let executor = Executor::new(db);
 
-        // Ensure the default branch exists (idempotent, open_runtime also ensures it)
+        // Ensure the runtime default branch exists (idempotent, open_runtime also ensures it)
         Self::ensure_default_branch(&executor)?;
 
-        Ok(Self {
-            backend: Backend::Local { executor },
-            current_branch: BranchId::default(),
-            current_space: "default".to_string(),
-            access_mode: AccessMode::ReadWrite,
-        })
+        Self::from_backend(Backend::Local { executor }, AccessMode::ReadWrite)
     }
 
     /// Create a new independent handle to the same database.
     ///
-    /// Each handle has its own branch context (starting on "default") and can
+    /// Each handle has its own branch context (starting on the runtime default
+    /// branch) and can
     /// be moved to a separate thread. This is the standard way to use Strata
     /// from multiple threads.
     ///
@@ -356,20 +360,18 @@ impl Strata {
                 let db = executor.primitives().db.clone();
                 let new_executor = Executor::new_with_mode(db, self.access_mode);
 
-                // Ensure the default branch exists (idempotent)
+                // Ensure the runtime default branch exists (idempotent)
                 if self.access_mode == AccessMode::ReadWrite {
                     Self::ensure_default_branch(&new_executor)?;
                 }
                 // Read-only: no verification needed; operations fail gracefully
 
-                Ok(Self {
-                    backend: Backend::Local {
+                Self::from_backend(
+                    Backend::Local {
                         executor: new_executor,
                     },
-                    current_branch: BranchId::default(),
-                    current_space: "default".to_string(),
-                    access_mode: self.access_mode,
-                })
+                    self.access_mode,
+                )
             }
             Backend::Ipc {
                 client,
@@ -381,31 +383,30 @@ impl Strata {
                     reason: format!("Failed to open new IPC connection: {}", e),
                     hint: None,
                 })?;
-                Ok(Self {
-                    backend: Backend::Ipc {
+                Self::from_backend(
+                    Backend::Ipc {
                         client: std::sync::Mutex::new(new_client),
                         access_mode: *access_mode,
                         data_dir: data_dir.clone(),
                     },
-                    current_branch: BranchId::default(),
-                    current_space: "default".to_string(),
-                    access_mode: *access_mode,
-                })
+                    *access_mode,
+                )
             }
         }
     }
-    /// Ensures the "default" branch exists in the database, creating it if
-    /// missing.
+
+    /// Ensures the runtime default branch exists in the database, creating it
+    /// if missing.
     fn ensure_default_branch(executor: &Executor) -> Result<()> {
-        // Check if default branch exists
+        let default_branch = executor.default_branch().clone();
+
         match executor.execute(Command::BranchExists {
-            branch: BranchId::default(),
+            branch: default_branch.clone(),
         })? {
             Output::Bool(exists) => {
                 if !exists {
-                    // Create the default branch
                     executor.execute(Command::BranchCreate {
-                        branch_id: Some("default".to_string()),
+                        branch_id: Some(default_branch.to_string()),
                         metadata: None,
                     })?;
                 }
@@ -509,7 +510,7 @@ impl Strata {
     /// db.branches().fork("default", "experiment-copy")?;
     /// ```
     pub fn branches(&self) -> Branches<'_> {
-        Branches::new(&self.backend)
+        Branches::new(&self.backend, self.current_branch(), self.default_branch())
     }
 
     /// Get a handle to the `_system_` branch for internal operations.
@@ -566,14 +567,18 @@ impl Strata {
         self.current_branch.as_str()
     }
 
+    fn default_branch(&self) -> &str {
+        self.default_branch.as_str()
+    }
+
     /// Switch to an existing branch.
     ///
     /// All subsequent data operations will use this branch.
     ///
     /// # Errors
     ///
-    /// Returns an error if the branch doesn't exist. Use `create_branch()` first
-    /// to create a new branch.
+    /// Returns an error if the branch doesn't exist. Use `db.branches().create()`
+    /// first to create a new branch.
     ///
     /// # Example
     ///
@@ -596,95 +601,6 @@ impl Strata {
 
         self.current_branch = BranchId::from(branch_name);
         Ok(())
-    }
-
-    /// Create a new blank branch.
-    ///
-    /// The new branch starts with no data. Stays on the current branch after creation.
-    /// Use `set_branch()` to switch to the new branch.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the branch already exists.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// // Create a new branch
-    /// db.create_branch("experiment")?;
-    ///
-    /// // Optionally switch to it
-    /// db.set_branch("experiment")?;
-    /// ```
-    pub fn create_branch(&self, branch_name: &str) -> Result<()> {
-        self.branches().create(branch_name)
-    }
-
-    /// Fork the current branch with all its data into a new branch.
-    ///
-    /// Copies all data (KV, State, Events, JSON, Vectors) from the current
-    /// branch to the new branch. Stays on the current branch after forking.
-    /// Use `set_branch()` to switch to the fork.
-    ///
-    /// # Example
-    ///
-    /// ```text
-    /// // Fork current branch to "experiment"
-    /// db.fork_branch("experiment")?;
-    ///
-    /// // Switch to the fork
-    /// db.set_branch("experiment")?;
-    /// // ... make changes without affecting original ...
-    /// ```
-    pub fn fork_branch(&self, destination: &str) -> Result<ForkInfo> {
-        self.branches().fork(self.current_branch(), destination)
-    }
-
-    /// Compare two branches and return their differences.
-    ///
-    /// Returns a structured diff showing per-space added, removed, and
-    /// modified entries between the two branches.
-    pub fn diff_branches(&self, branch_a: &str, branch_b: &str) -> Result<BranchDiffResult> {
-        self.branches().diff(branch_a, branch_b)
-    }
-
-    /// Merge data from source branch into target branch.
-    ///
-    /// See [`Branches::merge`] for details on merge strategies.
-    pub fn merge_branches(
-        &self,
-        source: &str,
-        target: &str,
-        strategy: MergeStrategy,
-    ) -> Result<MergeInfo> {
-        self.branches().merge(source, target, strategy)
-    }
-
-    /// List all available branches.
-    ///
-    /// Returns a list of branch names.
-    pub fn list_branches(&self) -> Result<Vec<String>> {
-        self.branches().list()
-    }
-
-    /// Delete a branch and all its data.
-    ///
-    /// **WARNING**: This is irreversible! All data in the branch will be deleted.
-    ///
-    /// # Errors
-    ///
-    /// - Returns an error if trying to delete the current branch
-    /// - Returns an error if trying to delete the "default" branch
-    pub fn delete_branch(&self, branch_name: &str) -> Result<()> {
-        // Cannot delete the current branch
-        if branch_name == self.current_branch.as_str() {
-            return Err(Error::ConstraintViolation {
-                reason: "Cannot delete the current branch. Switch to a different branch first."
-                    .into(),
-            });
-        }
-
-        self.branches().delete(branch_name)
     }
 
     /// Get the BranchId for use in commands.
@@ -814,9 +730,17 @@ mod tests {
     use super::*;
     use crate::types::*;
     use crate::Value;
+    use strata_engine::Database;
 
     fn create_strata() -> Strata {
         Strata::cache().unwrap()
+    }
+
+    fn create_custom_default_strata(default_branch: &str) -> Strata {
+        let db = Database::open_runtime(default_product_cache_spec().with_default_branch(default_branch))
+            .unwrap();
+        let executor = Executor::new(db);
+        Strata::from_backend(Backend::Local { executor }, AccessMode::ReadWrite).unwrap()
     }
 
     #[test]
@@ -973,11 +897,57 @@ mod tests {
     }
 
     #[test]
+    fn test_strata_uses_configured_default_branch_for_context_and_info() {
+        let mut db = create_custom_default_strata("main");
+
+        assert_eq!(db.current_branch(), "main");
+        assert_eq!(db.info().unwrap().default_branch, "main");
+
+        db.branches().create("other").unwrap();
+        db.set_branch("other").unwrap();
+
+        let err = db.branches().delete("main").unwrap_err();
+        assert!(
+            matches!(err, Error::ConstraintViolation { .. }),
+            "expected default-branch delete rejection, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_follower_open_uses_configured_default_branch() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let _primary = Database::open_runtime(
+            default_product_spec(temp_dir.path()).with_default_branch("main"),
+        )
+        .unwrap();
+        drop(_primary);
+
+        let db =
+            Strata::open_with(temp_dir.path(), OpenOptions::default().follower(true)).unwrap();
+        assert_eq!(db.current_branch(), "main");
+        assert_eq!(db.info().unwrap().default_branch, "main");
+    }
+
+    #[test]
+    fn test_open_reuses_persisted_default_branch_after_restart() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let _primary = Database::open_runtime(
+            default_product_spec(temp_dir.path()).with_default_branch("main"),
+        )
+        .unwrap();
+        drop(_primary);
+
+        let db = Strata::open(temp_dir.path()).unwrap();
+        assert_eq!(db.current_branch(), "main");
+        assert_eq!(db.info().unwrap().default_branch, "main");
+    }
+
+    #[test]
     fn test_create_branch() {
         let db = create_strata();
 
         // Create a new branch (stays on current branch)
-        db.create_branch("experiment-1").unwrap();
+        db.branches().create("experiment-1").unwrap();
 
         // Still on default branch
         assert_eq!(db.current_branch(), "default");
@@ -991,7 +961,7 @@ mod tests {
         let mut db = create_strata();
 
         // Create a branch first
-        db.create_branch("my-branch").unwrap();
+        db.branches().create("my-branch").unwrap();
 
         // Switch to it
         db.set_branch("my-branch").unwrap();
@@ -1012,11 +982,11 @@ mod tests {
         let db = create_strata();
 
         // Create a few branches
-        db.create_branch("branch-a").unwrap();
-        db.create_branch("branch-b").unwrap();
-        db.create_branch("branch-c").unwrap();
+        db.branches().create("branch-a").unwrap();
+        db.branches().create("branch-b").unwrap();
+        db.branches().create("branch-c").unwrap();
 
-        let branches = db.list_branches().unwrap();
+        let branches = db.branches().list().unwrap();
         assert!(branches.contains(&"branch-a".to_string()));
         assert!(branches.contains(&"branch-b".to_string()));
         assert!(branches.contains(&"branch-c".to_string()));
@@ -1027,10 +997,10 @@ mod tests {
         let db = create_strata();
 
         // Create a branch
-        db.create_branch("to-delete").unwrap();
+        db.branches().create("to-delete").unwrap();
 
         // Delete the branch
-        db.delete_branch("to-delete").unwrap();
+        db.branches().delete("to-delete").unwrap();
 
         // Verify it's gone
         assert!(!db.branches().exists("to-delete").unwrap());
@@ -1040,11 +1010,11 @@ mod tests {
     fn test_delete_current_branch_fails() {
         let mut db = create_strata();
 
-        db.create_branch("current-branch").unwrap();
+        db.branches().create("current-branch").unwrap();
         db.set_branch("current-branch").unwrap();
 
         // Trying to delete the current branch should fail
-        let result = db.delete_branch("current-branch");
+        let result = db.branches().delete("current-branch");
         assert!(result.is_err());
     }
 
@@ -1053,7 +1023,7 @@ mod tests {
         let db = create_strata();
 
         // Trying to delete the default branch should fail
-        let result = db.delete_branch("default");
+        let result = db.branches().delete("default");
         assert!(result.is_err());
     }
 
@@ -1065,7 +1035,7 @@ mod tests {
         db.kv_put("key", "default-value").unwrap();
 
         // Create and switch to another branch
-        db.create_branch("experiment").unwrap();
+        db.branches().create("experiment").unwrap();
         db.set_branch("experiment").unwrap();
 
         // The key should not exist in this branch
@@ -1095,7 +1065,7 @@ mod tests {
         .unwrap();
 
         // Create and switch to another branch
-        db.create_branch("isolated").unwrap();
+        db.branches().create("isolated").unwrap();
         db.set_branch("isolated").unwrap();
 
         // None of the data should exist in this branch
@@ -1176,7 +1146,7 @@ mod tests {
         db.kv_put("key2", 42i64).unwrap();
 
         // Fork default branch to "forked" (no data copy)
-        let info = db.fork_branch("forked").unwrap();
+        let info = db.branches().fork("default", "forked").unwrap();
         assert_eq!(info.source, "default");
         assert_eq!(info.destination, "forked");
         assert_eq!(info.keys_copied, 0, "fork copies zero keys");
@@ -1192,12 +1162,12 @@ mod tests {
         db.kv_put("only-default", 1i64).unwrap();
 
         // Create another branch with different data
-        db.create_branch("other").unwrap();
+        db.branches().create("other").unwrap();
         db.set_branch("other").unwrap();
         db.kv_put("shared", "value-b").unwrap();
         db.kv_put("only-other", 2i64).unwrap();
 
-        let diff = db.diff_branches("default", "other").unwrap();
+        let diff = db.branches().diff("default", "other").unwrap();
         assert_eq!(diff.branch_a, "default");
         assert_eq!(diff.branch_b, "other");
         // "shared" should be modified, "only-default" removed, "only-other" added
@@ -1215,14 +1185,15 @@ mod tests {
         db.kv_put("base-key", "base-value").unwrap();
 
         // Fork default → source, then write on source
-        db.fork_branch("source").unwrap();
+        db.branches().fork("default", "source").unwrap();
         db.set_branch("source").unwrap();
         db.kv_put("new-key", "new-value").unwrap();
 
         // Merge source into default
         db.set_branch("default").unwrap();
         let info = db
-            .merge_branches("source", "default", MergeStrategy::LastWriterWins)
+            .branches()
+            .merge("source", "default", MergeStrategy::LastWriterWins)
             .unwrap();
         assert!(info.keys_applied >= 1);
 
@@ -1510,7 +1481,7 @@ mod tests {
         db.graph_add_node("isolated", "n1", None, None).unwrap();
 
         // Create and switch to new branch
-        db.create_branch("graph-branch").unwrap();
+        db.branches().create("graph-branch").unwrap();
         db.set_branch("graph-branch").unwrap();
 
         // Graph should not exist on the new branch

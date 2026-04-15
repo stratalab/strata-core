@@ -200,7 +200,7 @@ impl LocalSession {
             });
         }
 
-        cmd.resolve_defaults();
+        cmd.resolve_defaults_with(self.executor.default_branch());
 
         match &cmd {
             // Transaction lifecycle commands

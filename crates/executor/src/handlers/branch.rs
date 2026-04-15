@@ -7,7 +7,9 @@ use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_engine::BranchMetadata;
-use strata_engine::{ForkOptions, MergeOptions};
+use strata_engine::{
+    CherryPickFilter, DiffFilter, DiffOptions, ForkOptions, MergeBaseInfo, MergeOptions,
+};
 
 use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
 use crate::convert::convert_result;
@@ -71,7 +73,7 @@ pub fn branch_get(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     if branch.as_str().starts_with("_system") {
         return Ok(Output::MaybeBranchInfo(None));
     }
-    let result = convert_result(p.branch.get_branch(branch.as_str()))?;
+    let result = convert_result(p.db.branches().info_versioned(branch.as_str()))?;
     match result {
         Some(v) => Ok(Output::MaybeBranchInfo(Some(versioned_to_branch_info(v)))),
         None => Ok(Output::MaybeBranchInfo(None)),
@@ -89,14 +91,15 @@ pub fn branch_list(
     // status filter is a no-op until additional user-visible states exist.
     let _ = state;
 
-    let ids = convert_result(p.branch.list_branches())?;
+    let branches = p.db.branches();
+    let ids = convert_result(branches.list())?;
 
     let mut all = Vec::new();
     for id in ids {
         if id.starts_with("_system") {
             continue;
         }
-        if let Some(versioned) = convert_result(p.branch.get_branch(&id))? {
+        if let Some(versioned) = convert_result(branches.info_versioned(&id))? {
             all.push(versioned_to_branch_info(versioned));
         }
     }
@@ -117,42 +120,17 @@ pub fn branch_exists(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     if branch.as_str().starts_with("_system") {
         return Ok(Output::Bool(false));
     }
-    let exists = convert_result(p.branch.exists(branch.as_str()))?;
+    let exists = convert_result(p.db.branches().exists(branch.as_str()))?;
     Ok(Output::Bool(exists))
 }
 
 /// Handle BranchDelete command.
 ///
-/// After deleting the branch metadata, performs cleanup:
-/// - Removes the per-branch commit lock to prevent unbounded growth (#944)
-/// - Deletes all vector collections for the branch to free memory (#946)
+/// BranchService owns the canonical delete path, including DAG integration and
+/// subsystem teardown for branch-owned runtime state.
 pub fn branch_delete(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
-    // Use BranchService for canonical path with DAG integration.
+    // Use BranchService for the canonical path.
     convert_result(p.db.branches().delete(branch.as_str()))?;
-
-    // Cleanup: remove per-branch commit lock (#944)
-    // Convert the executor BranchId to core BranchId for the lock cleanup
-    if let Ok(core_branch_id) = crate::bridge::to_core_branch_id(&branch) {
-        // Clean up storage-layer segments (segment files, memtables, refcounts) (#1702).
-        // Must happen after logical deletion so in-progress reads see the deletion first.
-        p.db.clear_branch_storage(&core_branch_id);
-
-        // Best-effort: if a concurrent commit holds the lock, skip removal.
-        // The stale entry is harmless and will be cleaned up on next attempt.
-        let _ = p.db.remove_branch_lock(&core_branch_id);
-
-        // Cleanup: delete all vector collections for this branch (#946)
-        // Best-effort: silently continue if vector cleanup fails, since the
-        // branch metadata is already deleted and data will be orphaned but harmless.
-        if let Ok(collections) = p.vector.list_collections(core_branch_id, "default") {
-            for collection in collections {
-                let _ = p
-                    .vector
-                    .delete_collection(core_branch_id, "default", &collection.name);
-            }
-        }
-    }
-
     Ok(Output::Unit)
 }
 
@@ -195,9 +173,9 @@ pub fn branch_diff(
     as_of: Option<u64>,
 ) -> Result<Output> {
     let has_filter = filter_primitives.is_some() || filter_spaces.is_some();
-    let options = strata_engine::branch_ops::DiffOptions {
+    let options = DiffOptions {
         filter: if has_filter {
-            Some(strata_engine::branch_ops::DiffFilter {
+            Some(DiffFilter {
                 primitives: filter_primitives,
                 spaces: filter_spaces,
             })
@@ -262,7 +240,7 @@ pub fn branch_merge_base(
     let merge_base = convert_result(p.db.branches().merge_base(&branch_a, &branch_b))?;
 
     // Convert MergeBaseResult to MergeBaseInfo for output compatibility
-    let result = merge_base.map(|mb| strata_engine::branch_ops::MergeBaseInfo {
+    let result = merge_base.map(|mb| MergeBaseInfo {
         branch: mb.branch_name,
         version: mb.commit_version,
     });
@@ -310,7 +288,7 @@ pub fn branch_cherry_pick(
         // Direct key pick
         p.db.branches().cherry_pick(&source, &target, &keys)
     } else {
-        let filter = strata_engine::branch_ops::CherryPickFilter {
+        let filter = CherryPickFilter {
             spaces: filter_spaces,
             keys: filter_keys,
             primitives: filter_primitives,

@@ -227,7 +227,7 @@ fn all_primitives_work_in_all_modes() {
         let kv = KVStore::new(db.clone());
         let event = EventLog::new(db.clone());
         let json = JsonStore::new(db.clone());
-        let branch_idx = BranchIndex::new(db.clone());
+        let branches = db.branches();
 
         // KV
         kv.put(&branch_id, "default", "k", Value::Int(1)).unwrap();
@@ -246,8 +246,7 @@ fn all_primitives_work_in_all_modes() {
         )
         .unwrap();
 
-        // BranchIndex
-        branch_idx.create_branch("test_branch").unwrap();
+        branches.create("test_branch").unwrap();
 
         // All succeeded
         true

@@ -8,7 +8,7 @@ use crate::common::search::substrate_search;
 use strata_core::search_types::{PrimitiveType, SearchRequest, SearchResponse};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_engine::{KVStore, BranchIndex};
+use strata_engine::KVStore;
 use strata_engine::search::{BM25LiteScorer, Scorer};
 use strata_search::RRFFuser;
 use std::collections::HashSet;
@@ -56,25 +56,19 @@ fn test_tier1_rule1_docref_size_bounded() {
 // Rule 2: Primitive Search is First-Class
 // ============================================================================
 
-/// All primitives implement Searchable trait
+/// Public searchable primitives implement Searchable trait
 #[test]
 fn test_tier1_rule2_all_primitives_searchable() {
     let db = create_test_db();
     let branch_id = test_branch_id();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
-
-    // Create a branch first
-    branch_index.create_branch(&branch_id.to_string()).unwrap();
+    db.branches().create(&branch_id.to_string()).unwrap();
 
     let req = SearchRequest::new(branch_id, "test");
 
     // KVStore implements Searchable
     let _: SearchResponse = kv.search(&req).unwrap();
-
-    // BranchIndex implements Searchable
-    let _: SearchResponse = branch_index.search(&req).unwrap();
 }
 
 /// Primitive search returns valid SearchResponse
@@ -146,9 +140,7 @@ fn test_tier1_rule4_snapshot_consistent() {
     let branch_id = test_branch_id();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
-
-    branch_index.create_branch(&branch_id.to_string()).unwrap();
+    db.branches().create(&branch_id.to_string()).unwrap();
     kv.put(&branch_id, "initial", Value::String("searchable term".into()))
         .unwrap();
 

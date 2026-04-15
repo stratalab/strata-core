@@ -5,7 +5,7 @@
 use crate::common::*;
 use strata_core::search_types::{SearchBudget, SearchRequest};
 use strata_core::value::Value;
-use strata_engine::{KVStore, BranchIndex};
+use strata_engine::KVStore;
 use crate::common::search::{substrate_search, verify_substrate_scores_decreasing, verify_substrate_ranks_sequential};
 use std::sync::Arc;
 use std::thread;
@@ -105,8 +105,7 @@ fn test_tier10_concurrent_read_write() {
     let branch_id = test_branch_id();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
-    branch_index.create_branch(&branch_id.to_string()).unwrap();
+    db.branches().create(&branch_id.to_string()).unwrap();
 
     // Add some initial data
     for i in 0..100 {
@@ -179,13 +178,12 @@ fn test_tier10_many_branches() {
     let db = create_test_db();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
 
     // Create 100 branches with data
     let mut branch_ids = Vec::new();
     for i in 0..100 {
         let branch_id = test_branch_id();
-        branch_index.create_branch(&branch_id.to_string()).unwrap();
+        db.branches().create(&branch_id.to_string()).unwrap();
 
         for j in 0..10 {
             kv.put(
@@ -272,8 +270,7 @@ fn test_tier10_unicode_query() {
     let branch_id = test_branch_id();
 
     let kv = KVStore::new(db.clone());
-    let branch_index = BranchIndex::new(db.clone());
-    branch_index.create_branch(&branch_id.to_string()).unwrap();
+    db.branches().create(&branch_id.to_string()).unwrap();
 
     kv.put(
         &branch_id,

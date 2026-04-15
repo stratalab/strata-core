@@ -3,7 +3,7 @@
 //! Provides high-level primitives as stateless facades over the Database engine:
 //! - **KVStore**: General-purpose key-value storage
 //! - **EventLog**: Immutable append-only event stream with causal hash chaining
-//! - **BranchIndex**: Branch lifecycle management
+//! - **Branch metadata**: branch names, status, and branch-scoped handles
 //! - **JsonStore**: JSON document storage with path-based operations
 //!
 //! Vector storage is provided by the `strata-vector` crate.
@@ -48,7 +48,7 @@ pub mod space;
 
 // Re-exports - primitives are exported as they're implemented
 pub use branch::{BranchHandle, EventHandle, JsonHandle, KvHandle};
-pub use branch::{BranchIndex, BranchMetadata, BranchStatus};
+pub use branch::{BranchMetadata, BranchStatus, resolve_branch_name};
 pub use event::{Event, EventLog};
 pub use json::{JsonDoc, JsonStore};
 pub use kv::KVStore;

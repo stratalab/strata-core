@@ -127,7 +127,9 @@ fn test_strata_cache_auto_seeds_recipes() {
     let strata = Strata::cache().expect("cache() should succeed");
 
     // All 6 built-in recipes should be available immediately
-    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    let result = strata
+        .executor()
+        .execute(Command::RecipeList { branch: None });
     match result {
         Ok(Output::Keys(names)) => {
             assert_eq!(names.len(), 6, "Should have 6 built-in recipes auto-seeded");
@@ -153,7 +155,9 @@ fn test_strata_open_with_auto_seeds_recipes() {
     let strata = Strata::open_with(temp_dir.path(), opts).expect("open should succeed");
 
     // All 6 built-in recipes should be available immediately
-    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    let result = strata
+        .executor()
+        .execute(Command::RecipeList { branch: None });
     match result {
         Ok(Output::Keys(names)) => {
             assert_eq!(names.len(), 6, "Should have 6 built-in recipes auto-seeded");
@@ -178,7 +182,9 @@ fn test_strata_local_readonly_auto_seeds_recipes() {
     let strata = Strata::open_with(temp_dir.path(), opts).expect("open should succeed");
 
     // Built-in recipes should be available
-    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    let result = strata
+        .executor()
+        .execute(Command::RecipeList { branch: None });
     match result {
         Ok(Output::Keys(names)) => {
             assert_eq!(
@@ -208,7 +214,9 @@ fn test_strata_seed_builtin_recipes_api() {
         .expect("seed should succeed (idempotent)");
 
     // Still have exactly 6 recipes
-    let result = strata.executor().execute(Command::RecipeList { branch: None });
+    let result = strata
+        .executor()
+        .execute(Command::RecipeList { branch: None });
     match result {
         Ok(Output::Keys(names)) => {
             assert_eq!(names.len(), 6, "Should have exactly 6 built-in recipes");

@@ -32,11 +32,11 @@
 use crate::ipc::Backend;
 use crate::types::{BranchId, BranchInfo, BranchStatus, VersionedBranchInfo};
 use crate::{Command, Error, Output, Result, Value};
-use strata_engine::branch_ops::{
+use strata_engine::{
     BranchDiffResult, CherryPickFilter, CherryPickInfo, ForkInfo, MergeInfo, MergeStrategy,
     NoteInfo, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
-use strata_engine::MergeBaseInfo;
+use strata_engine::{DiffOptions, MergeBaseInfo};
 
 /// Handle for branch management operations.
 ///
@@ -44,11 +44,21 @@ use strata_engine::MergeBaseInfo;
 /// management including listing, creating, deleting, forking, diffing, and merging.
 pub struct Branches<'a> {
     backend: &'a Backend,
+    current_branch: &'a str,
+    default_branch: &'a str,
 }
 
 impl<'a> Branches<'a> {
-    pub(crate) fn new(backend: &'a Backend) -> Self {
-        Self { backend }
+    pub(crate) fn new(
+        backend: &'a Backend,
+        current_branch: &'a str,
+        default_branch: &'a str,
+    ) -> Self {
+        Self {
+            backend,
+            current_branch,
+            default_branch,
+        }
     }
 
     /// List all branch names.
@@ -144,7 +154,14 @@ impl<'a> Branches<'a> {
 
     /// Delete a branch and all its data.
     pub fn delete(&self, name: &str) -> Result<()> {
-        if name == "default" {
+        if name == self.current_branch {
+            return Err(Error::ConstraintViolation {
+                reason: "Cannot delete the current branch. Switch to a different branch first."
+                    .into(),
+            });
+        }
+
+        if name == self.default_branch {
             return Err(Error::ConstraintViolation {
                 reason: "Cannot delete the default branch".into(),
             });
@@ -221,7 +238,7 @@ impl<'a> Branches<'a> {
         &self,
         branch_a: &str,
         branch_b: &str,
-        options: strata_engine::branch_ops::DiffOptions,
+        options: DiffOptions,
     ) -> Result<BranchDiffResult> {
         let has_filter = options.filter.is_some();
         let (filter_primitives, filter_spaces) = if has_filter {

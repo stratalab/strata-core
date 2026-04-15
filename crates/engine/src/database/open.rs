@@ -1040,9 +1040,9 @@ impl Database {
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Primary,
-            subsystem_names,
+            subsystem_names.clone(),
             durability_mode,
-            codec_name,
+            codec_name.clone(),
             default_branch.clone(),
         );
 
@@ -1060,13 +1060,23 @@ impl Database {
                 Self::wait_for_opened_db(db)
             }
             AcquiredDatabase::New { db, canonical_path } => {
-                Self::finish_opened_db(db, &canonical_path, |db| {
+                let effective_default_branch =
+                    Self::resolve_effective_default_branch(&db, default_branch.clone())?;
+                let effective_signature = CompatibilitySignature::from_spec(
+                    super::spec::DatabaseMode::Primary,
+                    subsystem_names,
+                    durability_mode,
+                    codec_name,
+                    effective_default_branch.clone(),
+                );
+                Self::finish_opened_db(db, &canonical_path, move |db| {
+                    db.set_runtime_signature(effective_signature);
                     // Write the *sanitized* resolved_cfg, not the original config.
                     // This ensures persisted config matches runtime state (e.g.,
                     // auto_embed=false when embed feature is not compiled).
                     resolved_cfg.write_to_file(&config_path)?;
                     Self::run_lifecycle_hooks(db, true)?;
-                    if let Some(branch_name) = &default_branch {
+                    if let Some(branch_name) = &effective_default_branch {
                         Self::ensure_default_branch(db, branch_name)?;
                     }
                     Ok(())
@@ -1111,7 +1121,7 @@ impl Database {
             super::spec::DatabaseMode::Follower,
             subsystem_names,
             durability_mode,
-            codec_name,
+            codec_name.clone(),
             default_branch,
         );
 
@@ -1137,8 +1147,18 @@ impl Database {
             );
         }
 
+        let effective_default_branch =
+            Self::resolve_effective_default_branch(&db, requested_signature.default_branch)?;
+        let effective_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Follower,
+            subsystems.iter().map(|s| s.name()).collect(),
+            durability_mode,
+            codec_name,
+            effective_default_branch,
+        );
+
         db.set_subsystems(subsystems);
-        db.set_runtime_signature(requested_signature);
+        db.set_runtime_signature(effective_signature);
         db.set_lifecycle_initializing();
 
         // Followers don't use the registry — no insertion needed.
@@ -1152,13 +1172,35 @@ impl Database {
 
     /// Open a cache database from an `OpenSpec`.
     fn open_runtime_cache(spec: super::spec::OpenSpec) -> StrataResult<Arc<Self>> {
+        use super::compat::CompatibilitySignature;
+
+        let super::spec::OpenSpec {
+            mode: _,
+            path: _,
+            config,
+            subsystems,
+            default_branch,
+        } = spec;
+
         // Create ephemeral database with spec.config if provided.
         // Cache databases are not in the registry, so no reuse check needed.
-        let db = Self::create_ephemeral_bare(spec.config.as_ref())?;
+        let db = Self::create_ephemeral_bare(config.as_ref())?;
+
+        let resolved_cfg = db.config();
+        let durability_mode = resolved_cfg.durability_mode()?;
+        let codec_name = resolved_cfg.storage.codec.clone();
+        let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
+        let requested_signature = CompatibilitySignature::from_spec(
+            super::spec::DatabaseMode::Cache,
+            subsystem_names,
+            durability_mode,
+            codec_name,
+            default_branch.clone(),
+        );
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
         // and install subsystems for freeze-on-drop
-        for subsystem in &spec.subsystems {
+        for subsystem in &subsystems {
             info!(
                 target: "strata::recovery",
                 subsystem = subsystem.name(),
@@ -1169,13 +1211,14 @@ impl Database {
             // primary/follower paths and to let subsystems know they're starting.
             subsystem.recover(&db)?;
         }
-        db.set_subsystems(spec.subsystems);
+        db.set_subsystems(subsystems);
+        db.set_runtime_signature(requested_signature);
 
         // Run lifecycle hooks (initialize and bootstrap)
         Self::run_lifecycle_hooks(&db, true)?;
 
         // Ensure default branch if specified
-        if let Some(branch_name) = &spec.default_branch {
+        if let Some(branch_name) = &default_branch {
             Self::ensure_default_branch(&db, branch_name)?;
         }
 
@@ -1231,16 +1274,37 @@ impl Database {
     ///
     /// Creates the branch if it doesn't exist. Idempotent.
     fn ensure_default_branch(db: &Arc<Self>, branch_name: &str) -> StrataResult<()> {
-        let branch_index = crate::primitives::branch::BranchIndex::new(db.clone());
-        if !branch_index.exists(branch_name)? {
+        let branches = db.branches();
+        if !branches.exists(branch_name)? {
             info!(
                 target: "strata::db",
                 branch = branch_name,
                 "Creating default branch"
             );
-            branch_index.create_branch(branch_name)?;
+            branches.create(branch_name)?;
         }
+        crate::primitives::branch::write_default_branch_marker(db, branch_name)?;
         Ok(())
+    }
+
+    fn resolve_effective_default_branch(
+        db: &Arc<Self>,
+        requested: Option<String>,
+    ) -> StrataResult<Option<String>> {
+        match crate::primitives::branch::read_default_branch_marker(db.as_ref())? {
+            Some(stored) => {
+                if requested.as_deref().is_some_and(|name| name != stored) {
+                    warn!(
+                        target: "strata::db",
+                        requested = ?requested,
+                        stored = %stored,
+                        "Ignoring requested default branch; persisted branch metadata is authoritative"
+                    );
+                }
+                Ok(Some(stored))
+            }
+            None => Ok(requested),
+        }
     }
 
     fn wait_for_opened_db(db: Arc<Self>) -> StrataResult<Arc<Self>> {

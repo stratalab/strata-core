@@ -2287,11 +2287,11 @@ impl Command {
     ///
     /// Called by the executor before dispatch so handlers always receive a
     /// concrete `BranchId` and space name.
-    pub fn resolve_defaults(&mut self) {
+    pub fn resolve_defaults_with(&mut self, default_branch: &BranchId) {
         macro_rules! resolve_branch {
             ($branch:expr) => {
                 if $branch.is_none() {
-                    *$branch = Some(BranchId::default());
+                    *$branch = Some(default_branch.clone());
                 }
             };
         }
@@ -2484,6 +2484,16 @@ impl Command {
         }
     }
 
+    /// Fill in missing branches/spaces using the legacy literal `"default"`
+    /// branch name.
+    ///
+    /// Prefer [`Command::resolve_defaults_with`] in runtime-aware code so the
+    /// effective branch comes from the opened database instead of assuming the
+    /// legacy default branch name.
+    pub fn resolve_defaults(&mut self) {
+        self.resolve_defaults_with(&BranchId::default());
+    }
+
     /// Backwards-compatible alias for resolve_defaults
     pub fn resolve_default_branch(&mut self) {
         self.resolve_defaults();
@@ -2491,8 +2501,9 @@ impl Command {
 
     /// Return the resolved branch for data-scoped commands, if any.
     ///
-    /// Must be called *after* `resolve_defaults()`. Returns `None` for
-    /// branch-lifecycle, transaction, and database-level commands.
+    /// Must be called *after* `resolve_defaults_with(...)` (or the legacy
+    /// `resolve_defaults()`). Returns `None` for branch-lifecycle,
+    /// transaction, and database-level commands.
     pub fn resolved_branch(&self) -> Option<&BranchId> {
         match self {
             // Data commands with branch + space

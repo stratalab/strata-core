@@ -1,9 +1,8 @@
 //! Branch DAG infrastructure for the `_system_` branch.
 //!
 //! Reserves the `_system_` namespace, auto-creates the system branch and
-//! `_branch_dag` graph on database init, seeds the "default" branch node,
-//! and records branch lifecycle events (creation, forks, merges, deletion)
-//! as nodes and edges in the DAG.
+//! `_branch_dag` graph on database init, and records branch lifecycle
+//! events (creation, forks, merges, deletion) as nodes and edges in the DAG.
 //!
 //! Write helpers (`dag_add_branch`, `dag_record_fork`, `dag_record_merge`,
 //! `dag_set_status`, `dag_mark_deleted`, `dag_set_message`) are called
@@ -24,8 +23,8 @@ use tracing::warn;
 use crate::keys::{validate_node_id, GRAPH_SPACE};
 use crate::types::{Direction, EdgeData, NodeData};
 use crate::GraphStore;
-use strata_engine::primitives::branch::{resolve_branch_name, BranchIndex};
-use strata_engine::Database;
+use strata_engine::primitives::branch::resolve_branch_name;
+use strata_engine::{CherryPickInfo, Database, MergeInfo, MergeStrategy, RevertInfo};
 
 const BRANCH_NODE_ID_PREFIX: &str = "_branch_";
 
@@ -57,17 +56,10 @@ fn branch_name_prop(
         .map(ToString::to_string)
 }
 
-/// Ensure the `_system_` branch exists in BranchIndex.
+/// Ensure the reserved `_system_` branch exists before DAG bootstrap.
 fn ensure_system_branch(db: &Arc<Database>) -> Result<(), String> {
-    let branch_index = BranchIndex::new(db.clone());
-    match branch_index.exists(SYSTEM_BRANCH) {
-        Ok(true) => Ok(()),
-        Ok(false) => branch_index
-            .create_branch(SYSTEM_BRANCH)
-            .map(|_| ())
-            .map_err(|e| format!("failed to create _system_ branch: {e}")),
-        Err(e) => Err(format!("failed to check _system_ branch: {e}")),
-    }
+    db.ensure_system_branch_exists()
+        .map_err(|e| format!("failed to create _system_ branch: {e}"))
 }
 
 /// Ensure the `_branch_dag` graph exists on the `_system_` branch.
@@ -84,45 +76,11 @@ fn ensure_branch_dag(db: &Arc<Database>) -> Result<(), String> {
     }
 }
 
-/// Seed a "default" branch node in the DAG if not already present.
-fn seed_default_branch(db: &Arc<Database>) -> Result<(), String> {
-    let graph_store = GraphStore::new(db.clone());
-    let branch_id = resolve_branch_name(SYSTEM_BRANCH);
-    let default_node_id = dag_branch_node_id("default");
-
-    match graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &default_node_id) {
-        Ok(Some(_)) => Ok(()),
-        Ok(None) => {
-            let props = serde_json::json!({
-                "branch_name": "default",
-                "status": "active",
-                "created_by": "system",
-            });
-            let node = NodeData {
-                entity_ref: None,
-                properties: Some(props),
-                object_type: Some("branch".to_string()),
-            };
-            graph_store
-                .add_node(
-                    branch_id,
-                    GRAPH_SPACE,
-                    BRANCH_DAG_GRAPH,
-                    &default_node_id,
-                    node,
-                )
-                .map(|_| ())
-                .map_err(|e| format!("failed to seed default branch node: {e}"))
-        }
-        Err(e) => Err(format!("failed to check default branch node: {e}")),
-    }
-}
-
 /// Initialise system branch infrastructure on database open.
 ///
-/// Creates the `_system_` branch, the `_branch_dag` graph, and seeds
-/// the "default" branch node. All steps are best-effort -- failures are
-/// logged but do not prevent the database from opening.
+/// Creates the `_system_` branch and the `_branch_dag` graph. All steps are
+/// best-effort -- failures are logged but do not prevent the database from
+/// opening.
 pub fn init_system_branch(db: &Arc<Database>) {
     if let Err(e) = bootstrap_system_branch(db) {
         warn!("system branch init: {e}");
@@ -132,7 +90,6 @@ pub fn init_system_branch(db: &Arc<Database>) {
 fn bootstrap_system_branch(db: &Arc<Database>) -> StrataResult<()> {
     ensure_system_branch(db).map_err(StrataError::internal)?;
     ensure_branch_dag(db).map_err(StrataError::internal)?;
-    seed_default_branch(db).map_err(StrataError::internal)?;
     Ok(())
 }
 
@@ -302,7 +259,7 @@ pub fn dag_record_merge(
     db: &Arc<Database>,
     source: &str,
     target: &str,
-    merge_info: &strata_engine::branch_ops::MergeInfo,
+    merge_info: &MergeInfo,
     strategy: Option<&str>,
     message: Option<&str>,
     creator: Option<&str>,
@@ -391,7 +348,7 @@ pub fn dag_record_merge(
 /// pair) so it has only one edge, unlike fork and merge.
 pub fn dag_record_revert(
     db: &Arc<Database>,
-    revert_info: &strata_engine::branch_ops::RevertInfo,
+    revert_info: &RevertInfo,
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<DagEventId> {
@@ -462,7 +419,7 @@ pub fn dag_record_cherry_pick(
     db: &Arc<Database>,
     source: &str,
     target: &str,
-    info: &strata_engine::branch_ops::CherryPickInfo,
+    info: &CherryPickInfo,
 ) -> StrataResult<DagEventId> {
     ensure_branch_node_exists(db, source)?;
     ensure_branch_node_exists(db, target)?;
@@ -1148,7 +1105,6 @@ impl BranchOpObserver for AuditBranchOpObserver {
 // =============================================================================
 
 use strata_core::id::CommitVersion;
-use strata_engine::branch_ops::{CherryPickInfo, MergeInfo, RevertInfo};
 use strata_engine::database::dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
     MergeBaseResult,
@@ -1387,8 +1343,8 @@ fn event_node_to_dag_event(
                 .and_then(|value| value.as_str())
                 .unwrap_or("last_writer_wins")
             {
-                "strict" => strata_engine::branch_ops::MergeStrategy::Strict,
-                _ => strata_engine::branch_ops::MergeStrategy::LastWriterWins,
+                "strict" => MergeStrategy::Strict,
+                _ => MergeStrategy::LastWriterWins,
             };
             DagEvent::merge(
                 resolve_branch_name(&target),
@@ -1793,8 +1749,7 @@ mod tests {
     #[test]
     fn system_branch_auto_created() {
         let db = setup();
-        let branch_index = BranchIndex::new(db.clone());
-        assert!(branch_index.exists(SYSTEM_BRANCH).unwrap());
+        assert!(db.branches().exists(SYSTEM_BRANCH).unwrap());
     }
 
     #[test]
@@ -1809,19 +1764,14 @@ mod tests {
     }
 
     #[test]
-    fn default_branch_seeded() {
+    fn init_does_not_seed_default_branch() {
         let db = setup();
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
             .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default")
             .unwrap();
-        assert!(node.is_some());
-        let node = node.unwrap();
-        assert_eq!(node.object_type.as_deref(), Some("branch"));
-        // Verify properties are populated
-        let props = node.properties.as_ref().unwrap();
-        assert_eq!(props.get("status").and_then(|v| v.as_str()), Some("active"));
+        assert!(node.is_none());
     }
 
     #[test]
@@ -1829,14 +1779,49 @@ mod tests {
         let db = setup();
         // cache() already called init once; call again explicitly
         init_system_branch(&db);
-        let branch_index = BranchIndex::new(db.clone());
-        assert!(branch_index.exists(SYSTEM_BRANCH).unwrap());
+        assert!(db.branches().exists(SYSTEM_BRANCH).unwrap());
         let graph_store = GraphStore::new(db.clone());
         let branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let node = graph_store
             .get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default")
             .unwrap();
-        assert!(node.is_some());
+        assert!(node.is_none());
+    }
+
+    #[test]
+    fn open_runtime_bootstraps_configured_default_branch_through_dag() {
+        let db = Database::open_runtime(
+            OpenSpec::cache()
+                .with_subsystem(GraphSubsystem)
+                .with_default_branch("main"),
+        )
+        .unwrap();
+
+        assert!(db.branches().exists("main").unwrap());
+
+        let graph_store = GraphStore::new(db.clone());
+        let system_id = resolve_branch_name(SYSTEM_BRANCH);
+        assert!(
+            graph_store
+                .get_node(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "main")
+                .unwrap()
+                .is_some(),
+            "configured default branch must have a DAG node"
+        );
+        assert!(
+            graph_store
+                .get_node(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, "default")
+                .unwrap()
+                .is_none(),
+            "graph bootstrap must not inject a stray literal default node"
+        );
+
+        let log = db.branches().log("main", 10).unwrap();
+        assert!(
+            log.iter()
+                .any(|event| event.kind == DagEventKind::BranchCreate),
+            "configured default branch must be created through BranchService so the DAG log works"
+        );
     }
 
     #[test]
@@ -2015,7 +2000,7 @@ mod tests {
         dag_add_branch(&db, "merge-src", None, None).unwrap();
         dag_add_branch(&db, "merge-tgt", None, None).unwrap();
 
-        let merge_info = strata_engine::branch_ops::MergeInfo {
+        let merge_info = MergeInfo {
             source: "merge-src".to_string(),
             target: "merge-tgt".to_string(),
             keys_applied: 10,
@@ -2139,7 +2124,7 @@ mod tests {
         )
         .unwrap();
 
-        let merge_info = strata_engine::branch_ops::MergeInfo {
+        let merge_info = MergeInfo {
             source: "info-child".to_string(),
             target: "info-parent".to_string(),
             keys_applied: 5,
@@ -2306,7 +2291,7 @@ mod tests {
         dag_add_branch(&db, "mv-src", None, None).unwrap();
         dag_add_branch(&db, "mv-tgt", None, None).unwrap();
 
-        let merge_info = strata_engine::branch_ops::MergeInfo {
+        let merge_info = MergeInfo {
             source: "mv-src".to_string(),
             target: "mv-tgt".to_string(),
             keys_applied: 3,
@@ -2353,7 +2338,7 @@ mod tests {
         dag_add_branch(&db, "flmv-child", None, None).unwrap();
         dag_record_fork(&db, "flmv-parent", "flmv-child", Some(10), None, None).unwrap();
 
-        let merge_info = strata_engine::branch_ops::MergeInfo {
+        let merge_info = MergeInfo {
             source: "flmv-child".to_string(),
             target: "flmv-parent".to_string(),
             keys_applied: 5,
@@ -2384,7 +2369,7 @@ mod tests {
         dag_add_branch(&db, "bidir-b", None, None).unwrap();
 
         // Merge A -> B with merge_version 10
-        let merge_info_ab = strata_engine::branch_ops::MergeInfo {
+        let merge_info_ab = MergeInfo {
             source: "bidir-a".to_string(),
             target: "bidir-b".to_string(),
             keys_applied: 2,
@@ -2396,7 +2381,7 @@ mod tests {
         dag_record_merge(&db, "bidir-a", "bidir-b", &merge_info_ab, None, None, None).unwrap();
 
         // Merge B -> A with merge_version 25
-        let merge_info_ba = strata_engine::branch_ops::MergeInfo {
+        let merge_info_ba = MergeInfo {
             source: "bidir-b".to_string(),
             target: "bidir-a".to_string(),
             keys_applied: 3,
@@ -2461,7 +2446,7 @@ mod tests {
             &db,
             "log-source",
             "log-target",
-            &strata_engine::branch_ops::MergeInfo {
+            &MergeInfo {
                 source: "log-source".to_string(),
                 target: "log-target".to_string(),
                 keys_applied: 3,
