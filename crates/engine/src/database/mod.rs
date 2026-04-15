@@ -74,7 +74,7 @@ use std::time::Instant;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, VersionedValue};
-use strata_durability::__internal::WalWriterEngineExt;
+use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_durability::wal::{DurabilityMode, WalWriter};
 use strata_storage::{SegmentedStore, StorageIterator};
 
@@ -474,6 +474,9 @@ pub struct Database {
 
     /// Whether this database is a read-only follower (no lock, no WAL writer).
     follower: bool,
+
+    /// Whether shutdown() has started (prevents halt-resume from reopening it).
+    shutdown_started: AtomicBool,
 
     /// Whether shutdown() has already completed (prevents double freeze in Drop).
     shutdown_complete: AtomicBool,
@@ -1063,6 +1066,35 @@ impl Database {
         self.accepting_transactions.load(Ordering::Acquire)
     }
 
+    pub(crate) fn writer_halted_error(&self) -> Option<StrataError> {
+        match &*self.wal_writer_health.lock() {
+            WalWriterHealth::Healthy => None,
+            WalWriterHealth::Halted {
+                reason,
+                first_observed_at,
+                ..
+            } => Some(StrataError::WriterHalted {
+                reason: reason.clone(),
+                first_observed_at: *first_observed_at,
+            }),
+        }
+    }
+
+    pub(crate) fn ensure_writer_healthy(&self) -> StrataResult<()> {
+        if let Some(err) = self.writer_halted_error() {
+            return Err(err);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn halted_health_from_bg_error(bg_error: BackgroundSyncError) -> WalWriterHealth {
+        WalWriterHealth::Halted {
+            reason: bg_error.message().to_string(),
+            first_observed_at: bg_error.first_observed_at(),
+            failed_sync_count: bg_error.failed_sync_count(),
+        }
+    }
+
     // ========================================================================
     // WAL Writer Health
     // ========================================================================
@@ -1104,7 +1136,8 @@ impl Database {
     ///
     /// * `Ok(())` - Writer resumed successfully and is accepting commits
     /// * `Err(WriterHalted)` - Sync still failing; writer remains halted
-    /// * `Err(Internal)` - No WAL writer (ephemeral database) or other error
+    /// * `Err(InvalidInput)` - Shutdown has started or the database is closed
+    /// * `Err(Internal)` - No WAL writer (ephemeral database)
     ///
     /// # Example
     /// ```text
@@ -1116,22 +1149,47 @@ impl Database {
             StrataError::internal("cannot resume WAL writer on ephemeral database".to_string())
         })?;
 
+        if self.shutdown_started.load(Ordering::Acquire)
+            || self.shutdown_complete.load(Ordering::Acquire)
+        {
+            return Err(StrataError::invalid_input(
+                "cannot resume WAL writer after shutdown has started".to_string(),
+            ));
+        }
+
+        let was_halted = matches!(self.wal_writer_health(), WalWriterHealth::Halted { .. });
+        if !was_halted {
+            if self.accepting_transactions.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            return Err(StrataError::invalid_input(
+                "database is not accepting transactions".to_string(),
+            ));
+        }
+
         // Attempt a sync to prove storage is healthy
         {
             let mut writer = wal.lock();
-            if let Err(e) = writer.flush() {
-                // Sync still failing — update failed_sync_count but stay halted
+            #[cfg(test)]
+            let flush_result = crate::database::test_hooks::maybe_inject_sync_failure()
+                .map_or_else(|| writer.flush(), Err);
+
+            #[cfg(not(test))]
+            let flush_result = writer.flush();
+
+            if let Err(e) = flush_result {
+                writer.record_sync_failure(e);
+                let bg_error = writer.bg_error().expect(
+                    "record_sync_failure must preserve a background error for halted writer",
+                );
+                let reason = bg_error.message().to_string();
+                let first_observed_at = bg_error.first_observed_at();
                 let mut health = self.wal_writer_health.lock();
-                if let WalWriterHealth::Halted {
-                    failed_sync_count, ..
-                } = &mut *health
-                {
-                    *failed_sync_count += 1;
-                }
-                return Err(StrataError::storage(format!(
-                    "resume failed: sync still failing: {}",
-                    e
-                )));
+                *health = Self::halted_health_from_bg_error(bg_error);
+                return Err(StrataError::WriterHalted {
+                    reason,
+                    first_observed_at,
+                });
             }
 
             // Clear any recorded background error in the writer
@@ -1140,7 +1198,6 @@ impl Database {
 
         // Sync succeeded — restore healthy state
         let mut health = self.wal_writer_health.lock();
-        let was_halted = matches!(&*health, WalWriterHealth::Halted { .. });
         *health = WalWriterHealth::Healthy;
         drop(health);
 

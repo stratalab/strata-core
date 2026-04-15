@@ -604,6 +604,11 @@ impl WalWriter {
         let _snapshot = handle.take_snapshot();
         self.sync_in_flight = false;
 
+        self.record_sync_failure(error);
+    }
+
+    /// Records a sync failure while preserving dirty counters.
+    pub(crate) fn record_sync_failure(&mut self, error: io::Error) {
         let failed_sync_count = self
             .bg_error
             .as_ref()
@@ -2098,6 +2103,7 @@ mod tests {
             ["pub", " fn commit_background_sync("].concat(),
             ["pub", " fn abort_background_sync("].concat(),
             ["pub", " fn bg_error("].concat(),
+            ["pub", " fn record_sync_failure("].concat(),
             ["pub", " fn clear_bg_error("].concat(),
             ["pub", " fn sync_in_flight("].concat(),
         ] {

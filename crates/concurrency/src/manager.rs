@@ -35,10 +35,13 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+#[cfg(any(test, feature = "fault-injection"))]
+use std::sync::OnceLock;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
+use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::now_micros;
 use strata_durability::wal::WalWriter;
 
@@ -59,6 +62,34 @@ use std::time::Instant;
 
 static COMMIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static COMMIT_PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
+
+#[cfg(any(test, feature = "fault-injection"))]
+fn apply_failure_injection_slot() -> &'static Mutex<Option<String>> {
+    static APPLY_FAILURE_INJECTION: OnceLock<Mutex<Option<String>>> = OnceLock::new();
+    APPLY_FAILURE_INJECTION.get_or_init(|| Mutex::new(None))
+}
+
+#[cfg(any(test, feature = "fault-injection"))]
+pub(crate) fn inject_apply_failure_once(reason: impl Into<String>) {
+    *apply_failure_injection_slot().lock() = Some(reason.into());
+}
+
+#[cfg(any(test, feature = "fault-injection"))]
+pub(crate) fn clear_apply_failure_injection() {
+    *apply_failure_injection_slot().lock() = None;
+}
+
+#[cfg(any(test, feature = "fault-injection"))]
+fn maybe_take_apply_failure_injection() -> Option<String> {
+    apply_failure_injection_slot().lock().take()
+}
+
+fn writer_halted_commit_error(wal: &WalWriter) -> Option<CommitError> {
+    wal.bg_error().map(|bg_error| CommitError::WriterHalted {
+        reason: bg_error.message().to_string(),
+        first_observed_at: bg_error.first_observed_at(),
+    })
+}
 
 fn commit_profile_enabled() -> bool {
     if !COMMIT_PROFILE_CHECKED.load(Ordering::Relaxed) {
@@ -482,13 +513,13 @@ impl TransactionManager {
                 match wal_mode {
                     WalMode::Direct(wal) => {
                         let timestamp = now_micros();
+                        let wal_txn_id = TxnId(commit_version.as_u64());
                         let result = WAL_RECORD_BUF.with(|rec_cell| {
                             MSGPACK_BUF.with(|msg_cell| {
                                 let mut rec_buf = rec_cell.borrow_mut();
                                 let mut msg_buf = msg_cell.borrow_mut();
                                 let ts = Instant::now();
                                 // Issue #1696: Use commit_version as WAL record ordering key
-                                let wal_txn_id = TxnId(commit_version.as_u64());
                                 payload::serialize_wal_record_into(
                                     &mut rec_buf,
                                     &mut msg_buf,
@@ -499,30 +530,41 @@ impl TransactionManager {
                                     timestamp,
                                 );
                                 wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                                if let Some(err) = writer_halted_commit_error(wal) {
+                                    return Err(err);
+                                }
                                 // Direct mode: no separate mutex
                                 let tw = Instant::now();
-                                let r = wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp);
+                                wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                    .map_err(|e| CommitError::WALError(e.to_string()))?;
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
-                                r
+                                Ok(())
                             })
                         });
                         if let Err(e) = result {
+                            let abort_reason = match &e {
+                                CommitError::WriterHalted { reason, .. } => {
+                                    format!("WAL writer halted: {}", reason)
+                                }
+                                CommitError::WALError(msg) => format!("WAL write failed: {}", msg),
+                                other => format!("WAL write failed: {}", other),
+                            };
                             txn.status = TransactionStatus::Aborted {
-                                reason: format!("WAL write failed: {}", e),
+                                reason: abort_reason,
                             };
                             self.mark_version_applied(commit_version);
-                            return Err(CommitError::WALError(e.to_string()));
+                            return Err(e);
                         }
                         tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                     }
                     WalMode::Shared(wal_arc) => {
                         let timestamp = now_micros();
+                        let wal_txn_id = TxnId(commit_version.as_u64());
                         let result = WAL_RECORD_BUF.with(|rec_cell| {
                             MSGPACK_BUF.with(|msg_cell| {
                                 let mut rec_buf = rec_cell.borrow_mut();
                                 let mut msg_buf = msg_cell.borrow_mut();
                                 // Issue #1696: Use commit_version as WAL record ordering key
-                                let wal_txn_id = TxnId(commit_version.as_u64());
                                 let ts = Instant::now();
                                 payload::serialize_wal_record_into(
                                     &mut rec_buf,
@@ -537,18 +579,29 @@ impl TransactionManager {
                                 let tm = Instant::now();
                                 let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
                                 wal_mutex_ns = tm.elapsed().as_nanos() as u64;
+                                if let Some(err) = writer_halted_commit_error(&wal) {
+                                    return Err(err);
+                                }
                                 let tw = Instant::now();
-                                let r = wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp);
+                                wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                    .map_err(|e| CommitError::WALError(e.to_string()))?;
                                 wal_io_ns = tw.elapsed().as_nanos() as u64;
-                                r
+                                Ok(())
                             })
                         });
                         if let Err(e) = result {
+                            let abort_reason = match &e {
+                                CommitError::WriterHalted { reason, .. } => {
+                                    format!("WAL writer halted: {}", reason)
+                                }
+                                CommitError::WALError(msg) => format!("WAL write failed: {}", msg),
+                                other => format!("WAL write failed: {}", other),
+                            };
                             txn.status = TransactionStatus::Aborted {
-                                reason: format!("WAL write failed: {}", e),
+                                reason: abort_reason,
                             };
                             self.mark_version_applied(commit_version);
-                            return Err(CommitError::WALError(e.to_string()));
+                            return Err(e);
                         }
                         tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                     }
@@ -560,6 +613,30 @@ impl TransactionManager {
         // Apply to storage
         let t0 = Instant::now();
         perf_time!(trace, write_set_apply_ns, {
+            #[cfg(any(test, feature = "fault-injection"))]
+            if let Some(reason) = maybe_take_apply_failure_injection() {
+                self.mark_version_applied(commit_version);
+                if has_wal {
+                    tracing::error!(
+                        target: "strata::txn",
+                        txn_id = txn.txn_id.as_u64(),
+                        commit_version = commit_version.as_u64(),
+                        reason,
+                        "Injected storage-apply failure after WAL commit"
+                    );
+                    return Err(CommitError::DurableButNotVisible {
+                        txn_id: txn.txn_id.as_u64(),
+                        commit_version: commit_version.as_u64(),
+                        reason,
+                    });
+                } else {
+                    txn.status = TransactionStatus::Aborted {
+                        reason: reason.clone(),
+                    };
+                    return Err(CommitError::WALError(reason));
+                }
+            }
+
             if let Err(e) = txn.apply_writes(store, commit_version) {
                 self.mark_version_applied(commit_version);
                 if has_wal {
@@ -830,6 +907,7 @@ mod tests {
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_durability::__internal::WalWriterEngineExt;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalReader};
     use strata_storage::SegmentedStore;
@@ -2433,6 +2511,40 @@ mod tests {
             "Expected DurableButNotVisible error, got: {:?}",
             err
         );
+    }
+
+    #[test]
+    fn test_commit_with_wal_arc_rejects_when_writer_is_halted() {
+        let dir = TempDir::new().unwrap();
+        let wal = Arc::new(ParkingMutex::new(create_test_wal(dir.path())));
+        let store = Arc::new(SegmentedStore::new());
+        let manager = TransactionManager::new(CommitVersion::ZERO);
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let key = create_test_key(&ns, "halted_writer");
+
+        {
+            let mut writer = wal.lock();
+            writer.record_sync_failure(std::io::Error::other("disk full"));
+        }
+
+        let mut txn = TransactionContext::with_store(TxnId(9), branch_id, Arc::clone(&store));
+        txn.put(key, Value::Int(99)).unwrap();
+
+        let err = manager
+            .commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal))
+            .expect_err("halted WAL writer must reject commit");
+
+        match err {
+            CommitError::WriterHalted { reason, .. } => {
+                assert!(
+                    reason.contains("disk full"),
+                    "unexpected halt reason: {}",
+                    reason
+                );
+            }
+            other => panic!("expected WriterHalted, got {:?}", other),
+        }
     }
 
     /// Issue #1725: Same test for the commit_with_version path.

@@ -442,6 +442,8 @@ impl Database {
     /// assert!(!db.is_open());
     /// ```
     pub fn shutdown(&self) -> StrataResult<()> {
+        self.shutdown_started.store(true, Ordering::Release);
+
         // 1. Stop accepting new transactions
         self.accepting_transactions.store(false, Ordering::Release);
 

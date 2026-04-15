@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::TransactionPayload;
+use strata_concurrency::__internal as concurrency_test_hooks;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, Namespace, TypeTag};
 use strata_core::value::Value;
@@ -2463,10 +2464,11 @@ fn test_set_durability_mode_spawn_failure_rolls_back_state() {
     db.shutdown().unwrap();
 }
 
-/// T3-E2: Background sync failure halts the writer and rejects new transactions.
+/// T3-E2: Background sync failure halts the writer and rejects both new and
+/// already-open manual commits until explicit resume succeeds.
 #[test]
 #[serial]
-fn test_background_sync_failure_halts_writer() {
+fn test_background_sync_failure_halts_writer_and_rejects_manual_commit() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("bg_sync_halt_db");
     let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
@@ -2477,18 +2479,20 @@ fn test_background_sync_failure_halts_writer() {
     .unwrap();
 
     let branch_id = BranchId::new();
-    let key = Key::new_kv(create_test_namespace(branch_id), "bg_sync_key");
+    let trigger_key = Key::new_kv(create_test_namespace(branch_id), "bg_sync_key");
+    let pending_key = Key::new_kv(create_test_namespace(branch_id), "pending_key");
 
-    // First transaction succeeds (before sync failure)
     super::test_hooks::clear_sync_failure();
+    let mut manual_txn = db.begin_transaction(branch_id).unwrap();
+    manual_txn.put(pending_key.clone(), Value::Int(6)).unwrap();
+
+    // Commit a separate transaction to create unsynced WAL data.
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
     db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::Int(7))?;
+        txn.put(trigger_key.clone(), Value::Int(7))?;
         Ok(())
     })
     .unwrap();
-
-    // Inject sync failure for the background flush
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
 
     // Wait for background sync to fail and halt the writer
     wait_until(Duration::from_secs(2), || {
@@ -2511,10 +2515,19 @@ fn test_background_sync_failure_halts_writer() {
         }
     }
 
+    let err = manual_txn
+        .commit()
+        .expect_err("manual transaction should be rejected once the writer halts");
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted from manual commit, got: {:?}",
+        err
+    );
+
     // Verify new transactions are rejected with WriterHalted error
     let err = db
         .transaction(branch_id, |txn| {
-            txn.put(key.clone(), Value::Int(8))?;
+            txn.put(trigger_key.clone(), Value::Int(8))?;
             Ok(())
         })
         .expect_err("transaction should be rejected when writer is halted");
@@ -2525,8 +2538,18 @@ fn test_background_sync_failure_halts_writer() {
         err
     );
 
-    // Clear the injected failure and resume
+    // Clearing the fault should NOT auto-resume; the flush thread stays alive
+    // but passive until explicit operator resume.
     super::test_hooks::clear_sync_failure();
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        ),
+        "writer must remain halted until explicit resume"
+    );
+
     db.resume_wal_writer("test cleared injected failure")
         .unwrap();
 
@@ -2538,7 +2561,7 @@ fn test_background_sync_failure_halts_writer() {
 
     // Verify transactions work again
     db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::Int(9))?;
+        txn.put(trigger_key.clone(), Value::Int(9))?;
         Ok(())
     })
     .unwrap();
@@ -2546,10 +2569,10 @@ fn test_background_sync_failure_halts_writer() {
     db.shutdown().unwrap();
 }
 
-/// T3-E2: Sync failure sets initial failed_sync_count and can be resumed.
+/// T3-E2: Failed explicit resumes preserve the halt and increment the failure streak.
 #[test]
 #[serial]
-fn test_sync_failure_halt_and_resume() {
+fn test_resume_while_still_failing_increments_failed_sync_count() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("repeated_sync_fail_db");
     let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
@@ -2562,7 +2585,6 @@ fn test_sync_failure_halt_and_resume() {
     let branch_id = BranchId::new();
     let key = Key::new_kv(create_test_namespace(branch_id), "repeat_fail_key");
 
-    // First transaction
     super::test_hooks::clear_sync_failure();
     db.transaction(branch_id, |txn| {
         txn.put(key.clone(), Value::Int(1))?;
@@ -2581,32 +2603,49 @@ fn test_sync_failure_halt_and_resume() {
         )
     });
 
-    // Verify health state shows halted with at least 1 failed sync
-    match db.wal_writer_health() {
+    let (first_reason, first_seen, first_count) = match db.wal_writer_health() {
         super::WalWriterHealth::Halted {
-            failed_sync_count, ..
-        } => {
-            assert!(
-                failed_sync_count >= 1,
-                "expected at least 1 failed sync, got {}",
-                failed_sync_count
-            );
-        }
+            reason,
+            first_observed_at,
+            failed_sync_count,
+        } => (reason, first_observed_at, failed_sync_count),
         super::WalWriterHealth::Healthy => {
             panic!("expected writer to be halted");
         }
-    }
+    };
+    assert!(first_count >= 1, "expected at least 1 failed sync");
 
-    // Clean up and resume
-    super::test_hooks::clear_sync_failure();
-    db.resume_wal_writer("cleanup").unwrap();
-
-    // Verify health is restored
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    let err = db
+        .resume_wal_writer("fault still present")
+        .expect_err("resume should fail while sync is still failing");
     assert!(
-        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
-        "expected writer to be healthy after resume"
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted, got: {:?}",
+        err
     );
 
+    match db.wal_writer_health() {
+        super::WalWriterHealth::Halted {
+            reason,
+            first_observed_at,
+            failed_sync_count,
+        } => {
+            assert_eq!(reason, first_reason, "halt reason should stay stable");
+            assert_eq!(
+                first_observed_at, first_seen,
+                "first_observed_at should not reset across failed resumes"
+            );
+            assert_eq!(
+                failed_sync_count,
+                first_count + 1,
+                "failed resume must increment failed_sync_count"
+            );
+        }
+        super::WalWriterHealth::Healthy => panic!("writer must remain halted"),
+    }
+
+    super::test_hooks::clear_sync_failure();
     db.shutdown().unwrap();
 }
 
@@ -2659,6 +2698,90 @@ fn test_resume_when_already_healthy_is_noop() {
     .unwrap();
 
     db.shutdown().unwrap();
+}
+
+/// T3-E2: Resume must not reopen a database after shutdown has started.
+#[test]
+fn test_resume_after_shutdown_returns_error_and_does_not_reopen() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("resume_after_shutdown_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    db.shutdown().unwrap();
+    assert!(!db.is_open(), "shutdown must close the database");
+
+    let err = db
+        .resume_wal_writer("should not reopen closed database")
+        .expect_err("resume after shutdown must fail");
+    assert!(
+        matches!(err, StrataError::InvalidInput { .. }),
+        "expected InvalidInput after shutdown, got: {:?}",
+        err
+    );
+    assert!(!db.is_open(), "resume must not reopen a shut-down database");
+}
+
+/// T3-E2: Engine callers see DurableButNotVisible and the durable write becomes
+/// visible after reopen recovery.
+#[test]
+#[serial]
+fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
+    concurrency_test_hooks::clear_apply_failure_injection();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("durable_not_visible_db");
+    let branch_id = BranchId::new();
+    let key = Key::new_kv(create_test_namespace(branch_id), "durable_not_visible_key");
+
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+        concurrency_test_hooks::inject_apply_failure_once(
+            "injected apply_writes failure after WAL commit",
+        );
+        let err = db
+            .transaction(branch_id, |txn| {
+                txn.put(key.clone(), Value::Int(77))?;
+                Ok(())
+            })
+            .expect_err("commit should surface durable-but-not-visible");
+
+        match err {
+            StrataError::DurableButNotVisible {
+                txn_id,
+                commit_version,
+            } => {
+                assert!(txn_id > 0, "txn_id must be preserved");
+                assert!(commit_version > 0, "commit_version must be preserved");
+            }
+            other => panic!(
+                "expected DurableButNotVisible from engine commit path, got {:?}",
+                other
+            ),
+        }
+
+        let visible_now: Option<Value> =
+            db.transaction(branch_id, |txn| Ok(txn.get(&key)?)).unwrap();
+        assert!(
+            visible_now.is_none(),
+            "write must remain invisible in the current process"
+        );
+    }
+
+    concurrency_test_hooks::clear_apply_failure_injection();
+    OPEN_DATABASES.lock().clear();
+
+    let reopened = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+    let recovered: Option<Value> = reopened
+        .transaction(branch_id, |txn| Ok(txn.get(&key)?))
+        .unwrap();
+    assert_eq!(
+        recovered,
+        Some(Value::Int(77)),
+        "reopen recovery must make the durable write visible"
+    );
+
+    reopened.shutdown().unwrap();
 }
 
 #[test]

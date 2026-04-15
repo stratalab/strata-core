@@ -14,11 +14,12 @@ workspace = true
 [features]
 default = []
 perf-trace = ["strata-core/perf-trace"]  # Enable per-operation timing in commit path
+fault-injection = []
 
 [dependencies]
 strata-core = { path = "../core" }
 strata-storage = { path = "../storage" }
-strata-durability = { path = "../durability" }
+strata-durability = { path = "../durability", features = ["engine-internal"] }
 chrono = { workspace = true }
 dashmap = { workspace = true }
 parking_lot = { workspace = true }

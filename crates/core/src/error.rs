@@ -886,17 +886,14 @@ pub enum StrataError {
     /// StrataError::WriterHalted {
     ///     reason: "disk full".to_string(),
     ///     first_observed_at: SystemTime::now(),
-    ///     failed_sync_count: 3,
     /// };
     /// ```
-    #[error("WAL writer halted: {reason} (first observed: {first_observed_at:?}, failed syncs: {failed_sync_count})")]
+    #[error("WAL writer halted: {reason} (first observed: {first_observed_at:?})")]
     WriterHalted {
         /// Human-readable reason for the halt
         reason: String,
         /// When the first sync failure was observed
         first_observed_at: std::time::SystemTime,
-        /// Number of consecutive failed sync attempts
-        failed_sync_count: u64,
     },
 
     /// Durable but not visible
@@ -916,17 +913,14 @@ pub enum StrataError {
     /// StrataError::DurableButNotVisible {
     ///     txn_id: 12345,
     ///     commit_version: 67890,
-    ///     reason: "storage apply failed".to_string(),
     /// };
     /// ```
-    #[error("durable but not visible: txn {txn_id} at version {commit_version} ({reason})")]
+    #[error("durable but not visible: txn {txn_id} at version {commit_version}")]
     DurableButNotVisible {
         /// Transaction ID that committed durably
         txn_id: u64,
         /// Commit version assigned to the transaction
         commit_version: u64,
-        /// Reason the storage apply failed
-        reason: String,
     },
 
     /// Shutdown timeout

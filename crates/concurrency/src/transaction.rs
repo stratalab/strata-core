@@ -44,6 +44,17 @@ pub enum CommitError {
     /// If WAL write fails, the transaction cannot be durably committed.
     WALError(String),
 
+    /// WAL writer halted due to a failed sync.
+    ///
+    /// The transaction was not durably committed. Callers should resolve the
+    /// underlying storage issue and retry only after the writer is resumed.
+    WriterHalted {
+        /// Human-readable reason for the halt
+        reason: String,
+        /// When the halt-causing failure streak was first observed
+        first_observed_at: std::time::SystemTime,
+    },
+
     /// Storage error during validation
     ///
     /// A storage I/O error occurred while reading current versions for
@@ -82,6 +93,16 @@ impl std::fmt::Display for CommitError {
             }
             CommitError::InvalidState(msg) => write!(f, "Invalid state: {}", msg),
             CommitError::WALError(msg) => write!(f, "WAL error: {}", msg),
+            CommitError::WriterHalted {
+                reason,
+                first_observed_at,
+            } => {
+                write!(
+                    f,
+                    "WAL writer halted: {} (first observed: {:?})",
+                    reason, first_observed_at
+                )
+            }
             CommitError::StorageError(msg) => write!(f, "Storage error during validation: {}", msg),
             CommitError::CounterOverflow(msg) => write!(f, "Counter overflow: {}", msg),
             CommitError::DurableButNotVisible {
@@ -116,6 +137,13 @@ impl From<CommitError> for StrataError {
                 message: format!("WAL error: {}", msg),
                 source: None,
             },
+            CommitError::WriterHalted {
+                reason,
+                first_observed_at,
+            } => StrataError::WriterHalted {
+                reason,
+                first_observed_at,
+            },
             CommitError::StorageError(msg) => StrataError::Storage {
                 message: format!("Storage error during validation: {}", msg),
                 source: None,
@@ -126,11 +154,10 @@ impl From<CommitError> for StrataError {
             CommitError::DurableButNotVisible {
                 txn_id,
                 commit_version,
-                reason,
+                ..
             } => StrataError::DurableButNotVisible {
                 txn_id,
                 commit_version,
-                reason,
             },
             CommitError::BranchDeleting(branch_id) => StrataError::TransactionAborted {
                 reason: format!("Branch {} is being deleted", branch_id),

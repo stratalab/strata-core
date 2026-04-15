@@ -503,6 +503,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: true,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
@@ -561,6 +562,9 @@ impl Database {
                         if shutdown.load(Ordering::Relaxed) {
                             break;
                         }
+                        if matches!(&*health.lock(), WalWriterHealth::Halted { .. }) {
+                            continue;
+                        }
                         let sync_plan = {
                             let mut w = wal.lock();
                             match w.begin_background_sync() {
@@ -595,21 +599,16 @@ impl Database {
                                         tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                                         w.abort_background_sync(handle, e);
 
-                                        // Halt the writer: stop accepting transactions
-                                        accepting.store(false, Ordering::Release);
-
                                         // Update health state with error details from WAL writer
                                         let mut h = health.lock();
                                         if let Some(bg_error) = w.bg_error() {
-                                            *h = WalWriterHealth::Halted {
-                                                reason: bg_error.message().to_string(),
-                                                first_observed_at: bg_error.first_observed_at(),
-                                                failed_sync_count: bg_error.failed_sync_count(),
-                                            };
+                                            let reason = bg_error.message().to_string();
+                                            let failed_sync_count = bg_error.failed_sync_count();
+                                            *h = Self::halted_health_from_bg_error(bg_error);
                                             tracing::error!(
                                                 target: "strata::wal",
-                                                reason = %bg_error.message(),
-                                                failed_sync_count = bg_error.failed_sync_count(),
+                                                reason = %reason,
+                                                failed_sync_count,
                                                 "WAL writer halted due to sync failure"
                                             );
                                         } else {
@@ -626,6 +625,11 @@ impl Database {
                                             );
                                         }
                                         drop(h);
+
+                                        // Publish the halt after health is updated so
+                                        // new callers observe WriterHalted, not a
+                                        // generic shutdown-style rejection.
+                                        accepting.store(false, Ordering::Release);
 
                                         false
                                     }
@@ -866,6 +870,7 @@ impl Database {
             wal_dir,
             wal_watermark,
             follower: false,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
@@ -1011,6 +1016,7 @@ impl Database {
             wal_dir: PathBuf::new(),
             wal_watermark: AtomicU64::new(0),
             follower: false,
+            shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
             opened_at: Instant::now(),
             subsystems: parking_lot::RwLock::new(Vec::new()),
