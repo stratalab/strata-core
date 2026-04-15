@@ -470,13 +470,8 @@ impl Database {
         }
 
         // 4. Signal the background flush thread to stop (after transactions are drained)
-        self.flush_shutdown.store(true, Ordering::SeqCst);
-
-        // Join the flush thread so it releases the WAL lock
         // (E-5: the thread performs a final sync before exiting)
-        if let Some(handle) = self.flush_handle.lock().take() {
-            let _ = handle.join();
-        }
+        self.stop_flush_thread();
 
         // 5. Final flush to ensure all data is persisted
         self.flush()?;

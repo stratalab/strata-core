@@ -21,7 +21,7 @@ test-support = []  # Expose test helpers for downstream crates
 strata-core = { path = "../core" }
 strata-storage = { path = "../storage" }
 strata-concurrency = { path = "../concurrency" }
-strata-durability = { path = "../durability" }
+strata-durability = { path = "../durability", features = ["engine-internal"] }
 strata-security = { path = "../security" }
 dashmap = { workspace = true }
 once_cell = { workspace = true }

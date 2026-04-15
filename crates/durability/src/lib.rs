@@ -119,3 +119,93 @@ pub use wal::{
     TruncateInfo, WalConfig, WalConfigError, WalCounters, WalDiskUsage, WalReader, WalReaderError,
     WalRecordIterator, WalWriter,
 };
+
+/// Engine-only durability integration helpers.
+#[cfg(feature = "engine-internal")]
+#[doc(hidden)]
+pub mod __internal {
+    use std::fs::File;
+    use std::io;
+    use std::time::SystemTime;
+
+    use crate::wal::writer::{BgError as WriterBgError, SyncHandle as WriterSyncHandle};
+    use crate::WalWriter;
+
+    /// Snapshot of the last background sync failure.
+    #[derive(Debug, Clone)]
+    pub struct BackgroundSyncError {
+        /// The underlying IO error category.
+        pub kind: io::ErrorKind,
+        /// Human-readable error message.
+        pub message: String,
+        /// Timestamp of the first observed failure in the current streak.
+        pub first_observed_at: SystemTime,
+        /// Number of consecutive failed sync attempts.
+        pub failed_sync_count: u64,
+    }
+
+    impl From<&WriterBgError> for BackgroundSyncError {
+        fn from(value: &WriterBgError) -> Self {
+            Self {
+                kind: value.kind,
+                message: value.message.clone(),
+                first_observed_at: value.first_observed_at,
+                failed_sync_count: value.failed_sync_count,
+            }
+        }
+    }
+
+    /// Handle for an in-flight background sync.
+    #[must_use = "BackgroundSyncHandle must be consumed via commit_background_sync or abort_background_sync"]
+    pub struct BackgroundSyncHandle(pub(crate) WriterSyncHandle);
+
+    impl BackgroundSyncHandle {
+        /// Returns the cloned file descriptor to fsync outside the WAL lock.
+        pub fn fd(&self) -> &File {
+            self.0.fd()
+        }
+    }
+
+    /// Engine-only extension trait for the three-phase background sync API.
+    pub trait WalWriterEngineExt {
+        /// Starts a background sync if one is due.
+        fn begin_background_sync(&mut self) -> io::Result<Option<BackgroundSyncHandle>>;
+        /// Commits a successful background sync.
+        fn commit_background_sync(&mut self, handle: BackgroundSyncHandle) -> io::Result<()>;
+        /// Aborts a failed background sync.
+        fn abort_background_sync(&mut self, handle: BackgroundSyncHandle, error: io::Error);
+        /// Returns the last background sync error, if any.
+        fn bg_error(&self) -> Option<BackgroundSyncError>;
+        /// Clears the last background sync error.
+        fn clear_bg_error(&mut self);
+        /// Returns whether a background sync is currently in flight.
+        fn sync_in_flight(&self) -> bool;
+    }
+
+    impl WalWriterEngineExt for WalWriter {
+        fn begin_background_sync(&mut self) -> io::Result<Option<BackgroundSyncHandle>> {
+            crate::wal::writer::WalWriter::begin_background_sync(self)
+                .map(|handle| handle.map(BackgroundSyncHandle))
+        }
+
+        fn commit_background_sync(&mut self, handle: BackgroundSyncHandle) -> io::Result<()> {
+            crate::wal::writer::WalWriter::commit_background_sync(self, handle.0)
+        }
+
+        fn abort_background_sync(&mut self, handle: BackgroundSyncHandle, error: io::Error) {
+            crate::wal::writer::WalWriter::abort_background_sync(self, handle.0, error)
+        }
+
+        fn bg_error(&self) -> Option<BackgroundSyncError> {
+            crate::wal::writer::WalWriter::bg_error(self).map(BackgroundSyncError::from)
+        }
+
+        fn clear_bg_error(&mut self) {
+            crate::wal::writer::WalWriter::clear_bg_error(self)
+        }
+
+        fn sync_in_flight(&self) -> bool {
+            crate::wal::writer::WalWriter::sync_in_flight(self)
+        }
+    }
+}

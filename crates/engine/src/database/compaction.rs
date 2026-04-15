@@ -4,6 +4,7 @@ use std::sync::Arc;
 use strata_core::id::TxnId;
 use strata_core::types::{Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
+use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::{
     BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,
     EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, ManifestError, ManifestManager,
@@ -26,8 +27,29 @@ impl Database {
     /// For ephemeral databases, this is a no-op.
     pub fn flush(&self) -> StrataResult<()> {
         if let Some(ref wal) = self.wal_writer {
-            let mut wal = wal.lock();
-            wal.flush().map_err(StrataError::from)
+            // Wait up to 10 seconds for any in-flight background sync to complete.
+            // This is defensive against pathological cases (flush thread panic, etc.).
+            const MAX_WAIT_MS: u64 = 10_000;
+            let start = std::time::Instant::now();
+
+            loop {
+                let mut wal = wal.lock();
+                if !wal.sync_in_flight() {
+                    return wal.flush().map_err(StrataError::from);
+                }
+
+                // Preserve the in-flight background sync snapshot. The flush
+                // thread will clear the flag once it can safely hand off.
+                drop(wal);
+
+                if start.elapsed().as_millis() as u64 >= MAX_WAIT_MS {
+                    return Err(StrataError::internal(
+                        "flush timed out waiting for background sync to complete",
+                    ));
+                }
+
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
         } else {
             // Ephemeral mode - no-op
             Ok(())

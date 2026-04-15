@@ -9,6 +9,7 @@ use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::{Storage, StrataError, Timestamp};
+use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::format::WalRecord;
 use strata_durability::now_micros;
@@ -70,6 +71,17 @@ fn write_wal_txn(
     );
     wal.append(&record).unwrap();
     wal.flush().unwrap();
+}
+
+fn wait_until(timeout: Duration, mut predicate: impl FnMut() -> bool) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < timeout {
+        if predicate() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    panic!("condition not satisfied within {:?}", timeout);
 }
 
 #[test]
@@ -2266,6 +2278,170 @@ fn test_shutdown_flush_thread_termination() {
     assert!(
         db.flush_handle.lock().is_none(),
         "flush thread handle must be joined (consumed) during shutdown"
+    );
+}
+
+#[test]
+fn test_set_durability_mode_restarts_flush_thread_for_standard_reconfiguration() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("durability_switch_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    let original_thread_id = db
+        .flush_handle
+        .lock()
+        .as_ref()
+        .expect("standard mode should start a flush thread")
+        .thread()
+        .id();
+
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 1,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let restarted_thread_id = db
+        .flush_handle
+        .lock()
+        .as_ref()
+        .expect("reconfigured standard mode should have a flush thread")
+        .thread()
+        .id();
+
+    assert_ne!(
+        original_thread_id, restarted_thread_id,
+        "standard-mode reconfiguration must restart the shared flush thread"
+    );
+}
+
+#[test]
+fn test_set_durability_mode_updates_database_state() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("durability_state_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    db.set_durability_mode(DurabilityMode::Always).unwrap();
+
+    assert_eq!(
+        *db.durability_mode.read(),
+        DurabilityMode::Always,
+        "database state must reflect the runtime durability mode"
+    );
+}
+
+#[test]
+#[serial]
+fn test_background_sync_failure_sets_bg_error_and_retries() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("bg_sync_retry_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 10,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let key = Key::new_kv(create_test_namespace(branch_id), "bg_sync_key");
+
+    super::test_hooks::clear_sync_failure();
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(7))?;
+        Ok(())
+    })
+    .unwrap();
+
+    wait_until(Duration::from_secs(2), || {
+        db.wal_writer.as_ref().unwrap().lock().bg_error().is_some()
+    });
+
+    let failure = db
+        .wal_writer
+        .as_ref()
+        .unwrap()
+        .lock()
+        .bg_error()
+        .expect("expected background sync failure");
+    assert_eq!(failure.kind, std::io::ErrorKind::Other);
+    assert_eq!(failure.failed_sync_count, 1);
+
+    wait_until(Duration::from_secs(2), || {
+        db.wal_writer.as_ref().unwrap().lock().bg_error().is_none()
+    });
+
+    db.shutdown().unwrap();
+}
+
+#[test]
+fn test_explicit_flush_waits_for_inflight_background_sync() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("flush_waits_for_sync_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 1,
+        batch_size: 64,
+    })
+    .unwrap();
+    db.stop_flush_thread();
+
+    let branch_id = BranchId::new();
+    let key = Key::new_kv(create_test_namespace(branch_id), "flush_wait_key");
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(11))?;
+        Ok(())
+    })
+    .unwrap();
+
+    std::thread::sleep(Duration::from_millis(10));
+
+    let handle = {
+        let mut wal = db.wal_writer.as_ref().unwrap().lock();
+        wal.begin_background_sync()
+            .unwrap()
+            .expect("expected an in-flight background sync")
+    };
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let db_for_flush = Arc::clone(&db);
+    let flush_thread = std::thread::spawn(move || {
+        let result = db_for_flush.flush();
+        tx.send(result).unwrap();
+    });
+
+    assert!(
+        rx.recv_timeout(Duration::from_millis(50)).is_err(),
+        "explicit flush should wait for the in-flight background sync to resolve"
+    );
+
+    handle.fd().sync_all().unwrap();
+    {
+        let mut wal = db.wal_writer.as_ref().unwrap().lock();
+        wal.commit_background_sync(handle).unwrap();
+    }
+
+    rx.recv_timeout(Duration::from_secs(1))
+        .expect("flush should complete after background sync commit")
+        .unwrap();
+    flush_thread.join().unwrap();
+
+    db.shutdown().unwrap();
+}
+
+#[test]
+fn test_source_contains_single_flush_thread_implementation() {
+    let open_source = include_str!("open.rs");
+    let mod_source = include_str!("mod.rs");
+    let loop_marker = ["name(\"", "strata-wal-flush", "\""].concat();
+    let open_count = open_source.matches(&loop_marker).count();
+    let mod_count = mod_source.matches(&loop_marker).count();
+
+    assert_eq!(
+        open_count + mod_count,
+        1,
+        "engine database sources must contain exactly one production flush loop"
     );
 }
 

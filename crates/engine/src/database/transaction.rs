@@ -794,7 +794,7 @@ impl Database {
                 return Err(e);
             }
         }
-        let version = match self.commit_internal(txn, self.durability_mode) {
+        let version = match self.commit_internal(txn, self.current_durability_mode()) {
             Ok(version) => version,
             Err(e) => {
                 // `TransactionCoordinator::commit*` already decremented
