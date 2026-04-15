@@ -577,7 +577,9 @@ fn test_open_uses_registry() {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let db_path = temp_dir.path().join(format!("singleton_via_open_{}", unique_id));
+    let db_path = temp_dir
+        .path()
+        .join(format!("singleton_via_open_{}", unique_id));
 
     // Open via Database::open twice
     let db1 = Database::open(&db_path).unwrap();
