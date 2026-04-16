@@ -9,12 +9,13 @@ use strata_concurrency::__internal as concurrency_test_hooks;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_core::{Storage, StrataError, Timestamp};
+use strata_core::{Storage, StrataError, Timestamp, WriteMode};
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::codec::IdentityCodec;
 use strata_durability::format::WalRecord;
 use strata_durability::now_micros;
 use strata_durability::wal::WalConfig;
+use strata_durability::KvSnapshotEntry;
 use tempfile::TempDir;
 
 impl Database {
@@ -1944,6 +1945,283 @@ fn test_issue_1732_checkpoint_data_preserves_branch_names() {
     assert!(
         branch_entry.created_at > 0,
         "Branch created_at should be non-zero",
+    );
+}
+
+#[test]
+fn test_checkpoint_data_preserves_branch_space_and_type_for_kv_entries() {
+    let db = Database::cache().unwrap();
+    let branch_a = BranchId::from_bytes([1; 16]);
+    let branch_b = BranchId::from_bytes([2; 16]);
+    let timestamp_micros = 1_234_567u64;
+    let version = CommitVersion(7);
+    let value = Value::Int(42);
+
+    let ns_a = Arc::new(Namespace::new(branch_a, "default".to_string()));
+    let ns_b = Arc::new(Namespace::new(branch_b, "tenant_a".to_string()));
+
+    db.storage
+        .put_recovery_entry(
+            Key::new_kv(ns_a, "ambiguous"),
+            value.clone(),
+            version,
+            timestamp_micros,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_kv(ns_b, "ambiguous"),
+            value.clone(),
+            version,
+            timestamp_micros,
+            0,
+        )
+        .unwrap();
+
+    let data = db.collect_checkpoint_data();
+    let kv_entries = data.kv.expect("should have KV entries");
+    assert!(kv_entries.iter().any(|entry| {
+        entry.branch_id == *branch_a.as_bytes()
+            && entry.space == "default"
+            && entry.type_tag == TypeTag::KV.as_byte()
+            && entry.key == "ambiguous"
+            && entry.value == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
+            && entry.timestamp == timestamp_micros
+    }));
+    assert!(kv_entries.iter().any(|entry| {
+        entry.branch_id == *branch_b.as_bytes()
+            && entry.space == "tenant_a"
+            && entry.type_tag == TypeTag::KV.as_byte()
+            && entry.key == "ambiguous"
+            && entry.value == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
+            && entry.timestamp == timestamp_micros
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_preserves_graph_type_and_space_metadata() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([3; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "tenant_graph".to_string()));
+    let timestamp_micros = 2_345_678u64;
+    let version = CommitVersion(9);
+    let value = Value::String("graph-payload".to_string());
+
+    db.storage
+        .put_recovery_entry(
+            Key::new_graph(namespace, "shared"),
+            value.clone(),
+            version,
+            timestamp_micros,
+            0,
+        )
+        .unwrap();
+
+    let data = db.collect_checkpoint_data();
+    let kv_entries = data.kv.expect("should have KV entries");
+    assert!(kv_entries.iter().any(|entry| {
+        entry.branch_id == *branch_id.as_bytes()
+            && entry.space == "tenant_graph"
+            && entry.type_tag == TypeTag::Graph.as_byte()
+            && entry.key == "shared"
+            && entry.value == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
+            && entry.timestamp == timestamp_micros
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_preserves_event_space_metadata() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([6; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "tenant_events".to_string()));
+    let key = Key::new_event(namespace, 7);
+    let value = Value::String("event-payload".to_string());
+    let timestamp_micros = 7_654_321u64;
+
+    db.storage
+        .put_recovery_entry(key, value.clone(), CommitVersion(3), timestamp_micros, 0)
+        .unwrap();
+
+    let events = db
+        .collect_checkpoint_data()
+        .events
+        .expect("should have event entries");
+    assert!(events.iter().any(|entry| {
+        entry.branch_id == *branch_id.as_bytes()
+            && entry.space == "tenant_events"
+            && entry.sequence == 7
+            && entry.payload == serde_json::to_vec(&value).unwrap()
+            && entry.timestamp == timestamp_micros
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_preserves_json_space_metadata() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([7; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "products".to_string()));
+    let key = Key::new_json(namespace, "doc-1");
+    let value = Value::String("{\"sku\":\"123\"}".to_string());
+    let timestamp_micros = 8_765_432u64;
+    let version = CommitVersion(4);
+
+    db.storage
+        .put_recovery_entry(key, value.clone(), version, timestamp_micros, 0)
+        .unwrap();
+
+    let json_entries = db
+        .collect_checkpoint_data()
+        .json
+        .expect("should have json entries");
+    assert!(json_entries.iter().any(|entry| {
+        entry.branch_id == *branch_id.as_bytes()
+            && entry.space == "products"
+            && entry.doc_id == "doc-1"
+            && entry.content == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
+            && entry.timestamp == timestamp_micros
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_preserves_vector_space_metadata() {
+    #[derive(serde::Serialize)]
+    struct TestVectorRecord {
+        vector_id: u64,
+        #[serde(default)]
+        embedding: Vec<f32>,
+        metadata: Option<serde_json::Value>,
+        version: u64,
+        created_at: u64,
+        updated_at: u64,
+        #[serde(default)]
+        source_ref: Option<strata_core::EntityRef>,
+    }
+
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([8; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "semantic".to_string()));
+    let config_key = Key::new_vector_config(namespace.clone(), "embeddings");
+    let vector_key = Key::new_vector(namespace, "embeddings", "vec-1");
+    let record = TestVectorRecord {
+        vector_id: 99,
+        embedding: vec![0.1, 0.2, 0.3],
+        metadata: Some(serde_json::json!({ "label": "test" })),
+        version: 1,
+        created_at: 1_000,
+        updated_at: 1_000,
+        source_ref: None,
+    };
+
+    db.storage
+        .put_recovery_entry(
+            config_key,
+            Value::Bytes(b"{\"dimensions\":3}".to_vec()),
+            CommitVersion(1),
+            1_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            vector_key,
+            Value::Bytes(rmp_serde::to_vec(&record).unwrap()),
+            CommitVersion(2),
+            2_000,
+            0,
+        )
+        .unwrap();
+
+    let vector_entries = db
+        .collect_checkpoint_data()
+        .vectors
+        .expect("should have vector entries");
+    assert!(vector_entries.iter().any(|entry| {
+        entry.branch_id == *branch_id.as_bytes()
+            && entry.space == "semantic"
+            && entry.name == "embeddings"
+            && entry.vectors.iter().any(|vector| vector.key == "vec-1")
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_omits_tombstones_from_live_only_collection() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([4; 16]);
+    let key = Key::new_kv(create_test_namespace(branch_id), "deleted");
+
+    db.storage
+        .put_recovery_entry(key.clone(), Value::Int(1), CommitVersion(1), 1_000, 0)
+        .unwrap();
+    db.storage
+        .delete_recovery_entry(&key, CommitVersion(2), 2_000)
+        .unwrap();
+
+    let kv_entries = db.collect_checkpoint_data().kv.unwrap_or_default();
+    assert!(
+        !kv_entries.iter().any(|entry| entry.key == "deleted"),
+        "Deleted keys are omitted because checkpoint collection uses live-only list_by_type()"
+    );
+}
+
+#[test]
+fn test_checkpoint_data_omits_ttl_metadata() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([5; 16]);
+    let key = Key::new_kv(create_test_namespace(branch_id), "ttl_key");
+    let version = CommitVersion(11);
+    let ttl_ms = 60_000u64;
+    let value = Value::String("ttl".to_string());
+
+    db.storage
+        .put_with_version_mode(
+            key.clone(),
+            value.clone(),
+            version,
+            Some(Duration::from_millis(ttl_ms)),
+            WriteMode::Append,
+        )
+        .unwrap();
+
+    let kv_entries = db
+        .collect_checkpoint_data()
+        .kv
+        .expect("should have KV entries");
+    let snapshot_entry = kv_entries
+        .iter()
+        .find(|entry| entry.key == "ttl_key")
+        .expect("should find ttl_key in checkpoint");
+
+    assert!(
+        db.storage
+            .get_at_timestamp(
+                &key,
+                snapshot_entry
+                    .timestamp
+                    .saturating_add(ttl_ms.saturating_mul(1_000))
+                    .saturating_add(1),
+            )
+            .unwrap()
+            .is_none(),
+        "Storage entry should expire once TTL elapses"
+    );
+
+    assert_eq!(
+        snapshot_entry,
+        &KvSnapshotEntry {
+            branch_id: *branch_id.as_bytes(),
+            space: "default".to_string(),
+            type_tag: TypeTag::KV.as_byte(),
+            key: "ttl_key".to_string(),
+            value: serde_json::to_vec(&value).unwrap(),
+            version: version.as_u64(),
+            timestamp: snapshot_entry.timestamp,
+        },
+        "TTL exists in storage but is not represented in the KV snapshot DTO"
     );
 }
 

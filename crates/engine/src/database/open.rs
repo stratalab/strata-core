@@ -429,9 +429,8 @@ impl Database {
         let manifest_path = layout.manifest_path().to_path_buf();
 
         // Recovery — purely read-only (no truncation, no file writes)
-        let recovery =
-            RecoveryCoordinator::with_layout(layout, cfg.storage.effective_write_buffer_size())
-                .with_lossy_recovery(cfg.allow_lossy_recovery);
+        let recovery = RecoveryCoordinator::new(layout, cfg.storage.effective_write_buffer_size())
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -782,9 +781,8 @@ impl Database {
 
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
-        let recovery =
-            RecoveryCoordinator::with_layout(layout, cfg.storage.effective_write_buffer_size())
-                .with_lossy_recovery(cfg.allow_lossy_recovery);
+        let recovery = RecoveryCoordinator::new(layout, cfg.storage.effective_write_buffer_size())
+            .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {

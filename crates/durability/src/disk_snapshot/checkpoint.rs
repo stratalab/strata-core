@@ -271,12 +271,18 @@ mod tests {
 
         let kv_entries = vec![
             KvSnapshotEntry {
+                branch_id: test_uuid(),
+                space: "default".to_string(),
+                type_tag: 0x01,
                 key: "key1".to_string(),
                 value: b"value1".to_vec(),
                 version: 1,
                 timestamp: 1000,
             },
             KvSnapshotEntry {
+                branch_id: [2; 16],
+                space: "tenant_a".to_string(),
+                type_tag: 0x07,
                 key: "key2".to_string(),
                 value: b"value2".to_vec(),
                 version: 2,
@@ -338,12 +344,17 @@ mod tests {
 
         let data = CheckpointData::new()
             .with_kv(vec![KvSnapshotEntry {
+                branch_id: test_uuid(),
+                space: "default".to_string(),
+                type_tag: 0x01,
                 key: "k".to_string(),
                 value: vec![],
                 version: 1,
                 timestamp: 0,
             }])
             .with_events(vec![EventSnapshotEntry {
+                branch_id: test_uuid(),
+                space: "events".to_string(),
                 sequence: 1,
                 payload: vec![],
                 timestamp: 0,

@@ -257,6 +257,9 @@ impl Database {
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::KV) {
                 let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
                 kv_entries.push(KvSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
+                    type_tag: TypeTag::KV.as_byte(),
                     key: key.user_key_string().unwrap_or_default(),
                     value: value_bytes,
                     version: vv.version.as_u64(),
@@ -264,10 +267,14 @@ impl Database {
                 });
             }
 
-            // Graph entries (same shape as KV — stored under _graph_ namespace)
+            // Graph entries share the same value encoding as KV but keep their
+            // graph type tag and namespace so recovery can reconstruct them exactly.
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Graph) {
                 let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
                 kv_entries.push(KvSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
+                    type_tag: TypeTag::Graph.as_byte(),
                     key: key.user_key_string().unwrap_or_default(),
                     value: value_bytes,
                     version: vv.version.as_u64(),
@@ -288,6 +295,8 @@ impl Database {
                 };
                 let payload = serde_json::to_vec(&vv.value).unwrap_or_default();
                 event_entries.push(EventSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     sequence,
                     payload,
                     timestamp: vv.timestamp.as_micros(),
@@ -327,6 +336,8 @@ impl Database {
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Json) {
                 let content = serde_json::to_vec(&vv.value).unwrap_or_default();
                 json_entries.push(JsonSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     doc_id: key.user_key_string().unwrap_or_default(),
                     content,
                     version: vv.version.as_u64(),
@@ -385,6 +396,8 @@ impl Database {
                 }
 
                 vector_collections.push(VectorCollectionSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     name: collection_name,
                     config: config_bytes,
                     vectors: snapshot_vectors,

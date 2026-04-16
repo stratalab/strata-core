@@ -46,6 +46,13 @@ impl<'a> CursorReader<'a> {
         Ok(val)
     }
 
+    fn read_u8(&mut self) -> Result<u8, PrimitiveSerializeError> {
+        self.ensure(1)?;
+        let val = self.data[self.pos];
+        self.pos += 1;
+        Ok(val)
+    }
+
     fn read_f32(&mut self) -> Result<f32, PrimitiveSerializeError> {
         self.ensure(4)?;
         let val = f32::from_le_bytes(self.data[self.pos..self.pos + 4].try_into().unwrap());
@@ -76,9 +83,17 @@ impl<'a> CursorReader<'a> {
 
 /// Snapshot entry for KV primitive
 ///
-/// Format: key_len(4) + key + value_len(4) + value + version(8) + timestamp(8)
+/// Format:
+/// branch_id(16) + space_len(4) + space + type_tag(1) + key_len(4) + key
+/// + value_len(4) + value + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct KvSnapshotEntry {
+    /// Branch identifier (UUID bytes)
+    pub branch_id: [u8; 16],
+    /// Namespace space name
+    pub space: String,
+    /// Storage type tag (`TypeTag` byte) for KV/Graph disambiguation
+    pub type_tag: u8,
     /// Key string
     pub key: String,
     /// Value bytes (pre-codec)
@@ -91,9 +106,15 @@ pub struct KvSnapshotEntry {
 
 /// Snapshot entry for Event primitive
 ///
-/// Format: sequence(8) + payload_len(4) + payload + timestamp(8)
+/// Format:
+/// branch_id(16) + space_len(4) + space + sequence(8)
+/// + payload_len(4) + payload + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSnapshotEntry {
+    /// Branch identifier (UUID bytes)
+    pub branch_id: [u8; 16],
+    /// Namespace space name
+    pub space: String,
     /// Event sequence number
     pub sequence: u64,
     /// Event payload bytes (pre-codec)
@@ -119,9 +140,15 @@ pub struct BranchSnapshotEntry {
 
 /// Snapshot entry for Json primitive
 ///
-/// Format: doc_id_len(4) + doc_id + content_len(4) + content + version(8) + timestamp(8)
+/// Format:
+/// branch_id(16) + space_len(4) + space + doc_id_len(4) + doc_id
+/// + content_len(4) + content + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonSnapshotEntry {
+    /// Branch identifier (UUID bytes)
+    pub branch_id: [u8; 16],
+    /// Namespace space name
+    pub space: String,
     /// Document identifier
     pub doc_id: String,
     /// JSON content bytes (pre-codec)
@@ -134,9 +161,15 @@ pub struct JsonSnapshotEntry {
 
 /// Snapshot entry for Vector primitive (collection level)
 ///
-/// Format: collection_name_len(4) + name + config_len(4) + config + vectors_count(4) + [vectors...]
+/// Format:
+/// branch_id(16) + space_len(4) + space + collection_name_len(4) + name
+/// + config_len(4) + config + vectors_count(4) + [vectors...]
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorCollectionSnapshotEntry {
+    /// Branch identifier (UUID bytes)
+    pub branch_id: [u8; 16],
+    /// Namespace space name
+    pub space: String,
     /// Collection name
     pub name: String,
     /// Collection configuration as serialized bytes
@@ -179,6 +212,14 @@ impl SnapshotSerializer {
         data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
 
         for entry in entries {
+            data.extend_from_slice(&entry.branch_id);
+
+            let space_bytes = entry.space.as_bytes();
+            data.extend_from_slice(&(space_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(space_bytes);
+
+            data.push(entry.type_tag);
+
             // Key
             let key_bytes = entry.key.as_bytes();
             data.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
@@ -206,11 +247,17 @@ impl SnapshotSerializer {
         let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
+            let space = r.read_string()?;
+            let type_tag = r.read_u8()?;
             let key = r.read_string()?;
             let value = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
             entries.push(KvSnapshotEntry {
+                branch_id,
+                space,
+                type_tag,
                 key,
                 value,
                 version,
@@ -227,6 +274,12 @@ impl SnapshotSerializer {
         data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
 
         for entry in entries {
+            data.extend_from_slice(&entry.branch_id);
+
+            let space_bytes = entry.space.as_bytes();
+            data.extend_from_slice(&(space_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(space_bytes);
+
             data.extend_from_slice(&entry.sequence.to_le_bytes());
 
             let payload_bytes = self.codec.encode(&entry.payload);
@@ -248,10 +301,14 @@ impl SnapshotSerializer {
         let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
+            let space = r.read_string()?;
             let sequence = r.read_u64()?;
             let payload = self.codec.decode(r.read_blob()?)?;
             let timestamp = r.read_u64()?;
             entries.push(EventSnapshotEntry {
+                branch_id,
+                space,
                 sequence,
                 payload,
                 timestamp,
@@ -313,6 +370,12 @@ impl SnapshotSerializer {
         data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
 
         for entry in entries {
+            data.extend_from_slice(&entry.branch_id);
+
+            let space_bytes = entry.space.as_bytes();
+            data.extend_from_slice(&(space_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(space_bytes);
+
             let doc_id_bytes = entry.doc_id.as_bytes();
             data.extend_from_slice(&(doc_id_bytes.len() as u32).to_le_bytes());
             data.extend_from_slice(doc_id_bytes);
@@ -337,11 +400,15 @@ impl SnapshotSerializer {
         let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
+            let space = r.read_string()?;
             let doc_id = r.read_string()?;
             let content = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
             entries.push(JsonSnapshotEntry {
+                branch_id,
+                space,
                 doc_id,
                 content,
                 version,
@@ -358,6 +425,12 @@ impl SnapshotSerializer {
         data.extend_from_slice(&(collections.len() as u32).to_le_bytes());
 
         for collection in collections {
+            data.extend_from_slice(&collection.branch_id);
+
+            let space_bytes = collection.space.as_bytes();
+            data.extend_from_slice(&(space_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(space_bytes);
+
             // Collection name
             let name_bytes = collection.name.as_bytes();
             data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
@@ -405,6 +478,8 @@ impl SnapshotSerializer {
         let mut collections = Vec::with_capacity(collections_count);
 
         for _ in 0..collections_count {
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
+            let space = r.read_string()?;
             let name = r.read_string()?;
             let config = self.codec.decode(r.read_blob()?)?;
             let vectors_count = r.read_u32()? as usize;
@@ -428,6 +503,8 @@ impl SnapshotSerializer {
             }
 
             collections.push(VectorCollectionSnapshotEntry {
+                branch_id,
+                space,
                 name,
                 config,
                 vectors,
@@ -462,18 +539,28 @@ mod tests {
         SnapshotSerializer::new(Box::new(IdentityCodec))
     }
 
+    fn test_branch(bytes: u8) -> [u8; 16] {
+        [bytes; 16]
+    }
+
     #[test]
     fn test_kv_roundtrip() {
         let serializer = test_serializer();
 
         let entries = vec![
             KvSnapshotEntry {
+                branch_id: test_branch(1),
+                space: "default".to_string(),
+                type_tag: 0x01,
                 key: "key1".to_string(),
                 value: b"value1".to_vec(),
                 version: 1,
                 timestamp: 1000,
             },
             KvSnapshotEntry {
+                branch_id: test_branch(2),
+                space: "tenant_a".to_string(),
+                type_tag: 0x07,
                 key: "key2".to_string(),
                 value: b"value2".to_vec(),
                 version: 2,
@@ -503,6 +590,9 @@ mod tests {
         let serializer = test_serializer();
 
         let entries = vec![KvSnapshotEntry {
+            branch_id: test_branch(9),
+            space: "tenant_emoji".to_string(),
+            type_tag: 0x01,
             key: "key_\u{1F600}_emoji".to_string(),
             value: "value_\u{4E2D}\u{6587}_chinese".as_bytes().to_vec(),
             version: 42,
@@ -521,11 +611,15 @@ mod tests {
 
         let entries = vec![
             EventSnapshotEntry {
+                branch_id: test_branch(3),
+                space: "default".to_string(),
                 sequence: 1,
                 payload: b"event1".to_vec(),
                 timestamp: 1000,
             },
             EventSnapshotEntry {
+                branch_id: test_branch(4),
+                space: "tenant_events".to_string(),
                 sequence: 2,
                 payload: b"event2".to_vec(),
                 timestamp: 2000,
@@ -561,12 +655,16 @@ mod tests {
 
         let entries = vec![
             JsonSnapshotEntry {
+                branch_id: test_branch(5),
+                space: "default".to_string(),
                 doc_id: "doc1".to_string(),
                 content: b"{\"name\":\"test\"}".to_vec(),
                 version: 1,
                 timestamp: 1000,
             },
             JsonSnapshotEntry {
+                branch_id: test_branch(6),
+                space: "products".to_string(),
                 doc_id: "doc2".to_string(),
                 content: b"{\"value\":42}".to_vec(),
                 version: 2,
@@ -585,6 +683,8 @@ mod tests {
         let serializer = test_serializer();
 
         let collections = vec![VectorCollectionSnapshotEntry {
+            branch_id: test_branch(7),
+            space: "embeddings".to_string(),
             name: "embeddings".to_string(),
             config: b"{\"dimensions\":384}".to_vec(),
             vectors: vec![
@@ -617,6 +717,8 @@ mod tests {
         let embedding: Vec<f32> = (0..384).map(|i| i as f32 * 0.001).collect();
 
         let collections = vec![VectorCollectionSnapshotEntry {
+            branch_id: test_branch(8),
+            space: "semantic".to_string(),
             name: "minilm".to_string(),
             config: b"{\"dimensions\":384}".to_vec(),
             vectors: vec![VectorSnapshotEntry {
