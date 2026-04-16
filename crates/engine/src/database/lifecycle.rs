@@ -1,10 +1,11 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key};
-use strata_core::StrataResult;
+use strata_core::{StrataError, StrataResult};
 use tracing::{info, warn};
 
 use super::refresh::{
@@ -12,7 +13,10 @@ use super::refresh::{
     BlockedTxn, BlockedTxnState, FollowerStatus, PersistedFollowerState, PreparedRefresh,
     RefreshGuard, RefreshOutcome, UnblockError,
 };
-use super::{Database, PersistenceMode};
+use super::{registry, Database, PersistenceMode};
+
+/// Default deadline for [`Database::shutdown`] when no explicit deadline is given.
+const DEFAULT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 impl Database {
     // Branch Lifecycle Cleanup
@@ -66,7 +70,13 @@ impl Database {
     /// A future PR will add a background maintenance thread.
     ///
     /// Returns `(safe_point, total_versions_pruned)`.
+    ///
+    /// Returns `(0, 0)` while shutdown is in progress or has completed (see
+    /// [`Database::check_not_shutting_down`]).
     pub fn run_gc(&self) -> (u64, usize) {
+        if self.check_not_shutting_down().is_err() {
+            return (0, 0);
+        }
         let safe_point = self.gc_safe_point();
         if safe_point == 0 {
             return (0, 0);
@@ -92,7 +102,13 @@ impl Database {
     /// (e.g., from tests, CLI, or a future background thread).
     ///
     /// Returns `(safe_point, versions_pruned, ttl_entries_expired)`.
+    ///
+    /// Returns `(0, 0, 0)` while shutdown is in progress or has completed
+    /// (see [`Database::check_not_shutting_down`]).
     pub fn run_maintenance(&self) -> (u64, usize, usize) {
+        if self.check_not_shutting_down().is_err() {
+            return (0, 0, 0);
+        }
         let (safe_point, pruned) = self.run_gc();
         let expired = self
             .storage
@@ -544,7 +560,16 @@ impl Database {
     /// for the next recovery to reconstruct embeddings. This is called during
     /// shutdown and drop.
     /// Freeze all registered refresh hooks' state to disk.
+    ///
+    /// Rejected on a closed database — the hook implementations write mmap
+    /// files under `data_dir`, so letting a stale `Arc<Database>` rewrite
+    /// them after a fresh `Database::open` on the same path would corrupt
+    /// the new instance's recovery artifacts. Internal callers
+    /// (`VectorSubsystem::freeze` invoked from `run_freeze_hooks`, and
+    /// `Drop`'s fallback) only run while `shutdown_complete == false`, so
+    /// the guard does not fire on the legitimate shutdown path.
     pub fn freeze_vector_heaps(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
         if let Ok(hooks) = self.extension::<super::refresh::RefreshHooks>() {
             for hook in hooks.hooks() {
                 hook.freeze_to_disk(self)?;
@@ -566,59 +591,146 @@ impl Database {
         Ok(())
     }
 
-    /// This method:
-    /// 1. Stops accepting new transactions
-    /// 2. Waits for pending operations to complete
-    /// 3. Flushes WAL based on durability mode
+    /// Shut down the database using the default 30s deadline.
     ///
-    /// # Example
-    ///
-    /// ```text
-    /// db.shutdown()?;
-    /// assert!(!db.is_open());
-    /// ```
+    /// Equivalent to [`Database::shutdown_with_deadline`] with the default deadline.
     pub fn shutdown(&self) -> StrataResult<()> {
-        self.shutdown_started.store(true, Ordering::Release);
+        self.shutdown_with_deadline(DEFAULT_SHUTDOWN_DEADLINE)
+    }
 
-        // 1. Stop accepting new transactions
+    /// Authoritative ordered close barrier (CLAUDE.md Hard Rule 11 / D-DR-10).
+    ///
+    /// Ordering on a successful close:
+    /// 1. Flip `accepting_transactions = false` (new `begin_transaction` rejected).
+    /// 2. Drain background scheduler (embed hooks etc.) so no new transactions
+    ///    are spawned after the idle wait begins.
+    /// 3. Wait for the coordinator to report zero active transactions, bounded
+    ///    by `deadline`. On timeout, restore `shutdown_started = false` and
+    ///    `accepting_transactions = true` so the database remains usable,
+    ///    then return [`StrataError::ShutdownTimeout`] **without** stopping
+    ///    the flush thread, flushing the WAL, fsyncing the MANIFEST, or
+    ///    running subsystem freeze hooks. Callers may let their in-flight
+    ///    transactions commit, optionally do more work, and retry.
+    /// 4. Stop the background flush thread (final sync inside the thread).
+    /// 5. Final `flush()` of the WAL.
+    /// 6. Fsync the MANIFEST atomically (tmp + rename + parent dir fsync).
+    /// 7. Run subsystem freeze hooks in reverse-insertion order. Freeze failure
+    ///    is **not** treated as completion: the registry slot stays claimed,
+    ///    `shutdown_complete` stays `false`, and the `Drop` fallback still
+    ///    gets a chance to run. A retry is safe because every step is
+    ///    idempotent.
+    /// 8. On success, release the `OPEN_DATABASES` registry slot **and**
+    ///    drop the exclusive `.lock` file so a fresh `Database::open` on
+    ///    the same path succeeds immediately, without waiting for `Drop`
+    ///    on the old `Arc<Database>`. Only the primary singleton
+    ///    registers itself; followers intentionally skip the registry
+    ///    step so their shutdown does not evict a live primary sharing
+    ///    the same path.
+    ///
+    /// Calling `shutdown*` twice is idempotent: the second call returns
+    /// `Ok(())` once `shutdown_complete` is set.
+    pub fn shutdown_with_deadline(&self, deadline: Duration) -> StrataResult<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.shutdown_started.store(true, Ordering::Release);
         self.accepting_transactions.store(false, Ordering::Release);
 
-        // Followers have no background threads, WAL writer, or freeze targets.
+        // Followers have no background flush thread, WAL writer, or freeze
+        // targets. They also don't own a registry slot (see
+        // `Database::open_runtime_follower` — followers are not deduplicated
+        // via `OPEN_DATABASES`), so we must not call `release_registry_slot`
+        // here: doing so would evict a primary that happens to share the path.
         if self.follower {
+            self.shutdown_complete.store(true, Ordering::Release);
             return Ok(());
         }
 
-        // 2. Drain background tasks (embeddings etc.) before final WAL flush
+        // Drain background scheduler before the idle wait so its tasks don't
+        // spawn new transactions after `accepting_transactions = false` (they
+        // run via internal paths that bypass that gate).
         self.scheduler.drain();
 
-        // 3. Wait for in-flight transactions to complete FIRST.
-        //    Uses wait_for_idle() which polls with SeqCst ordering, ensuring
-        //    visibility of active_count increments from record_start() on all
-        //    architectures (fixes #1738 / 9.2.B).
-        let timeout = std::time::Duration::from_secs(30);
-        if !self.coordinator.wait_for_idle(timeout) {
-            let remaining = self.coordinator.active_count();
-            warn!(
-                target: "strata::db",
-                remaining,
-                "Shutdown timed out waiting for {} active transaction(s) after {:?}",
-                remaining,
-                timeout,
-            );
+        // Authoritative barrier. Polls with SeqCst ordering; see #1738.
+        if !self.coordinator.wait_for_idle(deadline) {
+            let active_txn_count = self.coordinator.active_count();
+            // Restore the pre-shutdown flags so the database is usable again.
+            // The caller can let in-flight work drain, optionally start new
+            // work, and retry. Every step up to this point is idempotent, so
+            // a subsequent `shutdown*` call replays safely.
+            //
+            // `accepting_transactions = false` is dual-purpose: it also
+            // carries the WAL writer-halt signal that the flush thread
+            // publishes at `open.rs:756` after a sync failure. The halt
+            // publisher runs in two phases — set `WalWriterHealth::Halted`
+            // under `wal_writer_health.lock()`, release the lock, then store
+            // `accepting_transactions = false`. To avoid a TOCTOU race where
+            // the publisher completes between our observation and our
+            // write, we hold `wal_writer_health.lock()` across the
+            // check-and-restore: the publisher's first phase cannot advance
+            // while we hold that lock, and once we release, any subsequent
+            // halt runs its full sequence — its final `store(false)` then
+            // wins over our `store(true)` because it is ordered after our
+            // release.
+            self.shutdown_started.store(false, Ordering::Release);
+            let health = self.wal_writer_health.lock();
+            if matches!(*health, super::WalWriterHealth::Healthy) {
+                self.accepting_transactions.store(true, Ordering::Release);
+            }
+            drop(health);
+            return Err(StrataError::ShutdownTimeout { active_txn_count });
         }
 
-        // 4. Signal the background flush thread to stop (after transactions are drained)
-        // (E-5: the thread performs a final sync before exiting)
+        // Flush thread performs a final sync on exit (E-5).
         self.stop_flush_thread();
+        // `self.flush()` now rejects once `shutdown_started = true`; use the
+        // unguarded internal body so shutdown can still drive its own final
+        // flush.
+        self.flush_internal()?;
+        self.fsync_manifest()?;
 
-        // 5. Final flush to ensure all data is persisted
-        self.flush()?;
+        // Freeze attempts all subsystems even if one fails; returns first err.
+        // A freeze error is NOT a successful shutdown: leave `shutdown_complete`
+        // as-is (so an explicit retry can re-run, and Drop's fallback path is
+        // not suppressed) and do not release the registry slot.
+        self.run_freeze_hooks()?;
 
-        // 6. Freeze all registered subsystems. Attempts all even if one fails.
-        let freeze_result = self.run_freeze_hooks();
         self.shutdown_complete.store(true, Ordering::Release);
-        freeze_result?;
-
+        self.release_registry_slot();
+        self.release_file_lock();
         Ok(())
+    }
+
+    /// Release the exclusive `.lock` file so a concurrent `Database::open`
+    /// on the same path can acquire it. Dropping the `File` closes the fd,
+    /// which releases the OS-level `flock`. Ephemeral databases have no
+    /// file lock, and on retry `take()` returns `None` (idempotent).
+    fn release_file_lock(&self) {
+        drop(self.lock_file.lock().take());
+    }
+
+    /// Atomically persist the MANIFEST so it is durable before freeze hooks run.
+    ///
+    /// `ManifestManager::persist()` performs tmp-write → `sync_all` → rename →
+    /// parent-dir fsync. Skipped for ephemeral databases (no data_dir).
+    fn fsync_manifest(&self) -> StrataResult<()> {
+        if self.data_dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let mut mgr = self.load_or_create_manifest()?;
+        mgr.persist()
+            .map_err(|e| StrataError::internal(format!("manifest fsync on shutdown failed: {}", e)))
+    }
+
+    /// Release this database's entry from the global `OPEN_DATABASES` registry.
+    ///
+    /// Only disk-backed primaries register themselves (followers skip the
+    /// registry entirely), so callers must ensure this is only invoked on a
+    /// successful primary shutdown.
+    fn release_registry_slot(&self) {
+        debug_assert!(!self.follower, "followers must not touch OPEN_DATABASES");
+        if self.persistence_mode == PersistenceMode::Disk {
+            registry::unregister(&self.data_dir);
+        }
     }
 }

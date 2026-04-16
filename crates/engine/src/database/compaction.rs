@@ -25,7 +25,20 @@ impl Database {
     /// be called manually to ensure durability at a specific point.
     ///
     /// For ephemeral databases, this is a no-op.
+    ///
+    /// Rejected while `shutdown_with_deadline` is in progress and after a
+    /// successful shutdown (see [`Database::check_not_shutting_down`]).
+    /// Internal callers (`shutdown_with_deadline`'s own final flush, the
+    /// `Drop` fallback) call [`Database::flush_internal`] directly to
+    /// bypass the guard on the close path itself.
     pub fn flush(&self) -> StrataResult<()> {
+        self.check_not_shutting_down()?;
+        self.flush_internal()
+    }
+
+    /// Unguarded flush body shared by the public `flush()`, the close
+    /// barrier, and the `Drop` fallback. See `flush()` for semantics.
+    pub(crate) fn flush_internal(&self) -> StrataResult<()> {
         if let Some(ref wal) = self.wal_writer {
             // Wait up to 10 seconds for any in-flight background sync to complete.
             // This is defensive against pathological cases (flush thread panic, etc.).
@@ -70,11 +83,17 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 6.3
     pub fn checkpoint(&self) -> StrataResult<()> {
+        self.check_not_shutting_down()?;
         if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }
 
-        // Flush WAL first to ensure all buffered writes are on disk
+        // Flush WAL first to ensure all buffered writes are on disk. If
+        // `shutdown_with_deadline` has started between the guard above and
+        // this line, the public `flush()` would reject — use it so the
+        // in-progress shutdown wins and `checkpoint` fails cleanly rather
+        // than racing further MANIFEST writes against shutdown's freeze
+        // loop.
         self.flush()?;
 
         // Drain all in-flight commits so the watermark reflects only fully-
@@ -160,6 +179,7 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 5.6
     pub fn compact(&self) -> StrataResult<()> {
+        self.check_not_shutting_down()?;
         if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }
@@ -497,7 +517,7 @@ impl Database {
     /// Load an existing MANIFEST or create a new one.
     ///
     /// Also updates the active WAL segment from the current WAL writer.
-    fn load_or_create_manifest(&self) -> StrataResult<ManifestManager> {
+    pub(super) fn load_or_create_manifest(&self) -> StrataResult<ManifestManager> {
         let manifest_path = self.data_dir.join("MANIFEST");
 
         let mut manifest = if ManifestManager::exists(&manifest_path) {

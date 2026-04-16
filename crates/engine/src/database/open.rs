@@ -618,7 +618,7 @@ impl Database {
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             backpressure_counter: AtomicU64::new(0),
-            _lock_file: None, // No lock acquired
+            lock_file: parking_lot::Mutex::new(None), // No lock acquired
             wal_dir,
             watermark,
             refresh_gate: super::refresh::RefreshGate::new(),
@@ -1065,7 +1065,7 @@ impl Database {
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             backpressure_counter: AtomicU64::new(0),
-            _lock_file: lock_file,
+            lock_file: parking_lot::Mutex::new(lock_file),
             wal_dir,
             watermark,
             refresh_gate: super::refresh::RefreshGate::new(),
@@ -1213,7 +1213,7 @@ impl Database {
             write_stall_cv: Arc::new(parking_lot::Condvar::new()),
             write_stall_mu: parking_lot::Mutex::new(()),
             backpressure_counter: AtomicU64::new(0),
-            _lock_file: None, // No lock for ephemeral databases
+            lock_file: parking_lot::Mutex::new(None), // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
             watermark: super::refresh::ContiguousWatermark::default(),
             refresh_gate: super::refresh::RefreshGate::new(),

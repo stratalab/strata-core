@@ -461,9 +461,12 @@ pub struct Database {
 
     /// Exclusive lock file preventing concurrent process access to the same database.
     ///
-    /// Held for the lifetime of the Database. Dropped automatically when the
-    /// Database is dropped, releasing the lock. None for ephemeral databases.
-    _lock_file: Option<std::fs::File>,
+    /// Wrapped in a `Mutex<Option<File>>` so `shutdown()` can take the file
+    /// out and drop it (releasing the `flock`) with only `&self`, allowing
+    /// a fresh `Database::open` on the same path to succeed immediately
+    /// without waiting for `Drop`. `Drop` takes whatever remains and drops
+    /// it as a best-effort fallback. `None` for ephemeral databases.
+    lock_file: parking_lot::Mutex<Option<std::fs::File>>,
 
     /// WAL directory path (for follower refresh).
     wal_dir: PathBuf,
@@ -1091,6 +1094,56 @@ impl Database {
         self.accepting_transactions.load(Ordering::Acquire)
     }
 
+    /// Guard for mutating maintenance APIs (flush, checkpoint, compact,
+    /// `set_durability_mode`, etc.) that must not run on a handle whose
+    /// owner has already successfully completed `shutdown()`.
+    ///
+    /// After a successful shutdown the registry slot and the `.lock` file
+    /// are both released, which means a fresh `Database::open` can acquire
+    /// them and start writing. Letting the old `Arc<Database>` still drive
+    /// WAL flushes, checkpoints, compactions, or MANIFEST updates against
+    /// that path would race the fresh instance and corrupt its state.
+    ///
+    /// The transaction gate (`check_accepting`) covers `begin_transaction`;
+    /// this covers the non-transactional admin/maintenance surface. It
+    /// intentionally keys on `shutdown_complete` — a *timed-out* shutdown
+    /// restores the pre-shutdown flags (see `shutdown_with_deadline`) so
+    /// callers can finish work and retry, and maintenance ops are still
+    /// allowed on that retry path.
+    pub(crate) fn check_not_closed(&self) -> StrataResult<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Err(StrataError::invalid_input(
+                "Database has been shut down".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Stricter variant of [`Database::check_not_closed`] used by mutating
+    /// admin / maintenance APIs that must not run concurrently with an
+    /// in-progress `shutdown_with_deadline`.
+    ///
+    /// The authoritative ordered close barrier (CLAUDE.md Hard Rule 11 /
+    /// D-DR-10) requires that once `shutdown_started == true`, nothing
+    /// else mutates WAL / MANIFEST / storage / subsystem state. This
+    /// guard enforces that for the non-transactional surface —
+    /// `begin_transaction` has its own gate via `check_accepting`, and
+    /// `resume_wal_writer` already uses the same two-flag rejection.
+    ///
+    /// A timed-out shutdown restores `shutdown_started = false` before
+    /// returning `ShutdownTimeout`, so maintenance APIs resume working
+    /// on the retry path — the exact usability contract Epic T3-E6
+    /// promises.
+    pub(crate) fn check_not_shutting_down(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err(StrataError::invalid_input(
+                "Database is shutting down".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn writer_halted_error(&self) -> Option<StrataError> {
         match &*self.wal_writer_health.lock() {
             WalWriterHealth::Healthy => None,
@@ -1553,6 +1606,9 @@ impl Database {
     /// disk-backed databases, and storage/coordinator/cache parameters are
     /// applied to the live database immediately.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
+        // Writes `strata.toml` and applies live storage/coordinator/cache
+        // changes — reject while shutdown is in progress or has completed.
+        self.check_not_shutting_down()?;
         let mut guard = self.config.write();
         f(&mut guard);
         // Persist to strata.toml for disk-backed databases
@@ -1607,6 +1663,10 @@ impl Database {
     /// Updates the WAL writer's fsync policy and restarts the shared
     /// background flush thread when the Standard-mode configuration changes.
     pub fn set_durability_mode(&self, mode: DurabilityMode) -> StrataResult<()> {
+        // Stops/restarts the flush thread — running this concurrently with
+        // `shutdown_with_deadline` would race shutdown's own
+        // `stop_flush_thread()` call. Reject as soon as shutdown starts.
+        self.check_not_shutting_down()?;
         let wal = self.wal_writer.as_ref().ok_or_else(|| {
             StrataError::invalid_input(
                 "Cannot change durability mode on an ephemeral (cache) database".to_string(),
@@ -1672,9 +1732,14 @@ impl Database {
     /// Enable or disable auto-embedding.
     ///
     /// Persists to `strata.toml` for disk-backed databases.
+    ///
+    /// Silent no-op on a closed database — `update_config` rejects the
+    /// mutation and this wrapper discards the error to preserve its
+    /// infallible signature. Production code sets auto-embed via the
+    /// executor's `ConfigSetAutoEmbed` handler, which calls
+    /// `update_config` directly and surfaces the closed error to the
+    /// caller. This method exists for test convenience.
     pub fn set_auto_embed(&self, enabled: bool) {
-        // Use update_config for persistence; ignore error since
-        // auto_embed never triggers the durability rejection.
         let _ = self.update_config(|cfg| {
             cfg.auto_embed = enabled;
         });
@@ -1726,8 +1791,11 @@ impl Drop for Database {
 
         // Skip flush/freeze if shutdown() already completed them.
         if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {
-            // Final flush to persist any remaining data
-            if let Err(e) = self.flush() {
+            // Final flush to persist any remaining data. Use the unguarded
+            // internal body because the public `flush()` rejects once
+            // `shutdown_started = true`, and Drop must still do its
+            // best-effort work if shutdown started and errored mid-flight.
+            if let Err(e) = self.flush_internal() {
                 tracing::error!(target: "strata::db", error = %e,
                     "Final flush on drop failed — data may not be durable");
             }
