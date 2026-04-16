@@ -1033,6 +1033,10 @@ fn test_admin_skip_after_hook_failure_makes_record_visible() {
         None,
         "storage apply must remain invisible until the blocked record is resolved"
     );
+    assert!(
+        dir.path().join("follower_state.json").exists(),
+        "blocked follower state must be persisted for restart recovery"
+    );
 
     follower
         .admin_skip_blocked_record(blocked_txn, "operator acknowledged hook failure")
@@ -1048,6 +1052,10 @@ fn test_admin_skip_after_hook_failure_makes_record_visible() {
     assert_eq!(
         recovered.applied_watermark, recovered.received_watermark,
         "skip should reconcile the watermarks for the skipped txn"
+    );
+    assert!(
+        !dir.path().join("follower_state.json").exists(),
+        "skip should clear the persisted blocked follower state"
     );
 
     let audit_log = std::fs::read_to_string(dir.path().join("follower_audit.log")).unwrap();

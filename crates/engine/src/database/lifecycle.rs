@@ -8,9 +8,9 @@ use strata_core::StrataResult;
 use tracing::{info, warn};
 
 use super::refresh::{
-    clear_persisted_follower_state, persist_follower_state, BlockReason, BlockedTxn,
-    BlockedTxnState, FollowerStatus, PersistedFollowerState, PreparedRefresh, RefreshGuard,
-    RefreshOutcome, UnblockError,
+    clear_persisted_follower_state, persist_follower_state, sync_path_parent, BlockReason,
+    BlockedTxn, BlockedTxnState, FollowerStatus, PersistedFollowerState, PreparedRefresh,
+    RefreshGuard, RefreshOutcome, UnblockError,
 };
 use super::{Database, PersistenceMode};
 
@@ -217,7 +217,11 @@ impl Database {
                 .create(true)
                 .append(true)
                 .open(&audit_path)
-                .and_then(|mut f| std::io::Write::write_all(&mut f, entry.as_bytes()))
+                .and_then(|mut f| {
+                    std::io::Write::write_all(&mut f, entry.as_bytes())?;
+                    f.sync_all()?;
+                    sync_path_parent(&audit_path)
+                })
             {
                 warn!(
                     target: "strata::follower::audit",

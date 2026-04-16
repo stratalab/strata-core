@@ -1608,4 +1608,107 @@ mod tests {
         );
         assert_eq!(matches[0].key, "visible-a");
     }
+
+    #[test]
+    fn test_blocked_follower_lazy_load_does_not_load_newer_vector_caches() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_id = strata_core::types::BranchId::default();
+        let fail_once = Arc::new(AtomicBool::new(false));
+
+        let primary = Database::open_runtime(
+            OpenSpec::primary(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+        let primary_store = VectorStore::new(primary.clone());
+
+        primary_store
+            .create_collection(
+                branch_id,
+                "default",
+                "embeddings",
+                crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+            )
+            .unwrap();
+        primary_store
+            .insert(
+                branch_id,
+                "default",
+                "embeddings",
+                "visible-a",
+                &[1.0, 0.0, 0.0],
+                None,
+            )
+            .unwrap();
+        primary.flush().unwrap();
+
+        let follower = Database::open_runtime(
+            OpenSpec::follower(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+
+        fail_once.store(true, Ordering::SeqCst);
+        primary_store
+            .insert(
+                branch_id,
+                "default",
+                "embeddings",
+                "blocked-b",
+                &[0.0, 1.0, 0.0],
+                None,
+            )
+            .unwrap();
+        primary.flush().unwrap();
+
+        assert!(
+            matches!(
+                follower.refresh(),
+                strata_engine::RefreshOutcome::Stuck { .. }
+            ),
+            "refresh should block before making the new vector visible"
+        );
+
+        drop(follower);
+        primary.shutdown().unwrap();
+        drop(primary);
+
+        let reopened = Database::open_runtime(
+            OpenSpec::follower(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(
+                    false,
+                )))),
+        )
+        .unwrap();
+        let reopened_store = VectorStore::new(reopened.clone());
+        let state = reopened.extension::<crate::VectorBackendState>().unwrap();
+        state.backends.clear();
+        assert!(
+            state.backends.is_empty(),
+            "test setup must force the lazy-load path instead of using recovered backends"
+        );
+
+        let matches = reopened_store
+            .search(
+                branch_id,
+                "default",
+                "embeddings",
+                &[0.0, 1.0, 0.0],
+                1,
+                None,
+            )
+            .unwrap();
+        assert_eq!(
+            matches.len(),
+            1,
+            "lazy-loaded follower collections must rebuild from visible KV state"
+        );
+        assert_eq!(
+            matches[0].key, "visible-a",
+            "lazy load must not pull blocked vectors from primary mmap caches"
+        );
+    }
 }

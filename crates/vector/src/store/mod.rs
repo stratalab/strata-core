@@ -308,7 +308,10 @@ impl VectorStore {
         let mut backend = self.create_backend_with_type(id, config, backend_type)?;
 
         let data_dir = self.db.data_dir();
-        let use_mmap = !data_dir.as_os_str().is_empty();
+        // Followers can reopen with storage intentionally clamped below the
+        // primary's latest durable caches. Keep lazy reload aligned with
+        // startup recovery and rebuild from the follower-visible KV snapshot.
+        let use_mmap = !data_dir.as_os_str().is_empty() && !self.db.is_follower();
 
         // Try mmap-accelerated reload (same logic as recover_from_db)
         let mut loaded_from_mmap = false;

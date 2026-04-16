@@ -407,6 +407,13 @@ pub(crate) fn load_persisted_follower_state(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+pub(crate) fn sync_path_parent(path: &Path) -> std::io::Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::File::open(parent)?.sync_all()
+}
+
 pub(crate) fn persist_follower_state(
     data_dir: &Path,
     state: &PersistedFollowerState,
@@ -421,8 +428,16 @@ pub(crate) fn persist_follower_state(
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(state)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(&tmp, bytes)?;
-    std::fs::rename(tmp, path)?;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&tmp)?;
+    std::io::Write::write_all(&mut file, &bytes)?;
+    file.sync_all()?;
+    drop(file);
+    std::fs::rename(tmp, &path)?;
+    sync_path_parent(&path)?;
     Ok(())
 }
 
@@ -430,8 +445,8 @@ pub(crate) fn clear_persisted_follower_state(data_dir: &Path) -> std::io::Result
     let Some(path) = follower_state_path(data_dir) else {
         return Ok(());
     };
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
+    match std::fs::remove_file(&path) {
+        Ok(()) => sync_path_parent(&path),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }
