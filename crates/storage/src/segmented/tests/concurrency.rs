@@ -1091,6 +1091,47 @@ fn test_issue_1740_apply_recovery_atomic_preserves_ttl() {
     );
 }
 
+#[test]
+fn test_recovery_paths_update_fast_count_prefix() {
+    let store = SegmentedStore::new();
+
+    store
+        .put_recovery_entry(
+            kv_key("from_wal"),
+            Value::Int(1),
+            CommitVersion(1),
+            1_000,
+            0,
+        )
+        .unwrap();
+    assert_eq!(
+        store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(),
+        1
+    );
+
+    store
+        .apply_recovery_atomic(
+            vec![(kv_key("from_refresh"), Value::Int(2))],
+            vec![],
+            CommitVersion(2),
+            2_000,
+            &[0],
+        )
+        .unwrap();
+    assert_eq!(
+        store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(),
+        2
+    );
+
+    store
+        .delete_recovery_entry(&kv_key("from_wal"), CommitVersion(3), 3_000)
+        .unwrap();
+    assert_eq!(
+        store.count_prefix(&kv_key(""), CommitVersion::MAX).unwrap(),
+        1
+    );
+}
+
 // ===== Issue #1721: fork_branch must not copy Materializing status =====
 
 /// Regression test for issue #1721 (COW-M6).

@@ -913,12 +913,14 @@ mod tests {
     use crate::payload::TransactionPayload;
     use crate::{JsonStoreExt, TransactionContext};
     use parking_lot::Mutex as ParkingMutex;
+    use std::path::Path;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::__internal::WalWriterEngineExt;
     use strata_durability::codec::IdentityCodec;
+    use strata_durability::layout::DatabaseLayout;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalReader};
     use strata_storage::SegmentedStore;
     use tempfile::TempDir;
@@ -940,6 +942,10 @@ mod tests {
             Box::new(IdentityCodec),
         )
         .unwrap()
+    }
+
+    fn test_recovery(root: &Path) -> crate::RecoveryCoordinator {
+        crate::RecoveryCoordinator::new(DatabaseLayout::from_root(root), 0)
     }
 
     #[test]
@@ -1516,7 +1522,7 @@ mod tests {
 
         // Drop WAL to flush buffers, then recover from disk
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover().unwrap();
 
         // Recovery should find exactly 1 transaction
@@ -1602,7 +1608,7 @@ mod tests {
 
         // Recover from WAL to verify all 10 records are well-formed
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.txns_replayed, num_threads);
         assert_eq!(
@@ -1661,7 +1667,7 @@ mod tests {
         // KEY ASSERTION: WAL should contain exactly 2 records (setup + T2).
         // T1 was aborted before WAL write, so its record must NOT be in WAL.
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover().unwrap();
         assert_eq!(
             result.stats.txns_replayed, 2,
@@ -1698,7 +1704,7 @@ mod tests {
 
         // WAL should be empty — no records written for read-only txn
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.txns_replayed, 0);
     }
@@ -1734,7 +1740,7 @@ mod tests {
 
         // WAL should have a record
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let rec_result = recovery.recover().unwrap();
         assert_eq!(rec_result.stats.txns_replayed, 1);
     }
@@ -1799,7 +1805,7 @@ mod tests {
 
         // Recover from WAL and verify all operations replayed correctly
         drop(wal);
-        let recovery = crate::RecoveryCoordinator::new(wal_dir);
+        let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.txns_replayed, 2);
 

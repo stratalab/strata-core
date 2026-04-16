@@ -223,8 +223,6 @@ impl Database {
 
     /// Collect all primitive data from storage for checkpointing.
     pub(super) fn collect_checkpoint_data(&self) -> CheckpointData {
-        use crate::primitives::branch::BranchMetadata;
-
         /// Lightweight deserialization shim for vector records in checkpoint.
         /// The full `VectorRecord` type lives in strata-vector.
         #[allow(dead_code)]
@@ -257,18 +255,25 @@ impl Database {
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::KV) {
                 let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
                 kv_entries.push(KvSnapshotEntry {
-                    key: key.user_key_string().unwrap_or_default(),
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
+                    type_tag: TypeTag::KV.as_byte(),
+                    user_key: key.user_key.to_vec(),
                     value: value_bytes,
                     version: vv.version.as_u64(),
                     timestamp: vv.timestamp.as_micros(),
                 });
             }
 
-            // Graph entries (same shape as KV — stored under _graph_ namespace)
+            // Graph entries share the same value encoding as KV but keep their
+            // graph type tag and namespace so recovery can reconstruct them exactly.
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Graph) {
                 let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
                 kv_entries.push(KvSnapshotEntry {
-                    key: key.user_key_string().unwrap_or_default(),
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
+                    type_tag: TypeTag::Graph.as_byte(),
+                    user_key: key.user_key.to_vec(),
                     value: value_bytes,
                     version: vv.version.as_u64(),
                     timestamp: vv.timestamp.as_micros(),
@@ -288,8 +293,11 @@ impl Database {
                 };
                 let payload = serde_json::to_vec(&vv.value).unwrap_or_default();
                 event_entries.push(EventSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     sequence,
                     payload,
+                    version: vv.version.as_u64(),
                     timestamp: vv.timestamp.as_micros(),
                 });
             }
@@ -300,26 +308,16 @@ impl Database {
                 if key.user_key.starts_with(b"__idx_") {
                     continue;
                 }
-                let branch_id_bytes: [u8; 16] = if key.user_key.len() == 16 {
-                    (*key.user_key).try_into().unwrap_or([0; 16])
-                } else {
-                    [0; 16]
+                let key_string = match key.user_key_string() {
+                    Some(key_string) => key_string,
+                    None => continue,
                 };
-                // Extract name and created_at from the serialized BranchMetadata
-                let (name, created_at) = match &vv.value {
-                    strata_core::value::Value::String(s) => {
-                        serde_json::from_str::<BranchMetadata>(s)
-                            .map(|meta| (meta.name, meta.created_at.as_micros()))
-                            .unwrap_or_else(|_| (String::new(), vv.timestamp.as_micros()))
-                    }
-                    _ => (String::new(), vv.timestamp.as_micros()),
-                };
-                let metadata = serde_json::to_vec(&vv.value).unwrap_or_default();
+                let value = serde_json::to_vec(&vv.value).unwrap_or_default();
                 branch_entries.push(BranchSnapshotEntry {
-                    branch_id: branch_id_bytes,
-                    name,
-                    created_at,
-                    metadata,
+                    key: key_string,
+                    value,
+                    version: vv.version.as_u64(),
+                    timestamp: vv.timestamp.as_micros(),
                 });
             }
 
@@ -327,6 +325,8 @@ impl Database {
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Json) {
                 let content = serde_json::to_vec(&vv.value).unwrap_or_default();
                 json_entries.push(JsonSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     doc_id: key.user_key_string().unwrap_or_default(),
                     content,
                     version: vv.version.as_u64(),
@@ -379,14 +379,21 @@ impl Database {
                                 vector_id: record.vector_id,
                                 embedding: record.embedding,
                                 metadata: metadata_bytes,
+                                raw_value: bytes.clone(),
+                                version: vec_vv.version.as_u64(),
+                                timestamp: vec_vv.timestamp.as_micros(),
                             });
                         }
                     }
                 }
 
                 vector_collections.push(VectorCollectionSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
+                    space: key.namespace.space.clone(),
                     name: collection_name,
                     config: config_bytes,
+                    config_version: vv.version.as_u64(),
+                    config_timestamp: vv.timestamp.as_micros(),
                     vectors: snapshot_vectors,
                 });
             }

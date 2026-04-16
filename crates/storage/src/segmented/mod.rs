@@ -223,6 +223,32 @@ pub struct OwnEntry {
     pub commit_id: CommitVersion,
 }
 
+/// Decoded snapshot payload for a single logical key.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DecodedSnapshotValue {
+    /// A live value restored from the snapshot.
+    Value(Value),
+    /// A tombstone restored from the snapshot.
+    Tombstone,
+}
+
+/// Decoded snapshot entry installed into storage during recovery.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DecodedSnapshotEntry {
+    /// Namespace space name for the logical key.
+    pub space: String,
+    /// User-key bytes for the logical key.
+    pub user_key: Vec<u8>,
+    /// Value or tombstone payload.
+    pub payload: DecodedSnapshotValue,
+    /// MVCC commit version carried by the snapshot.
+    pub version: CommitVersion,
+    /// Original commit timestamp in microseconds.
+    pub timestamp_micros: u64,
+    /// Per-key TTL in milliseconds, when known.
+    pub ttl_ms: u64,
+}
+
 // ---------------------------------------------------------------------------
 // SegmentVersion
 // ---------------------------------------------------------------------------
@@ -2324,6 +2350,7 @@ impl SegmentedStore {
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(&key, version, entry);
+        branch.num_entries.fetch_add(1, Ordering::Relaxed);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
@@ -2356,6 +2383,7 @@ impl SegmentedStore {
         };
         let ts = entry.timestamp.as_micros();
         branch.active.put_entry(key, version, entry);
+        branch.num_deletions.fetch_add(1, Ordering::Relaxed);
         branch.track_timestamp(ts);
         branch.track_version(version);
 
@@ -2410,6 +2438,7 @@ impl SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
+            let put_count = entries.len() as u64;
             for (key, value, ttl_ms) in entries {
                 let entry = MemtableEntry {
                     value,
@@ -2420,6 +2449,7 @@ impl SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            branch.num_entries.fetch_add(put_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
             branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
@@ -2431,6 +2461,7 @@ impl SegmentedStore {
                 .branches
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
+            let delete_count = keys.len() as u64;
             for key in keys {
                 let entry = MemtableEntry {
                     value: Value::Null,
@@ -2441,6 +2472,9 @@ impl SegmentedStore {
                 };
                 branch.active.put_entry(&key, version, entry);
             }
+            branch
+                .num_deletions
+                .fetch_add(delete_count, Ordering::Relaxed);
             branch.track_timestamp(ts);
             branch.track_version(version);
             self.maybe_rotate_branch(branch_id, &mut branch);
@@ -2451,6 +2485,80 @@ impl SegmentedStore {
         // (BM25/HNSW) have been updated, so readers never observe KV data
         // without corresponding index entries (Issue #1734).
         Ok(())
+    }
+
+    /// Install decoded entries for one branch and primitive type from a snapshot.
+    ///
+    /// The caller provides entries grouped by `(branch_id, type_tag)`. This
+    /// method reconstructs full `Key` values internally and preserves the
+    /// metadata carried by each decoded entry.
+    ///
+    /// # Timestamp Invariants
+    ///
+    /// The original commit timestamps from the snapshot are preserved, ensuring
+    /// time-travel queries return correct results after snapshot-based recovery.
+    ///
+    /// # Version Tracking
+    ///
+    /// Unlike WAL recovery, this method advances the storage version to the
+    /// maximum version seen across the installed snapshot entries.
+    pub fn install_snapshot_entries(
+        &self,
+        branch_id: BranchId,
+        type_tag: TypeTag,
+        entries: &[DecodedSnapshotEntry],
+    ) -> StrataResult<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let mut max_version = CommitVersion::ZERO;
+        let mut installed = 0usize;
+
+        let mut branch = self
+            .branches
+            .entry(branch_id)
+            .or_insert_with(BranchState::new);
+
+        for snapshot_entry in entries {
+            let namespace = Arc::new(strata_core::Namespace::for_branch_space(
+                branch_id,
+                &snapshot_entry.space,
+            ));
+            let key = Key::new(namespace, type_tag, snapshot_entry.user_key.clone());
+            let timestamp = Timestamp::from_micros(snapshot_entry.timestamp_micros);
+            let (value, is_tombstone) = match &snapshot_entry.payload {
+                DecodedSnapshotValue::Value(value) => (value.clone(), false),
+                DecodedSnapshotValue::Tombstone => (Value::Null, true),
+            };
+            let entry = MemtableEntry {
+                value,
+                is_tombstone,
+                timestamp,
+                ttl_ms: snapshot_entry.ttl_ms,
+                raw_value: None,
+            };
+            branch.active.put_entry(&key, snapshot_entry.version, entry);
+            if is_tombstone {
+                branch.num_deletions.fetch_add(1, Ordering::Relaxed);
+            } else {
+                branch.num_entries.fetch_add(1, Ordering::Relaxed);
+            }
+            branch.track_timestamp(snapshot_entry.timestamp_micros);
+            branch.track_version(snapshot_entry.version);
+            max_version = max_version.max(snapshot_entry.version);
+            installed += 1;
+        }
+
+        self.maybe_rotate_branch(branch_id, &mut branch);
+
+        // Advance version to the max seen in the snapshot.
+        if max_version > CommitVersion::ZERO {
+            self.version
+                .fetch_max(max_version.as_u64(), Ordering::AcqRel);
+        }
+
+        Ok(installed)
     }
 
     /// Get `(entry_count, total_version_count, btree_built)` for a branch.

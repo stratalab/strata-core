@@ -16,10 +16,10 @@
 
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
-use std::path::PathBuf;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::StrataResult;
 use strata_durability::format::WalSegment;
+use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::WalReader;
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
@@ -33,58 +33,36 @@ use tracing::{info, warn};
 /// 4. Applies all writes/deletes with version preservation
 /// 5. Initializes TransactionManager with final version
 pub struct RecoveryCoordinator {
-    /// Path to WAL directory (contains wal-NNNNNN.seg files)
-    wal_dir: PathBuf,
-    /// Path to snapshot directory (optional, not used in M2)
-    #[allow(dead_code)]
-    snapshot_path: Option<PathBuf>,
-    /// Path to segments directory for on-disk segment storage (optional)
-    segments_dir: Option<PathBuf>,
-    /// Write buffer size in bytes for SegmentedStore (used when segments_dir is set)
+    /// Canonical database layout.
+    layout: DatabaseLayout,
+    /// Write buffer size in bytes for the layout-rooted segmented store.
     write_buffer_size: usize,
     /// When true, WAL reader scans past corrupted regions instead of erroring.
     allow_lossy_recovery: bool,
 }
 
 impl RecoveryCoordinator {
-    /// Create a new recovery coordinator
+    /// Create a recovery coordinator from a canonical database layout.
     ///
     /// # Arguments
-    /// * `wal_dir` - Path to the segmented WAL directory
-    pub fn new(wal_dir: PathBuf) -> Self {
+    /// * `layout` - Canonical database directory layout
+    /// * `write_buffer_size` - Write buffer size in bytes for SegmentedStore
+    pub fn new(layout: DatabaseLayout, write_buffer_size: usize) -> Self {
         RecoveryCoordinator {
-            wal_dir,
-            snapshot_path: None,
-            segments_dir: None,
-            write_buffer_size: 0,
+            layout,
+            write_buffer_size,
             allow_lossy_recovery: false,
         }
+    }
+
+    /// Returns the coordinator's database layout.
+    pub fn layout(&self) -> &DatabaseLayout {
+        &self.layout
     }
 
     /// Enable lossy WAL recovery (scan past corrupted regions).
     pub fn with_lossy_recovery(mut self, allow: bool) -> Self {
         self.allow_lossy_recovery = allow;
-        self
-    }
-
-    /// Set snapshot path for checkpoint-based recovery (M3+ feature)
-    ///
-    /// Note: Snapshot-based recovery is not implemented in M2.
-    /// This method is provided for future extensibility.
-    #[allow(dead_code)]
-    pub(crate) fn with_snapshot_path(mut self, path: PathBuf) -> Self {
-        self.snapshot_path = Some(path);
-        self
-    }
-
-    /// Set the segments directory and write buffer size for on-disk segment storage.
-    ///
-    /// When set, recovery will create a `SegmentedStore::with_dir()` instead of
-    /// an ephemeral `SegmentedStore::new()`, enabling flush/compaction to persist
-    /// frozen memtables as on-disk SST segments.
-    pub fn with_segments(mut self, segments_dir: PathBuf, write_buffer_size: usize) -> Self {
-        self.segments_dir = Some(segments_dir);
-        self.write_buffer_size = write_buffer_size;
         self
     }
 
@@ -95,7 +73,8 @@ impl RecoveryCoordinator {
     /// appends new records after the garbage. On the next recovery the reader
     /// stops at the partial record and never reaches the later committed data.
     fn truncate_partial_tail(&self, reader: &WalReader) {
-        let segments = match reader.list_segments(&self.wal_dir) {
+        let wal_dir = self.layout.wal_dir();
+        let segments = match reader.list_segments(wal_dir) {
             Ok(s) => s,
             Err(_) => return,
         };
@@ -104,12 +83,12 @@ impl RecoveryCoordinator {
             None => return,
         };
 
-        let (_, valid_end, _, _) = match reader.read_segment(&self.wal_dir, last_seg) {
+        let (_, valid_end, _, _) = match reader.read_segment(wal_dir, last_seg) {
             Ok(r) => r,
             Err(_) => return,
         };
 
-        let seg_path = WalSegment::segment_path(&self.wal_dir, last_seg);
+        let seg_path = WalSegment::segment_path(wal_dir, last_seg);
         let file_len = match std::fs::metadata(&seg_path) {
             Ok(m) => m.len(),
             Err(_) => return,
@@ -151,16 +130,16 @@ impl RecoveryCoordinator {
     /// - If WAL directory cannot be read
     /// - If record deserialization fails
     pub fn recover(&self) -> StrataResult<RecoveryResult> {
-        let storage = match &self.segments_dir {
-            Some(dir) => SegmentedStore::with_dir(dir.clone(), self.write_buffer_size),
-            None => SegmentedStore::new(),
-        };
+        let storage = SegmentedStore::with_dir(
+            self.layout.segments_dir().to_path_buf(),
+            self.write_buffer_size,
+        );
         let mut max_version = 0u64;
         let mut max_txn_id = 0u64;
         let mut stats = RecoveryStats::default();
 
         // If WAL dir doesn't exist, return empty result
-        if !self.wal_dir.exists() {
+        if !self.layout.wal_dir().exists() {
             return Ok(RecoveryResult {
                 storage,
                 txn_manager: TransactionManager::new(CommitVersion::ZERO),
@@ -176,7 +155,7 @@ impl RecoveryCoordinator {
             reader = reader.with_lossy_recovery();
         }
         let records_iter = reader
-            .iter_all(&self.wal_dir)
+            .iter_all(self.layout.wal_dir())
             .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
 
         for record_result in records_iter {
@@ -333,6 +312,7 @@ impl RecoveryStats {
 mod tests {
     use super::*;
     use crate::payload::TransactionPayload;
+    use std::path::Path;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::traits::Storage;
@@ -357,6 +337,14 @@ mod tests {
             Box::new(IdentityCodec),
         )
         .unwrap()
+    }
+
+    fn test_layout(root: &Path) -> DatabaseLayout {
+        DatabaseLayout::from_root(root)
+    }
+
+    fn test_recovery(root: &Path) -> RecoveryCoordinator {
+        RecoveryCoordinator::new(test_layout(root), 0)
     }
 
     /// Helper: write a committed transaction to the WAL
@@ -393,7 +381,7 @@ mod tests {
         std::fs::create_dir_all(&wal_dir).unwrap();
         let _wal = create_test_wal(&wal_dir);
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
@@ -404,9 +392,7 @@ mod tests {
     #[test]
     fn test_recovery_nonexistent_dir() {
         let temp_dir = TempDir::new().unwrap();
-        let wal_dir = temp_dir.path().join("nonexistent");
-
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
@@ -434,7 +420,7 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 1);
@@ -486,7 +472,7 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.final_version, CommitVersion(200));
@@ -554,10 +540,10 @@ mod tests {
             }
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+        let coordinator = test_recovery(temp_dir.path());
         let result1 = coordinator.recover().unwrap();
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result2 = coordinator.recover().unwrap();
 
         assert_eq!(result1.stats.final_version, result2.stats.final_version);
@@ -605,7 +591,7 @@ mod tests {
             write_txn(&mut wal, 2, branch_id, vec![], vec![key.clone()], 101);
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.writes_applied, 1);
@@ -637,18 +623,19 @@ mod tests {
     }
 
     #[test]
-    fn test_recovery_coordinator_builder() {
+    fn test_recovery_coordinator_layout() {
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
-        let snapshot_path = temp_dir.path().join("snapshots");
 
         std::fs::create_dir_all(&wal_dir).unwrap();
         let _wal = create_test_wal(&wal_dir);
 
-        let coordinator = RecoveryCoordinator::new(wal_dir).with_snapshot_path(snapshot_path);
+        let layout = test_layout(temp_dir.path());
+        let coordinator = RecoveryCoordinator::new(layout.clone(), 0);
 
         let result = coordinator.recover().unwrap();
         assert!(!result.stats.from_checkpoint);
+        assert_eq!(coordinator.layout(), &layout);
     }
 
     // ========================================
@@ -668,7 +655,7 @@ mod tests {
         std::fs::create_dir_all(&wal_dir).unwrap();
         let _wal = create_test_wal(&wal_dir);
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
@@ -701,7 +688,7 @@ mod tests {
             // CRASH after commit marker written - record is durable
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 1);
@@ -746,7 +733,7 @@ mod tests {
             .unwrap();
         file.write_all(&[0xFF; 20]).unwrap();
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         // Valid record should be recovered, garbage skipped
@@ -779,10 +766,10 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+        let coordinator = test_recovery(temp_dir.path());
         let result1 = coordinator.recover().unwrap();
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result2 = coordinator.recover().unwrap();
 
         assert_eq!(result1.stats.txns_replayed, result2.stats.txns_replayed);
@@ -823,7 +810,7 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.txn_manager.current_version(), CommitVersion(999));
@@ -855,7 +842,7 @@ mod tests {
             }
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 10);
@@ -935,7 +922,7 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 4);
@@ -991,7 +978,7 @@ mod tests {
             }
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         let counter = result
@@ -1023,7 +1010,7 @@ mod tests {
             );
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
@@ -1057,7 +1044,7 @@ mod tests {
             }
         }
 
-        let coordinator = RecoveryCoordinator::new(wal_dir);
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, num_txns as usize);
@@ -1103,7 +1090,7 @@ mod tests {
         }
 
         // Verify recovery (which uses iter_all) returns correct results
-        let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+        let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 20);
@@ -1188,7 +1175,7 @@ mod tests {
         // Step 3: First recovery — should replay the 2 valid records
         // and truncate the partial tail
         {
-            let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+            let coordinator = test_recovery(temp_dir.path());
             let result = coordinator.recover().unwrap();
             assert_eq!(result.stats.txns_replayed, 2);
         }
@@ -1214,7 +1201,7 @@ mod tests {
         // Without the fix, the reader stops at the old partial bytes
         // and never reaches record 3.
         {
-            let coordinator = RecoveryCoordinator::new(wal_dir.clone());
+            let coordinator = test_recovery(temp_dir.path());
             let result = coordinator.recover().unwrap();
 
             assert_eq!(

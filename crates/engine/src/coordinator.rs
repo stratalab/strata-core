@@ -681,6 +681,7 @@ mod tests {
         use strata_core::traits::WriteMode;
         use strata_core::types::{Key, Namespace, TypeTag};
         use strata_core::value::Value;
+        use strata_durability::layout::DatabaseLayout;
 
         fn branch() -> BranchId {
             BranchId::from_bytes([1; 16])
@@ -701,9 +702,9 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let wal_dir = dir.path().join("WAL");
-        std::fs::create_dir_all(&wal_dir).unwrap();
-        let segments_dir = dir.path().join("segments");
+        let layout = DatabaseLayout::from_root(dir.path());
+        std::fs::create_dir_all(layout.wal_dir()).unwrap();
+        let segments_dir = layout.segments_dir().to_path_buf();
 
         let store = SegmentedStore::with_dir(segments_dir.clone(), 0);
         for i in 1..=100u64 {
@@ -720,7 +721,7 @@ mod tests {
         assert_eq!(store.branch_segment_count(&branch()), 1);
         drop(store);
 
-        let recovery = RecoveryCoordinator::new(wal_dir).with_segments(segments_dir, 0);
+        let recovery = RecoveryCoordinator::new(layout, 0);
         let result = recovery.recover().unwrap();
         assert_eq!(result.stats.final_version, CommitVersion::ZERO);
 

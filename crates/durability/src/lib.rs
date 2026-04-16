@@ -19,6 +19,7 @@ pub mod codec; // Storage codec abstraction (identity, future encryption/compres
 pub mod compaction; // WAL segment cleanup and tombstone tracking
 pub mod disk_snapshot; // Crash-safe snapshot I/O and checkpoint coordination
 pub mod format; // Binary on-disk formats (WAL segments, snapshots, manifest, writesets)
+pub mod layout; // Canonical database directory layout
 pub mod wal; // WAL segment types, durability modes
 
 // === Utilities ===
@@ -113,6 +114,9 @@ pub use compaction::{
     CompactInfo, CompactMode, CompactionError, Tombstone, TombstoneError, TombstoneIndex,
     TombstoneReason, WalOnlyCompactor,
 };
+
+// Layout
+pub use layout::DatabaseLayout;
 
 // WAL segmented types
 pub use wal::{

@@ -37,7 +37,7 @@ pub use rate_limiter::RateLimiter;
 pub use segment::{KVSegment, OwnedSegmentIter};
 pub use segment_builder::{CompressionCodec, SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
 pub use segmented::{
-    CompactionResult, MaterializeResult, PickAndCompactResult, SegmentedStore, StorageIterator,
-    VersionedEntry,
+    CompactionResult, DecodedSnapshotEntry, DecodedSnapshotValue, MaterializeResult,
+    PickAndCompactResult, SegmentedStore, StorageIterator, VersionedEntry,
 };
 pub use ttl::TTLIndex;
