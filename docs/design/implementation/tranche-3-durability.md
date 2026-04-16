@@ -349,16 +349,16 @@ Every in-tree `refresh()` caller must pattern-match `RefreshOutcome`. `#[must_us
 
 ## Epic 4: DatabaseLayout and Snapshot Install
 
-**Goal:** Introduce one canonical directory layout type and a snapshot install path that the recovery coordinator can call.
+**Goal:** Introduce one canonical directory layout type and a snapshot install path that the recovery coordinator can call, with retention-complete payload fidelity for tombstones and TTL.
 
-**Why:** Epic 5 needs a layout object shared by engine, coordinator, and tests. It also needs a way to install decoded checkpoint entries into `SegmentedStore`.
+**Why:** Epic 5 needs a layout object shared by engine, coordinator, and tests. It also needs a way to install decoded checkpoint entries into `SegmentedStore`. Tranche 4 now depends on Tranche 3 to preserve tombstone and TTL state faithfully through checkpoints and restart recovery, not just branch/space/type identity.
 
 **Implementation split:**
 
 - **PR 1:** layout and coordinator cleanup only. Land `DatabaseLayout`, move open/recovery call sites to it, and collapse `RecoveryCoordinator` construction onto one layout-based shape.
-- **PR 2:** storage-side snapshot install contract plus checkpoint payload fixes/tests so branch, space, type, raw key bytes, and per-entry MVCC metadata are explicit instead of inferred.
+- **PR 2:** storage-side snapshot install contract plus checkpoint payload fixes/tests so branch, space, type, raw key bytes, per-entry MVCC metadata, tombstones, and TTL are explicit instead of inferred or dropped.
 - **Non-goal for Epic 4:** do not change production recovery behavior, callback shape, or codec validation flow. Snapshot loading and delta-WAL replay remain Epic 5.
-- **Compatibility constraint:** snapshot payload and storage install semantics must be lossless for branch/space/type identity, raw user keys where applicable, and the MVCC version/timestamp needed to reinstall each logical entry. Epic 4 still does not solve tombstone or TTL serialization unless explicitly added.
+- **Compatibility constraint:** snapshot payload and storage install semantics must be lossless for branch/space/type identity, raw user keys where applicable, tombstone state, TTL state, and the MVCC version/timestamp needed to reinstall each logical entry. Recovery artifacts taken together must also preserve fork-frontier, inherited-layer, and reachability state needed for restart-correct branch retention semantics.
 
 ### Changes
 
@@ -396,18 +396,18 @@ RecoveryCoordinator::new(layout: DatabaseLayout, write_buffer_size: usize)
 - Delete `with_snapshot_path()` once tests and stubs no longer need it.
 - Epic 4 does not thread codec identity through the coordinator constructor yet. That validation moves in Epic 5 when recovery planning reads `MANIFEST`.
 
-**4. Fix and characterize the checkpoint payload** (~120-180 lines)
+**4. Fix and characterize the checkpoint payload** (~140-220 lines)
 
-- Update checkpoint DTOs so branch ID, namespace space, KV-vs-Graph type identity, raw KV/Graph user-key bytes, and per-entry MVCC metadata are serialized explicitly.
-- Add tests that pin the remaining omissions the payload still has.
+- Update checkpoint DTOs so branch ID, namespace space, KV-vs-Graph type identity, raw KV/Graph user-key bytes, per-entry MVCC metadata, tombstone state, and TTL state are serialized explicitly.
+- Add tests that prove checkpoint payload/install semantics are retention-complete for the branch-aware storage retention work in Tranche 4.
 - Cover at least:
   - branch/space/type identity is preserved explicitly in checkpoint DTOs
   - raw KV/Graph user-key bytes survive checkpoint serialization
   - event/branch/vector entries carry the MVCC version/timestamp Epic 5 will need to reinstall them
   - vector snapshot entries preserve the raw serialized `VectorRecord` bytes instead of a lossy projection
-  - checkpoint collection is live-only, so tombstones are not currently serialized
-  - TTL is not currently serialized in snapshot DTOs
-- These tests are groundwork for Epic 5. They prevent the storage install API from being defined around assumptions the remaining snapshot wire format still does not satisfy.
+  - tombstone state is serialized and re-installable instead of being dropped by live-only collection
+  - TTL state is serialized and re-installable instead of being omitted from snapshot DTOs
+- These tests are groundwork for Epic 5 and Tranche 4. They prevent the storage install API and later branch-retention work from being defined around a lossy snapshot wire format. They do not replace the need to preserve fork-frontier, inherited-layer, and reachability state through the non-checkpoint portions of the recovery chain.
 
 **5. `SegmentedStore::install_snapshot_entries` contract** (~150 lines)
 
@@ -430,7 +430,7 @@ where `DecodedSnapshotEntry` preserves:
 - value or tombstone state
 - commit version
 - timestamp
-- TTL, when the caller has it
+- TTL state
 
 The storage layer constructs `Key` values from `(branch_id, space, type_tag, user_key)`; it does not require snapshot sections to arrive with fully materialized `Key` objects.
 
@@ -445,8 +445,10 @@ Rules:
 
 - Test: `DatabaseLayout::from_root` produces expected paths.
 - Test: coordinator accepts `DatabaseLayout`; no `wal_dir` plus `with_segments` construction remains on the active production path.
-- Test: checkpoint characterization tests pin the current payload shape before Epic 5 consumes it.
+- Test: checkpoint characterization and regression tests prove tombstone and TTL fidelity before Epic 5 consumes checkpoints.
 - Test: `install_snapshot_entries` round-trips entries.
+- Test: checkpoint/install preserves tombstone state needed for restart correctness.
+- Test: checkpoint/install preserves TTL behavior needed for restart correctness.
 - Test: WAL-only recovery still passes unchanged.
 - Benchmark: YCSB, redb, open latency smoke.
 
@@ -458,7 +460,7 @@ Rules:
 
 **Goal:** Extend the existing `strata_concurrency::RecoveryCoordinator` with snapshot loading, codec validation, delta-WAL replay, and `.meta` sidecar rebuild.
 
-**Why:** This is the main recovery correctness fix. Checkpoints are written but not consumed. Recovery currently replays WAL only, so checkpoint coverage and WAL retention cannot become truthful.
+**Why:** This is the main recovery correctness fix. Checkpoints are written but not consumed. Recovery currently replays WAL only, so checkpoint coverage and WAL retention cannot become truthful. Tranche 4 branch-retention semantics also depend on restart preserving tombstone and TTL barriers exactly.
 
 ### Changes
 
@@ -468,6 +470,7 @@ Rules:
 - Load snapshot via durability snapshot reader.
 - Validate magic, CRC, and codec.
 - Pass a `LoadedSnapshot` to the engine callback.
+- Preserve the branch/inherited-layer/reachability state already carried by `MANIFEST` and segment recovery so fork-frontier visibility and safe shared-segment deletion remain restart-correct.
 
 No new recovery coordinator type. Extend the existing coordinator in place.
 
@@ -549,6 +552,10 @@ The old test asserted that checkpoint compact recovery must fail. It now asserts
 
 - Test: WAL-only restart still works.
 - Test: checkpoint-only restart works.
+- Test: checkpoint-only restart preserves tombstones.
+- Test: checkpoint-only restart preserves TTL behavior.
+- Test: restart preserves inherited-layer/fork-frontier visibility across reopen.
+- Test: restart preserves safe shared-segment deletion behavior.
 - Test: checkpoint plus delta-WAL replay works.
 - Test: partial WAL tail truncation still works.
 - Test: missing/stale `.meta` sidecar rebuild works.
@@ -746,7 +753,7 @@ Epic 1 + T2-E5 (session shape)
 
 **Sprint 2:** Epic 2 and Epic 4 PR 1 in parallel. Epic 2 consumes `bg_error`; Epic 4 PR 1 prepares the layout/coordinator structure.
 
-**Sprint 3:** Epic 4 PR 2, then Epic 5. PR 2 pins the storage install contract against the shipped snapshot payload; Epic 5 is the main load-bearing recovery PR and gets the heaviest review.
+**Sprint 3:** Epic 4 PR 2, then Epic 5. PR 2 makes the storage install contract and checkpoint payload retention-complete for tombstones/TTL; Epic 5 is the main load-bearing recovery PR and gets the heaviest review.
 
 **Sprint 4:** Epic 6 and Epic 7. Shutdown depends on T2-E5 and Epic 1; codec matrix depends on Epic 5.
 
@@ -768,12 +775,12 @@ Epic 1 + T2-E5 (session shape)
 | E2 | Yes | New error variants and health API are additive |
 | E3 | Partially | `RefreshHook` signature change breaks vector/search implementations on revert |
 | E4 | Yes | New types only |
-| E5 | Partially | Pre-DR-5 databases remain compatible; post-DR-5 snapshots would be unused on revert |
+| E5 | Partially | Recovery fidelity now carries tombstone/TTL state as well as snapshot coverage; reverting would reintroduce lossy reopen semantics |
 | E6 | Mostly | Reverting re-introduces unordered close |
 | E7 | Yes | Validation-only, additive |
 | E8 | Yes | Doc-only |
 
-No storage format changes in T3. Recovery consumes existing snapshot files that were already being written but never loaded.
+Storage format note: T3 now tightens checkpoint payload fidelity for tombstones and TTL in addition to the branch/space/type and MVCC metadata already needed for recovery. This is an intentional durability-format change in service of restart correctness and the later T4 branch-retention contract.
 
 ### Expected Results
 
@@ -788,6 +795,7 @@ No storage format changes in T3. Recovery consumes existing snapshot files that 
 | Concurrent refresh | Unspecified | Single-flight refresh gate |
 | Recovery | WAL-only | Snapshot load plus delta-WAL replay |
 | Directory layout | Ad-hoc paths | Shared `DatabaseLayout` |
+| Checkpoint payload | Lossy for delete/expiry barriers | Retention-complete for tombstones and TTL |
 | WAL retention | Snapshot coverage distrusted | Real recovery coverage reflected |
 | Shutdown | Warn-and-proceed on timeout | Error without freeze; retryable |
 | MANIFEST close path | No explicit fsync | MANIFEST fsynced on shutdown |
@@ -827,6 +835,8 @@ Required recovery correctness tests:
 
 - WAL-only restart still works.
 - Checkpoint-only restart works.
+- Checkpoint-only restart preserves tombstones.
+- Checkpoint-only restart preserves TTL behavior.
 - Checkpoint plus delta-WAL replay works.
 - Partial tail truncation still works.
 - Pre-DR-5 `.chk` fixtures remain consumable.
@@ -841,9 +851,9 @@ Performance regressions are not waived. Durability correctness that materially r
 From sibling scopes and post-cleanup backlog:
 
 - Runtime consolidation follow-through if any T2 session/open integration remains.
-- Branch primitives: `BranchRef`, lifecycle generations, primitive lifecycle contracts, and branch mutation control surfaces.
+- Branch primitives: `BranchRef`, lifecycle generations, primitive lifecycle contracts, branch mutation control surfaces, and branch-aware storage retention semantics above the recovery fidelity delivered here.
 - Product control surface: `ControlRegistry`, product open plans, config overlays, and doc gates.
 - Search/intelligence/inference: auto-embedding, HNSW and BM25 index creation, native inference providers, built-in and custom recipes.
 - Quality cleanup: full error taxonomy, visibility tightening, unsafe documentation, file decomposition, and catalog-to-test mapping.
 - Forced transaction abort on shutdown timeout. T3 deliberately returns `ShutdownTimeout` and leaves retry/abort decisions to callers.
-- New snapshot file formats. T3 consumes existing checkpoint files; it does not introduce a storage-format migration.
+- Further checkpoint-format optimization beyond the retention-complete fidelity introduced here. T3's concern is restart correctness, not later throughput or storage-efficiency tuning.

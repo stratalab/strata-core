@@ -566,6 +566,7 @@ mod compaction;
 mod lifecycle;
 mod open;
 pub mod refresh;
+mod snapshot_install;
 mod transaction;
 
 #[cfg(test)]

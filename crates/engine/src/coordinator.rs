@@ -663,6 +663,7 @@ mod tests {
             final_version: CommitVersion(100),
             max_txn_id: TxnId(6),
             from_checkpoint: false,
+            txns_skipped_below_watermark: 0,
         };
 
         let result = RecoveryResult {
@@ -722,7 +723,7 @@ mod tests {
         drop(store);
 
         let recovery = RecoveryCoordinator::new(layout, 0);
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.final_version, CommitVersion::ZERO);
 
         let seg_info = result.storage.recover_segments().unwrap();
@@ -1126,6 +1127,7 @@ mod tests {
             final_version: CommitVersion(500),
             max_txn_id: TxnId(15),
             from_checkpoint: false,
+            txns_skipped_below_watermark: 0,
         };
 
         let result = RecoveryResult {
