@@ -4808,3 +4808,141 @@ fn shutdown_timeout_preserves_writer_halt_signal() {
     drop(db);
     OPEN_DATABASES.lock().clear();
 }
+
+#[test]
+// Serialize against BOTH the default-key `#[serial]` tests (which share the
+// global sync-failure injection hook) AND the `open_databases` tests (which
+// mutate the shared `OPEN_DATABASES` registry). Without both keys, those
+// groups race with this stress test and flake.
+#[serial(open_databases)]
+#[serial]
+fn shutdown_timeout_halt_interleaving_preserves_invariant() {
+    // Stress regression for a TOCTOU race between the shutdown-timeout
+    // cleanup and the WAL flush thread's halt publishing (two-phase: set
+    // `WalWriterHealth::Halted` under health-lock, drop lock, then
+    // `accepting_transactions.store(false)`). A naive check-then-restore
+    // can read `Healthy`, then the flush thread completes its full halt
+    // sequence, and our subsequent `store(true)` erases the halt.
+    //
+    // The fix holds `wal_writer_health.lock()` across the observation and
+    // the restore so the publisher cannot advance its first phase during
+    // our critical section, and a halt that lands after our release runs
+    // its full two-phase sequence — its final `store(false)` wins over our
+    // `store(true)` because it is ordered after our lock release.
+    //
+    // This test schedules the sync-failure injection concurrently with a
+    // short-deadline shutdown across many iterations, attempting to land
+    // the halt within or just before the timeout-cleanup window. On every
+    // iteration the invariant is: if `wal_writer_health` is `Halted` after
+    // shutdown returns, `begin_transaction` must return `WriterHalted`
+    // (never `Ok`).
+    const ITERATIONS: usize = 24;
+    let mut halt_observed = 0usize;
+
+    for i in 0..ITERATIONS {
+        OPEN_DATABASES.lock().clear();
+        super::test_hooks::clear_sync_failure();
+
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join(format!("halt_race_{}", i));
+        let db =
+            Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+        // Tight sync interval so the background flush thread has time to
+        // observe the sync failure and publish the halt within the
+        // shutdown deadline.
+        db.set_durability_mode(DurabilityMode::Standard {
+            interval_ms: 5,
+            batch_size: 64,
+        })
+        .unwrap();
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let blocker_key = Key::new_kv(ns.clone(), "blocker");
+        let trigger_key = Key::new_kv(ns.clone(), "halt_trigger");
+
+        // Stage the sync failure BEFORE shutdown. The trigger commit
+        // queues dirty WAL bytes, but the actual `sync_all` happens on the
+        // next flush-thread tick (every 5ms). By varying how long after
+        // shutdown starts we set things up, the halt publishes at
+        // different points relative to the timeout-cleanup window.
+        super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+        db.transaction(branch_id, |txn| {
+            txn.put(trigger_key.clone(), Value::Int(i as i64))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Blocker txn — keeps `wait_for_idle` busy so shutdown must time out.
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let db_blocker = Arc::clone(&db);
+        let blocker_key_bg = blocker_key.clone();
+        let blocker_handle = std::thread::spawn(move || {
+            let mut txn = db_blocker.begin_transaction(branch_id).unwrap();
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            txn.put(blocker_key_bg, Value::Bytes(b"done".to_vec()))
+                .unwrap();
+            let _ = db_blocker.commit_transaction(&mut txn);
+            db_blocker.end_transaction(txn);
+        });
+        started_rx.recv().unwrap();
+
+        // Per-iteration jitter before shutdown positions the halt so it
+        // has to publish *during* or *just after* the timeout-cleanup
+        // runs. 0..=7 ms covers a range around the 5 ms flush interval so
+        // at least some iterations will land the halt inside the critical
+        // window where the race would manifest.
+        std::thread::sleep(Duration::from_millis(i as u64 % 8));
+
+        // Timed-out shutdown — whether or not the halt lands within the
+        // cleanup window, the post-return invariant must hold. Very short
+        // deadline so cleanup runs close to the halt publication.
+        let err = db
+            .shutdown_with_deadline(Duration::from_millis(2))
+            .expect_err("shutdown must time out while blocker is held");
+        assert!(
+            matches!(err, StrataError::ShutdownTimeout { .. }),
+            "iteration {}: unexpected error {:?}",
+            i,
+            err
+        );
+
+        // Give the flush thread a small chance to publish the halt if it
+        // was pending when shutdown returned. We measure state *after* the
+        // timeout cleanup has run, which is the window where the race
+        // would manifest (health = Halted, accepting = true).
+        std::thread::sleep(Duration::from_millis(30));
+
+        // Invariant: if the writer halted, `begin_transaction` must reject
+        // new admissions with `WriterHalted`. The race would allow a stray
+        // `Ok` here — that is the bug.
+        if matches!(db.wal_writer_health(), WalWriterHealth::Halted { .. }) {
+            halt_observed += 1;
+            match db.begin_transaction(branch_id) {
+                Ok(_) => panic!(
+                    "iteration {}: begin_transaction returned Ok despite Halted writer — \
+                     shutdown-timeout cleanup clobbered the halt signal",
+                    i
+                ),
+                Err(StrataError::WriterHalted { .. }) => {}
+                Err(other) => panic!("iteration {}: expected WriterHalted, got {:?}", i, other),
+            }
+        }
+
+        // Clean up.
+        super::test_hooks::clear_sync_failure();
+        release_tx.send(()).unwrap();
+        blocker_handle.join().unwrap();
+        drop(db);
+    }
+    // `halt_handle` no longer exists — trigger is committed inline.
+
+    OPEN_DATABASES.lock().clear();
+    assert!(
+        halt_observed > 0,
+        "stress test must land at least one halt across {} iterations to be meaningful",
+        ITERATIONS
+    );
+}

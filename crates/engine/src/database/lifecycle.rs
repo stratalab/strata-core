@@ -636,17 +636,25 @@ impl Database {
             // work, and retry. Every step up to this point is idempotent, so
             // a subsequent `shutdown*` call replays safely.
             //
-            // Important: `accepting_transactions = false` is dual-purpose —
-            // it also carries the WAL writer-halt signal that the flush
-            // thread publishes at `open.rs:756` after a sync failure. If the
-            // writer halted while we were waiting for idle, we MUST leave
-            // the flag `false` so `check_accepting` keeps returning
-            // `WriterHalted`. Re-admitting transactions here would let new
-            // callers past the gate only to corrupt or fail later at commit.
+            // `accepting_transactions = false` is dual-purpose: it also
+            // carries the WAL writer-halt signal that the flush thread
+            // publishes at `open.rs:756` after a sync failure. The halt
+            // publisher runs in two phases — set `WalWriterHealth::Halted`
+            // under `wal_writer_health.lock()`, release the lock, then store
+            // `accepting_transactions = false`. To avoid a TOCTOU race where
+            // the publisher completes between our observation and our
+            // write, we hold `wal_writer_health.lock()` across the
+            // check-and-restore: the publisher's first phase cannot advance
+            // while we hold that lock, and once we release, any subsequent
+            // halt runs its full sequence — its final `store(false)` then
+            // wins over our `store(true)` because it is ordered after our
+            // release.
             self.shutdown_started.store(false, Ordering::Release);
-            if self.writer_halted_error().is_none() {
+            let health = self.wal_writer_health.lock();
+            if matches!(*health, super::WalWriterHealth::Healthy) {
                 self.accepting_transactions.store(true, Ordering::Release);
             }
+            drop(health);
             return Err(StrataError::ShutdownTimeout { active_txn_count });
         }
 
