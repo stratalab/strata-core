@@ -308,7 +308,10 @@ impl VectorStore {
         let mut backend = self.create_backend_with_type(id, config, backend_type)?;
 
         let data_dir = self.db.data_dir();
-        let use_mmap = !data_dir.as_os_str().is_empty();
+        // Followers can reopen with storage intentionally clamped below the
+        // primary's latest durable caches. Keep lazy reload aligned with
+        // startup recovery and rebuild from the follower-visible KV snapshot.
+        let use_mmap = !data_dir.as_os_str().is_empty() && !self.db.is_follower();
 
         // Try mmap-accelerated reload (same logic as recover_from_db)
         let mut loaded_from_mmap = false;
@@ -4059,15 +4062,11 @@ mod tests {
             .create_collection(branch_id, "default", "emb", config)
             .unwrap();
 
-        // VectorStore registers commit+replay observers. SearchSubsystem also registers
-        // observers when present. Check that at least 1 observer exists (VectorStore's).
+        // VectorStore registers commit observers. Follower refresh is handled via
+        // RefreshHook (not ReplayObserver). Check that commit observer exists.
         assert!(
             !db.commit_observers().is_empty(),
             "VectorStore should register a commit observer"
-        );
-        assert!(
-            !db.replay_observers().is_empty(),
-            "VectorStore should register a replay observer"
         );
 
         let state = store.state().unwrap();
@@ -4096,7 +4095,6 @@ mod tests {
         let _ = store.state().unwrap();
         // Same as above: observers count includes SearchSubsystem observers
         assert!(!db.commit_observers().is_empty());
-        assert!(!db.replay_observers().is_empty());
     }
 
     #[test]

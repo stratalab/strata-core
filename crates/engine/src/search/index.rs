@@ -39,6 +39,7 @@ use super::segment::{self, SealedSegment};
 use super::tokenizer::tokenize_with_positions;
 use super::types::EntityRef;
 use dashmap::DashMap;
+use sha2::{Digest, Sha256};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
@@ -452,6 +453,8 @@ pub struct InvertedIndex {
     doc_lengths: RwLock<Vec<Option<u32>>>,
     /// doc_id -> terms indexed for that document (forward index for O(terms) removal)
     doc_terms: RwLock<Vec<Option<Vec<String>>>>,
+    /// doc_id -> content fingerprint for fast reconcile.
+    doc_content_hashes: RwLock<Vec<Option<[u8; 32]>>>,
 
     // --- Sealed segments (immutable, mmap-backed) ---
     /// Sealed segments ordered by segment_id
@@ -503,6 +506,7 @@ impl InvertedIndex {
             total_doc_len: AtomicUsize::new(0),
             doc_lengths: RwLock::new(Vec::new()),
             doc_terms: RwLock::new(Vec::new()),
+            doc_content_hashes: RwLock::new(Vec::new()),
             doc_id_map: DocIdMap::new(),
             sealed: RwLock::new(Vec::new()),
             next_segment_id: AtomicU64::new(0),
@@ -541,6 +545,7 @@ impl InvertedIndex {
         self.doc_freqs.clear();
         self.doc_lengths.write().unwrap().clear();
         self.doc_terms.write().unwrap().clear();
+        self.doc_content_hashes.write().unwrap().clear();
         self.doc_id_map.clear();
         self.sealed.write().unwrap().clear();
         // Relaxed: clear() is called during logical reset — the subsequent
@@ -582,7 +587,30 @@ impl InvertedIndex {
 
     /// Check if a document is already present in the index.
     pub fn has_document(&self, doc_ref: &EntityRef) -> bool {
-        self.doc_id_map.get(doc_ref).is_some()
+        let Some(doc_id) = self.doc_id_map.get(doc_ref) else {
+            return false;
+        };
+        self.doc_lengths
+            .read()
+            .unwrap()
+            .get(doc_id as usize)
+            .copied()
+            .flatten()
+            .is_some()
+    }
+
+    /// Check whether the live indexed content matches `text`.
+    pub(crate) fn document_matches_text(&self, doc_ref: &EntityRef, text: &str) -> bool {
+        let Some(doc_id) = self.doc_id_map.get(doc_ref) else {
+            return false;
+        };
+        self.doc_content_hashes
+            .read()
+            .unwrap()
+            .get(doc_id as usize)
+            .copied()
+            .flatten()
+            .is_some_and(|existing| existing == Self::content_fingerprint(text))
     }
 
     /// Check if index is at least at given version
@@ -662,6 +690,23 @@ impl InvertedIndex {
     /// entries back to the original document references.
     pub fn resolve_doc_id(&self, doc_id: u32) -> Option<EntityRef> {
         self.doc_id_map.resolve(doc_id)
+    }
+
+    /// Snapshot all entity refs currently tracked by the index.
+    pub(crate) fn entity_refs_snapshot(&self) -> Vec<EntityRef> {
+        self.doc_id_map
+            .id_to_ref
+            .read()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect()
+    }
+
+    fn content_fingerprint(text: &str) -> [u8; 32] {
+        let mut hasher = Sha256::new();
+        hasher.update(text.as_bytes());
+        hasher.finalize().into()
     }
 
     // ========================================================================
@@ -1081,6 +1126,7 @@ impl InvertedIndex {
         }
 
         let tokens = tokenize_with_positions(text);
+        let content_hash = Self::content_fingerprint(text);
         // doc_len = max_position + 1 (includes stopword gaps for accurate BM25 length norm)
         let doc_len = tokens.last().map_or(0, |t| t.position + 1);
 
@@ -1131,6 +1177,15 @@ impl InvertedIndex {
                 lengths.resize(idx + 1, None);
             }
             lengths[idx] = Some(doc_len);
+        }
+
+        {
+            let mut hashes = self.doc_content_hashes.write().unwrap();
+            let idx = doc_id as usize;
+            if idx >= hashes.len() {
+                hashes.resize(idx + 1, None);
+            }
+            hashes[idx] = Some(content_hash);
         }
 
         // Relaxed: observational counters — the version bump below (Release)
@@ -1189,6 +1244,14 @@ impl InvertedIndex {
                 None
             }
         };
+
+        {
+            let mut hashes = self.doc_content_hashes.write().unwrap();
+            let idx = doc_id as usize;
+            if idx < hashes.len() {
+                hashes[idx] = None;
+            }
+        }
 
         // Remove from active segment using forward index — O(terms_in_doc) not O(vocabulary)
         let mut active_removed = false;
@@ -1408,6 +1471,7 @@ impl InvertedIndex {
         let doc_id_map_vec = self.doc_id_map.id_to_ref.read().unwrap().clone();
         let doc_lengths_vec = self.doc_lengths.read().unwrap().clone();
         let doc_terms_vec = self.doc_terms.read().unwrap().clone();
+        let doc_content_hashes_vec = self.doc_content_hashes.read().unwrap().clone();
 
         let manifest_data = ManifestData {
             version: 1,
@@ -1418,6 +1482,7 @@ impl InvertedIndex {
             doc_id_map: doc_id_map_vec,
             doc_lengths: doc_lengths_vec,
             doc_terms: doc_terms_vec,
+            doc_content_hashes: doc_content_hashes_vec,
         };
 
         let manifest_path = search_dir.join("search.manifest");
@@ -1497,6 +1562,7 @@ impl InvertedIndex {
 
         // Restore forward index (doc_id → terms) for O(terms) removal
         *self.doc_terms.write().unwrap() = data.doc_terms;
+        *self.doc_content_hashes.write().unwrap() = data.doc_content_hashes;
 
         // Rebuild branch_ids from restored DocIdMap
         {

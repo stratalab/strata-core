@@ -15,7 +15,10 @@ pub use mode::DurabilityMode;
 
 // Segmented WAL types (primary API)
 pub use config::{WalConfig, WalConfigError};
-pub use reader::{ReadStopReason, TruncateInfo, WalReader, WalReaderError, WalRecordIterator};
+pub use reader::{
+    ReadStopReason, TruncateInfo, WalReader, WalReaderError, WalRecordIterator,
+    WatermarkBlockedRecord, WatermarkReadResult,
+};
 pub use writer::{WalCounters, WalDiskUsage, WalWriter};
 
 /// Parse a WAL segment number from a filename like `wal-NNNNNN.seg`.

@@ -1,6 +1,7 @@
 //! Database opening and initialization.
 
 use super::config::StorageConfig;
+use super::refresh::load_persisted_follower_state;
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -453,7 +454,45 @@ impl Database {
             writes_applied = result.stats.writes_applied,
             "Follower recovery complete");
 
-        let wal_watermark = AtomicU64::new(result.stats.max_txn_id.as_u64());
+        let persisted_follower_state = match load_persisted_follower_state(&canonical_path) {
+            Ok(Some(state))
+                if state.applied_watermark.as_u64() <= state.received_watermark.as_u64()
+                    && state.received_watermark.as_u64() <= result.stats.max_txn_id.as_u64()
+                    && state.visible_version.as_u64() <= result.stats.final_version.as_u64() =>
+            {
+                Some(state)
+            }
+            Ok(Some(state)) => {
+                warn!(
+                    target: "strata::db",
+                    received = state.received_watermark.as_u64(),
+                    applied = state.applied_watermark.as_u64(),
+                    visible_version = state.visible_version.as_u64(),
+                    recovered_txn = result.stats.max_txn_id.as_u64(),
+                    recovered_version = result.stats.final_version.as_u64(),
+                    "Ignoring inconsistent persisted follower state"
+                );
+                None
+            }
+            Ok(None) => None,
+            Err(e) => {
+                warn!(
+                    target: "strata::db",
+                    error = %e,
+                    "Failed to load persisted follower state"
+                );
+                None
+            }
+        };
+        let watermark = if let Some(state) = &persisted_follower_state {
+            super::refresh::ContiguousWatermark::from_state(
+                state.received_watermark,
+                state.applied_watermark,
+                Some(state.blocked.clone()),
+            )
+        } else {
+            super::refresh::ContiguousWatermark::new(result.stats.max_txn_id)
+        };
 
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
             &result,
@@ -501,7 +540,9 @@ impl Database {
             backpressure_counter: AtomicU64::new(0),
             _lock_file: None, // No lock acquired
             wal_dir,
-            wal_watermark,
+            watermark,
+            refresh_gate: super::refresh::RefreshGate::new(),
+            refresh_publish_barrier: parking_lot::RwLock::new(()),
             follower: true,
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
@@ -520,6 +561,12 @@ impl Database {
             runtime_signature: parking_lot::RwLock::new(None),
             merge_registry: super::MergeHandlerRegistry::new(),
         });
+
+        if let Some(state) = persisted_follower_state {
+            db.storage.set_version(state.visible_version);
+            db.coordinator
+                .restore_visible_version(state.visible_version);
+        }
 
         Ok(db)
     }
@@ -801,7 +848,7 @@ impl Database {
             codec,
         )?;
 
-        let wal_watermark = AtomicU64::new(result.stats.max_txn_id.as_u64());
+        let watermark = super::refresh::ContiguousWatermark::new(result.stats.max_txn_id);
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
@@ -868,7 +915,9 @@ impl Database {
             backpressure_counter: AtomicU64::new(0),
             _lock_file: lock_file,
             wal_dir,
-            wal_watermark,
+            watermark,
+            refresh_gate: super::refresh::RefreshGate::new(),
+            refresh_publish_barrier: parking_lot::RwLock::new(()),
             follower: false,
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),
@@ -1014,7 +1063,9 @@ impl Database {
             backpressure_counter: AtomicU64::new(0),
             _lock_file: None, // No lock for ephemeral databases
             wal_dir: PathBuf::new(),
-            wal_watermark: AtomicU64::new(0),
+            watermark: super::refresh::ContiguousWatermark::default(),
+            refresh_gate: super::refresh::RefreshGate::new(),
+            refresh_publish_barrier: parking_lot::RwLock::new(()),
             follower: false,
             shutdown_started: AtomicBool::new(false),
             shutdown_complete: AtomicBool::new(false),

@@ -49,6 +49,10 @@ pub use observers::{
     BranchOpObserverRegistry, CommitInfo, CommitObserver, CommitObserverRegistry, ObserverError,
     ObserverErrorKind, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
 };
+pub use refresh::{
+    AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,
+    UnblockError,
+};
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
     OpenSpec,
@@ -469,8 +473,24 @@ pub struct Database {
     /// WAL directory path (for follower refresh).
     wal_dir: PathBuf,
 
-    /// Max txn_id applied to local storage from WAL (follower watermark).
-    wal_watermark: AtomicU64,
+    /// Contiguous watermark tracking for follower refresh.
+    ///
+    /// Tracks both received and applied watermarks. The applied watermark
+    /// only advances after storage AND all refresh hooks succeed.
+    watermark: refresh::ContiguousWatermark,
+
+    /// Single-flight gate for follower refresh operations.
+    ///
+    /// Ensures only one refresh can be in progress at a time.
+    refresh_gate: refresh::RefreshGate,
+
+    /// Synchronizes follower refresh publication with search/vector/graph queries.
+    ///
+    /// Queries that read derived state take a shared guard. Follower refresh
+    /// takes an exclusive guard while publishing staged hook updates and
+    /// advancing visibility, preventing readers from observing either side of
+    /// the handoff in isolation.
+    refresh_publish_barrier: parking_lot::RwLock<()>,
 
     /// Whether this database is a read-only follower (no lock, no WAL writer).
     follower: bool,
@@ -599,6 +619,15 @@ impl Database {
     /// primitives (KVStore, EventLog, etc.) which go through transactions.
     pub fn storage(&self) -> &Arc<SegmentedStore> {
         &self.storage
+    }
+
+    #[doc(hidden)]
+    pub fn refresh_query_guard(&self) -> parking_lot::RwLockReadGuard<'_, ()> {
+        self.refresh_publish_barrier.read()
+    }
+
+    pub(crate) fn refresh_publish_guard(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.refresh_publish_barrier.write()
     }
 
     /// Clean up storage-layer segments for a deleted branch (#1702).

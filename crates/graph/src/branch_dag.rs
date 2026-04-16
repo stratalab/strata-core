@@ -904,8 +904,9 @@ impl strata_engine::Subsystem for GraphSubsystem {
         });
         db.branch_op_observers().register(audit_observer);
 
-        // Register commit and replay observers for graph index maintenance.
-        // T2-E5: moves graph index maintenance to subsystem-owned observers.
+        // Register commit/abort observers and the follower refresh hook for
+        // graph index maintenance. T2-E5/E3 move graph index maintenance into
+        // subsystem-owned lifecycle wiring.
         let state = db
             .extension::<crate::GraphBackendState>()
             .map_err(|e| StrataError::internal(format!("failed to get GraphBackendState: {e}")))?;
