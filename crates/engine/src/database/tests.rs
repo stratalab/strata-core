@@ -1901,7 +1901,7 @@ fn test_issue_1732_checkpoint_data_preserves_timestamps() {
 
     let entry = kv_entries
         .iter()
-        .find(|e| e.key == "ts_test")
+        .find(|e| e.user_key == b"ts_test".to_vec())
         .expect("should find ts_test in checkpoint");
 
     // The checkpoint timestamp must match the storage timestamp, not `now`
@@ -1922,7 +1922,7 @@ fn test_issue_1732_checkpoint_data_preserves_timestamps() {
 fn test_issue_1732_checkpoint_data_preserves_branch_names() {
     // Issue #1732: collect_checkpoint_data() sets branch name to String::new()
     // instead of extracting it from the serialized BranchMetadata.
-    use crate::primitives::branch::BranchIndex;
+    use crate::primitives::branch::{BranchIndex, BranchMetadata};
 
     let temp_dir = TempDir::new().unwrap();
     let db = Database::open(temp_dir.path().join("db")).unwrap();
@@ -1933,18 +1933,36 @@ fn test_issue_1732_checkpoint_data_preserves_branch_names() {
     let data = db.collect_checkpoint_data();
     let branch_entries = data.branches.expect("should have branch entries");
 
-    let found = branch_entries.iter().find(|b| b.name == "my-test-branch");
+    let found = branch_entries.iter().find(|b| b.key == "my-test-branch");
     assert!(
         found.is_some(),
-        "Branch name 'my-test-branch' should be preserved in checkpoint. \
-         Got names: {:?}",
-        branch_entries.iter().map(|b| &b.name).collect::<Vec<_>>(),
+        "Branch key 'my-test-branch' should be preserved in checkpoint. \
+         Got keys: {:?}",
+        branch_entries.iter().map(|b| &b.key).collect::<Vec<_>>(),
     );
-    // Also verify created_at is a real timestamp, not rewritten to `now`
     let branch_entry = found.unwrap();
+
+    let stored_value: Value =
+        serde_json::from_slice(&branch_entry.value).expect("branch snapshot value should decode");
+    let stored_json = match stored_value {
+        Value::String(json) => json,
+        other => panic!("branch snapshot should store Value::String, got {other:?}"),
+    };
+    let metadata: BranchMetadata =
+        serde_json::from_str(&stored_json).expect("branch metadata should decode");
+
+    assert_eq!(metadata.name, "my-test-branch");
     assert!(
-        branch_entry.created_at > 0,
-        "Branch created_at should be non-zero",
+        metadata.created_at.as_micros() > 0,
+        "Branch created_at should be non-zero in serialized metadata",
+    );
+    assert!(
+        branch_entry.version > 0,
+        "Branch snapshot must preserve MVCC version"
+    );
+    assert!(
+        branch_entry.timestamp > 0,
+        "Branch snapshot must preserve MVCC timestamp",
     );
 }
 
@@ -1985,7 +2003,7 @@ fn test_checkpoint_data_preserves_branch_space_and_type_for_kv_entries() {
         entry.branch_id == *branch_a.as_bytes()
             && entry.space == "default"
             && entry.type_tag == TypeTag::KV.as_byte()
-            && entry.key == "ambiguous"
+            && entry.user_key == b"ambiguous".to_vec()
             && entry.value == serde_json::to_vec(&value).unwrap()
             && entry.version == version.as_u64()
             && entry.timestamp == timestamp_micros
@@ -1994,7 +2012,37 @@ fn test_checkpoint_data_preserves_branch_space_and_type_for_kv_entries() {
         entry.branch_id == *branch_b.as_bytes()
             && entry.space == "tenant_a"
             && entry.type_tag == TypeTag::KV.as_byte()
-            && entry.key == "ambiguous"
+            && entry.user_key == b"ambiguous".to_vec()
+            && entry.value == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
+            && entry.timestamp == timestamp_micros
+    }));
+}
+
+#[test]
+fn test_checkpoint_data_preserves_binary_kv_keys() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([9; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "binary".to_string()));
+    let user_key = vec![0x00, 0xFF, 0x80, 0x01];
+    let key = Key::new(namespace, TypeTag::KV, user_key.clone());
+    let value = Value::Int(7);
+    let version = CommitVersion(13);
+    let timestamp_micros = 9_999_999u64;
+
+    db.storage
+        .put_recovery_entry(key, value.clone(), version, timestamp_micros, 0)
+        .unwrap();
+
+    let kv_entries = db
+        .collect_checkpoint_data()
+        .kv
+        .expect("should have KV entries");
+    assert!(kv_entries.iter().any(|entry| {
+        entry.branch_id == *branch_id.as_bytes()
+            && entry.space == "binary"
+            && entry.type_tag == TypeTag::KV.as_byte()
+            && entry.user_key == user_key
             && entry.value == serde_json::to_vec(&value).unwrap()
             && entry.version == version.as_u64()
             && entry.timestamp == timestamp_micros
@@ -2026,7 +2074,7 @@ fn test_checkpoint_data_preserves_graph_type_and_space_metadata() {
         entry.branch_id == *branch_id.as_bytes()
             && entry.space == "tenant_graph"
             && entry.type_tag == TypeTag::Graph.as_byte()
-            && entry.key == "shared"
+            && entry.user_key == b"shared".to_vec()
             && entry.value == serde_json::to_vec(&value).unwrap()
             && entry.version == version.as_u64()
             && entry.timestamp == timestamp_micros
@@ -2041,9 +2089,10 @@ fn test_checkpoint_data_preserves_event_space_metadata() {
     let key = Key::new_event(namespace, 7);
     let value = Value::String("event-payload".to_string());
     let timestamp_micros = 7_654_321u64;
+    let version = CommitVersion(3);
 
     db.storage
-        .put_recovery_entry(key, value.clone(), CommitVersion(3), timestamp_micros, 0)
+        .put_recovery_entry(key, value.clone(), version, timestamp_micros, 0)
         .unwrap();
 
     let events = db
@@ -2055,6 +2104,7 @@ fn test_checkpoint_data_preserves_event_space_metadata() {
             && entry.space == "tenant_events"
             && entry.sequence == 7
             && entry.payload == serde_json::to_vec(&value).unwrap()
+            && entry.version == version.as_u64()
             && entry.timestamp == timestamp_micros
     }));
 }
@@ -2107,6 +2157,10 @@ fn test_checkpoint_data_preserves_vector_space_metadata() {
     let namespace = Arc::new(Namespace::new(branch_id, "semantic".to_string()));
     let config_key = Key::new_vector_config(namespace.clone(), "embeddings");
     let vector_key = Key::new_vector(namespace, "embeddings", "vec-1");
+    let config_version = CommitVersion(1);
+    let vector_version = CommitVersion(2);
+    let config_timestamp = 1_000u64;
+    let vector_timestamp = 2_000u64;
     let record = TestVectorRecord {
         vector_id: 99,
         embedding: vec![0.1, 0.2, 0.3],
@@ -2116,22 +2170,23 @@ fn test_checkpoint_data_preserves_vector_space_metadata() {
         updated_at: 1_000,
         source_ref: None,
     };
+    let raw_record = rmp_serde::to_vec(&record).unwrap();
 
     db.storage
         .put_recovery_entry(
             config_key,
             Value::Bytes(b"{\"dimensions\":3}".to_vec()),
-            CommitVersion(1),
-            1_000,
+            config_version,
+            config_timestamp,
             0,
         )
         .unwrap();
     db.storage
         .put_recovery_entry(
             vector_key,
-            Value::Bytes(rmp_serde::to_vec(&record).unwrap()),
-            CommitVersion(2),
-            2_000,
+            Value::Bytes(raw_record.clone()),
+            vector_version,
+            vector_timestamp,
             0,
         )
         .unwrap();
@@ -2144,7 +2199,15 @@ fn test_checkpoint_data_preserves_vector_space_metadata() {
         entry.branch_id == *branch_id.as_bytes()
             && entry.space == "semantic"
             && entry.name == "embeddings"
-            && entry.vectors.iter().any(|vector| vector.key == "vec-1")
+            && entry.config == b"{\"dimensions\":3}".to_vec()
+            && entry.config_version == config_version.as_u64()
+            && entry.config_timestamp == config_timestamp
+            && entry.vectors.iter().any(|vector| {
+                vector.key == "vec-1"
+                    && vector.raw_value == raw_record
+                    && vector.version == vector_version.as_u64()
+                    && vector.timestamp == vector_timestamp
+            })
     }));
 }
 
@@ -2163,7 +2226,9 @@ fn test_checkpoint_data_omits_tombstones_from_live_only_collection() {
 
     let kv_entries = db.collect_checkpoint_data().kv.unwrap_or_default();
     assert!(
-        !kv_entries.iter().any(|entry| entry.key == "deleted"),
+        !kv_entries
+            .iter()
+            .any(|entry| entry.user_key == b"deleted".to_vec()),
         "Deleted keys are omitted because checkpoint collection uses live-only list_by_type()"
     );
 }
@@ -2193,7 +2258,7 @@ fn test_checkpoint_data_omits_ttl_metadata() {
         .expect("should have KV entries");
     let snapshot_entry = kv_entries
         .iter()
-        .find(|entry| entry.key == "ttl_key")
+        .find(|entry| entry.user_key == b"ttl_key".to_vec())
         .expect("should find ttl_key in checkpoint");
 
     assert!(
@@ -2216,7 +2281,7 @@ fn test_checkpoint_data_omits_ttl_metadata() {
             branch_id: *branch_id.as_bytes(),
             space: "default".to_string(),
             type_tag: TypeTag::KV.as_byte(),
-            key: "ttl_key".to_string(),
+            user_key: b"ttl_key".to_vec(),
             value: serde_json::to_vec(&value).unwrap(),
             version: version.as_u64(),
             timestamp: snapshot_entry.timestamp,

@@ -84,7 +84,7 @@ impl<'a> CursorReader<'a> {
 /// Snapshot entry for KV primitive
 ///
 /// Format:
-/// branch_id(16) + space_len(4) + space + type_tag(1) + key_len(4) + key
+/// branch_id(16) + space_len(4) + space + type_tag(1) + user_key_len(4) + user_key
 /// + value_len(4) + value + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct KvSnapshotEntry {
@@ -94,8 +94,8 @@ pub struct KvSnapshotEntry {
     pub space: String,
     /// Storage type tag (`TypeTag` byte) for KV/Graph disambiguation
     pub type_tag: u8,
-    /// Key string
-    pub key: String,
+    /// Raw user-key bytes
+    pub user_key: Vec<u8>,
     /// Value bytes (pre-codec)
     pub value: Vec<u8>,
     /// Version counter
@@ -108,7 +108,7 @@ pub struct KvSnapshotEntry {
 ///
 /// Format:
 /// branch_id(16) + space_len(4) + space + sequence(8)
-/// + payload_len(4) + payload + timestamp(8)
+/// + payload_len(4) + payload + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct EventSnapshotEntry {
     /// Branch identifier (UUID bytes)
@@ -119,23 +119,26 @@ pub struct EventSnapshotEntry {
     pub sequence: u64,
     /// Event payload bytes (pre-codec)
     pub payload: Vec<u8>,
+    /// MVCC commit version
+    pub version: u64,
     /// Timestamp (microseconds since epoch)
     pub timestamp: u64,
 }
 
 /// Snapshot entry for Run primitive
 ///
-/// Format: branch_id(16 bytes UUID) + name_len(4) + name + created_at(8) + metadata_len(4) + metadata
+/// Format:
+/// key_len(4) + key + value_len(4) + value + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchSnapshotEntry {
-    /// Run identifier (UUID bytes)
-    pub branch_id: [u8; 16],
-    /// Run name
-    pub name: String,
-    /// Creation timestamp (microseconds)
-    pub created_at: u64,
-    /// Metadata as serialized bytes
-    pub metadata: Vec<u8>,
+    /// Branch primitive storage key in the global namespace.
+    pub key: String,
+    /// Serialized `Value` bytes for the branch entry.
+    pub value: Vec<u8>,
+    /// MVCC commit version
+    pub version: u64,
+    /// Timestamp (microseconds)
+    pub timestamp: u64,
 }
 
 /// Snapshot entry for Json primitive
@@ -163,7 +166,8 @@ pub struct JsonSnapshotEntry {
 ///
 /// Format:
 /// branch_id(16) + space_len(4) + space + collection_name_len(4) + name
-/// + config_len(4) + config + vectors_count(4) + [vectors...]
+/// + config_len(4) + config + config_version(8) + config_timestamp(8)
+/// + vectors_count(4) + [vectors...]
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorCollectionSnapshotEntry {
     /// Branch identifier (UUID bytes)
@@ -174,13 +178,20 @@ pub struct VectorCollectionSnapshotEntry {
     pub name: String,
     /// Collection configuration as serialized bytes
     pub config: Vec<u8>,
+    /// MVCC commit version for the collection config entry
+    pub config_version: u64,
+    /// Timestamp for the collection config entry
+    pub config_timestamp: u64,
     /// Vectors in this collection
     pub vectors: Vec<VectorSnapshotEntry>,
 }
 
 /// Individual vector within a collection
 ///
-/// Format: key_len(4) + key + vector_id(8) + dimensions(4) + [f32...] + metadata_len(4) + metadata
+/// Format:
+/// key_len(4) + key + vector_id(8) + dimensions(4) + [f32...]
+/// + metadata_len(4) + metadata + raw_value_len(4) + raw_value
+/// + version(8) + timestamp(8)
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorSnapshotEntry {
     /// Vector key
@@ -191,6 +202,12 @@ pub struct VectorSnapshotEntry {
     pub embedding: Vec<f32>,
     /// Optional metadata as serialized bytes
     pub metadata: Vec<u8>,
+    /// Raw serialized `VectorRecord` bytes for lossless reinstall.
+    pub raw_value: Vec<u8>,
+    /// MVCC commit version for this vector entry
+    pub version: u64,
+    /// Timestamp for this vector entry
+    pub timestamp: u64,
 }
 
 /// Serializer for snapshot primitive data
@@ -220,10 +237,8 @@ impl SnapshotSerializer {
 
             data.push(entry.type_tag);
 
-            // Key
-            let key_bytes = entry.key.as_bytes();
-            data.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
-            data.extend_from_slice(key_bytes);
+            data.extend_from_slice(&(entry.user_key.len() as u32).to_le_bytes());
+            data.extend_from_slice(&entry.user_key);
 
             // Value (through codec)
             let value_bytes = self.codec.encode(&entry.value);
@@ -250,7 +265,7 @@ impl SnapshotSerializer {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let space = r.read_string()?;
             let type_tag = r.read_u8()?;
-            let key = r.read_string()?;
+            let user_key = r.read_blob()?.to_vec();
             let value = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
@@ -258,7 +273,7 @@ impl SnapshotSerializer {
                 branch_id,
                 space,
                 type_tag,
-                key,
+                user_key,
                 value,
                 version,
                 timestamp,
@@ -286,6 +301,7 @@ impl SnapshotSerializer {
             data.extend_from_slice(&(payload_bytes.len() as u32).to_le_bytes());
             data.extend_from_slice(&payload_bytes);
 
+            data.extend_from_slice(&entry.version.to_le_bytes());
             data.extend_from_slice(&entry.timestamp.to_le_bytes());
         }
 
@@ -305,12 +321,14 @@ impl SnapshotSerializer {
             let space = r.read_string()?;
             let sequence = r.read_u64()?;
             let payload = self.codec.decode(r.read_blob()?)?;
+            let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
             entries.push(EventSnapshotEntry {
                 branch_id,
                 space,
                 sequence,
                 payload,
+                version,
                 timestamp,
             });
         }
@@ -324,17 +342,16 @@ impl SnapshotSerializer {
         data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
 
         for entry in entries {
-            data.extend_from_slice(&entry.branch_id);
+            let key_bytes = entry.key.as_bytes();
+            data.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(key_bytes);
 
-            let name_bytes = entry.name.as_bytes();
-            data.extend_from_slice(&(name_bytes.len() as u32).to_le_bytes());
-            data.extend_from_slice(name_bytes);
+            let value_bytes = self.codec.encode(&entry.value);
+            data.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
+            data.extend_from_slice(&value_bytes);
 
-            data.extend_from_slice(&entry.created_at.to_le_bytes());
-
-            let metadata_bytes = self.codec.encode(&entry.metadata);
-            data.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
-            data.extend_from_slice(&metadata_bytes);
+            data.extend_from_slice(&entry.version.to_le_bytes());
+            data.extend_from_slice(&entry.timestamp.to_le_bytes());
         }
 
         data
@@ -349,15 +366,15 @@ impl SnapshotSerializer {
         let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
-            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
-            let name = r.read_string()?;
-            let created_at = r.read_u64()?;
-            let metadata = self.codec.decode(r.read_blob()?)?;
+            let key = r.read_string()?;
+            let value = self.codec.decode(r.read_blob()?)?;
+            let version = r.read_u64()?;
+            let timestamp = r.read_u64()?;
             entries.push(BranchSnapshotEntry {
-                branch_id,
-                name,
-                created_at,
-                metadata,
+                key,
+                value,
+                version,
+                timestamp,
             });
         }
         Ok(entries)
@@ -440,6 +457,8 @@ impl SnapshotSerializer {
             let config_bytes = self.codec.encode(&collection.config);
             data.extend_from_slice(&(config_bytes.len() as u32).to_le_bytes());
             data.extend_from_slice(&config_bytes);
+            data.extend_from_slice(&collection.config_version.to_le_bytes());
+            data.extend_from_slice(&collection.config_timestamp.to_le_bytes());
 
             // Vectors
             data.extend_from_slice(&(collection.vectors.len() as u32).to_le_bytes());
@@ -462,6 +481,10 @@ impl SnapshotSerializer {
                 let metadata_bytes = self.codec.encode(&vector.metadata);
                 data.extend_from_slice(&(metadata_bytes.len() as u32).to_le_bytes());
                 data.extend_from_slice(&metadata_bytes);
+                data.extend_from_slice(&(vector.raw_value.len() as u32).to_le_bytes());
+                data.extend_from_slice(&vector.raw_value);
+                data.extend_from_slice(&vector.version.to_le_bytes());
+                data.extend_from_slice(&vector.timestamp.to_le_bytes());
             }
         }
 
@@ -482,6 +505,8 @@ impl SnapshotSerializer {
             let space = r.read_string()?;
             let name = r.read_string()?;
             let config = self.codec.decode(r.read_blob()?)?;
+            let config_version = r.read_u64()?;
+            let config_timestamp = r.read_u64()?;
             let vectors_count = r.read_u32()? as usize;
 
             let mut vectors = Vec::with_capacity(vectors_count);
@@ -494,11 +519,17 @@ impl SnapshotSerializer {
                     embedding.push(r.read_f32()?);
                 }
                 let metadata = self.codec.decode(r.read_blob()?)?;
+                let raw_value = r.read_blob()?.to_vec();
+                let version = r.read_u64()?;
+                let timestamp = r.read_u64()?;
                 vectors.push(VectorSnapshotEntry {
                     key,
                     vector_id,
                     embedding,
                     metadata,
+                    raw_value,
+                    version,
+                    timestamp,
                 });
             }
 
@@ -507,6 +538,8 @@ impl SnapshotSerializer {
                 space,
                 name,
                 config,
+                config_version,
+                config_timestamp,
                 vectors,
             });
         }
@@ -552,7 +585,7 @@ mod tests {
                 branch_id: test_branch(1),
                 space: "default".to_string(),
                 type_tag: 0x01,
-                key: "key1".to_string(),
+                user_key: b"key1".to_vec(),
                 value: b"value1".to_vec(),
                 version: 1,
                 timestamp: 1000,
@@ -561,7 +594,7 @@ mod tests {
                 branch_id: test_branch(2),
                 space: "tenant_a".to_string(),
                 type_tag: 0x07,
-                key: "key2".to_string(),
+                user_key: b"key2".to_vec(),
                 value: b"value2".to_vec(),
                 version: 2,
                 timestamp: 2000,
@@ -593,10 +626,30 @@ mod tests {
             branch_id: test_branch(9),
             space: "tenant_emoji".to_string(),
             type_tag: 0x01,
-            key: "key_\u{1F600}_emoji".to_string(),
+            user_key: "key_\u{1F600}_emoji".as_bytes().to_vec(),
             value: "value_\u{4E2D}\u{6587}_chinese".as_bytes().to_vec(),
             version: 42,
             timestamp: 9999,
+        }];
+
+        let data = serializer.serialize_kv(&entries);
+        let parsed = serializer.deserialize_kv(&data).unwrap();
+
+        assert_eq!(entries, parsed);
+    }
+
+    #[test]
+    fn test_kv_binary_keys_roundtrip() {
+        let serializer = test_serializer();
+
+        let entries = vec![KvSnapshotEntry {
+            branch_id: test_branch(10),
+            space: "binary".to_string(),
+            type_tag: 0x01,
+            user_key: vec![0x00, 0xFF, 0x80, 0x01],
+            value: b"value".to_vec(),
+            version: 7,
+            timestamp: 12_345,
         }];
 
         let data = serializer.serialize_kv(&entries);
@@ -615,6 +668,7 @@ mod tests {
                 space: "default".to_string(),
                 sequence: 1,
                 payload: b"event1".to_vec(),
+                version: 11,
                 timestamp: 1000,
             },
             EventSnapshotEntry {
@@ -622,6 +676,7 @@ mod tests {
                 space: "tenant_events".to_string(),
                 sequence: 2,
                 payload: b"event2".to_vec(),
+                version: 12,
                 timestamp: 2000,
             },
         ];
@@ -637,10 +692,10 @@ mod tests {
         let serializer = test_serializer();
 
         let entries = vec![BranchSnapshotEntry {
-            branch_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-            name: "my-branch".to_string(),
-            created_at: 1000,
-            metadata: b"{}".to_vec(),
+            key: "my-branch".to_string(),
+            value: b"{}".to_vec(),
+            version: 17,
+            timestamp: 1000,
         }];
 
         let data = serializer.serialize_branches(&entries);
@@ -687,18 +742,26 @@ mod tests {
             space: "embeddings".to_string(),
             name: "embeddings".to_string(),
             config: b"{\"dimensions\":384}".to_vec(),
+            config_version: 21,
+            config_timestamp: 1111,
             vectors: vec![
                 VectorSnapshotEntry {
                     key: "vec1".to_string(),
                     vector_id: 1,
                     embedding: vec![0.1, 0.2, 0.3],
                     metadata: b"{}".to_vec(),
+                    raw_value: b"raw-vec1".to_vec(),
+                    version: 31,
+                    timestamp: 2222,
                 },
                 VectorSnapshotEntry {
                     key: "vec2".to_string(),
                     vector_id: 2,
                     embedding: vec![0.4, 0.5, 0.6],
                     metadata: b"{\"label\":\"test\"}".to_vec(),
+                    raw_value: b"raw-vec2".to_vec(),
+                    version: 32,
+                    timestamp: 3333,
                 },
             ],
         }];
@@ -721,11 +784,16 @@ mod tests {
             space: "semantic".to_string(),
             name: "minilm".to_string(),
             config: b"{\"dimensions\":384}".to_vec(),
+            config_version: 41,
+            config_timestamp: 4444,
             vectors: vec![VectorSnapshotEntry {
                 key: "high-dim".to_string(),
                 vector_id: 1,
                 embedding: embedding.clone(),
                 metadata: vec![],
+                raw_value: vec![1, 2, 3, 4],
+                version: 51,
+                timestamp: 5555,
             }],
         }];
 
