@@ -2453,6 +2453,158 @@ impl SegmentedStore {
         Ok(())
     }
 
+    /// Install entries from a checkpoint/snapshot during recovery.
+    ///
+    /// This method is used by the recovery coordinator to install snapshot
+    /// entries into the storage layer. It differs from WAL recovery in that:
+    ///
+    /// - Entries come from a point-in-time snapshot, not incremental WAL records
+    /// - TTL is always 0 (snapshots do not store TTL information)
+    /// - All entries share the same high watermark version
+    ///
+    /// # Arguments
+    ///
+    /// * `entries` - Slice of (key, value, version, timestamp_micros) tuples
+    ///
+    /// # Timestamp Invariants
+    ///
+    /// The original commit timestamps from the snapshot are preserved, ensuring
+    /// time-travel queries return correct results after snapshot-based recovery.
+    ///
+    /// # Version Tracking
+    ///
+    /// Unlike WAL recovery, this method DOES advance the storage version to
+    /// the maximum version seen across all entries, since snapshot recovery
+    /// happens before delta-WAL replay and the snapshot provides the base state.
+    pub fn install_snapshot_entries(
+        &self,
+        entries: &[(Key, Value, CommitVersion, u64)],
+    ) -> StrataResult<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
+
+        let mut max_version = CommitVersion::ZERO;
+        let mut installed = 0usize;
+
+        // Group entries by branch for efficient insertion.
+        let mut by_branch: std::collections::HashMap<
+            BranchId,
+            Vec<&(Key, Value, CommitVersion, u64)>,
+        > = std::collections::HashMap::new();
+
+        for entry in entries {
+            by_branch
+                .entry(entry.0.namespace.branch_id)
+                .or_default()
+                .push(entry);
+            if entry.2 > max_version {
+                max_version = entry.2;
+            }
+        }
+
+        // Install entries per branch.
+        for (branch_id, branch_entries) in by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+
+            for (key, value, version, timestamp_micros) in branch_entries {
+                let timestamp = Timestamp::from_micros(*timestamp_micros);
+                let entry = MemtableEntry {
+                    value: value.clone(),
+                    is_tombstone: false,
+                    timestamp,
+                    ttl_ms: 0, // Snapshots don't preserve TTL
+                    raw_value: None,
+                };
+                branch.active.put_entry(key, *version, entry);
+                branch.track_timestamp(*timestamp_micros);
+                branch.track_version(*version);
+                installed += 1;
+            }
+
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        // Advance version to the max seen in the snapshot.
+        if max_version > CommitVersion::ZERO {
+            self.version
+                .fetch_max(max_version.as_u64(), Ordering::AcqRel);
+        }
+
+        Ok(installed)
+    }
+
+    /// Install tombstones from a checkpoint/snapshot during recovery.
+    ///
+    /// Similar to [`install_snapshot_entries`], but for deletions.
+    /// Tombstones in snapshots represent keys that were deleted before
+    /// the checkpoint was taken.
+    ///
+    /// # Arguments
+    ///
+    /// * `tombstones` - Slice of (key, version, timestamp_micros) tuples
+    pub fn install_snapshot_tombstones(
+        &self,
+        tombstones: &[(Key, CommitVersion, u64)],
+    ) -> StrataResult<usize> {
+        if tombstones.is_empty() {
+            return Ok(0);
+        }
+
+        let mut max_version = CommitVersion::ZERO;
+        let mut installed = 0usize;
+
+        // Group tombstones by branch for efficient insertion.
+        let mut by_branch: std::collections::HashMap<BranchId, Vec<&(Key, CommitVersion, u64)>> =
+            std::collections::HashMap::new();
+
+        for tombstone in tombstones {
+            by_branch
+                .entry(tombstone.0.namespace.branch_id)
+                .or_default()
+                .push(tombstone);
+            if tombstone.1 > max_version {
+                max_version = tombstone.1;
+            }
+        }
+
+        // Install tombstones per branch.
+        for (branch_id, branch_tombstones) in by_branch {
+            let mut branch = self
+                .branches
+                .entry(branch_id)
+                .or_insert_with(BranchState::new);
+
+            for (key, version, timestamp_micros) in branch_tombstones {
+                let timestamp = Timestamp::from_micros(*timestamp_micros);
+                let entry = MemtableEntry {
+                    value: Value::Null,
+                    is_tombstone: true,
+                    timestamp,
+                    ttl_ms: 0,
+                    raw_value: None,
+                };
+                branch.active.put_entry(key, *version, entry);
+                branch.track_timestamp(*timestamp_micros);
+                branch.track_version(*version);
+                installed += 1;
+            }
+
+            self.maybe_rotate_branch(branch_id, &mut branch);
+        }
+
+        // Advance version to the max seen in the snapshot.
+        if max_version > CommitVersion::ZERO {
+            self.version
+                .fetch_max(max_version.as_u64(), Ordering::AcqRel);
+        }
+
+        Ok(installed)
+    }
+
     /// Get `(entry_count, total_version_count, btree_built)` for a branch.
     ///
     /// SegmentedStore does not use BTreeSet indexes, so `btree_built` is always false.

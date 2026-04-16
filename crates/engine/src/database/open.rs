@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use strata_concurrency::RecoveryCoordinator;
 use strata_durability::__internal::WalWriterEngineExt;
+use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_durability::ManifestManager;
 use strata_storage::SegmentedStore;
@@ -422,15 +423,15 @@ impl Database {
         // (in-memory only — followers never persist config).
         crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
 
-        let wal_dir = canonical_path.join("wal");
-
-        // Segments directory for reading existing segments (read-only, no create)
-        let segments_dir = canonical_path.join("segments");
+        // Build canonical layout for this database
+        let layout = DatabaseLayout::from_root(&canonical_path);
+        let wal_dir = layout.wal_dir().to_path_buf();
+        let manifest_path = layout.manifest_path().to_path_buf();
 
         // Recovery — purely read-only (no truncation, no file writes)
-        let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.effective_write_buffer_size())
-            .with_lossy_recovery(cfg.allow_lossy_recovery);
+        let recovery =
+            RecoveryCoordinator::with_layout(layout, cfg.storage.effective_write_buffer_size())
+                .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -507,7 +508,6 @@ impl Database {
         Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         // Load database UUID from MANIFEST if it exists (read-only, no create)
-        let manifest_path = canonical_path.join("MANIFEST");
         let database_uuid = if ManifestManager::exists(&manifest_path) {
             ManifestManager::load(manifest_path)
                 .map(|m| m.manifest().database_uuid)
@@ -768,21 +768,23 @@ impl Database {
             )));
         }
 
-        // Create WAL directory
-        let wal_dir = canonical_path.join("wal");
-        std::fs::create_dir_all(&wal_dir).map_err(StrataError::from)?;
-        restrict_dir(&wal_dir);
+        // Build canonical layout for this database
+        let layout = DatabaseLayout::from_root(&canonical_path);
 
-        // Create segments directory for on-disk segment storage
-        let segments_dir = canonical_path.join("segments");
-        std::fs::create_dir_all(&segments_dir).map_err(StrataError::from)?;
-        restrict_dir(&segments_dir);
+        // Create directories (WAL, segments, snapshots)
+        layout.create_dirs().map_err(StrataError::from)?;
+        restrict_dir(layout.wal_dir());
+        restrict_dir(layout.segments_dir());
+        restrict_dir(layout.snapshots_dir());
+
+        let wal_dir = layout.wal_dir().to_path_buf();
+        let manifest_path = layout.manifest_path().to_path_buf();
 
         // Use RecoveryCoordinator for proper transaction-aware recovery
         // This reads all WalRecords from the segmented WAL directory
-        let recovery = RecoveryCoordinator::new(wal_dir.clone())
-            .with_segments(segments_dir, cfg.storage.effective_write_buffer_size())
-            .with_lossy_recovery(cfg.allow_lossy_recovery);
+        let recovery =
+            RecoveryCoordinator::with_layout(layout, cfg.storage.effective_write_buffer_size())
+                .with_lossy_recovery(cfg.allow_lossy_recovery);
         let result = match recovery.recover() {
             Ok(result) => result,
             Err(e) => {
@@ -814,7 +816,6 @@ impl Database {
         // Load or create MANIFEST to get the database UUID.
         // On first open: generate a new UUID and persist it with the configured codec.
         // On subsequent opens: load the existing UUID and validate codec matches.
-        let manifest_path = canonical_path.join("MANIFEST");
         let database_uuid = if ManifestManager::exists(&manifest_path) {
             let m = ManifestManager::load(manifest_path)
                 .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;

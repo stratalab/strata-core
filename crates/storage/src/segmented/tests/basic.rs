@@ -972,3 +972,284 @@ fn storage_iterator_pagination() {
     assert_eq!(all_keys[0], "key_00");
     assert_eq!(all_keys[14], "key_14");
 }
+
+// ===== Snapshot recovery tests (T3-E4) =====
+
+#[test]
+fn install_snapshot_entries_empty_returns_zero() {
+    let store = SegmentedStore::new();
+    let entries: Vec<(Key, Value, CommitVersion, u64)> = vec![];
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 0);
+    assert_eq!(store.version(), 0);
+}
+
+#[test]
+fn install_snapshot_entries_single_entry() {
+    let store = SegmentedStore::new();
+    let key = kv_key("snapshot_key");
+    let entries = vec![(key.clone(), Value::Int(42), CommitVersion(10), 1000)];
+
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 1);
+
+    // Verify entry is readable
+    let result = store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(42));
+    assert_eq!(result.version.as_u64(), 10);
+
+    // Verify version was advanced to exactly the entry's version
+    assert_eq!(store.version(), 10);
+}
+
+#[test]
+fn install_snapshot_entries_preserves_timestamp() {
+    use strata_core::Timestamp;
+
+    let store = SegmentedStore::new();
+    let key = kv_key("ts_key");
+    let timestamp_micros = 5_000_000u64; // 5 seconds since epoch
+    let entries = vec![(
+        key.clone(),
+        Value::Int(100),
+        CommitVersion(5),
+        timestamp_micros,
+    )];
+
+    store.install_snapshot_entries(&entries).unwrap();
+
+    // Get the entry and check timestamp
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
+    assert_eq!(entry.timestamp, Timestamp::from_micros(timestamp_micros));
+}
+
+#[test]
+fn install_snapshot_entries_multiple_entries_same_branch() {
+    let store = SegmentedStore::new();
+    let entries = vec![
+        (kv_key("a"), Value::Int(1), CommitVersion(1), 1000),
+        (kv_key("b"), Value::Int(2), CommitVersion(2), 2000),
+        (kv_key("c"), Value::Int(3), CommitVersion(3), 3000),
+    ];
+
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 3);
+
+    // Verify all entries are readable
+    assert_eq!(
+        store
+            .get_versioned(&kv_key("a"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(1)
+    );
+    assert_eq!(
+        store
+            .get_versioned(&kv_key("b"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(2)
+    );
+    assert_eq!(
+        store
+            .get_versioned(&kv_key("c"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(3)
+    );
+
+    // Version should be exactly the max of all entries
+    assert_eq!(store.version(), 3);
+}
+
+#[test]
+fn install_snapshot_entries_multiple_branches() {
+    let b1 = BranchId::from_bytes([1; 16]);
+    let b2 = BranchId::from_bytes([2; 16]);
+    let ns1 = Arc::new(Namespace::new(b1, "default".to_string()));
+    let ns2 = Arc::new(Namespace::new(b2, "default".to_string()));
+    let k1 = Key::new(ns1, TypeTag::KV, "key1".as_bytes().to_vec());
+    let k2 = Key::new(ns2, TypeTag::KV, "key2".as_bytes().to_vec());
+
+    let store = SegmentedStore::new();
+    let entries = vec![
+        (k1.clone(), Value::Int(100), CommitVersion(10), 1000),
+        (k2.clone(), Value::Int(200), CommitVersion(20), 2000),
+    ];
+
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 2);
+
+    // Verify both branches have entries
+    assert!(store.branch_ids().contains(&b1));
+    assert!(store.branch_ids().contains(&b2));
+
+    // Verify entries
+    assert_eq!(
+        store
+            .get_versioned(&k1, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(100)
+    );
+    assert_eq!(
+        store
+            .get_versioned(&k2, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(200)
+    );
+
+    // Version should be exactly the max across all entries
+    assert_eq!(store.version(), 20);
+}
+
+#[test]
+fn install_snapshot_tombstones_empty_returns_zero() {
+    let store = SegmentedStore::new();
+    let tombstones: Vec<(Key, CommitVersion, u64)> = vec![];
+    let installed = store.install_snapshot_tombstones(&tombstones).unwrap();
+    assert_eq!(installed, 0);
+}
+
+#[test]
+fn install_snapshot_tombstones_marks_deletion() {
+    let store = SegmentedStore::new();
+
+    // First install an entry
+    let key = kv_key("to_delete");
+    let entries = vec![(key.clone(), Value::Int(1), CommitVersion(1), 1000)];
+    store.install_snapshot_entries(&entries).unwrap();
+
+    // Then install a tombstone at a higher version
+    let tombstones = vec![(key.clone(), CommitVersion(2), 2000)];
+    let installed = store.install_snapshot_tombstones(&tombstones).unwrap();
+    assert_eq!(installed, 1);
+
+    // Entry should no longer be visible at latest version
+    assert!(store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .is_none());
+
+    // But should be visible at version 1
+    assert_eq!(
+        store
+            .get_versioned(&key, CommitVersion(1))
+            .unwrap()
+            .unwrap()
+            .value,
+        Value::Int(1)
+    );
+}
+
+#[test]
+fn install_snapshot_entries_round_trip() {
+    // Simulate: write -> snapshot -> recovery
+    let store1 = SegmentedStore::new();
+    let key = kv_key("roundtrip");
+    seed(&store1, key.clone(), Value::Int(42), 5);
+
+    // "Snapshot" the entry
+    let result = store1
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    let snapshot_entry = (
+        key.clone(),
+        result.value.clone(),
+        CommitVersion(result.version.as_u64()),
+        1_000_000u64, // simulated timestamp
+    );
+
+    // "Recover" into a new store
+    let store2 = SegmentedStore::new();
+    let installed = store2.install_snapshot_entries(&[snapshot_entry]).unwrap();
+    assert_eq!(installed, 1);
+
+    // Verify recovery matches original
+    let recovered = store2
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(recovered.value, Value::Int(42));
+    assert_eq!(recovered.version.as_u64(), 5);
+}
+
+#[test]
+fn install_snapshot_entries_same_key_multiple_versions() {
+    // Test MVCC: same key with different versions should all be stored
+    let store = SegmentedStore::new();
+    let key = kv_key("mvcc_key");
+    let entries = vec![
+        (key.clone(), Value::Int(10), CommitVersion(1), 1000),
+        (key.clone(), Value::Int(20), CommitVersion(2), 2000),
+        (key.clone(), Value::Int(30), CommitVersion(3), 3000),
+    ];
+
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 3);
+
+    // Reading at MAX should return the latest version
+    let latest = store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(latest.value, Value::Int(30));
+    assert_eq!(latest.version.as_u64(), 3);
+
+    // Reading at version 2 should return value from version 2
+    let v2 = store
+        .get_versioned(&key, CommitVersion(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(v2.value, Value::Int(20));
+    assert_eq!(v2.version.as_u64(), 2);
+
+    // Reading at version 1 should return value from version 1
+    let v1 = store
+        .get_versioned(&key, CommitVersion(1))
+        .unwrap()
+        .unwrap();
+    assert_eq!(v1.value, Value::Int(10));
+    assert_eq!(v1.version.as_u64(), 1);
+}
+
+#[test]
+fn install_snapshot_entries_timestamp_zero() {
+    // Edge case: timestamp = 0 should work (epoch timestamp)
+    let store = SegmentedStore::new();
+    let key = kv_key("zero_ts");
+    let entries = vec![(key.clone(), Value::Int(1), CommitVersion(1), 0u64)];
+
+    let installed = store.install_snapshot_entries(&entries).unwrap();
+    assert_eq!(installed, 1);
+
+    // Entry should be readable
+    let result = store
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(result.value, Value::Int(1));
+
+    // Verify timestamp is actually 0
+    use strata_core::Timestamp;
+    let branch = store.branches.get(&branch()).unwrap();
+    let entry = branch
+        .active
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
+    assert_eq!(entry.timestamp, Timestamp::from_micros(0));
+}

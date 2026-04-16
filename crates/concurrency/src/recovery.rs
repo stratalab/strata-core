@@ -20,6 +20,7 @@ use std::path::PathBuf;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::StrataResult;
 use strata_durability::format::WalSegment;
+use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::WalReader;
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
@@ -33,6 +34,8 @@ use tracing::{info, warn};
 /// 4. Applies all writes/deletes with version preservation
 /// 5. Initializes TransactionManager with final version
 pub struct RecoveryCoordinator {
+    /// Canonical database layout (when using unified constructor).
+    layout: Option<DatabaseLayout>,
     /// Path to WAL directory (contains wal-NNNNNN.seg files)
     wal_dir: PathBuf,
     /// Path to snapshot directory (optional, not used in M2)
@@ -47,18 +50,46 @@ pub struct RecoveryCoordinator {
 }
 
 impl RecoveryCoordinator {
-    /// Create a new recovery coordinator
+    /// Create a recovery coordinator from a canonical database layout.
+    ///
+    /// This is the preferred constructor that uses `DatabaseLayout` for consistent
+    /// path handling across engine, recovery, and tests.
+    ///
+    /// # Arguments
+    /// * `layout` - Canonical database directory layout
+    /// * `write_buffer_size` - Write buffer size in bytes for SegmentedStore
+    pub fn with_layout(layout: DatabaseLayout, write_buffer_size: usize) -> Self {
+        RecoveryCoordinator {
+            wal_dir: layout.wal_dir().to_path_buf(),
+            snapshot_path: Some(layout.snapshots_dir().to_path_buf()),
+            segments_dir: Some(layout.segments_dir().to_path_buf()),
+            layout: Some(layout),
+            write_buffer_size,
+            allow_lossy_recovery: false,
+        }
+    }
+
+    /// Create a new recovery coordinator from a WAL directory path.
+    ///
+    /// Prefer [`with_layout`](Self::with_layout) for new code. This constructor
+    /// exists for backward compatibility.
     ///
     /// # Arguments
     /// * `wal_dir` - Path to the segmented WAL directory
     pub fn new(wal_dir: PathBuf) -> Self {
         RecoveryCoordinator {
+            layout: None,
             wal_dir,
             snapshot_path: None,
             segments_dir: None,
             write_buffer_size: 0,
             allow_lossy_recovery: false,
         }
+    }
+
+    /// Returns the database layout if this coordinator was created with one.
+    pub fn layout(&self) -> Option<&DatabaseLayout> {
+        self.layout.as_ref()
     }
 
     /// Enable lossy WAL recovery (scan past corrupted regions).
@@ -82,6 +113,8 @@ impl RecoveryCoordinator {
     /// When set, recovery will create a `SegmentedStore::with_dir()` instead of
     /// an ephemeral `SegmentedStore::new()`, enabling flush/compaction to persist
     /// frozen memtables as on-disk SST segments.
+    ///
+    /// Prefer [`with_layout`](Self::with_layout) for new code.
     pub fn with_segments(mut self, segments_dir: PathBuf, write_buffer_size: usize) -> Self {
         self.segments_dir = Some(segments_dir);
         self.write_buffer_size = write_buffer_size;
