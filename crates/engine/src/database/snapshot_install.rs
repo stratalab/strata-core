@@ -76,10 +76,18 @@ pub(crate) fn install_snapshot(
     let mut stats = InstallStats::default();
     for section in &snapshot.sections {
         match section.primitive_type {
-            primitive_tags::KV => install_kv_section(&serializer, &section.data, storage, &mut stats)?,
-            primitive_tags::EVENT => install_event_section(&serializer, &section.data, storage, &mut stats)?,
-            primitive_tags::JSON => install_json_section(&serializer, &section.data, storage, &mut stats)?,
-            primitive_tags::VECTOR => install_vector_section(&serializer, &section.data, storage, &mut stats)?,
+            primitive_tags::KV => {
+                install_kv_section(&serializer, &section.data, storage, &mut stats)?
+            }
+            primitive_tags::EVENT => {
+                install_event_section(&serializer, &section.data, storage, &mut stats)?
+            }
+            primitive_tags::JSON => {
+                install_json_section(&serializer, &section.data, storage, &mut stats)?
+            }
+            primitive_tags::VECTOR => {
+                install_vector_section(&serializer, &section.data, storage, &mut stats)?
+            }
             primitive_tags::BRANCH => {
                 // BranchSnapshotEntry does not carry a `branch_id` field today,
                 // so install cannot dispatch per-branch correctly. Branch
@@ -200,8 +208,7 @@ fn install_event_section(
     }
     for (branch_bytes, group_entries) in groups {
         let branch_id = BranchId::from_bytes(branch_bytes);
-        let count =
-            storage.install_snapshot_entries(branch_id, TypeTag::Event, &group_entries)?;
+        let count = storage.install_snapshot_entries(branch_id, TypeTag::Event, &group_entries)?;
         stats.events += count;
     }
     Ok(())
@@ -234,8 +241,7 @@ fn install_json_section(
     }
     for (branch_bytes, group_entries) in groups {
         let branch_id = BranchId::from_bytes(branch_bytes);
-        let count =
-            storage.install_snapshot_entries(branch_id, TypeTag::Json, &group_entries)?;
+        let count = storage.install_snapshot_entries(branch_id, TypeTag::Json, &group_entries)?;
         stats.json += count;
     }
     Ok(())
@@ -319,6 +325,7 @@ fn decode_value_json(bytes: &[u8], section: &str) -> StrataResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
     use strata_core::contract::Version;
     use strata_core::id::CommitVersion;
     use strata_core::traits::Storage;
@@ -333,7 +340,6 @@ mod tests {
         disk_snapshot::{SnapshotSection, SnapshotWriter},
         SnapshotReader,
     };
-    use std::sync::Arc;
 
     fn writer_for(dir: &std::path::Path) -> SnapshotWriter {
         SnapshotWriter::new(dir.to_path_buf(), Box::new(IdentityCodec), [9u8; 16]).unwrap()
@@ -394,14 +400,20 @@ mod tests {
         assert_eq!(stats.total_installed(), 2);
 
         let alpha = storage
-            .get_versioned(&Key::new_kv(ns(branch_id, "default"), "alpha"), CommitVersion::MAX)
+            .get_versioned(
+                &Key::new_kv(ns(branch_id, "default"), "alpha"),
+                CommitVersion::MAX,
+            )
             .unwrap()
             .expect("alpha must be installed");
         assert_eq!(alpha.value, Value::Int(1));
         assert_eq!(alpha.version, Version::Txn(5));
 
         let beta = storage
-            .get_versioned(&Key::new_kv(ns(branch_id, "default"), "beta"), CommitVersion::MAX)
+            .get_versioned(
+                &Key::new_kv(ns(branch_id, "default"), "beta"),
+                CommitVersion::MAX,
+            )
             .unwrap()
             .expect("beta must be installed");
         assert_eq!(beta.value, Value::String("two".into()));
@@ -484,7 +496,10 @@ mod tests {
         install_snapshot(&snapshot, &IdentityCodec, &storage).unwrap();
 
         let entry = storage
-            .get_versioned(&Key::new_kv(ns(branch_id, "default"), "k"), CommitVersion::MAX)
+            .get_versioned(
+                &Key::new_kv(ns(branch_id, "default"), "k"),
+                CommitVersion::MAX,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(entry.version, Version::Txn(999));

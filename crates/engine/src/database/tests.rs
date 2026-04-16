@@ -3898,7 +3898,10 @@ fn test_checkpoint_only_restart_recovers_kv_from_snapshot() {
         .flatten()
         .filter(|e| e.path().is_file())
         .collect();
-    assert!(remaining.is_empty(), "WAL dir should be empty before reopen");
+    assert!(
+        remaining.is_empty(),
+        "WAL dir should be empty before reopen"
+    );
 
     // Step 5: reopen. Recovery must install the snapshot.
     let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();

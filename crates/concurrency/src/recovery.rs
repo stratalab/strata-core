@@ -213,9 +213,8 @@ impl RecoveryCoordinator {
         if !ManifestManager::exists(manifest_path) {
             return Ok(RecoveryPlan::fresh());
         }
-        let mgr = ManifestManager::load(manifest_path.to_path_buf()).map_err(|e| {
-            StrataError::corruption(format!("failed to load MANIFEST: {}", e))
-        })?;
+        let mgr = ManifestManager::load(manifest_path.to_path_buf())
+            .map_err(|e| StrataError::corruption(format!("failed to load MANIFEST: {}", e)))?;
         let m = mgr.manifest();
         if m.codec_id != expected_codec_id {
             return Err(StrataError::corruption(format!(
@@ -303,11 +302,7 @@ impl RecoveryCoordinator {
     /// Propagates errors from `on_snapshot`, `on_record`, and WAL reading.
     /// A hard error from `on_record` halts replay immediately — the caller
     /// is expected to surface it.
-    pub fn recover<FS, FR>(
-        self,
-        on_snapshot: FS,
-        mut on_record: FR,
-    ) -> StrataResult<RecoveryStats>
+    pub fn recover<FS, FR>(self, on_snapshot: FS, mut on_record: FR) -> StrataResult<RecoveryStats>
     where
         FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
         FR: FnMut(&WalRecord) -> StrataResult<()>,
@@ -527,8 +522,7 @@ impl RecoveryCoordinator {
                 |record| apply_wal_record_to_memory_storage(storage_ref, record),
             )?
         };
-        let txn_manager =
-            TransactionManager::with_txn_id(stats.final_version, stats.max_txn_id);
+        let txn_manager = TransactionManager::with_txn_id(stats.final_version, stats.max_txn_id);
         Ok(RecoveryResult {
             storage,
             txn_manager,
@@ -559,7 +553,13 @@ pub fn apply_wal_record_to_memory_storage(
     let version = CommitVersion(payload.version);
     for (i, (key, value)) in payload.puts.iter().enumerate() {
         let ttl_ms = payload.put_ttls.get(i).copied().unwrap_or(0);
-        storage.put_recovery_entry(key.clone(), value.clone(), version, record.timestamp, ttl_ms)?;
+        storage.put_recovery_entry(
+            key.clone(),
+            value.clone(),
+            version,
+            record.timestamp,
+            ttl_ms,
+        )?;
     }
     for key in &payload.deletes {
         storage.delete_recovery_entry(key, version, record.timestamp)?;
@@ -1685,7 +1685,10 @@ mod tests {
                     &mut wal,
                     i,
                     branch_id,
-                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
                     vec![],
                     i * 10,
                 );
@@ -1735,7 +1738,10 @@ mod tests {
                     &mut wal,
                     i,
                     branch_id,
-                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
                     vec![],
                     i,
                 );
@@ -2033,7 +2039,10 @@ mod tests {
                     &mut wal,
                     i,
                     branch_id,
-                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
                     vec![],
                     i,
                 );
@@ -2080,7 +2089,10 @@ mod tests {
                     &mut wal,
                     i,
                     branch_id,
-                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
                     vec![],
                     i,
                 );
@@ -2090,10 +2102,13 @@ mod tests {
         let coord = test_recovery(temp_dir.path());
         let mut replayed = 0usize;
         let stats = coord
-            .recover(|_| Ok(()), |_| {
-                replayed += 1;
-                Ok(())
-            })
+            .recover(
+                |_| Ok(()),
+                |_| {
+                    replayed += 1;
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(replayed, 4);
         assert_eq!(stats.txns_replayed, 4);
@@ -2120,7 +2135,10 @@ mod tests {
                     &mut wal,
                     i,
                     branch_id,
-                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
                     vec![],
                     i,
                 );
@@ -2130,10 +2148,13 @@ mod tests {
         let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
         let mut replayed = 0usize;
         let stats = coord
-            .recover(|_| Ok(()), |_| {
-                replayed += 1;
-                Ok(())
-            })
+            .recover(
+                |_| Ok(()),
+                |_| {
+                    replayed += 1;
+                    Ok(())
+                },
+            )
             .unwrap();
         assert_eq!(replayed, 0);
         assert_eq!(stats.txns_replayed, 0);
@@ -2187,8 +2208,7 @@ mod tests {
 
         // Delete the sidecar for the closed segment (segment 1) so recovery
         // has something to rebuild.
-        let closed_sidecar =
-            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        let closed_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
         if closed_sidecar.exists() {
             std::fs::remove_file(&closed_sidecar).unwrap();
         }
@@ -2245,8 +2265,7 @@ mod tests {
 
         // Overwrite the closed sidecar with bytes that will fail magic/CRC
         // validation in `SegmentMeta::from_bytes`.
-        let closed_sidecar =
-            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        let closed_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
         std::fs::write(&closed_sidecar, b"CORRUPT_GARBAGE_NOT_A_VALID_META").unwrap();
 
         let coord = test_recovery(temp_dir.path());
@@ -2292,8 +2311,7 @@ mod tests {
         }
 
         // Delete the active-segment sidecar (segment 2 is the tail here).
-        let active_sidecar =
-            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 2);
+        let active_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 2);
         if active_sidecar.exists() {
             std::fs::remove_file(&active_sidecar).unwrap();
         }

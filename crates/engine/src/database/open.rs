@@ -466,11 +466,9 @@ impl Database {
             layout.segments_dir().to_path_buf(),
             cfg.storage.effective_write_buffer_size(),
         );
-        let mut recovery = RecoveryCoordinator::new(
-            layout.clone(),
-            cfg.storage.effective_write_buffer_size(),
-        )
-        .with_lossy_recovery(cfg.allow_lossy_recovery);
+        let mut recovery =
+            RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
+                .with_lossy_recovery(cfg.allow_lossy_recovery);
         if let Some(ref c) = follower_codec {
             recovery = recovery.with_codec(clone_codec(c.as_ref()));
         }
@@ -907,12 +905,10 @@ impl Database {
             cfg.storage.effective_write_buffer_size(),
         );
         let recovery_codec_for_install = clone_codec(codec.as_ref());
-        let recovery = RecoveryCoordinator::new(
-            layout.clone(),
-            cfg.storage.effective_write_buffer_size(),
-        )
-        .with_lossy_recovery(cfg.allow_lossy_recovery)
-        .with_codec(clone_codec(codec.as_ref()));
+        let recovery =
+            RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
+                .with_lossy_recovery(cfg.allow_lossy_recovery)
+                .with_codec(clone_codec(codec.as_ref()));
 
         let recover_result = {
             let storage_ref = &storage;
