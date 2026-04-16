@@ -3835,3 +3835,82 @@ fn test_issue_1380_encryption_rejected_with_wal() {
         Ok(_) => panic!("should reject encryption with WAL-based durability"),
     }
 }
+
+// ============================================================================
+// T3-E5 Chunk 2: checkpoint-only restart via snapshot load + install
+// ============================================================================
+
+/// Write KV entries, checkpoint, drop the database, manually delete the WAL
+/// segments (simulating what post-Chunk-4 `compact()` will do), reopen, and
+/// verify all data is recovered from the snapshot alone.
+///
+/// This is the core Epic 5 correctness gate: checkpoints must be a complete
+/// recovery artifact, not just a future optimization. Until Chunk 2 wired
+/// snapshot loading into the coordinator and engine install decoder, this
+/// scenario was impossible — checkpoints were written but never consumed.
+///
+/// Tranche 4 branch-aware retention will depend on this path being correct
+/// for tombstone and TTL state as well; those cases are validated in
+/// Chunk 3 once the checkpoint payload carries that metadata.
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_only_restart_recovers_kv_from_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    // Step 1: write several KV entries on the user branch.
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        for i in 0u64..10 {
+            let key = Key::new_kv(ns.clone(), format!("kv-{}", i));
+            let value = Value::String(format!("payload-{}", i));
+            db.transaction(branch_id, |txn| {
+                txn.put(key, value.clone())?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        // Step 2: checkpoint. This flushes the WAL, serializes the KV
+        // section to a `snap-NNNNNN.chk` file, and updates the MANIFEST
+        // with the new snapshot id and watermark.
+        db.checkpoint().unwrap();
+    }
+    // Step 3: drop DB. Clear registry so reopen produces a fresh instance.
+    OPEN_DATABASES.lock().clear();
+
+    // Step 4: simulate post-Chunk-4 compact() by manually deleting every WAL
+    // segment. The MANIFEST still points at the snapshot; recovery must fall
+    // back to snapshot load and surface all 10 entries without WAL replay.
+    let wal_dir = db_path.join("wal");
+    for entry in std::fs::read_dir(&wal_dir).unwrap().flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+    // Confirm the WAL dir is now empty so the test is actually exercising
+    // snapshot-only recovery rather than accidentally still hitting WAL.
+    let remaining: Vec<_> = std::fs::read_dir(&wal_dir)
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .collect();
+    assert!(remaining.is_empty(), "WAL dir should be empty before reopen");
+
+    // Step 5: reopen. Recovery must install the snapshot.
+    let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+    // Step 6: every committed key must be visible with its original value.
+    for i in 0u64..10 {
+        let key = Key::new_kv(ns.clone(), format!("kv-{}", i));
+        let stored = db
+            .storage()
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("kv-{} must survive snapshot-only restart", i));
+        assert_eq!(stored.value, Value::String(format!("payload-{}", i)));
+    }
+}

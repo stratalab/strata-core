@@ -34,5 +34,8 @@ pub mod __internal {
 
 pub use manager::TransactionManager;
 pub use payload::TransactionPayload;
-pub use recovery::{RecoveryCoordinator, RecoveryPlan, RecoveryResult, RecoveryStats};
+pub use recovery::{
+    apply_wal_record_to_memory_storage, RecoveryCoordinator, RecoveryPlan, RecoveryResult,
+    RecoveryStats,
+};
 pub use transaction::{CommitError, JsonStoreExt, TransactionContext, TransactionStatus};

@@ -19,10 +19,11 @@ use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::{StrataError, StrataResult};
-use strata_durability::format::{WalRecord, WalSegment};
+use strata_durability::codec::{clone_codec, StorageCodec};
+use strata_durability::format::{snapshot_path, WalRecord, WalSegment};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::WalReader;
-use strata_durability::{LoadedSnapshot, ManifestManager};
+use strata_durability::{LoadedSnapshot, ManifestManager, SnapshotReader};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
@@ -101,6 +102,11 @@ pub struct RecoveryCoordinator {
     write_buffer_size: usize,
     /// When true, WAL reader scans past corrupted regions instead of erroring.
     allow_lossy_recovery: bool,
+    /// Storage codec used to decode snapshot payloads. When unset, the
+    /// coordinator skips snapshot loading — callers that stay on the legacy
+    /// `recover_into_memory_storage` wrapper preserve WAL-only behavior until
+    /// they migrate to the direct callback API with a codec wired in.
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl RecoveryCoordinator {
@@ -114,6 +120,7 @@ impl RecoveryCoordinator {
             layout,
             write_buffer_size,
             allow_lossy_recovery: false,
+            codec: None,
         }
     }
 
@@ -125,6 +132,14 @@ impl RecoveryCoordinator {
     /// Enable lossy WAL recovery (scan past corrupted regions).
     pub fn with_lossy_recovery(mut self, allow: bool) -> Self {
         self.allow_lossy_recovery = allow;
+        self
+    }
+
+    /// Install the storage codec used to load and validate snapshots during
+    /// recovery. When unset, `recover()` does not attempt to load snapshots
+    /// and `on_snapshot` never fires.
+    pub fn with_codec(mut self, codec: Box<dyn StorageCodec>) -> Self {
+        self.codec = Some(codec);
         self
     }
 
@@ -219,6 +234,53 @@ impl RecoveryCoordinator {
         })
     }
 
+    /// Read the MANIFEST and, if a snapshot is recorded, load and return it
+    /// after validating magic/CRC/codec via [`SnapshotReader`]. Returns
+    /// `Ok(None)` when the MANIFEST has no snapshot recorded or is absent.
+    ///
+    /// Codec validation runs at two layers:
+    /// 1. MANIFEST-level: `plan_recovery` rejects pre-WAL-read if the MANIFEST
+    ///    codec doesn't match the caller-installed codec.
+    /// 2. Snapshot-level: `SnapshotReader::load` rejects if the snapshot file's
+    ///    embedded codec id doesn't match. These should align when the
+    ///    MANIFEST and snapshot were written by the same process; snapshot
+    ///    codec mismatch is elevated to `StrataError::corruption` here.
+    fn load_snapshot_if_present(
+        &self,
+        codec: &dyn StorageCodec,
+    ) -> StrataResult<Option<LoadedSnapshot>> {
+        let plan = self.plan_recovery(codec.codec_id())?;
+        let snapshot_id = match plan.snapshot_id {
+            Some(id) => id,
+            None => return Ok(None),
+        };
+        let path = snapshot_path(self.layout.snapshots_dir(), snapshot_id);
+        if !path.exists() {
+            return Err(StrataError::corruption(format!(
+                "MANIFEST references snapshot {} but {} is missing",
+                snapshot_id,
+                path.display()
+            )));
+        }
+        let reader = SnapshotReader::new(clone_codec(codec));
+        let snapshot = reader.load(&path).map_err(|e| {
+            StrataError::corruption(format!(
+                "failed to load snapshot {} at {}: {}",
+                snapshot_id,
+                path.display(),
+                e
+            ))
+        })?;
+        info!(
+            target: "strata::recovery",
+            snapshot_id,
+            watermark = snapshot.watermark_txn(),
+            sections = snapshot.sections.len(),
+            "Loaded snapshot"
+        );
+        Ok(Some(snapshot))
+    }
+
     /// Drive recovery through caller-supplied callbacks.
     ///
     /// The engine owns storage construction; the coordinator only:
@@ -243,7 +305,7 @@ impl RecoveryCoordinator {
     /// is expected to surface it.
     pub fn recover<FS, FR>(
         self,
-        _on_snapshot: FS,
+        on_snapshot: FS,
         mut on_record: FR,
     ) -> StrataResult<RecoveryStats>
     where
@@ -254,8 +316,28 @@ impl RecoveryCoordinator {
         let mut max_version = 0u64;
         let mut max_txn_id = 0u64;
 
-        // Snapshot loading is wired in Epic 5 Chunk 2; until then the
-        // coordinator never fires `on_snapshot`.
+        // Snapshot loading: when the caller installed a codec via
+        // `with_codec()`, the coordinator consults the MANIFEST for a
+        // recorded snapshot and invokes `on_snapshot` with the decoded
+        // `LoadedSnapshot`. When no codec is installed, snapshot loading
+        // is skipped to preserve the pre-Epic-5 WAL-only behavior that the
+        // compat wrapper depends on.
+        //
+        // The snapshot's `watermark_txn` is the max TxnId covered by the
+        // snapshot and is folded into `max_txn_id` so the txn-id counter
+        // bootstraps above it. The snapshot's max *commit version* is not
+        // observable here — it lives inside the per-entry `version` fields
+        // the callback installs — so callers who need `stats.final_version`
+        // to include the snapshot must fold in their storage's post-install
+        // `current_version()` themselves. Doing that here would require
+        // the coordinator to reach into caller-owned state.
+        if let Some(codec) = self.codec.as_deref() {
+            if let Some(snapshot) = self.load_snapshot_if_present(codec)? {
+                stats.from_checkpoint = true;
+                max_txn_id = max_txn_id.max(snapshot.watermark_txn());
+                on_snapshot(snapshot)?;
+            }
+        }
 
         // If WAL dir doesn't exist, return an empty-replay plan.
         if !self.layout.wal_dir().exists() {
@@ -341,10 +423,16 @@ impl RecoveryCoordinator {
     }
 }
 
-/// Default WAL-record apply used by the legacy `recover_into_memory_storage`
-/// wrapper. Preserves `#1619` / `#1740` invariants: recovery uses the WAL
-/// record's commit timestamp and the payload's TTL, not now-based values.
-fn apply_wal_record_to_memory_storage(
+/// Apply a WAL record to `SegmentedStore` using recovery-specific write paths
+/// that preserve the original commit timestamp and the payload's TTL
+/// (`#1619` / `#1740`).
+///
+/// This is the default apply used by
+/// [`RecoveryCoordinator::recover_into_memory_storage`] and is exposed so
+/// engine open paths that drive the callback-driven [`RecoveryCoordinator::recover`]
+/// directly can reuse the exact same apply semantics in their `on_record`
+/// closure without duplicating the decode/apply ladder.
+pub fn apply_wal_record_to_memory_storage(
     storage: &SegmentedStore,
     record: &WalRecord,
 ) -> StrataResult<()> {
@@ -1499,7 +1587,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(snapshot_fired, 0, "on_snapshot must not fire in Chunk 1");
+        assert_eq!(
+            snapshot_fired, 0,
+            "on_snapshot must not fire without codec and snapshot"
+        );
         assert_eq!(record_txns, vec![1, 2, 3, 4, 5]);
         assert_eq!(stats.txns_replayed, 5);
         assert_eq!(stats.writes_applied, 5);
@@ -1710,5 +1801,123 @@ mod tests {
         assert_eq!(result.stats.deletes_applied, stats_b.deletes_applied);
         assert_eq!(result.stats.final_version, stats_b.final_version);
         assert_eq!(result.stats.max_txn_id, stats_b.max_txn_id);
+    }
+
+    // ========================================
+    // Epic 5 Chunk 2: coordinator snapshot loading
+    // ========================================
+
+    use strata_durability::disk_snapshot::{SnapshotSection, SnapshotWriter};
+    use strata_durability::format::primitive_tags;
+
+    /// Helper: seed a snapshot file and matching MANIFEST entry so the
+    /// coordinator's snapshot-loading path can find them.
+    fn seed_snapshot(layout: &DatabaseLayout, snapshot_id: u64, watermark: u64) {
+        std::fs::create_dir_all(layout.snapshots_dir()).unwrap();
+        let writer = SnapshotWriter::new(
+            layout.snapshots_dir().to_path_buf(),
+            Box::new(IdentityCodec),
+            [4u8; 16],
+        )
+        .unwrap();
+        // Minimal valid KV section (entry count = 0); coordinator only
+        // cares that the file loads cleanly.
+        let sections = vec![SnapshotSection::new(primitive_tags::KV, vec![0, 0, 0, 0])];
+        writer
+            .create_snapshot(snapshot_id, watermark, sections)
+            .unwrap();
+
+        let mut mgr = ManifestManager::create(
+            layout.manifest_path().to_path_buf(),
+            [4u8; 16],
+            "identity".to_string(),
+        )
+        .unwrap();
+        mgr.set_snapshot_watermark(snapshot_id, TxnId(watermark))
+            .unwrap();
+    }
+
+    /// With a codec installed and a snapshot recorded in the MANIFEST, the
+    /// coordinator loads the snapshot, fires `on_snapshot` once with the
+    /// correct watermark, and reports `from_checkpoint = true`.
+    #[test]
+    fn test_recover_invokes_on_snapshot_when_codec_and_manifest_agree() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 7, 42);
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+
+        let mut snapshot_seen = Vec::<u64>::new();
+        let stats = coord
+            .recover(
+                |snapshot| {
+                    snapshot_seen.push(snapshot.watermark_txn());
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+
+        assert_eq!(snapshot_seen, vec![42]);
+        assert!(stats.from_checkpoint);
+        assert_eq!(stats.max_txn_id, TxnId(42));
+        // The coordinator does not bump final_version from snapshot load —
+        // it stays at the max payload version seen in WAL replay (zero here).
+        assert_eq!(stats.final_version, CommitVersion::ZERO);
+    }
+
+    /// With a codec installed but no MANIFEST on disk, snapshot loading is
+    /// skipped silently and `on_snapshot` never fires.
+    #[test]
+    fn test_recover_skips_snapshot_when_manifest_absent() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+
+        let mut fired = 0usize;
+        let stats = coord
+            .recover(
+                |_| {
+                    fired += 1;
+                    Ok(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(fired, 0);
+        assert!(!stats.from_checkpoint);
+    }
+
+    /// MANIFEST references a snapshot id but the corresponding .chk file was
+    /// deleted from disk. Recovery must fail loud with `StrataError::corruption`,
+    /// not silently fall back to WAL-only or produce an empty plan.
+    #[test]
+    fn test_recover_rejects_missing_snapshot_file() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 3, 100);
+
+        // Remove the snapshot file the MANIFEST still points at.
+        let snap = strata_durability::format::snapshot_path(layout.snapshots_dir(), 3);
+        std::fs::remove_file(&snap).unwrap();
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+
+        let err = coord
+            .recover(|_| Ok(()), |_| Ok(()))
+            .expect_err("missing snapshot file must surface as corruption");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("MANIFEST references snapshot"),
+            "error should mention MANIFEST ref, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("missing"),
+            "error should state the file is missing, got: {}",
+            msg
+        );
     }
 }
