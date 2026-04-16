@@ -722,7 +722,7 @@ mod tests {
         drop(store);
 
         let recovery = RecoveryCoordinator::new(layout, 0);
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.final_version, CommitVersion::ZERO);
 
         let seg_info = result.storage.recover_segments().unwrap();

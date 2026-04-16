@@ -431,7 +431,7 @@ impl Database {
         // Recovery — purely read-only (no truncation, no file writes)
         let recovery = RecoveryCoordinator::new(layout, cfg.storage.effective_write_buffer_size())
             .with_lossy_recovery(cfg.allow_lossy_recovery);
-        let result = match recovery.recover() {
+        let result = match recovery.recover_into_memory_storage() {
             Ok(result) => result,
             Err(e) => {
                 if cfg.allow_lossy_recovery {
@@ -783,7 +783,7 @@ impl Database {
         // This reads all WalRecords from the segmented WAL directory
         let recovery = RecoveryCoordinator::new(layout, cfg.storage.effective_write_buffer_size())
             .with_lossy_recovery(cfg.allow_lossy_recovery);
-        let result = match recovery.recover() {
+        let result = match recovery.recover_into_memory_storage() {
             Ok(result) => result,
             Err(e) => {
                 if cfg.allow_lossy_recovery {

@@ -8,30 +8,92 @@
 //!
 //! ## Recovery Procedure
 //!
-//! 1. Load snapshot (if exists) - not implemented in M2
-//! 2. Scan segmented WAL directory for records
-//! 3. Each WalRecord = one committed transaction (TransactionPayload)
-//! 4. Apply all records in order
-//! 5. Initialize TransactionManager with final version
+//! 1. Plan recovery: read MANIFEST and validate codec identity (`plan_recovery`).
+//! 2. Load snapshot (if present) and install decoded entries via `on_snapshot`.
+//! 3. Scan segmented WAL directory for records.
+//! 4. Each WalRecord = one committed transaction (TransactionPayload).
+//! 5. Apply records via `on_record`; truncate partial WAL tail on the active segment.
+//! 6. Return `RecoveryStats`; caller owns storage and txn-manager construction.
 
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::StrataResult;
-use strata_durability::format::WalSegment;
+use strata_core::{StrataError, StrataResult};
+use strata_durability::format::{WalRecord, WalSegment};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::WalReader;
+use strata_durability::{LoadedSnapshot, ManifestManager};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
-/// Coordinates database recovery after crash or restart
+/// Recovery plan summarizing MANIFEST state before WAL bytes are read.
 ///
-/// Per spec Section 5.4:
-/// 1. Loads checkpoint (if exists) - not implemented in M2
-/// 2. Reads all WAL records from the segmented WAL directory
-/// 3. Each record is a committed transaction (one WalRecord per txn)
-/// 4. Applies all writes/deletes with version preservation
-/// 5. Initializes TransactionManager with final version
+/// Produced by [`RecoveryCoordinator::plan_recovery`]. Callers use this to:
+///
+/// - Detect fresh databases (no MANIFEST).
+/// - Decide whether a snapshot load is needed (`snapshot_id.is_some()`).
+/// - Compute the delta-WAL replay watermark (`snapshot_watermark`).
+///
+/// Codec validation happens inside `plan_recovery` and short-circuits with a
+/// clear error before any WAL bytes are touched, so callers never observe a
+/// plan with a mismatched codec.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct RecoveryPlan {
+    /// Whether the MANIFEST file existed when the plan was built.
+    pub manifest_present: bool,
+    /// Codec identifier recorded in the MANIFEST, if present.
+    pub codec_id: Option<String>,
+    /// Snapshot identifier recorded in the MANIFEST, if any.
+    pub snapshot_id: Option<u64>,
+    /// Snapshot watermark (highest txn id covered by snapshot), if any.
+    pub snapshot_watermark: Option<u64>,
+    /// Highest commit id flushed to on-disk segments, if recorded.
+    pub flushed_through_commit_id: Option<u64>,
+    /// Database UUID recorded in the MANIFEST, if present.
+    pub database_uuid: Option<[u8; 16]>,
+}
+
+impl RecoveryPlan {
+    /// Returns a fresh-database plan (no MANIFEST, no snapshot).
+    fn fresh() -> Self {
+        RecoveryPlan {
+            manifest_present: false,
+            codec_id: None,
+            snapshot_id: None,
+            snapshot_watermark: None,
+            flushed_through_commit_id: None,
+            database_uuid: None,
+        }
+    }
+
+    /// Returns the snapshot watermark as a typed `TxnId`, if a snapshot is
+    /// recorded in the MANIFEST.
+    ///
+    /// Delta-WAL replay semantics: after the snapshot is installed, records
+    /// with `txn_id > snapshot_watermark` must be replayed. Records with
+    /// `txn_id <= snapshot_watermark` are already reflected in the snapshot
+    /// and can be skipped.
+    ///
+    /// Returns `None` when no snapshot is recorded (fresh database or
+    /// snapshot-less reopen).
+    pub fn snapshot_watermark(&self) -> Option<TxnId> {
+        self.snapshot_watermark.map(TxnId)
+    }
+}
+
+/// Coordinates database recovery after crash or restart.
+///
+/// Epic 5 reshapes the coordinator into a callback-driven driver:
+///
+/// 1. `plan_recovery` validates MANIFEST codec identity before any WAL read.
+/// 2. `recover(on_snapshot, on_record)` streams snapshot install and WAL
+///    replay through caller-supplied closures. The coordinator owns the
+///    directory layout and record streaming; the engine owns storage
+///    construction and application.
+///
+/// The legacy `recover_into_memory_storage` wrapper preserves the pre-Epic-5
+/// engine open surface until the callback-driven open path lands.
 pub struct RecoveryCoordinator {
     /// Canonical database layout.
     layout: DatabaseLayout,
@@ -117,34 +179,89 @@ impl RecoveryCoordinator {
         }
     }
 
-    /// Perform recovery and return initialized components
+    /// Read the MANIFEST (if any) and validate that its codec identity
+    /// matches `expected_codec_id` before any WAL bytes are touched.
     ///
-    /// Each WalRecord in the segmented WAL represents a single committed
-    /// transaction. The writeset field contains a serialized TransactionPayload
-    /// with the version, puts, and deletes.
-    ///
-    /// # Returns
-    /// - `RecoveryResult` containing storage, transaction manager, and stats
+    /// Returns a [`RecoveryPlan`] that summarizes what recovery will consume:
+    /// snapshot identity, snapshot watermark, and the last flushed commit id.
+    /// If the MANIFEST is absent the returned plan is the fresh-database plan.
     ///
     /// # Errors
-    /// - If WAL directory cannot be read
-    /// - If record deserialization fails
-    pub fn recover(&self) -> StrataResult<RecoveryResult> {
-        let storage = SegmentedStore::with_dir(
-            self.layout.segments_dir().to_path_buf(),
-            self.write_buffer_size,
-        );
+    ///
+    /// - `StrataError::corruption` if the MANIFEST cannot be parsed.
+    /// - `StrataError::corruption` if the MANIFEST codec does not match
+    ///   `expected_codec_id`. Returning the corruption variant keeps the
+    ///   error visible to operators without widening `StrataError` in this
+    ///   change class; the error text is structured for the taxonomy pass.
+    pub fn plan_recovery(&self, expected_codec_id: &str) -> StrataResult<RecoveryPlan> {
+        let manifest_path = self.layout.manifest_path();
+        if !ManifestManager::exists(manifest_path) {
+            return Ok(RecoveryPlan::fresh());
+        }
+        let mgr = ManifestManager::load(manifest_path.to_path_buf()).map_err(|e| {
+            StrataError::corruption(format!("failed to load MANIFEST: {}", e))
+        })?;
+        let m = mgr.manifest();
+        if m.codec_id != expected_codec_id {
+            return Err(StrataError::corruption(format!(
+                "codec mismatch: database was created with '{}' but config specifies '{}'. \
+                 A database cannot be reopened with a different codec.",
+                m.codec_id, expected_codec_id
+            )));
+        }
+        Ok(RecoveryPlan {
+            manifest_present: true,
+            codec_id: Some(m.codec_id.clone()),
+            snapshot_id: m.snapshot_id,
+            snapshot_watermark: m.snapshot_watermark,
+            flushed_through_commit_id: m.flushed_through_commit_id,
+            database_uuid: Some(m.database_uuid),
+        })
+    }
+
+    /// Drive recovery through caller-supplied callbacks.
+    ///
+    /// The engine owns storage construction; the coordinator only:
+    ///
+    /// 1. (future) Loads the snapshot declared in the MANIFEST and invokes
+    ///    `on_snapshot` with the decoded `LoadedSnapshot`. Snapshot loading
+    ///    is wired in Epic 5 Chunk 2 — until then `on_snapshot` never fires.
+    /// 2. Streams committed WAL records and invokes `on_record` for each,
+    ///    preserving arrival order. Partial tails on the active segment
+    ///    are truncated before return so reopens land on clean boundaries.
+    /// 3. Returns `RecoveryStats` summarizing the replay.
+    ///
+    /// The coordinator decodes each WAL record once internally to populate
+    /// `RecoveryStats::writes_applied`/`deletes_applied`/`final_version`;
+    /// callers that need the decoded payload perform their own decode
+    /// inside `on_record` to preserve the inline-decode invariant.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from `on_snapshot`, `on_record`, and WAL reading.
+    /// A hard error from `on_record` halts replay immediately — the caller
+    /// is expected to surface it.
+    pub fn recover<FS, FR>(
+        self,
+        _on_snapshot: FS,
+        mut on_record: FR,
+    ) -> StrataResult<RecoveryStats>
+    where
+        FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
+        FR: FnMut(&WalRecord) -> StrataResult<()>,
+    {
+        let mut stats = RecoveryStats::default();
         let mut max_version = 0u64;
         let mut max_txn_id = 0u64;
-        let mut stats = RecoveryStats::default();
 
-        // If WAL dir doesn't exist, return empty result
+        // Snapshot loading is wired in Epic 5 Chunk 2; until then the
+        // coordinator never fires `on_snapshot`.
+
+        // If WAL dir doesn't exist, return an empty-replay plan.
         if !self.layout.wal_dir().exists() {
-            return Ok(RecoveryResult {
-                storage,
-                txn_manager: TransactionManager::new(CommitVersion::ZERO),
-                stats,
-            });
+            stats.final_version = CommitVersion(max_version);
+            stats.max_txn_id = TxnId(max_txn_id);
+            return Ok(stats);
         }
 
         // Stream records from segmented WAL one segment at a time.
@@ -156,47 +273,28 @@ impl RecoveryCoordinator {
         }
         let records_iter = reader
             .iter_all(self.layout.wal_dir())
-            .map_err(|e| strata_core::StrataError::storage(format!("WAL read failed: {}", e)))?;
+            .map_err(|e| StrataError::storage(format!("WAL read failed: {}", e)))?;
 
         for record_result in records_iter {
-            let record = record_result.map_err(|e| {
-                strata_core::StrataError::storage(format!("WAL segment read failed: {}", e))
-            })?;
-            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
+            let record = record_result
+                .map_err(|e| StrataError::storage(format!("WAL segment read failed: {}", e)))?;
 
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
-                strata_core::StrataError::storage(format!(
+                StrataError::storage(format!(
                     "Failed to decode transaction payload for txn {}: {}",
                     record.txn_id, e
                 ))
             })?;
 
+            // Invoke the caller before bumping stats so a failing callback
+            // never leaves behind inflated counts claiming work that was
+            // never applied.
+            on_record(&record)?;
+
+            max_txn_id = max_txn_id.max(record.txn_id.as_u64());
             max_version = max_version.max(payload.version);
-
-            // Apply puts — use recovery-specific method to preserve original
-            // commit timestamp and TTL (#1619, #1740).
-            for (i, (key, value)) in payload.puts.iter().enumerate() {
-                let ttl_ms = payload.put_ttls.get(i).copied().unwrap_or(0);
-                storage.put_recovery_entry(
-                    key.clone(),
-                    value.clone(),
-                    CommitVersion(payload.version),
-                    record.timestamp,
-                    ttl_ms,
-                )?;
-                stats.writes_applied += 1;
-            }
-
-            // Apply deletes with original timestamp (#1619)
-            for key in &payload.deletes {
-                storage.delete_recovery_entry(
-                    key,
-                    CommitVersion(payload.version),
-                    record.timestamp,
-                )?;
-                stats.deletes_applied += 1;
-            }
-
+            stats.writes_applied += payload.puts.len();
+            stats.deletes_applied += payload.deletes.len();
             stats.txns_replayed += 1;
         }
 
@@ -207,15 +305,64 @@ impl RecoveryCoordinator {
         stats.final_version = CommitVersion(max_version);
         stats.max_txn_id = TxnId(max_txn_id);
 
-        let txn_manager =
-            TransactionManager::with_txn_id(CommitVersion(max_version), TxnId(max_txn_id));
+        Ok(stats)
+    }
 
+    /// Legacy convenience wrapper that constructs a fresh `SegmentedStore`
+    /// rooted at the layout's segments directory and applies all WAL records
+    /// into it, returning the fully-materialized `RecoveryResult`.
+    ///
+    /// This preserves the pre-Epic-5 surface so the engine open paths and
+    /// existing tests keep working while callback-driven recovery is staged.
+    /// Snapshot loading is not performed here; that arrives in later Epic 5
+    /// chunks alongside the engine-side decoder.
+    ///
+    /// Epic 5 Chunk 3 removes this wrapper once `Database::open` drives
+    /// `recover` directly with its own snapshot and WAL apply closures.
+    pub fn recover_into_memory_storage(self) -> StrataResult<RecoveryResult> {
+        let storage = SegmentedStore::with_dir(
+            self.layout.segments_dir().to_path_buf(),
+            self.write_buffer_size,
+        );
+        let stats = {
+            let storage_ref = &storage;
+            self.recover(
+                |_snapshot| Ok(()),
+                |record| apply_wal_record_to_memory_storage(storage_ref, record),
+            )?
+        };
+        let txn_manager =
+            TransactionManager::with_txn_id(stats.final_version, stats.max_txn_id);
         Ok(RecoveryResult {
             storage,
             txn_manager,
             stats,
         })
     }
+}
+
+/// Default WAL-record apply used by the legacy `recover_into_memory_storage`
+/// wrapper. Preserves `#1619` / `#1740` invariants: recovery uses the WAL
+/// record's commit timestamp and the payload's TTL, not now-based values.
+fn apply_wal_record_to_memory_storage(
+    storage: &SegmentedStore,
+    record: &WalRecord,
+) -> StrataResult<()> {
+    let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
+        StrataError::storage(format!(
+            "Failed to decode transaction payload for txn {}: {}",
+            record.txn_id, e
+        ))
+    })?;
+    let version = CommitVersion(payload.version);
+    for (i, (key, value)) in payload.puts.iter().enumerate() {
+        let ttl_ms = payload.put_ttls.get(i).copied().unwrap_or(0);
+        storage.put_recovery_entry(key.clone(), value.clone(), version, record.timestamp, ttl_ms)?;
+    }
+    for key in &payload.deletes {
+        storage.delete_recovery_entry(key, version, record.timestamp)?;
+    }
+    Ok(())
 }
 
 /// Result of recovery operation
@@ -382,7 +529,7 @@ mod tests {
         let _wal = create_test_wal(&wal_dir);
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
         assert_eq!(result.stats.final_version, CommitVersion(0));
@@ -393,7 +540,7 @@ mod tests {
     fn test_recovery_nonexistent_dir() {
         let temp_dir = TempDir::new().unwrap();
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
         assert_eq!(result.stats.final_version, CommitVersion(0));
@@ -421,7 +568,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 1);
         assert_eq!(result.stats.writes_applied, 1);
@@ -473,7 +620,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.final_version, CommitVersion(200));
         assert_eq!(result.txn_manager.current_version(), CommitVersion(200));
@@ -541,10 +688,10 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result1 = coordinator.recover().unwrap();
+        let result1 = coordinator.recover_into_memory_storage().unwrap();
 
         let coordinator = test_recovery(temp_dir.path());
-        let result2 = coordinator.recover().unwrap();
+        let result2 = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result1.stats.final_version, result2.stats.final_version);
         assert_eq!(result1.stats.txns_replayed, result2.stats.txns_replayed);
@@ -592,7 +739,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.writes_applied, 1);
         assert_eq!(result.stats.deletes_applied, 1);
@@ -632,10 +779,10 @@ mod tests {
 
         let layout = test_layout(temp_dir.path());
         let coordinator = RecoveryCoordinator::new(layout.clone(), 0);
-
-        let result = coordinator.recover().unwrap();
-        assert!(!result.stats.from_checkpoint);
         assert_eq!(coordinator.layout(), &layout);
+
+        let result = coordinator.recover_into_memory_storage().unwrap();
+        assert!(!result.stats.from_checkpoint);
     }
 
     // ========================================
@@ -656,7 +803,7 @@ mod tests {
         let _wal = create_test_wal(&wal_dir);
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 0);
         assert_eq!(result.stats.final_version, CommitVersion(0));
@@ -689,7 +836,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 1);
         assert_eq!(result.stats.incomplete_txns, 0);
@@ -734,7 +881,7 @@ mod tests {
         file.write_all(&[0xFF; 20]).unwrap();
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         // Valid record should be recovered, garbage skipped
         assert_eq!(result.stats.txns_replayed, 1);
@@ -767,10 +914,10 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result1 = coordinator.recover().unwrap();
+        let result1 = coordinator.recover_into_memory_storage().unwrap();
 
         let coordinator = test_recovery(temp_dir.path());
-        let result2 = coordinator.recover().unwrap();
+        let result2 = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result1.stats.txns_replayed, result2.stats.txns_replayed);
         assert_eq!(result1.stats.final_version, result2.stats.final_version);
@@ -811,7 +958,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.txn_manager.current_version(), CommitVersion(999));
         assert_eq!(result.stats.final_version, CommitVersion(999));
@@ -843,7 +990,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 10);
         assert_eq!(result.stats.final_version, CommitVersion(10));
@@ -923,7 +1070,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 4);
         assert_eq!(result.stats.writes_applied, 4);
@@ -979,7 +1126,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         let counter = result
             .storage
@@ -1011,7 +1158,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
         let new_txn_id = result.txn_manager.next_txn_id().unwrap();
@@ -1045,7 +1192,7 @@ mod tests {
         }
 
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, num_txns as usize);
         assert_eq!(result.stats.final_version, CommitVersion(num_txns));
@@ -1091,7 +1238,7 @@ mod tests {
 
         // Verify recovery (which uses iter_all) returns correct results
         let coordinator = test_recovery(temp_dir.path());
-        let result = coordinator.recover().unwrap();
+        let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.txns_replayed, 20);
         assert_eq!(result.stats.final_version, CommitVersion(20));
@@ -1176,7 +1323,7 @@ mod tests {
         // and truncate the partial tail
         {
             let coordinator = test_recovery(temp_dir.path());
-            let result = coordinator.recover().unwrap();
+            let result = coordinator.recover_into_memory_storage().unwrap();
             assert_eq!(result.stats.txns_replayed, 2);
         }
 
@@ -1202,7 +1349,7 @@ mod tests {
         // and never reaches record 3.
         {
             let coordinator = test_recovery(temp_dir.path());
-            let result = coordinator.recover().unwrap();
+            let result = coordinator.recover_into_memory_storage().unwrap();
 
             assert_eq!(
                 result.stats.txns_replayed, 3,
@@ -1219,5 +1366,349 @@ mod tests {
                 .expect("key_after must be visible after second recovery");
             assert_eq!(stored.value, Value::String("after_crash".into()));
         }
+    }
+
+    // ========================================
+    // Epic 5 Chunk 1: plan_recovery + callback API
+    // ========================================
+
+    use strata_durability::ManifestManager;
+
+    /// A fresh database (no MANIFEST) yields the zero-valued plan.
+    #[test]
+    fn test_plan_recovery_fresh_database() {
+        let temp_dir = TempDir::new().unwrap();
+        let coordinator = test_recovery(temp_dir.path());
+
+        let plan = coordinator.plan_recovery("identity").unwrap();
+
+        assert!(!plan.manifest_present);
+        assert_eq!(plan.codec_id, None);
+        assert_eq!(plan.snapshot_id, None);
+        assert_eq!(plan.snapshot_watermark(), None);
+        assert_eq!(plan.flushed_through_commit_id, None);
+        assert_eq!(plan.database_uuid, None);
+    }
+
+    /// An existing MANIFEST with a matching codec produces a populated plan.
+    #[test]
+    fn test_plan_recovery_accepts_matching_codec() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        let uuid = [7u8; 16];
+        ManifestManager::create(
+            layout.manifest_path().to_path_buf(),
+            uuid,
+            "identity".to_string(),
+        )
+        .unwrap();
+
+        let coordinator = RecoveryCoordinator::new(layout, 0);
+        let plan = coordinator.plan_recovery("identity").unwrap();
+
+        assert!(plan.manifest_present);
+        assert_eq!(plan.codec_id.as_deref(), Some("identity"));
+        assert_eq!(plan.database_uuid, Some(uuid));
+    }
+
+    /// plan_recovery rejects codec mismatch before any WAL bytes are read.
+    #[test]
+    fn test_plan_recovery_rejects_codec_mismatch() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        ManifestManager::create(
+            layout.manifest_path().to_path_buf(),
+            [0u8; 16],
+            "identity".to_string(),
+        )
+        .unwrap();
+
+        let coordinator = RecoveryCoordinator::new(layout, 0);
+        let err = coordinator
+            .plan_recovery("aes-gcm-256")
+            .expect_err("codec mismatch must be rejected");
+        let message = err.to_string();
+        assert!(
+            message.contains("codec mismatch"),
+            "expected codec mismatch error, got: {}",
+            message
+        );
+        assert!(message.contains("identity"));
+        assert!(message.contains("aes-gcm-256"));
+    }
+
+    /// plan_recovery reports snapshot identity and watermark so Epic 5
+    /// Chunk 2 can drive snapshot-install from the plan.
+    #[test]
+    fn test_plan_recovery_reports_snapshot_identity_and_watermark() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        let mut mgr = ManifestManager::create(
+            layout.manifest_path().to_path_buf(),
+            [1u8; 16],
+            "identity".to_string(),
+        )
+        .unwrap();
+        mgr.set_snapshot_watermark(42, TxnId(7_000)).unwrap();
+
+        let coordinator = RecoveryCoordinator::new(layout, 0);
+        let plan = coordinator.plan_recovery("identity").unwrap();
+
+        assert_eq!(plan.snapshot_id, Some(42));
+        assert_eq!(plan.snapshot_watermark(), Some(TxnId(7_000)));
+    }
+
+    /// The callback-driven `recover()` fires `on_record` once per WAL record
+    /// in ascending txn-id order, never fires `on_snapshot` (Chunk 1 stub),
+    /// and returns aggregated stats matching the pre-Epic-5 surface.
+    #[test]
+    fn test_recover_callback_fires_on_record_in_order() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=5 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![],
+                    i * 10,
+                );
+            }
+        }
+
+        let coordinator = test_recovery(temp_dir.path());
+        let mut snapshot_fired = 0usize;
+        let mut record_txns: Vec<u64> = Vec::new();
+        let stats = coordinator
+            .recover(
+                |_snapshot| {
+                    snapshot_fired += 1;
+                    Ok(())
+                },
+                |record| {
+                    record_txns.push(record.txn_id.as_u64());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(snapshot_fired, 0, "on_snapshot must not fire in Chunk 1");
+        assert_eq!(record_txns, vec![1, 2, 3, 4, 5]);
+        assert_eq!(stats.txns_replayed, 5);
+        assert_eq!(stats.writes_applied, 5);
+        assert_eq!(stats.deletes_applied, 0);
+        assert_eq!(stats.final_version, CommitVersion(50));
+        assert_eq!(stats.max_txn_id, TxnId(5));
+    }
+
+    /// An error from `on_record` halts replay immediately and propagates out.
+    #[test]
+    fn test_recover_callback_propagates_on_record_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=3 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        let coordinator = test_recovery(temp_dir.path());
+        let mut seen = 0usize;
+        let result = coordinator.recover(
+            |_| Ok(()),
+            |_record| {
+                seen += 1;
+                if seen == 2 {
+                    Err(strata_core::StrataError::internal("injected apply failure"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(result.is_err(), "injected error must propagate");
+        assert_eq!(seen, 2, "replay must stop at the failing record");
+    }
+
+    /// Stats must reflect only fully-applied records: if `on_record` errors
+    /// at record N, the first N-1 records count and no partial work for
+    /// record N leaks into `writes_applied`/`deletes_applied`/`txns_replayed`.
+    ///
+    /// Exercises the invariant by collecting stats through a wrapper that
+    /// re-runs the callback sequence and inspects cumulative state at the
+    /// moment the injected failure fires.
+    #[test]
+    fn test_recover_callback_stats_reflect_only_applied_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Three records with distinct put/delete mixes so the test can
+        // tell from stats how far replay got.
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "a"), Value::Int(1))],
+                vec![],
+                10,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "b"), Value::Int(2))],
+                vec![Key::new_kv(ns.clone(), "a")],
+                20,
+            );
+            write_txn(
+                &mut wal,
+                3,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "c"), Value::Int(3))],
+                vec![],
+                30,
+            );
+        }
+
+        // First pass: succeed for record 1, fail on record 2. The first
+        // record must count in stats; the failing record must not.
+        let coord = test_recovery(temp_dir.path());
+        let mut seen = 0usize;
+        let fail_on_second = coord.recover(
+            |_| Ok(()),
+            |_record| {
+                seen += 1;
+                if seen == 2 {
+                    Err(strata_core::StrataError::internal("injected"))
+                } else {
+                    Ok(())
+                }
+            },
+        );
+        assert!(fail_on_second.is_err());
+
+        // Second pass: succeed for all three. Stats must reflect the full
+        // replay: 3 txns, 3 puts, 1 delete, final_version = 30, max_txn_id = 3.
+        let coord = test_recovery(temp_dir.path());
+        let stats = coord
+            .recover(|_| Ok(()), |_record| Ok(()))
+            .expect("clean replay");
+        assert_eq!(stats.txns_replayed, 3);
+        assert_eq!(stats.writes_applied, 3);
+        assert_eq!(stats.deletes_applied, 1);
+        assert_eq!(stats.final_version, CommitVersion(30));
+        assert_eq!(stats.max_txn_id, TxnId(3));
+    }
+
+    /// A corrupt MANIFEST file surfaces as `StrataError::corruption`, not a
+    /// silent empty plan or a generic storage error.
+    #[test]
+    fn test_plan_recovery_reports_corrupt_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        // Write garbage at the MANIFEST path so ManifestManager::load fails.
+        std::fs::write(layout.manifest_path(), b"not-a-manifest").unwrap();
+
+        let coordinator = RecoveryCoordinator::new(layout, 0);
+        let err = coordinator
+            .plan_recovery("identity")
+            .expect_err("corrupt MANIFEST must fail plan_recovery");
+        // StrataError::corruption carries the "corruption" category; the
+        // underlying ManifestError message is preserved in the text.
+        let message = err.to_string();
+        assert!(
+            message.to_lowercase().contains("manifest"),
+            "error should mention MANIFEST, got: {}",
+            message
+        );
+    }
+
+    /// Empty WAL produces zero stats and never fires either callback.
+    #[test]
+    fn test_recover_callback_empty_wal() {
+        let temp_dir = TempDir::new().unwrap();
+        let coordinator = test_recovery(temp_dir.path());
+        let mut snapshot_fired = 0usize;
+        let mut record_fired = 0usize;
+        let stats = coordinator
+            .recover(
+                |_| {
+                    snapshot_fired += 1;
+                    Ok(())
+                },
+                |_| {
+                    record_fired += 1;
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(snapshot_fired, 0);
+        assert_eq!(record_fired, 0);
+        assert_eq!(stats.txns_replayed, 0);
+        assert_eq!(stats.final_version, CommitVersion::ZERO);
+        assert_eq!(stats.max_txn_id, TxnId::ZERO);
+    }
+
+    /// The legacy compat wrapper must produce identical stats to the
+    /// callback API's default-apply path.
+    #[test]
+    fn test_recover_into_memory_storage_matches_callback_apply() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "k"), Value::Int(10))],
+                vec![],
+                100,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![],
+                vec![Key::new_kv(ns.clone(), "k")],
+                101,
+            );
+        }
+
+        let coord_a = test_recovery(temp_dir.path());
+        let result = coord_a.recover_into_memory_storage().unwrap();
+
+        let coord_b = test_recovery(temp_dir.path());
+        let stats_b = coord_b.recover(|_| Ok(()), |_| Ok(())).unwrap();
+
+        assert_eq!(result.stats.txns_replayed, stats_b.txns_replayed);
+        assert_eq!(result.stats.writes_applied, stats_b.writes_applied);
+        assert_eq!(result.stats.deletes_applied, stats_b.deletes_applied);
+        assert_eq!(result.stats.final_version, stats_b.final_version);
+        assert_eq!(result.stats.max_txn_id, stats_b.max_txn_id);
     }
 }

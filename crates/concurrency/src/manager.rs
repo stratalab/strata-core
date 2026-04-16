@@ -1523,7 +1523,7 @@ mod tests {
         // Drop WAL to flush buffers, then recover from disk
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
 
         // Recovery should find exactly 1 transaction
         assert_eq!(result.stats.txns_replayed, 1);
@@ -1609,7 +1609,7 @@ mod tests {
         // Recover from WAL to verify all 10 records are well-formed
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.txns_replayed, num_threads);
         assert_eq!(
             result.stats.final_version,
@@ -1668,7 +1668,7 @@ mod tests {
         // T1 was aborted before WAL write, so its record must NOT be in WAL.
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(
             result.stats.txns_replayed, 2,
             "Aborted txn must not appear in WAL"
@@ -1705,7 +1705,7 @@ mod tests {
         // WAL should be empty — no records written for read-only txn
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.txns_replayed, 0);
     }
 
@@ -1741,7 +1741,7 @@ mod tests {
         // WAL should have a record
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let rec_result = recovery.recover().unwrap();
+        let rec_result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(rec_result.stats.txns_replayed, 1);
     }
 
@@ -1806,7 +1806,7 @@ mod tests {
         // Recover from WAL and verify all operations replayed correctly
         drop(wal);
         let recovery = test_recovery(temp_dir.path());
-        let result = recovery.recover().unwrap();
+        let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.txns_replayed, 2);
 
         // key_a: was written in txn1 then deleted in txn2
