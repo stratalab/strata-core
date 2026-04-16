@@ -707,13 +707,10 @@ fn test_checkpoint_creates_snapshot() {
 }
 
 #[test]
-fn test_checkpoint_then_compact_without_flush_succeeds() {
-    // Inverted in T3-E5 Chunk 4.
-    //
-    // Pre-Epic-5, compact() had to refuse on snapshot-only coverage because
-    // recovery was WAL-only. Now the recovery coordinator installs
-    // snapshots, so the snapshot watermark is a valid WAL-retention input
-    // and compact() succeeds without a flush watermark.
+fn test_checkpoint_then_compact_without_flush_fails() {
+    // Issue #1730: compact() after checkpoint-only must fail because
+    // recovery cannot load snapshots. WAL compaction is only safe
+    // when driven by the flush watermark (data in SST segments).
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
     let db = Database::open(&db_path).unwrap();
@@ -722,18 +719,19 @@ fn test_checkpoint_then_compact_without_flush_succeeds() {
     let ns = create_test_namespace(branch_id);
     let key = Key::new_kv(ns, "compact_test");
 
+    // Write data
     db.transaction(branch_id, |txn| {
         txn.put(key.clone(), Value::Int(42))?;
         Ok(())
     })
     .unwrap();
 
-    db.checkpoint()
-        .expect("checkpoint must succeed to populate the snapshot watermark");
+    // Checkpoint creates snapshot but no flush watermark
+    assert!(db.checkpoint().is_ok());
 
-    // Compact now succeeds on snapshot-only coverage.
-    db.compact()
-        .expect("compact() must succeed once recovery consumes snapshots");
+    // Compact must fail — snapshot watermark alone is not safe
+    let result = db.compact();
+    assert!(result.is_err());
 }
 
 #[test]
@@ -1594,20 +1592,17 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
 #[test]
 #[serial(open_databases)]
 fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
-    // Inverted in T3-E5 Chunk 4.
+    // Issue #1730: checkpoint+compact deletes WAL segments, but recovery
+    // is WAL-only and never loads snapshots. This causes data loss.
     //
-    // Pre-Epic-5, recovery was WAL-only and checkpoints were never loaded,
-    // so `compact()` had to refuse to delete WAL segments covered only by
-    // a snapshot watermark — otherwise those records would vanish on the
-    // next reopen. That hardening is now removed: the recovery coordinator
-    // installs snapshots through the engine decoder, so `compact()`
-    // succeeds, the WAL shrinks, and the committed data survives reopen
-    // via snapshot install.
+    // After the fix, compact() must refuse to delete WAL segments based
+    // on the snapshot watermark alone, since recovery cannot load snapshots.
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
 
     let branch_id = BranchId::new();
 
+    // Step 1: Write data
     {
         let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
         let ns = create_test_namespace(branch_id);
@@ -1619,40 +1614,51 @@ fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
         })
         .unwrap();
 
-        // Checkpoint populates the snapshot and sets the MANIFEST watermark.
+        // Step 2: Checkpoint (creates snapshot, sets watermark in MANIFEST)
         db.checkpoint().unwrap();
 
-        // Compact now succeeds on snapshot watermark alone: the snapshot
-        // is a valid recovery source, so WAL segments covered by it can be
-        // deleted without risking data loss.
-        db.compact()
-            .expect("compact() must succeed once snapshot coverage is trusted");
+        // Step 3: Compact — should NOT delete WAL segments since recovery
+        // cannot load snapshots. With the fix, this returns an error.
+        let compact_result = db.compact();
+        assert!(
+            compact_result.is_err(),
+            "compact() must fail when only snapshot watermark exists \
+             (no flush watermark) because recovery cannot load snapshots"
+        );
     }
+    // Database dropped (simulates clean shutdown)
 
+    // Clear the registry so reopen doesn't return the cached instance
     OPEN_DATABASES.lock().clear();
 
+    // Step 4: Reopen — recovery replays WAL
     {
         let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
 
         let ns = create_test_namespace(branch_id);
         let key = Key::new_kv(ns, "critical_data");
 
+        // Step 5: Data MUST still be present
         let result = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
-            .unwrap()
-            .expect("data must survive checkpoint+compact+recovery via snapshot install");
-        assert_eq!(result.value, Value::String("must_survive".to_string()));
+            .unwrap();
+        assert!(
+            result.is_some(),
+            "CRITICAL: Data lost after checkpoint+compact+recovery! \
+             WAL segments were deleted but recovery never loaded the snapshot."
+        );
+        assert_eq!(
+            result.unwrap().value,
+            Value::String("must_survive".to_string())
+        );
     }
 }
 
 #[test]
 #[serial(open_databases)]
 fn test_issue_1730_standard_durability() {
-    // Inverted twin of `test_issue_1730_checkpoint_compact_recovery_data_loss`
-    // for the Standard durability mode. Same contract: after T3-E5, compact
-    // succeeds on snapshot coverage alone and reopen sees the data via
-    // snapshot install.
+    // Same as above but with Standard durability mode (disk-based, batched fsync).
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
 
@@ -1673,18 +1679,22 @@ fn test_issue_1730_standard_durability() {
         })
         .unwrap();
 
-        // Flush ensures the record is on disk before checkpoint so the
-        // snapshot + MANIFEST watermark reflect the transaction.
+        // Ensure WAL is flushed to disk
         db.flush().unwrap();
+
         db.checkpoint().unwrap();
 
-        // compact() succeeds on snapshot watermark alone after T3-E5.
-        db.compact()
-            .expect("compact() must succeed on snapshot-only watermark under Standard durability");
+        // compact() must fail — only snapshot watermark, no flush watermark
+        let compact_result = db.compact();
+        assert!(
+            compact_result.is_err(),
+            "compact() after checkpoint-only must fail under Standard durability"
+        );
     }
 
     OPEN_DATABASES.lock().clear();
 
+    // Reopen and verify data survived
     {
         let db = Database::open_with_durability(&db_path, durability).unwrap();
         let ns = create_test_namespace(branch_id);
@@ -1693,9 +1703,12 @@ fn test_issue_1730_standard_durability() {
         let result = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
-            .unwrap()
-            .expect("data must survive checkpoint+compact+recovery under Standard durability");
-        assert_eq!(result.value, Value::String("durable".to_string()));
+            .unwrap();
+        assert!(
+            result.is_some(),
+            "Data must survive checkpoint+failed-compact+recovery under Standard durability"
+        );
+        assert_eq!(result.unwrap().value, Value::String("durable".to_string()));
     }
 }
 
