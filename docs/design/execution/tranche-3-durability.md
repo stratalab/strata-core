@@ -4,14 +4,16 @@
 
 | Field | Value |
 |-------|-------|
-| Goal | Unified recovery, WAL correctness, follower convergence, authoritative shutdown |
+| Goal | Unified recovery, WAL correctness, follower convergence, authoritative shutdown, retention-complete checkpoint fidelity |
 | Owning scopes | durability-recovery |
 | Contributing phases | DR-0 through DR-10 |
 | Prerequisite tranches | T1 (CI); T2 (RC-1 observer traits, RC-6 session shape for DR-8) |
 | Change class | cutover (DR-1, DR-5) + intentional (DR-2 new errors, DR-3 new types) |
 | Assurance class | S4 (WAL correctness, recovery, commit ordering) |
 | Benchmark required | Yes — after every epic |
-| Exit gate | SyncHandle in WAL, RecoveryCoordinator snapshot-aware, follower contiguous, shutdown authoritative, codec uniform |
+| Exit gate | SyncHandle in WAL, RecoveryCoordinator snapshot-aware, follower contiguous, shutdown authoritative, codec uniform, checkpoint/recovery preserve tombstone and TTL barrier state |
+
+**Preparation note:** T3-E4 and T3-E5 now explicitly prepare the branch-aware storage retention work planned in Tranche 4 by making checkpoint/install/recovery fidelity complete for tombstones and TTL, not just branch/space/type identity.
 
 ---
 
@@ -128,7 +130,7 @@ Implementation note:
 
 - Land this epic as two PRs.
 - PR 1 is layout and coordinator cleanup only: `DatabaseLayout`, open-path adoption, `RecoveryCoordinator::new(layout, write_buffer_size)`, and harness migration.
-- PR 2 adds the storage-side snapshot install contract, fixes the checkpoint payload so it preserves branch/space/type identity plus raw KV/Graph key bytes and per-entry MVCC metadata, and adds tests that pin the remaining known omissions honestly.
+- PR 2 adds the storage-side snapshot install contract and fixes the checkpoint payload so it preserves branch/space/type identity, raw KV/Graph key bytes, per-entry MVCC metadata, tombstones, and TTL.
 - Neither PR changes production recovery behavior or callback shape. Snapshot loading, codec validation, and delta-WAL replay remain Epic T3-E5.
 
 ### Tasks
@@ -140,10 +142,11 @@ Implementation note:
   - Delete the production `with_segments` builder path once all call sites move; delete `with_snapshot_path()` if no longer needed
   - Update test harnesses to use `DatabaseLayout`
 - [ ] **PR 2: snapshot-install groundwork**
-  - Add tests that pin the remaining known checkpoint omissions so Epic T3-E5 consumes the payload honestly
-  - Add `SegmentedStore::install_snapshot_entries(branch_id, type_tag, entries)` with unit tests
+  - Add `SegmentedStore::install_snapshot_entries(branch_id, type_tag, entries)` with unit tests covering tombstones and TTL
   - Entry shape must preserve namespace space, raw user key bytes, timestamp, commit version, TTL, and tombstone state; it must not assume snapshot sections already contain fully reconstructed `Key` values
-  - Checkpoint DTOs must preserve branch, space, and type identity explicitly so recovery does not infer them from flattened section ordering
+  - Checkpoint DTOs and collection paths must preserve branch, space, type, tombstone, and TTL identity explicitly so restart correctness does not depend on live-only collection behavior
+  - Recovery artifacts taken together must not regress fork-frontier, inherited-layer, or reachability state that remains persisted outside checkpoint payloads
+  - Add characterization and regression tests proving checkpoint payload/install semantics are retention-complete for the T4 branch-aware storage retention work
 
 ### Acceptance Criteria
 
@@ -152,7 +155,10 @@ Implementation note:
 - [ ] No `new(wal_dir).with_segments(...)` construction remains on the active production path
 - [ ] PR 1 has no regression in WAL-only recovery
 - [ ] `install_snapshot_entries` unit tests pass
-- [ ] Characterization tests pin the current checkpoint payload shape before Epic T3-E5 consumes it
+- [ ] Checkpoint payload preserves tombstone state needed for restart correctness
+- [ ] Checkpoint payload preserves TTL state needed for restart correctness
+- [ ] Checkpoint/recovery preparation does not regress inherited-layer or reachability metadata needed for safe reopen semantics
+- [ ] Characterization and regression tests prove delete/TTL fidelity before Epic T3-E5 consumes checkpoints
 - [ ] `/regression-check` passes
 
 ---
@@ -171,6 +177,7 @@ Implementation note:
   - Add snapshot loading: read MANIFEST's snapshot_id/watermark, load via `SnapshotReader`, validate magic/CRC/codec
   - Add codec validation in `plan_recovery()`: reject mismatch BEFORE any WAL bytes read
   - Add delta-WAL replay: after snapshot install, replay only `txn_id > snapshot_watermark`
+  - Preserve inherited-layer and reachability metadata from `MANIFEST` / segment recovery so fork-frontier visibility and safe shared-segment deletion remain restart-correct
   - Add `.meta` sidecar rebuild when missing or stale
   - Change API to callback-driven: `recover(on_snapshot, on_record) -> RecoveryStats`
 - [ ] **Engine changes** (`crates/engine/src/database/`):
@@ -182,6 +189,10 @@ Implementation note:
 - [ ] **Test matrix** (`engine/tests/checkpoint_recovery_tests.rs`):
   - WAL-only restart (regression guard)
   - Checkpoint-only restart
+  - Checkpoint-only restart with tombstones preserved
+  - Checkpoint-only restart with TTL preserved
+  - Restart preserves inherited-layer visibility/fork-frontier behavior
+  - Restart preserves safe shared-segment deletion behavior
   - Checkpoint + delta-WAL replay
   - Partial WAL tail truncation (regression guard)
   - `.meta` sidecar rebuild
@@ -192,11 +203,15 @@ Implementation note:
 
 ### Acceptance Criteria
 
-- [ ] All 9 checkpoint recovery test scenarios pass
+- [ ] All 13 checkpoint recovery test scenarios pass
 - [ ] Pre-DR-5 `.chk` fixtures remain consumable
 - [ ] `test_issue_1730` inverted (compact succeeds)
 - [ ] Codec mismatch rejected with clear error at open
 - [ ] Non-identity codec survives write→crash→reopen→read
+- [ ] Checkpoint/reopen preserves delete state
+- [ ] Checkpoint/reopen preserves TTL behavior
+- [ ] Restart preserves inherited-layer visibility across reopen
+- [ ] Restart preserves safe shared-segment deletion behavior
 - [ ] `/regression-check` passes
 
 ---
@@ -316,7 +331,7 @@ T3-E8 (cleanup + docs)
 
 - **E1 → E2:** halt/resume consumes `bg_error` field from E1
 - **E3 parallel with E1/E2:** independent code area (follower refresh vs WAL write path)
-- **E4 → E5:** snapshot install needed before recovery extension
+- **E4 → E5:** snapshot install and retention-complete payload fidelity needed before recovery extension
 - **E5 depends on E3:** ReplayObserver insertion point wired in E3
 - **E6 depends on T2-E5:** session shape must be fixed for shutdown integration
 - **E7 after E5:** codec validation moved into coordinator in E5
@@ -339,6 +354,7 @@ T3-E8 (cleanup + docs)
 - **T2 (runtime):** E6 (shutdown) depends on T2-E5 (RC-6 session shape fix)
 - **T2 (runtime):** E3 (follower refresh) needs RC Phase 2 `ReplayObserver` trait from T2-E2
 - **T2 (runtime):** E5 (recovery) coordinates with RC `open_runtime` step 3 sequence
+- **T4 (branch):** branch-aware storage retention depends on E4/E5 carrying tombstones and TTL faithfully through checkpoint/install/recovery
 - **T4 (branch):** BP-5 adds `Subsystem::lifecycle_contracts()` which does NOT block T3, but T3's subsystem freeze hooks must be forward-compatible
 - **T5 (product):** PCS-2 (ControlRegistry) consumes DR-9 config matrix — T5-E2 depends on T3-E7
 
