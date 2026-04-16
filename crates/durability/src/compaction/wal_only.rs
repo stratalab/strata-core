@@ -77,7 +77,12 @@ impl WalOnlyCompactor {
         let start_time = std::time::Instant::now();
         let mut info = CompactInfo::new(CompactMode::WALOnly);
 
-        // Get effective watermark from MANIFEST (flush watermark only; see #1730)
+        // Get effective watermark from MANIFEST — max of flush watermark
+        // and snapshot watermark. Both sources produce recovery-complete
+        // state at or below their respective txn id, so WAL segments
+        // covered by either are safe to delete. Snapshot coverage became
+        // trustworthy in T3-E5 when `RecoveryCoordinator::recover` started
+        // consuming snapshots; see `effective_watermark` for details.
         let (watermark, manifest_active) = {
             let manifest = self.manifest.lock();
             let m = manifest.manifest();
@@ -309,12 +314,29 @@ impl WalOnlyCompactor {
 
 /// Compute the effective watermark for WAL truncation.
 ///
-/// Returns the flush watermark from the MANIFEST, ignoring the snapshot
-/// watermark. Snapshot-aware recovery is not yet implemented (#1730), so
-/// WAL segments must only be deleted when their data is persisted in
-/// on-disk SST segments (tracked by `flushed_through_commit_id`).
+/// Returns the highest txn id whose data recovery can reconstruct without
+/// the WAL: either by replaying flushed SST segments (tracked via
+/// `flushed_through_commit_id`), by installing the latest snapshot
+/// (tracked via `snapshot_watermark`), or both. A WAL segment covered by
+/// this watermark is safe to delete because its records are reconstructible
+/// from one of those two sources during recovery.
+///
+/// T3-E5 restored snapshot coverage here. Before Epic 5, recovery was
+/// WAL-only — the snapshot was written but never loaded — so deleting WAL
+/// segments on snapshot coverage alone (`#1730`) caused data loss. Now
+/// that `RecoveryCoordinator::recover` consumes the snapshot via the
+/// engine's `snapshot_install` decoder, WAL retention can trust the
+/// composite coverage again.
 fn effective_watermark(manifest: &crate::format::Manifest) -> Option<u64> {
-    manifest.flushed_through_commit_id
+    match (
+        manifest.flushed_through_commit_id,
+        manifest.snapshot_watermark,
+    ) {
+        (Some(flushed), Some(snap)) => Some(flushed.max(snap)),
+        (Some(flushed), None) => Some(flushed),
+        (None, Some(snap)) => Some(snap),
+        (None, None) => None,
+    }
 }
 
 /// Generate segment file path
@@ -783,15 +805,23 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_truncation_ignores_snapshot_watermark() {
-        // Issue #1730: snapshot watermark must NOT drive WAL deletion because
-        // recovery is WAL-only and cannot load snapshots.
+    fn test_wal_truncation_accepts_snapshot_watermark_alone() {
+        // Inverted from the pre-T3-E5 `test_wal_truncation_ignores_snapshot_watermark`.
+        //
+        // Before T3-E5, recovery was WAL-only — snapshots were written but
+        // never consumed — so WAL deletion could not trust snapshot coverage
+        // (`#1730`). After T3-E5, `RecoveryCoordinator::recover` installs
+        // snapshots through the engine's `snapshot_install` decoder, which
+        // makes snapshot watermark a valid input to `effective_watermark`.
+        // WAL segments whose records are covered by the snapshot are now
+        // safe to delete even when no flush watermark has been recorded.
         let (_dir, wal_dir, manifest) = setup_test_env();
 
         create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
         create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
 
-        // Set only snapshot watermark (no flush watermark)
+        // Set only snapshot watermark (no flush watermark). Watermark=100
+        // covers every record written to segments 1 and 2.
         {
             let mut m = manifest.lock();
             m.set_snapshot_watermark(1, TxnId(100)).unwrap();
@@ -800,13 +830,17 @@ mod tests {
         }
 
         let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
-        let result = compactor.compact();
+        let info = compactor
+            .compact()
+            .expect("snapshot watermark alone must drive successful compaction after T3-E5");
 
-        // Must return NoSnapshot because snapshot watermark alone is not safe
-        assert!(matches!(result, Err(CompactionError::NoSnapshot)));
-        // WAL segments must NOT be deleted
-        assert!(segment_path(&wal_dir, 1).exists());
-        assert!(segment_path(&wal_dir, 2).exists());
+        // Both closed segments are covered by the snapshot watermark and
+        // must be removed; the active boundary is manifest.active=10 so
+        // nothing there to protect.
+        assert_eq!(info.wal_segments_removed, 2);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+        assert_eq!(info.snapshot_watermark, Some(100));
     }
 
     #[test]
