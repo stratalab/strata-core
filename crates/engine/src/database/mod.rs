@@ -461,9 +461,12 @@ pub struct Database {
 
     /// Exclusive lock file preventing concurrent process access to the same database.
     ///
-    /// Held for the lifetime of the Database. Dropped automatically when the
-    /// Database is dropped, releasing the lock. None for ephemeral databases.
-    _lock_file: Option<std::fs::File>,
+    /// Wrapped in a `Mutex<Option<File>>` so `shutdown()` can take the file
+    /// out and drop it (releasing the `flock`) with only `&self`, allowing
+    /// a fresh `Database::open` on the same path to succeed immediately
+    /// without waiting for `Drop`. `Drop` takes whatever remains and drops
+    /// it as a best-effort fallback. `None` for ephemeral databases.
+    lock_file: parking_lot::Mutex<Option<std::fs::File>>,
 
     /// WAL directory path (for follower refresh).
     wal_dir: PathBuf,

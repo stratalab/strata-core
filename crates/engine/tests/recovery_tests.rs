@@ -1907,16 +1907,18 @@ fn shutdown_is_ordered_and_deterministic() {
 
     db.shutdown()
         .expect("explicit shutdown must succeed on an idle database");
-    // Release all Arc<Database> refs so the on-disk file lock can be acquired
-    // by the reopen below.
-    drop(db);
 
+    // T3-E6 contract: fresh reopen on the same path must succeed
+    // immediately after `shutdown()` — WITHOUT dropping the old
+    // `Arc<Database>`. `shutdown()` releases both the `OPEN_DATABASES`
+    // slot and the on-disk `.lock` flock so a new open can acquire them.
     let db2 = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
-        .expect("reopen after shutdown must succeed");
+        .expect("reopen after shutdown must succeed while old Arc is still alive");
     let kv2 = KVStore::new(db2.clone());
     assert_eq!(
         kv2.get(&branch_id, "default", "ordered_key").unwrap(),
         Some(Value::String("ordered_value".into())),
         "data committed before shutdown() must be readable after reopen"
     );
+    drop(db);
 }

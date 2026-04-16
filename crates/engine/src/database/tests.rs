@@ -4427,7 +4427,12 @@ fn shutdown_timeout_returns_error_and_skips_freeze() {
 
 #[test]
 #[serial(open_databases)]
-fn shutdown_releases_registry_slot() {
+fn shutdown_releases_registry_slot_and_allows_fresh_reopen() {
+    // T3-E6 contract: a successful `shutdown()` must release BOTH the
+    // in-process `OPEN_DATABASES` slot AND the on-disk `.lock` flock so a
+    // fresh `Database::open` on the same path succeeds immediately — without
+    // waiting for `Drop` on the old `Arc<Database>`. Anything less means
+    // reopen is gated on arbitrary Arc-holder cleanup timing.
     OPEN_DATABASES.lock().clear();
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("registry_release");
@@ -4441,15 +4446,20 @@ fn shutdown_releases_registry_slot() {
 
     db.shutdown().unwrap();
 
-    // The entry must be removed even though we still hold the `Arc<Database>`
-    // (i.e. before Drop runs). This is the deterministic-release property.
+    // The in-process registry slot must be released before Drop runs.
     assert!(
         !OPEN_DATABASES.lock().contains_key(&canonical_key),
         "successful shutdown must release the registry slot without waiting for Drop"
     );
 
-    // Drop the remaining handle so the on-disk file lock releases before the
-    // `temp_dir` cleans up.
+    // The OS-level `.lock` file must also be released: a fresh open on the
+    // same path must succeed even though we still hold the old
+    // `Arc<Database>`. Before the file-lock-release fix this failed with
+    // "database is already in use by another process".
+    let db_reopen = Database::open(&db_path)
+        .expect("fresh Database::open must succeed after shutdown without waiting for Drop");
+    assert!(!Arc::ptr_eq(&db, &db_reopen));
+    drop(db_reopen);
     drop(db);
 }
 

@@ -598,11 +598,13 @@ impl Database {
     ///    `shutdown_complete` stays `false`, and the `Drop` fallback still
     ///    gets a chance to run. A retry is safe because every step is
     ///    idempotent.
-    /// 8. On success, release the `OPEN_DATABASES` registry slot so a fresh
-    ///    open on the same path succeeds immediately, without waiting for
-    ///    `Drop`. Only the primary singleton registers itself; followers
-    ///    intentionally skip this step so their shutdown does not evict a
-    ///    live primary sharing the same path.
+    /// 8. On success, release the `OPEN_DATABASES` registry slot **and**
+    ///    drop the exclusive `.lock` file so a fresh `Database::open` on
+    ///    the same path succeeds immediately, without waiting for `Drop`
+    ///    on the old `Arc<Database>`. Only the primary singleton
+    ///    registers itself; followers intentionally skip the registry
+    ///    step so their shutdown does not evict a live primary sharing
+    ///    the same path.
     ///
     /// Calling `shutdown*` twice is idempotent: the second call returns
     /// `Ok(())` once `shutdown_complete` is set.
@@ -671,7 +673,16 @@ impl Database {
 
         self.shutdown_complete.store(true, Ordering::Release);
         self.release_registry_slot();
+        self.release_file_lock();
         Ok(())
+    }
+
+    /// Release the exclusive `.lock` file so a concurrent `Database::open`
+    /// on the same path can acquire it. Dropping the `File` closes the fd,
+    /// which releases the OS-level `flock`. Ephemeral databases have no
+    /// file lock, and on retry `take()` returns `None` (idempotent).
+    fn release_file_lock(&self) {
+        drop(self.lock_file.lock().take());
     }
 
     /// Atomically persist the MANIFEST so it is durable before freeze hooks run.
