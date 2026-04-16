@@ -561,7 +561,7 @@ The old test asserted that checkpoint compact recovery must fail. It now asserts
 - Test: missing/stale `.meta` sidecar rebuild works.
 - Test: codec mismatch rejected before WAL bytes are read.
 - Test: non-identity codec write, crash, reopen, read works.
-- Test: pre-DR-5 `.chk` fixtures remain consumable.
+- Test: snapshot format version is enforced on load (v1 rejected, only the current retention-complete `SNAPSHOT_FORMAT_VERSION` is accepted). Strata is pre-release with no deployed databases, so the T3-E5 retention follow-up makes a clean break to v2 rather than maintaining a v1 deserializer. A `.chk` compatibility shim can be reintroduced if a supported release ever persists v2 checkpoints.
 - Test: vector double-recovery does not conflict with `VectorSubsystem::recover`.
 - Test: `test_issue_1730` is inverted to success.
 - Benchmark: WAL latency, YCSB, redb, open-time latency.
