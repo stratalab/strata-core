@@ -860,6 +860,16 @@ impl TransactionManager {
         self.visible_version.fetch_max(v, Ordering::AcqRel);
     }
 
+    /// Set the visible version exactly.
+    ///
+    /// Used when reopening a blocked follower: recovery restores the full WAL
+    /// state into storage, then the engine clamps visibility back below the
+    /// blocked record until an operator explicitly skips it.
+    pub fn set_visible_version(&self, version: CommitVersion) {
+        self.visible_version
+            .store(version.as_u64(), Ordering::Release);
+    }
+
     /// Advance the next_txn_id counter to at least `id + 1`.
     ///
     /// Used during multi-process refresh to ensure locally-allocated transaction

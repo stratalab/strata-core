@@ -44,6 +44,7 @@ impl VectorStore {
         opts: SearchOptions,
     ) -> VectorResult<Vec<VectorMatch>> {
         let start = std::time::Instant::now();
+        let _refresh_guard = self.db.refresh_query_guard();
 
         // k=0 returns empty
         if k == 0 {
@@ -211,6 +212,7 @@ impl VectorStore {
         as_of_ts: u64,
     ) -> VectorResult<Vec<VectorMatch>> {
         let start = std::time::Instant::now();
+        let _refresh_guard = self.db.refresh_query_guard();
 
         // k=0 returns empty
         if k == 0 {
@@ -391,6 +393,7 @@ impl VectorStore {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        let _refresh_guard = self.db.refresh_query_guard();
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -485,6 +488,7 @@ impl VectorStore {
         start_ts: u64,
         end_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        let _refresh_guard = self.db.refresh_query_guard();
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -603,6 +607,7 @@ impl VectorStore {
         start_ts: u64,
         end_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        let _refresh_guard = self.db.refresh_query_guard();
         if k == 0 {
             return Ok(Vec::new());
         }
@@ -688,6 +693,7 @@ impl VectorStore {
         k: usize,
         as_of_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
+        let _refresh_guard = self.db.refresh_query_guard();
         if k == 0 {
             return Ok(Vec::new());
         }

@@ -21,11 +21,12 @@ const MANIFEST_MAGIC: &[u8; 4] = b"SMNF";
 /// v2 was introduced when `EntityRef::{Kv,Event,Json,Vector}` gained a
 /// `space` field (Phase 0 of the space-correctness fix). v1 manifests
 /// stored space-blind `EntityRef` values that would silently collapse
-/// non-default-space identities; they are rejected by the version
-/// check in `load_manifest`. The recovery path
-/// (`crates/engine/src/search/recovery.rs`) catches the resulting
-/// error and rebuilds the index from KV with space-aware refs.
-const MANIFEST_VERSION: u32 = 2;
+/// non-default-space identities.
+///
+/// v3 adds per-document content fingerprints so fast-path reconcile can
+/// detect graph updates without rewriting every graph document on every
+/// startup. This also forces a one-time rebuild for pre-graph-hook caches.
+const MANIFEST_VERSION: u32 = 3;
 
 // ============================================================================
 // Manifest Data (serializable)
@@ -54,6 +55,9 @@ pub(crate) struct ManifestData {
     /// Enables O(terms_in_doc) removal instead of O(vocabulary).
     #[serde(default)]
     pub doc_terms: Vec<Option<Vec<String>>>,
+    /// Per-document content fingerprints used by fast-path reconcile.
+    #[serde(default)]
+    pub doc_content_hashes: Vec<Option<[u8; 32]>>,
 }
 
 /// Manifest entry for a single sealed segment.
@@ -179,6 +183,7 @@ mod tests {
                 Some(vec!["key1".to_string(), "value1".to_string()]),
                 Some(vec!["key2".to_string()]),
             ],
+            doc_content_hashes: vec![Some([1u8; 32]), Some([2u8; 32])],
         }
     }
 
@@ -205,6 +210,10 @@ mod tests {
             loaded.doc_terms[0],
             Some(vec!["key1".to_string(), "value1".to_string()])
         );
+        assert_eq!(
+            loaded.doc_content_hashes,
+            vec![Some([1u8; 32]), Some([2u8; 32])]
+        );
     }
 
     #[test]
@@ -221,6 +230,7 @@ mod tests {
             doc_id_map: vec![],
             doc_lengths: vec![],
             doc_terms: vec![],
+            doc_content_hashes: vec![],
         };
         write_manifest(&path, &data).unwrap();
 

@@ -62,7 +62,8 @@ impl GraphStore {
     /// This returns the shared `GraphBackendState` stored in the Database.
     /// All GraphStore instances for the same Database share this state.
     ///
-    /// Also ensures runtime wiring (commit/replay observers) is registered.
+    /// Also ensures runtime wiring (commit/abort observers and follower refresh
+    /// hooks) is registered.
     pub fn state(&self) -> StrataResult<Arc<GraphBackendState>> {
         let state = self
             .db
@@ -200,6 +201,7 @@ impl strata_engine::search::Searchable for GraphStore {
         use strata_engine::search::{EntityRef, InvertedIndex, SearchHit, SearchStats};
 
         let start = Instant::now();
+        let _refresh_guard = self.db.refresh_query_guard();
         let index = self.db.extension::<InvertedIndex>()?;
 
         if !index.is_enabled() || index.total_docs() == 0 {

@@ -17,9 +17,10 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
-use strata_core::id::TxnId;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::Key;
 use strata_core::value::Value;
 use strata_core::StrataResult;
@@ -64,13 +65,29 @@ impl std::error::Error for RefreshHookError {}
 #[non_exhaustive]
 pub enum BlockReason {
     /// WAL record could not be decoded (corrupt or incompatible format).
-    Decode { message: String },
+    Decode {
+        /// Human-readable decode failure detail.
+        message: String,
+    },
     /// Codec mismatch between WAL record and database.
-    Codec { expected: String, actual: String },
+    Codec {
+        /// Expected codec identifier.
+        expected: String,
+        /// Actual codec identifier observed while decoding.
+        actual: String,
+    },
     /// Storage layer rejected the mutation.
-    StorageApply { message: String },
+    StorageApply {
+        /// Human-readable storage failure detail.
+        message: String,
+    },
     /// A secondary index hook (vector, search, etc.) failed.
-    SecondaryIndex { hook_name: String, message: String },
+    SecondaryIndex {
+        /// Name of the failed refresh hook.
+        hook_name: String,
+        /// Human-readable hook failure detail.
+        message: String,
+    },
 }
 
 impl fmt::Display for BlockReason {
@@ -154,9 +171,15 @@ impl RefreshOutcome {
     /// Returns the highest contiguously applied transaction ID.
     pub fn applied_through(&self) -> TxnId {
         match self {
-            RefreshOutcome::CaughtUp { applied_through, .. } => *applied_through,
-            RefreshOutcome::Stuck { applied_through, .. } => *applied_through,
-            RefreshOutcome::NoProgress { applied_through, .. } => *applied_through,
+            RefreshOutcome::CaughtUp {
+                applied_through, ..
+            } => *applied_through,
+            RefreshOutcome::Stuck {
+                applied_through, ..
+            } => *applied_through,
+            RefreshOutcome::NoProgress {
+                applied_through, ..
+            } => *applied_through,
         }
     }
 
@@ -214,11 +237,18 @@ impl fmt::Display for RefreshOutcome {
 pub enum UnblockError {
     /// The provided transaction ID doesn't match the blocked transaction.
     Mismatch {
+        /// Transaction ID currently blocking refresh.
         expected: TxnId,
+        /// Transaction ID supplied by the operator.
         provided: TxnId,
     },
     /// The follower is not currently blocked.
     NotBlocked,
+    /// The current blocked record cannot be skipped safely.
+    NotSkippable {
+        /// Transaction ID that remains non-skippable.
+        txn_id: TxnId,
+    },
     /// This database is not a follower.
     NotFollower,
 }
@@ -234,6 +264,13 @@ impl fmt::Display for UnblockError {
                 )
             }
             UnblockError::NotBlocked => write!(f, "follower is not blocked"),
+            UnblockError::NotSkippable { txn_id } => {
+                write!(
+                    f,
+                    "blocked txn {} cannot be skipped safely; manual repair is required",
+                    txn_id
+                )
+            }
             UnblockError::NotFollower => write!(f, "this database is not a follower"),
         }
     }
@@ -246,7 +283,10 @@ impl std::error::Error for UnblockError {}
 #[non_exhaustive]
 pub enum AdvanceError {
     /// Cannot advance: follower is blocked.
-    Blocked { blocked_at: TxnId },
+    Blocked {
+        /// Transaction currently blocking contiguous advancement.
+        blocked_at: TxnId,
+    },
     /// Cannot advance: not a follower database.
     NotFollower,
 }
@@ -324,12 +364,82 @@ pub(crate) struct ContiguousWatermark {
     /// Highest contiguously applied transaction ID.
     applied: AtomicU64,
     /// If set, the transaction that is blocking progress.
-    blocked: parking_lot::RwLock<Option<BlockedTxn>>,
+    blocked: parking_lot::RwLock<Option<BlockedTxnState>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct BlockedTxnState {
+    pub blocked: BlockedTxn,
+    pub visibility_version: Option<CommitVersion>,
+    pub skip_allowed: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct PersistedFollowerState {
+    pub received_watermark: TxnId,
+    pub applied_watermark: TxnId,
+    pub visible_version: CommitVersion,
+    pub blocked: BlockedTxnState,
+}
+
+pub(crate) const FOLLOWER_STATE_FILE: &str = "follower_state.json";
+
+pub(crate) fn follower_state_path(data_dir: &Path) -> Option<PathBuf> {
+    if data_dir.as_os_str().is_empty() {
+        None
+    } else {
+        Some(data_dir.join(FOLLOWER_STATE_FILE))
+    }
+}
+
+pub(crate) fn load_persisted_follower_state(
+    data_dir: &Path,
+) -> std::io::Result<Option<PersistedFollowerState>> {
+    let Some(path) = follower_state_path(data_dir) else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+    let bytes = std::fs::read(path)?;
+    serde_json::from_slice(&bytes)
+        .map(Some)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+pub(crate) fn persist_follower_state(
+    data_dir: &Path,
+    state: &PersistedFollowerState,
+) -> std::io::Result<()> {
+    let Some(path) = follower_state_path(data_dir) else {
+        return Ok(());
+    };
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(parent)?;
+    let tmp = path.with_extension("json.tmp");
+    let bytes = serde_json::to_vec_pretty(state)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
+}
+
+pub(crate) fn clear_persisted_follower_state(data_dir: &Path) -> std::io::Result<()> {
+    let Some(path) = follower_state_path(data_dir) else {
+        return Ok(());
+    };
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
 }
 
 impl ContiguousWatermark {
     /// Create a new watermark initialized to the given value.
-    pub fn new(initial: TxnId) -> Self {
+    pub(crate) fn new(initial: TxnId) -> Self {
         Self {
             received: AtomicU64::new(initial.as_u64()),
             applied: AtomicU64::new(initial.as_u64()),
@@ -337,64 +447,83 @@ impl ContiguousWatermark {
         }
     }
 
+    /// Create watermark state from explicit values (used when restoring a blocked follower).
+    pub(crate) fn from_state(
+        received: TxnId,
+        applied: TxnId,
+        blocked: Option<BlockedTxnState>,
+    ) -> Self {
+        Self {
+            received: AtomicU64::new(received.as_u64()),
+            applied: AtomicU64::new(applied.as_u64()),
+            blocked: parking_lot::RwLock::new(blocked),
+        }
+    }
+
     /// Get the received watermark.
-    pub fn received(&self) -> TxnId {
+    pub(crate) fn received(&self) -> TxnId {
         TxnId(self.received.load(Ordering::SeqCst))
     }
 
     /// Get the applied watermark.
-    pub fn applied(&self) -> TxnId {
+    pub(crate) fn applied(&self) -> TxnId {
         TxnId(self.applied.load(Ordering::SeqCst))
     }
 
     /// Get the blocked transaction if any.
-    pub fn blocked(&self) -> Option<BlockedTxn> {
+    pub(crate) fn blocked(&self) -> Option<BlockedTxn> {
+        self.blocked
+            .read()
+            .as_ref()
+            .map(|state| state.blocked.clone())
+    }
+
+    /// Snapshot the full blocked state for persistence.
+    pub(crate) fn blocked_state(&self) -> Option<BlockedTxnState> {
         self.blocked.read().clone()
     }
 
-    /// Check if currently blocked.
-    pub fn is_blocked(&self) -> bool {
-        self.blocked.read().is_some()
-    }
-
     /// Update the received watermark (telemetry only, does not affect visibility).
-    pub fn set_received(&self, txn_id: TxnId) {
+    pub(crate) fn set_received(&self, txn_id: TxnId) {
         self.received.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
     }
 
     /// Advance the applied watermark after successful processing.
     ///
     /// This should only be called after storage apply AND all hooks succeed.
-    pub fn advance_applied(&self, txn_id: TxnId) {
+    pub(crate) fn try_advance(&self, txn_id: TxnId) -> Result<(), AdvanceError> {
+        if let Some(blocked) = self.blocked.read().as_ref() {
+            return Err(AdvanceError::Blocked {
+                blocked_at: blocked.blocked.txn_id,
+            });
+        }
         self.applied.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
+        Ok(())
     }
 
     /// Mark the watermark as blocked at a specific transaction.
-    pub fn set_blocked(&self, blocked: BlockedTxn) {
+    pub(crate) fn block_at(&self, blocked: BlockedTxnState) {
         *self.blocked.write() = Some(blocked);
-    }
-
-    /// Clear the blocked state (after admin skip).
-    pub fn clear_blocked(&self) {
-        *self.blocked.write() = None;
     }
 
     /// Admin skip: advance past the blocked transaction.
     ///
     /// Returns an error if the provided txn_id doesn't match the blocked transaction.
-    pub fn admin_skip(&self, txn_id: TxnId) -> Result<(), UnblockError> {
+    pub(crate) fn unblock_exact(&self, txn_id: TxnId) -> Result<BlockedTxnState, UnblockError> {
         let mut blocked = self.blocked.write();
         match &*blocked {
-            Some(b) if b.txn_id == txn_id => {
-                // Advance applied watermark past the skipped transaction
-                self.applied.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
-                *blocked = None;
-                Ok(())
-            }
-            Some(b) => Err(UnblockError::Mismatch {
-                expected: b.txn_id,
+            Some(state) if state.blocked.txn_id != txn_id => Err(UnblockError::Mismatch {
+                expected: state.blocked.txn_id,
                 provided: txn_id,
             }),
+            Some(state) if !state.skip_allowed => Err(UnblockError::NotSkippable { txn_id }),
+            Some(state) => {
+                let state = state.clone();
+                self.received.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
+                self.applied.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
+                *blocked = None;
+                Ok(state)
+            }
             None => Err(UnblockError::NotBlocked),
         }
     }
@@ -410,30 +539,20 @@ impl Default for ContiguousWatermark {
 ///
 /// Ensures only one refresh can be in progress at a time per follower database.
 pub(crate) struct RefreshGate {
+    lock: parking_lot::Mutex<()>,
     in_progress: AtomicBool,
 }
 
 impl RefreshGate {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
+            lock: parking_lot::Mutex::new(()),
             in_progress: AtomicBool::new(false),
         }
     }
 
-    /// Try to acquire the gate. Returns `true` if acquired, `false` if already held.
-    pub fn try_acquire(&self) -> bool {
-        self.in_progress
-            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-            .is_ok()
-    }
-
-    /// Release the gate.
-    pub fn release(&self) {
-        self.in_progress.store(false, Ordering::SeqCst);
-    }
-
     /// Check if refresh is in progress.
-    pub fn is_in_progress(&self) -> bool {
+    pub(crate) fn is_in_progress(&self) -> bool {
         self.in_progress.load(Ordering::SeqCst)
     }
 }
@@ -447,22 +566,24 @@ impl Default for RefreshGate {
 /// RAII guard for the refresh gate.
 pub(crate) struct RefreshGuard<'a> {
     gate: &'a RefreshGate,
+    _guard: parking_lot::MutexGuard<'a, ()>,
 }
 
 impl<'a> RefreshGuard<'a> {
-    /// Try to acquire the gate.
-    pub fn try_new(gate: &'a RefreshGate) -> Option<Self> {
-        if gate.try_acquire() {
-            Some(Self { gate })
-        } else {
-            None
+    /// Acquire the gate, blocking until the active refresh completes.
+    pub(crate) fn new(gate: &'a RefreshGate) -> Self {
+        let guard = gate.lock.lock();
+        gate.in_progress.store(true, Ordering::SeqCst);
+        Self {
+            gate,
+            _guard: guard,
         }
     }
 }
 
 impl Drop for RefreshGuard<'_> {
     fn drop(&mut self) {
-        self.gate.release();
+        self.gate.in_progress.store(false, Ordering::SeqCst);
     }
 }
 
@@ -470,19 +591,39 @@ impl Drop for RefreshGuard<'_> {
 // Refresh Hook Trait
 // =============================================================================
 
+/// Pending refresh work prepared by a [`RefreshHook`].
+///
+/// Hooks validate and stage derived-state updates before the contiguous
+/// watermark advances. The engine publishes the prepared updates only after it
+/// has exclusive access to the follower's query/publish barrier, preventing
+/// search/vector/graph readers from observing pre-visibility state.
+pub trait PreparedRefresh: Send {
+    /// Publish the staged derived-state changes.
+    fn publish(self: Box<Self>);
+}
+
+/// No-op prepared refresh for hooks with nothing to publish.
+pub struct NoopPreparedRefresh;
+
+impl PreparedRefresh for NoopPreparedRefresh {
+    fn publish(self: Box<Self>) {}
+}
+
 /// Trait for secondary index backends that participate in follower refresh.
 ///
 /// Implementations handle incremental updates from WAL replay during
 /// `Database::refresh()`. The engine calls hooks in two phases:
 ///
 /// 1. `pre_delete_read`: Before storage mutations, read state needed for deletes
-/// 2. `apply_refresh`: After storage mutations, apply puts and deletes
+/// 2. `apply_refresh`: After storage mutations, validate and stage puts/deletes
 ///
 /// ## Fallibility
 ///
-/// `apply_refresh` returns `Result<(), RefreshHookError>`. If any hook fails,
-/// refresh blocks at that transaction and returns `RefreshOutcome::Stuck`.
-/// The contiguous watermark does NOT advance past the failed transaction.
+/// `apply_refresh` returns staged work as `Result<Box<dyn PreparedRefresh>,
+/// RefreshHookError>`. If any hook fails, refresh blocks at that transaction
+/// and returns `RefreshOutcome::Stuck`. The contiguous watermark does NOT
+/// advance past the failed transaction, and no staged derived-state updates are
+/// published.
 ///
 /// Operators can inspect `FollowerStatus::blocked_at` to diagnose the issue
 /// and use `Database::admin_skip_blocked_record()` to skip past the problematic
@@ -498,17 +639,18 @@ pub trait RefreshHook: Send + Sync + 'static {
     /// the old values at this point.
     fn pre_delete_read(&self, db: &super::Database, deletes: &[Key]) -> Vec<(Key, Vec<u8>)>;
 
-    /// Apply puts and deletes from a single WAL record.
+    /// Validate and stage puts and deletes from a single WAL record.
     ///
-    /// Called AFTER storage mutations are applied. Returns `Ok(())` on success,
-    /// or `Err(RefreshHookError)` if secondary index maintenance failed.
+    /// Called AFTER storage mutations are applied. Returns staged publication
+    /// work on success, or `Err(RefreshHookError)` if secondary index
+    /// maintenance failed.
     ///
     /// On error, the contiguous watermark does NOT advance past this transaction.
     fn apply_refresh(
         &self,
         puts: &[(Key, Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
-    ) -> Result<(), RefreshHookError>;
+    ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError>;
 
     /// Freeze in-memory state to disk for fast recovery on next open.
     fn freeze_to_disk(&self, db: &super::Database) -> StrataResult<()>;

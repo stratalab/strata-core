@@ -613,6 +613,7 @@ impl crate::search::Searchable for KVStore {
         use std::time::Instant;
 
         let start = Instant::now();
+        let _refresh_guard = self.db.refresh_query_guard();
         let index = self.db.extension::<InvertedIndex>()?;
 
         // If the index is disabled or empty, return early

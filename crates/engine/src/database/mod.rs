@@ -484,6 +484,14 @@ pub struct Database {
     /// Ensures only one refresh can be in progress at a time.
     refresh_gate: refresh::RefreshGate,
 
+    /// Synchronizes follower refresh publication with search/vector/graph queries.
+    ///
+    /// Queries that read derived state take a shared guard. Follower refresh
+    /// takes an exclusive guard while publishing staged hook updates and
+    /// advancing visibility, preventing readers from observing either side of
+    /// the handoff in isolation.
+    refresh_publish_barrier: parking_lot::RwLock<()>,
+
     /// Whether this database is a read-only follower (no lock, no WAL writer).
     follower: bool,
 
@@ -611,6 +619,15 @@ impl Database {
     /// primitives (KVStore, EventLog, etc.) which go through transactions.
     pub fn storage(&self) -> &Arc<SegmentedStore> {
         &self.storage
+    }
+
+    #[doc(hidden)]
+    pub fn refresh_query_guard(&self) -> parking_lot::RwLockReadGuard<'_, ()> {
+        self.refresh_publish_barrier.read()
+    }
+
+    pub(crate) fn refresh_publish_guard(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.refresh_publish_barrier.write()
     }
 
     /// Clean up storage-layer segments for a deleted branch (#1702).

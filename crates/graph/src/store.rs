@@ -9,7 +9,8 @@
 //! Graph index operations (BM25 search indexing) cannot participate in OCC
 //! because the inverted index is an in-memory structure that isn't rollback-safe.
 //! Operations are queued during transactions and applied after successful commit
-//! by `GraphCommitObserver`.
+//! by `GraphCommitObserver`. Followers apply the same graph-specific search
+//! maintenance through `GraphRefreshHook` during `Database::refresh()`.
 //!
 //! ## Thread Safety
 //!
@@ -151,19 +152,20 @@ fn apply_staged_graph_op(graph_store: &crate::GraphStore, op: StagedGraphOp) {
 }
 
 // =============================================================================
-// Commit and Replay Observers
+// Commit Observers and Refresh Hooks
 // =============================================================================
 
 use std::sync::Weak;
 use strata_engine::database::observers::{
     AbortInfo, AbortObserver, CommitInfo, CommitObserver, ObserverError,
 };
-use strata_engine::Database;
+use strata_engine::{Database, RefreshHook, RefreshHookError};
 
 /// Ensure runtime hooks are wired for this database instance.
 ///
-/// This is called from `GraphSubsystem::initialize()` to register commit and
-/// replay observers. Uses atomic flag to ensure idempotent registration.
+/// This is called from `GraphSubsystem::initialize()` to register commit/abort
+/// observers and the follower refresh hook. Uses atomic flag to ensure
+/// idempotent registration.
 pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>) {
     use std::sync::atomic::Ordering;
 
@@ -181,10 +183,12 @@ pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>)
     });
     db.abort_observers().register(abort_observer);
 
-    let replay_observer = Arc::new(GraphReplayObserver {
+    let refresh_hook = Arc::new(GraphRefreshHook {
         db: Arc::downgrade(db),
     });
-    db.replay_observers().register(replay_observer);
+    if let Ok(hooks) = db.extension::<strata_engine::RefreshHooks>() {
+        hooks.register(refresh_hook);
+    }
 }
 
 /// Observer that applies pending graph index operations after commit.
@@ -252,106 +256,163 @@ impl AbortObserver for GraphAbortObserver {
     }
 }
 
-/// Observer that updates graph search index during follower replay.
+fn parse_graph_node_key(key: &strata_core::types::Key) -> Result<Option<(String, String)>, String> {
+    use strata_core::types::TypeTag;
+
+    if key.type_tag != TypeTag::Graph {
+        return Ok(None);
+    }
+
+    let user_key = key
+        .user_key_string()
+        .ok_or_else(|| "graph key is not valid UTF-8".to_string())?;
+    let parts: Vec<&str> = user_key.splitn(3, '/').collect();
+    if parts.len() != 3 || parts[1] != "n" {
+        return Ok(None);
+    }
+
+    Ok(Some((parts[0].to_string(), parts[2].to_string())))
+}
+
+fn decode_graph_node_data(
+    value: &strata_core::value::Value,
+) -> Result<crate::types::NodeData, String> {
+    use strata_core::value::Value;
+
+    let Value::String(json) = value else {
+        return Err("graph node payload stored as non-string value".to_string());
+    };
+
+    serde_json::from_str(json).map_err(|e| format!("failed to decode graph node payload: {e}"))
+}
+
+/// Refresh hook that updates graph search index during follower replay.
 ///
-/// When a follower replays WAL records, it needs to update the BM25 index
-/// for any graph nodes that were added or removed.
-struct GraphReplayObserver {
+/// Graph node indexing semantics live in `GraphStore::index_node_for_search`.
+/// Followers must use the same path instead of the generic search hook so
+/// replay stays consistent with primary commit-time indexing.
+struct GraphRefreshHook {
     db: Weak<Database>,
 }
 
-use strata_engine::database::observers::{ReplayInfo, ReplayObserver};
+enum GraphRefreshOp {
+    Index {
+        branch_id: strata_core::types::BranchId,
+        space: String,
+        graph: String,
+        node_id: String,
+        data: crate::types::NodeData,
+    },
+    Remove {
+        branch_id: strata_core::types::BranchId,
+        space: String,
+        graph: String,
+        node_id: String,
+    },
+}
 
-impl ReplayObserver for GraphReplayObserver {
+struct PendingGraphRefresh {
+    graph_store: crate::GraphStore,
+    ops: Vec<GraphRefreshOp>,
+}
+
+impl strata_engine::PreparedRefresh for PendingGraphRefresh {
+    fn publish(self: Box<Self>) {
+        for op in self.ops {
+            match op {
+                GraphRefreshOp::Index {
+                    branch_id,
+                    space,
+                    graph,
+                    node_id,
+                    data,
+                } => {
+                    self.graph_store
+                        .index_node_for_search(branch_id, &space, &graph, &node_id, &data);
+                }
+                GraphRefreshOp::Remove {
+                    branch_id,
+                    space,
+                    graph,
+                    node_id,
+                } => {
+                    self.graph_store
+                        .deindex_node_for_search(branch_id, &space, &graph, &node_id);
+                }
+            }
+        }
+    }
+}
+
+impl RefreshHook for GraphRefreshHook {
     fn name(&self) -> &'static str {
         "graph"
     }
 
-    fn on_replay(&self, info: &ReplayInfo) -> Result<(), ObserverError> {
+    fn pre_delete_read(
+        &self,
+        _db: &Database,
+        deletes: &[strata_core::types::Key],
+    ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
+        use strata_core::types::TypeTag;
+
+        deletes
+            .iter()
+            .filter(|key| key.type_tag == TypeTag::Graph)
+            .cloned()
+            .map(|key| (key, Vec::new()))
+            .collect()
+    }
+
+    fn apply_refresh(
+        &self,
+        puts: &[(strata_core::types::Key, strata_core::value::Value)],
+        pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+    ) -> Result<Box<dyn strata_engine::PreparedRefresh>, RefreshHookError> {
         let Some(db) = self.db.upgrade() else {
-            return Ok(());
+            return Ok(Box::new(strata_engine::NoopPreparedRefresh));
         };
+        let graph_store = crate::GraphStore::new(db);
+        let mut ops = Vec::with_capacity(puts.len() + pre_read_deletes.len());
 
-        // Apply graph index updates for replayed graph node changes.
-        apply_replayed_graph_changes(&db, &info.puts, &info.deleted_values);
+        for (key, value) in puts {
+            let Some((graph, node_id)) =
+                parse_graph_node_key(key).map_err(|e| RefreshHookError::new("graph", e))?
+            else {
+                continue;
+            };
 
+            let data =
+                decode_graph_node_data(value).map_err(|e| RefreshHookError::new("graph", e))?;
+            ops.push(GraphRefreshOp::Index {
+                branch_id: key.namespace.branch_id,
+                space: key.namespace.space.to_string(),
+                graph,
+                node_id,
+                data,
+            });
+        }
+
+        for (key, _) in pre_read_deletes {
+            let Some((graph, node_id)) =
+                parse_graph_node_key(key).map_err(|e| RefreshHookError::new("graph", e))?
+            else {
+                continue;
+            };
+
+            ops.push(GraphRefreshOp::Remove {
+                branch_id: key.namespace.branch_id,
+                space: key.namespace.space.to_string(),
+                graph,
+                node_id,
+            });
+        }
+
+        Ok(Box::new(PendingGraphRefresh { graph_store, ops }))
+    }
+
+    fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
         Ok(())
-    }
-}
-
-/// Apply graph index updates from replayed WAL records.
-///
-/// Scans the puts and deletes for graph node keys and updates the BM25 index.
-/// Graph nodes are identified by their key format: `{graph}/n/{node_id}`.
-/// Nodes can be in ANY space (user-defined or system `_graph_`).
-fn apply_replayed_graph_changes(
-    db: &Arc<Database>,
-    puts: &[(strata_core::types::Key, strata_core::value::Value)],
-    deleted_values: &[(strata_core::types::Key, strata_core::value::Value)],
-) {
-    use strata_core::types::TypeTag;
-    use strata_core::value::Value;
-
-    let graph_store = crate::GraphStore::new(db.clone());
-
-    // Index new/updated graph nodes
-    for (key, value) in puts {
-        // Graph nodes are stored with TypeTag::Graph with key format: "{graph}/n/{node_id}"
-        if key.type_tag != TypeTag::Graph {
-            continue;
-        }
-
-        let user_key = match key.user_key_string() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        // Parse key format: "{graph}/n/{node_id}"
-        // Only process keys that match the graph node pattern.
-        let parts: Vec<&str> = user_key.splitn(3, '/').collect();
-        if parts.len() != 3 || parts[1] != "n" {
-            continue;
-        }
-        let graph = parts[0];
-        let node_id = parts[2];
-
-        // Deserialize node data from JSON string
-        let json_str = match value {
-            Value::String(s) => s,
-            _ => continue,
-        };
-        let data: crate::types::NodeData = match serde_json::from_str(json_str) {
-            Ok(d) => d,
-            Err(_) => continue,
-        };
-
-        let branch_id = key.namespace.branch_id;
-        let space = key.namespace.space.as_str();
-        graph_store.index_node_for_search(branch_id, space, graph, node_id, &data);
-    }
-
-    // Deindex deleted graph nodes
-    for (key, _value) in deleted_values {
-        if key.type_tag != TypeTag::Graph {
-            continue;
-        }
-
-        let user_key = match key.user_key_string() {
-            Some(s) => s,
-            None => continue,
-        };
-
-        // Parse key format: "{graph}/n/{node_id}"
-        let parts: Vec<&str> = user_key.splitn(3, '/').collect();
-        if parts.len() != 3 || parts[1] != "n" {
-            continue;
-        }
-        let graph = parts[0];
-        let node_id = parts[2];
-
-        let branch_id = key.namespace.branch_id;
-        let space = key.namespace.space.as_str();
-        graph_store.deindex_node_for_search(branch_id, space, graph, node_id);
     }
 }
 
@@ -359,9 +420,89 @@ fn apply_replayed_graph_changes(
 mod tests {
     use super::*;
     use crate::ext::GraphStoreExt;
+    use crate::types::NodeData;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use strata_core::types::BranchId;
     use strata_engine::database::OpenSpec;
-    use strata_engine::SearchSubsystem;
+    use strata_engine::search::EntityRef;
+    use strata_engine::search::Searchable;
+    use strata_engine::RefreshOutcome;
+    use strata_engine::{
+        Database, NoopPreparedRefresh, PreparedRefresh, RefreshHook, RefreshHookError,
+        RefreshHooks, SearchRequest, SearchSubsystem, Subsystem,
+    };
+
+    #[derive(Clone)]
+    struct FailOnceRefreshSubsystem {
+        fail_once: Arc<AtomicBool>,
+    }
+
+    impl FailOnceRefreshSubsystem {
+        fn new(fail_once: Arc<AtomicBool>) -> Self {
+            Self { fail_once }
+        }
+    }
+
+    struct FailOnceRefreshHook {
+        fail_once: Arc<AtomicBool>,
+    }
+
+    impl RefreshHook for FailOnceRefreshHook {
+        fn name(&self) -> &'static str {
+            "graph-test-fail-once"
+        }
+
+        fn pre_delete_read(
+            &self,
+            _db: &Database,
+            _deletes: &[strata_core::types::Key],
+        ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
+            Vec::new()
+        }
+
+        fn apply_refresh(
+            &self,
+            puts: &[(strata_core::types::Key, strata_core::value::Value)],
+            _pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+        ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
+            if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
+                return Err(RefreshHookError::new(
+                    "graph-test-fail-once",
+                    "injected refresh hook failure",
+                ));
+            }
+            Ok(Box::new(NoopPreparedRefresh))
+        }
+
+        fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+            Ok(())
+        }
+    }
+
+    impl Subsystem for FailOnceRefreshSubsystem {
+        fn name(&self) -> &'static str {
+            "graph-test-fail-once"
+        }
+
+        fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+            Ok(())
+        }
+
+        fn initialize(&self, db: &Arc<Database>) -> strata_core::StrataResult<()> {
+            let hooks = db.extension::<RefreshHooks>()?;
+            hooks.register(Arc::new(FailOnceRefreshHook {
+                fail_once: self.fail_once.clone(),
+            }));
+            Ok(())
+        }
+    }
+
+    fn unique_test_dir(prefix: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        path
+    }
 
     #[test]
     fn test_manual_abort_clears_pending_graph_ops() {
@@ -398,5 +539,436 @@ mod tests {
             !state.pending_ops.contains_key(&txn_id),
             "abort should clear staged graph work via engine observers"
         );
+    }
+
+    #[test]
+    fn graph_refresh_indexes_follower_nodes_by_graph_semantics() {
+        let path = unique_test_dir("strata-graph-follower-refresh");
+
+        {
+            let primary = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(SearchSubsystem)
+                    .with_subsystem(crate::GraphSubsystem),
+            )
+            .unwrap();
+            let follower = Database::open_runtime(
+                OpenSpec::follower(&path)
+                    .with_subsystem(SearchSubsystem)
+                    .with_subsystem(crate::GraphSubsystem),
+            )
+            .unwrap();
+
+            let branch_id = BranchId::new();
+            let space = "tenant_a";
+            let graph = "papers";
+            let node_id = "quasar-node";
+
+            let primary_graph = crate::GraphStore::new(primary.clone());
+            let follower_graph = crate::GraphStore::new(follower.clone());
+
+            primary_graph
+                .create_graph(branch_id, space, graph, None)
+                .unwrap();
+            primary_graph
+                .add_node(
+                    branch_id,
+                    space,
+                    graph,
+                    node_id,
+                    NodeData {
+                        entity_ref: None,
+                        object_type: Some("paper".to_string()),
+                        properties: Some(serde_json::json!({
+                            "title": "baseline indexing"
+                        })),
+                    },
+                )
+                .unwrap();
+            primary.flush().unwrap();
+
+            let req = SearchRequest::new(branch_id, "quasar").with_space(space);
+            assert!(
+                follower_graph.search(&req).unwrap().hits.is_empty(),
+                "follower search should remain stale before refresh"
+            );
+
+            let create_outcome = follower.refresh();
+            assert!(
+                matches!(
+                    create_outcome,
+                    RefreshOutcome::CaughtUp { applied, .. } if applied >= 1
+                ),
+                "expected follower refresh to apply graph records, got {create_outcome:?}"
+            );
+
+            let after_create = follower_graph.search(&req).unwrap();
+            assert_eq!(after_create.hits.len(), 1);
+            assert!(matches!(
+                &after_create.hits[0].doc_ref,
+                EntityRef::Graph { key, .. } if key == "papers/n/quasar-node"
+            ));
+
+            primary_graph
+                .remove_node(branch_id, space, graph, node_id)
+                .unwrap();
+            primary.flush().unwrap();
+
+            let delete_outcome = follower.refresh();
+            assert!(
+                matches!(
+                    delete_outcome,
+                    RefreshOutcome::CaughtUp { applied, .. } if applied >= 1
+                ),
+                "expected follower refresh to deindex deleted graph node, got {delete_outcome:?}"
+            );
+            assert!(
+                follower_graph.search(&req).unwrap().hits.is_empty(),
+                "deleted graph node should be removed from follower search index"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn graph_refresh_does_not_leak_before_visibility_advance() {
+        let path = unique_test_dir("strata-graph-follower-blocked");
+        let branch_id = BranchId::new();
+        let space = "tenant_a";
+        let fail_once = Arc::new(AtomicBool::new(false));
+
+        let primary = Database::open_runtime(
+            OpenSpec::primary(&path)
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+        let follower = Database::open_runtime(
+            OpenSpec::follower(&path)
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+
+        let primary_graph = crate::GraphStore::new(primary.clone());
+        let follower_graph = crate::GraphStore::new(follower.clone());
+        primary_graph
+            .create_graph(branch_id, space, "papers", None)
+            .unwrap();
+        primary.flush().unwrap();
+
+        fail_once.store(true, Ordering::SeqCst);
+        primary_graph
+            .add_node(
+                branch_id,
+                space,
+                "papers",
+                "quasar-node",
+                NodeData {
+                    entity_ref: None,
+                    object_type: Some("paper".to_string()),
+                    properties: Some(serde_json::json!({
+                        "title": "blocked graph refresh"
+                    })),
+                },
+            )
+            .unwrap();
+        primary.flush().unwrap();
+
+        let outcome = follower.refresh();
+        assert!(
+            matches!(outcome, RefreshOutcome::Stuck { .. }),
+            "graph refresh should block after staging graph index work"
+        );
+
+        let req = SearchRequest::new(branch_id, "quasar").with_space(space);
+        assert!(
+            follower_graph.search(&req).unwrap().hits.is_empty(),
+            "graph search must not expose blocked staged index updates"
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn graph_restart_keeps_blocked_search_state_clamped() {
+        let path = unique_test_dir("strata-graph-follower-restart-blocked");
+        let branch_id = BranchId::new();
+        let space = "tenant_a";
+        let fail_once = Arc::new(AtomicBool::new(false));
+
+        let primary = Database::open_runtime(
+            OpenSpec::primary(&path)
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+        let follower = Database::open_runtime(
+            OpenSpec::follower(&path)
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+
+        let primary_graph = crate::GraphStore::new(primary.clone());
+        let follower_graph = crate::GraphStore::new(follower.clone());
+        primary_graph
+            .create_graph(branch_id, space, "papers", None)
+            .unwrap();
+        primary.flush().unwrap();
+        let _ = follower.refresh();
+
+        fail_once.store(true, Ordering::SeqCst);
+        primary_graph
+            .add_node(
+                branch_id,
+                space,
+                "papers",
+                "restart-quasar",
+                NodeData {
+                    entity_ref: None,
+                    object_type: Some("paper".to_string()),
+                    properties: Some(serde_json::json!({
+                        "title": "restart quasar"
+                    })),
+                },
+            )
+            .unwrap();
+        primary.flush().unwrap();
+
+        assert!(
+            matches!(follower.refresh(), RefreshOutcome::Stuck { .. }),
+            "graph refresh should block before publishing the node"
+        );
+
+        let req = SearchRequest::new(branch_id, "quasar").with_space(space);
+        assert!(
+            follower_graph.search(&req).unwrap().hits.is_empty(),
+            "blocked graph node must remain invisible before restart"
+        );
+
+        drop(follower);
+        primary.shutdown().unwrap();
+        drop(primary);
+
+        let reopened = Database::open_runtime(
+            OpenSpec::follower(&path)
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(
+                    false,
+                )))),
+        )
+        .unwrap();
+        let reopened_graph = crate::GraphStore::new(reopened);
+        assert!(
+            reopened_graph.search(&req).unwrap().hits.is_empty(),
+            "follower reopen must not load blocked graph docs from primary caches"
+        );
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn graph_search_recovery_rebuilds_node_id_text_on_slow_path() {
+        let path = unique_test_dir("strata-graph-recovery-slow");
+        let branch_id = BranchId::new();
+        let space = "tenant_a";
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            let graph = crate::GraphStore::new(db.clone());
+
+            graph
+                .create_graph(branch_id, space, "papers", None)
+                .unwrap();
+            graph
+                .add_node(
+                    branch_id,
+                    space,
+                    "papers",
+                    "quasar-node",
+                    NodeData {
+                        entity_ref: None,
+                        object_type: Some("paper".to_string()),
+                        properties: Some(serde_json::json!({
+                            "title": "baseline indexing"
+                        })),
+                    },
+                )
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        let _ = std::fs::remove_dir_all(path.join("search"));
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            let graph = crate::GraphStore::new(db);
+            let req = SearchRequest::new(branch_id, "quasar").with_space(space);
+            let response = graph.search(&req).unwrap();
+            assert_eq!(response.hits.len(), 1);
+            assert!(matches!(
+                &response.hits[0].doc_ref,
+                EntityRef::Graph { key, .. } if key == "papers/n/quasar-node"
+            ));
+        }
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn graph_search_recovery_fast_path_prunes_stale_graph_docs() {
+        let path = unique_test_dir("strata-graph-recovery-fast");
+        let branch_id = BranchId::new();
+        let space = "tenant_a";
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            let graph = crate::GraphStore::new(db.clone());
+            graph
+                .create_graph(branch_id, space, "papers", None)
+                .unwrap();
+            graph
+                .add_node(
+                    branch_id,
+                    space,
+                    "papers",
+                    "real-node",
+                    NodeData {
+                        entity_ref: None,
+                        object_type: Some("paper".to_string()),
+                        properties: Some(serde_json::json!({
+                            "title": "baseline indexing"
+                        })),
+                    },
+                )
+                .unwrap();
+
+            let index = db.extension::<strata_engine::InvertedIndex>().unwrap();
+            index.index_document(
+                &EntityRef::Graph {
+                    branch_id,
+                    space: space.to_string(),
+                    key: "papers/n/ghost-node".to_string(),
+                },
+                "ghostterm",
+                None,
+            );
+            db.flush().unwrap();
+
+            let stale_req = SearchRequest::new(branch_id, "ghostterm").with_space(space);
+            assert_eq!(graph.search(&stale_req).unwrap().hits.len(), 1);
+        }
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            let graph = crate::GraphStore::new(db);
+
+            let stale_req = SearchRequest::new(branch_id, "ghostterm").with_space(space);
+            assert!(
+                graph.search(&stale_req).unwrap().hits.is_empty(),
+                "fast-path recovery should remove graph docs that are not present in storage"
+            );
+
+            let real_req = SearchRequest::new(branch_id, "real").with_space(space);
+            let real_response = graph.search(&real_req).unwrap();
+            assert_eq!(real_response.hits.len(), 1);
+            assert!(matches!(
+                &real_response.hits[0].doc_ref,
+                EntityRef::Graph { key, .. } if key == "papers/n/real-node"
+            ));
+        }
+
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[test]
+    fn graph_search_recovery_fast_path_is_noop_when_storage_is_unchanged() {
+        let path = unique_test_dir("strata-graph-recovery-fast-noop");
+        let branch_id = BranchId::new();
+        let space = "tenant_a";
+        let manifest_path = path.join("search").join("search.manifest");
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(&path)
+                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            let graph = crate::GraphStore::new(db.clone());
+            graph
+                .create_graph(branch_id, space, "papers", None)
+                .unwrap();
+            graph
+                .add_node(
+                    branch_id,
+                    space,
+                    "papers",
+                    "quasar-node",
+                    NodeData {
+                        entity_ref: None,
+                        object_type: Some("paper".to_string()),
+                        properties: Some(serde_json::json!({
+                            "title": "baseline indexing"
+                        })),
+                    },
+                )
+                .unwrap();
+            db.flush().unwrap();
+        }
+
+        let modified_before = std::fs::metadata(&manifest_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+
+        let reopened = Database::open_runtime(
+            OpenSpec::primary(&path)
+                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        let graph = crate::GraphStore::new(reopened);
+        let modified_after = std::fs::metadata(&manifest_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+
+        let req = SearchRequest::new(branch_id, "quasar").with_space(space);
+        assert_eq!(graph.search(&req).unwrap().hits.len(), 1);
+        assert_eq!(
+            modified_after, modified_before,
+            "fast-path recovery should not rewrite the manifest when graph storage is unchanged"
+        );
+
+        let _ = std::fs::remove_dir_all(path);
     }
 }

@@ -465,6 +465,14 @@ impl TransactionCoordinator {
         self.manager.catch_up_txn_id(id);
     }
 
+    /// Restore the visible version exactly.
+    ///
+    /// Used by follower reopen to re-establish the last safe visibility point
+    /// when a blocked refresh was persisted across restart.
+    pub fn restore_visible_version(&self, version: CommitVersion) {
+        self.manager.set_visible_version(version);
+    }
+
     // ========================================================================
     // Coordinator-owned state
     // ========================================================================

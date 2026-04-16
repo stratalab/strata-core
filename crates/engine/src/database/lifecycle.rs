@@ -3,12 +3,14 @@
 use std::sync::atomic::Ordering;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key, TypeTag};
+use strata_core::types::{BranchId, Key};
 use strata_core::StrataResult;
 use tracing::{info, warn};
 
 use super::refresh::{
-    BlockReason, BlockedTxn, FollowerStatus, RefreshGuard, RefreshOutcome, UnblockError,
+    clear_persisted_follower_state, persist_follower_state, BlockReason, BlockedTxn,
+    BlockedTxnState, FollowerStatus, PersistedFollowerState, PreparedRefresh, RefreshGuard,
+    RefreshOutcome, UnblockError,
 };
 use super::{Database, PersistenceMode};
 
@@ -127,6 +129,34 @@ impl Database {
         }
     }
 
+    fn persist_blocked_follower_state(&self, blocked: &BlockedTxnState) {
+        let state = PersistedFollowerState {
+            received_watermark: self.watermark.received(),
+            applied_watermark: self.watermark.applied(),
+            visible_version: CommitVersion(self.storage.version()),
+            blocked: blocked.clone(),
+        };
+        if let Err(e) = persist_follower_state(self.data_dir(), &state) {
+            warn!(
+                target: "strata::follower::audit",
+                path = ?self.data_dir().join(super::refresh::FOLLOWER_STATE_FILE),
+                error = %e,
+                "Failed to persist blocked follower state"
+            );
+        }
+    }
+
+    fn clear_blocked_follower_state_file(&self) {
+        if let Err(e) = clear_persisted_follower_state(self.data_dir()) {
+            warn!(
+                target: "strata::follower::audit",
+                path = ?self.data_dir().join(super::refresh::FOLLOWER_STATE_FILE),
+                error = %e,
+                "Failed to clear persisted follower state"
+            );
+        }
+    }
+
     /// Skip a blocked WAL record after manual intervention.
     ///
     /// This is an administrative operation for when a follower is stuck on a
@@ -155,8 +185,14 @@ impl Database {
             return Err(UnblockError::NotFollower);
         }
 
-        // Attempt the skip
-        self.watermark.admin_skip(txn_id)?;
+        let blocked = self.watermark.unblock_exact(txn_id)?;
+        if let Some(version) = blocked.visibility_version {
+            let _publish_guard = self.refresh_publish_guard();
+            self.storage.advance_version(version);
+            self.coordinator.catch_up_version(version.as_u64());
+        }
+        self.coordinator.catch_up_txn_id(txn_id.as_u64());
+        self.clear_blocked_follower_state_file();
 
         // Log to tracing
         info!(
@@ -230,24 +266,8 @@ impl Database {
             };
         }
 
-        // Acquire single-flight gate FIRST to prevent TOCTOU races on blocked state
-        let _guard = match RefreshGuard::try_new(&self.refresh_gate) {
-            Some(g) => g,
-            None => {
-                // Another refresh is in progress; return current state
-                return if let Some(blocked) = self.watermark.blocked() {
-                    RefreshOutcome::NoProgress {
-                        applied_through: self.watermark.applied(),
-                        blocked_at: blocked,
-                    }
-                } else {
-                    RefreshOutcome::CaughtUp {
-                        applied: 0,
-                        applied_through: self.watermark.applied(),
-                    }
-                };
-            }
-        };
+        // Acquire single-flight gate FIRST to prevent TOCTOU races on blocked state.
+        let _guard = RefreshGuard::new(&self.refresh_gate);
 
         // Now check if blocked (safe under gate protection)
         if let Some(blocked) = self.watermark.blocked() {
@@ -257,41 +277,51 @@ impl Database {
             };
         }
 
-        let watermark = self.watermark.applied().as_u64();
-
-        // Read all WAL records after our watermark
-        let reader = strata_durability::wal::WalReader::new();
-        let records = match reader.read_all_after_watermark(&self.wal_dir, watermark) {
-            Ok(r) => r,
-            Err(e) => {
-                let blocked = BlockedTxn {
-                    txn_id: TxnId(watermark + 1),
-                    reason: BlockReason::Decode {
-                        message: format!("WAL read failed: {}", e),
-                    },
-                };
-                self.watermark.set_blocked(blocked.clone());
-                return RefreshOutcome::Stuck {
-                    applied: 0,
-                    applied_through: TxnId(watermark),
-                    blocked_at: blocked,
-                };
+        let received_watermark = self.watermark.received().as_u64();
+        let make_blocked_state = |txn_id: TxnId,
+                                  reason: BlockReason,
+                                  visibility_version: Option<CommitVersion>,
+                                  skip_allowed: bool| {
+            BlockedTxnState {
+                blocked: BlockedTxn { txn_id, reason },
+                visibility_version,
+                skip_allowed,
             }
         };
 
-        if records.is_empty() {
+        // Read the longest contiguous WAL prefix after the received watermark.
+        let reader = strata_durability::wal::WalReader::new();
+        let read_result =
+            match reader.read_all_after_watermark_contiguous(&self.wal_dir, received_watermark) {
+                Ok(r) => r,
+                Err(e) => {
+                    let blocked = make_blocked_state(
+                        TxnId(received_watermark.saturating_add(1)),
+                        BlockReason::Decode {
+                            message: format!("WAL read failed: {}", e),
+                        },
+                        None,
+                        false,
+                    );
+                    self.watermark.block_at(blocked.clone());
+                    self.persist_blocked_follower_state(&blocked);
+                    return RefreshOutcome::Stuck {
+                        applied: 0,
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked.blocked,
+                    };
+                }
+            };
+
+        if read_result.records.is_empty() && read_result.blocked.is_none() {
             return RefreshOutcome::CaughtUp {
                 applied: 0,
-                applied_through: TxnId(watermark),
+                applied_through: self.watermark.applied(),
             };
         }
 
         let mut applied = 0usize;
-        let mut max_version = 0u64;
-
-        // Get search index (if available) for incremental updates
-        let search_index = self.extension::<crate::search::InvertedIndex>().ok();
-        let search_enabled = search_index.as_ref().is_some_and(|idx| idx.is_enabled());
+        let mut pending_publications: Vec<Box<dyn PreparedRefresh>> = Vec::new();
 
         // Get refresh hooks
         let refresh_hooks = self
@@ -300,7 +330,7 @@ impl Database {
             .map(|h| h.hooks())
             .unwrap_or_default();
 
-        for record in &records {
+        for record in &read_result.records {
             let txn_id = record.txn_id;
 
             // Update received watermark (telemetry)
@@ -311,22 +341,23 @@ impl Database {
             {
                 Ok(p) => p,
                 Err(e) => {
-                    let blocked = BlockedTxn {
+                    let blocked = make_blocked_state(
                         txn_id,
-                        reason: BlockReason::Decode {
+                        BlockReason::Decode {
                             message: format!("corrupt payload: {}", e),
                         },
-                    };
-                    self.watermark.set_blocked(blocked.clone());
+                        None,
+                        true,
+                    );
+                    self.watermark.block_at(blocked.clone());
+                    self.persist_blocked_follower_state(&blocked);
                     return RefreshOutcome::Stuck {
                         applied,
                         applied_through: self.watermark.applied(),
-                        blocked_at: blocked,
+                        blocked_at: blocked.blocked,
                     };
                 }
             };
-
-            max_version = max_version.max(payload.version);
 
             // Pre-read state for delete hooks (must happen before storage mutations)
             let hook_pre_reads: Vec<Vec<(Key, Vec<u8>)>> = refresh_hooks
@@ -360,164 +391,85 @@ impl Database {
                     record.timestamp,
                     &payload.put_ttls,
                 ) {
-                    let blocked = BlockedTxn {
+                    let blocked = make_blocked_state(
                         txn_id,
-                        reason: BlockReason::StorageApply {
+                        BlockReason::StorageApply {
                             message: format!("{}", e),
                         },
-                    };
-                    self.watermark.set_blocked(blocked.clone());
+                        None,
+                        true,
+                    );
+                    self.watermark.block_at(blocked.clone());
+                    self.persist_blocked_follower_state(&blocked);
                     return RefreshOutcome::Stuck {
                         applied,
                         applied_through: self.watermark.applied(),
-                        blocked_at: blocked,
+                        blocked_at: blocked.blocked,
                     };
                 }
             }
 
-            // --- Update BM25 search index ---
-            if search_enabled {
-                let index = search_index.as_ref().unwrap();
-
-                for (key, value) in &payload.puts {
-                    let branch_id = key.namespace.branch_id;
-                    match key.type_tag {
-                        TypeTag::KV => {
-                            if let Some(text) = crate::search::extract_indexable_text(value) {
-                                if let Some(user_key) = key.user_key_string() {
-                                    let entity_ref = strata_core::EntityRef::Kv {
-                                        branch_id,
-                                        space: key.namespace.space.to_string(),
-                                        key: user_key,
-                                    };
-                                    index.index_document(&entity_ref, &text, None);
-                                }
-                            }
-                        }
-                        TypeTag::Event => {
-                            if *key.user_key == *b"__meta__"
-                                || key.user_key.starts_with(b"__tidx__")
-                            {
-                                continue;
-                            }
-                            if let Some(text) = crate::search::extract_indexable_text(value) {
-                                if key.user_key.len() == 8 {
-                                    let sequence = u64::from_be_bytes(
-                                        (*key.user_key).try_into().unwrap_or([0; 8]),
-                                    );
-                                    let entity_ref = strata_core::EntityRef::Event {
-                                        branch_id,
-                                        space: key.namespace.space.to_string(),
-                                        sequence,
-                                    };
-                                    index.index_document(&entity_ref, &text, None);
-                                }
-                            }
-                        }
-                        TypeTag::Graph => {
-                            if key.user_key.starts_with(b"__")
-                                || key.user_key.windows(3).any(|w| w == b"/__")
-                            {
-                                continue;
-                            }
-                            if let Some(text) = crate::search::extract_indexable_text(value) {
-                                if let Some(user_key) = key.user_key_string() {
-                                    let entity_ref = strata_core::EntityRef::Graph {
-                                        branch_id,
-                                        space: key.namespace.space.to_string(),
-                                        key: user_key,
-                                    };
-                                    index.index_document(&entity_ref, &text, None);
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-
-                for key in &payload.deletes {
-                    let branch_id = key.namespace.branch_id;
-                    match key.type_tag {
-                        TypeTag::KV => {
-                            if let Some(user_key) = key.user_key_string() {
-                                let entity_ref = strata_core::EntityRef::Kv {
-                                    branch_id,
-                                    space: key.namespace.space.to_string(),
-                                    key: user_key,
-                                };
-                                index.remove_document(&entity_ref);
-                            }
-                        }
-                        TypeTag::Event => {
-                            if *key.user_key == *b"__meta__"
-                                || key.user_key.starts_with(b"__tidx__")
-                            {
-                                continue;
-                            }
-                            if key.user_key.len() == 8 {
-                                let sequence = u64::from_be_bytes(
-                                    (*key.user_key).try_into().unwrap_or([0; 8]),
-                                );
-                                let branch_id = key.namespace.branch_id;
-                                let entity_ref = strata_core::EntityRef::Event {
-                                    branch_id,
-                                    space: key.namespace.space.to_string(),
-                                    sequence,
-                                };
-                                index.remove_document(&entity_ref);
-                            }
-                        }
-                        TypeTag::Graph => {
-                            if key.user_key.starts_with(b"__")
-                                || key.user_key.windows(3).any(|w| w == b"/__")
-                            {
-                                continue;
-                            }
-                            if let Some(user_key) = key.user_key_string() {
-                                let entity_ref = strata_core::EntityRef::Graph {
-                                    branch_id,
-                                    space: key.namespace.space.to_string(),
-                                    key: user_key,
-                                };
-                                index.remove_document(&entity_ref);
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // --- Update refresh hooks (vector backends, etc.) ---
+            // --- Update refresh hooks (vector backends, search index, etc.) ---
             let puts_slice: Vec<(Key, strata_core::value::Value)> = payload
                 .puts
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (hook, pre_reads) in refresh_hooks.iter().zip(hook_pre_reads.iter()) {
-                if let Err(e) = hook.apply_refresh(&puts_slice, pre_reads) {
-                    let blocked = BlockedTxn {
-                        txn_id,
-                        reason: BlockReason::SecondaryIndex {
-                            hook_name: e.hook_name.clone(),
-                            message: e.message.clone(),
-                        },
-                    };
-                    self.watermark.set_blocked(blocked.clone());
-                    return RefreshOutcome::Stuck {
-                        applied,
-                        applied_through: self.watermark.applied(),
-                        blocked_at: blocked,
-                    };
+                match hook.apply_refresh(&puts_slice, pre_reads) {
+                    Ok(pending) => pending_publications.push(pending),
+                    Err(e) => {
+                        let blocked = make_blocked_state(
+                            txn_id,
+                            BlockReason::SecondaryIndex {
+                                hook_name: e.hook_name.clone(),
+                                message: e.message.clone(),
+                            },
+                            Some(CommitVersion(payload.version)),
+                            true,
+                        );
+                        self.watermark.block_at(blocked.clone());
+                        self.persist_blocked_follower_state(&blocked);
+                        return RefreshOutcome::Stuck {
+                            applied,
+                            applied_through: self.watermark.applied(),
+                            blocked_at: blocked.blocked,
+                        };
+                    }
                 }
             }
 
-            // Advance visible version AFTER secondary indexes are updated
-            self.storage.advance_version(CommitVersion(payload.version));
+            if let Err(e) = self.watermark.try_advance(txn_id) {
+                let blocked = make_blocked_state(
+                    txn_id,
+                    BlockReason::Decode {
+                        message: format!("watermark advancement failed: {}", e),
+                    },
+                    Some(CommitVersion(payload.version)),
+                    false,
+                );
+                self.watermark.block_at(blocked.clone());
+                self.persist_blocked_follower_state(&blocked);
+                return RefreshOutcome::Stuck {
+                    applied,
+                    applied_through: self.watermark.applied(),
+                    blocked_at: blocked.blocked,
+                };
+            }
 
-            // Advance the contiguous watermark
-            self.watermark.advance_applied(txn_id);
+            // Publish staged derived-state changes and advance visibility as one
+            // synchronized handoff to readers.
+            {
+                let _publish_guard = self.refresh_publish_guard();
+                for pending in pending_publications.drain(..) {
+                    pending.publish();
+                }
+                self.storage.advance_version(CommitVersion(payload.version));
+                self.coordinator.catch_up_version(payload.version);
+                self.coordinator.catch_up_txn_id(txn_id.as_u64());
+            }
 
-            // Notify replay observers (best-effort, errors logged not propagated)
+            // Notify replay observers (best-effort, errors logged not propagated).
             let branch_id = payload
                 .puts
                 .first()
@@ -537,14 +489,43 @@ impl Database {
             applied += 1;
         }
 
-        // Advance local counters so new transactions get unique IDs/versions
-        let applied_through = self.watermark.applied();
-        self.coordinator.catch_up_version(max_version);
-        self.coordinator.catch_up_txn_id(applied_through.as_u64());
+        if let Some(blocked) = read_result.blocked {
+            let txn_id = blocked.txn_id;
+            let skip_allowed = blocked.skip_allowed;
+            let detail = blocked.detail;
+            let reason = match blocked.stop_reason {
+                strata_durability::wal::ReadStopReason::Gap {
+                    expected_txn_id,
+                    observed_txn_id,
+                } => BlockReason::Decode {
+                    message: format!(
+                        "missing WAL record at {}; next readable txn is {}",
+                        expected_txn_id, observed_txn_id
+                    ),
+                },
+                strata_durability::wal::ReadStopReason::ChecksumMismatch { .. }
+                | strata_durability::wal::ReadStopReason::ParseError { .. } => {
+                    BlockReason::Decode { message: detail }
+                }
+                strata_durability::wal::ReadStopReason::EndOfData
+                | strata_durability::wal::ReadStopReason::PartialRecord => {
+                    BlockReason::Decode { message: detail }
+                }
+            };
+            let blocked = make_blocked_state(txn_id, reason, None, skip_allowed);
+            self.watermark.block_at(blocked.clone());
+            self.persist_blocked_follower_state(&blocked);
+            return RefreshOutcome::Stuck {
+                applied,
+                applied_through: self.watermark.applied(),
+                blocked_at: blocked.blocked,
+            };
+        }
 
+        self.clear_blocked_follower_state_file();
         RefreshOutcome::CaughtUp {
             applied,
-            applied_through,
+            applied_through: self.watermark.applied(),
         }
     }
 

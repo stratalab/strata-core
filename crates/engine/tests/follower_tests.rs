@@ -8,9 +8,13 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
+use strata_core::JsonValue;
 use strata_engine::database::OpenSpec;
-use strata_engine::Database;
-use strata_engine::SearchSubsystem;
+use strata_engine::search::Searchable;
+use strata_engine::{
+    Database, JsonStore, NoopPreparedRefresh, PreparedRefresh, RefreshHook, RefreshHookError,
+    RefreshHooks, SearchRequest, SearchSubsystem, Subsystem,
+};
 use tempfile::tempdir;
 
 fn ns(branch: BranchId) -> Arc<Namespace> {
@@ -48,6 +52,67 @@ fn read_kv(db: &Database, branch: BranchId, key: &str) -> Option<String> {
         Ok(Some(other)) => Some(format!("{:?}", other)),
         Ok(None) => None,
         Err(e) => panic!("read_kv failed unexpectedly: {}", e),
+    }
+}
+
+#[derive(Clone)]
+struct FailOnceRefreshSubsystem {
+    fail_once: Arc<AtomicBool>,
+}
+
+impl FailOnceRefreshSubsystem {
+    fn new(fail_once: Arc<AtomicBool>) -> Self {
+        Self { fail_once }
+    }
+}
+
+struct FailOnceRefreshHook {
+    fail_once: Arc<AtomicBool>,
+}
+
+impl RefreshHook for FailOnceRefreshHook {
+    fn name(&self) -> &'static str {
+        "test-fail-once"
+    }
+
+    fn pre_delete_read(&self, _db: &Database, _deletes: &[Key]) -> Vec<(Key, Vec<u8>)> {
+        Vec::new()
+    }
+
+    fn apply_refresh(
+        &self,
+        puts: &[(Key, Value)],
+        _pre_read_deletes: &[(Key, Vec<u8>)],
+    ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
+        if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
+            return Err(RefreshHookError::new(
+                "test-fail-once",
+                "injected refresh hook failure",
+            ));
+        }
+        Ok(Box::new(NoopPreparedRefresh))
+    }
+
+    fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+}
+
+impl Subsystem for FailOnceRefreshSubsystem {
+    fn name(&self) -> &'static str {
+        "fail-once-refresh"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+
+    fn initialize(&self, db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        let hooks = db.extension::<RefreshHooks>()?;
+        hooks.register(Arc::new(FailOnceRefreshHook {
+            fail_once: self.fail_once.clone(),
+        }));
+        Ok(())
     }
 }
 
@@ -132,7 +197,10 @@ fn test_follower_refresh_sees_new_data() {
     // After refresh, follower sees the new data
     let outcome = follower.refresh();
     assert!(outcome.is_caught_up(), "refresh should catch up");
-    assert!(outcome.applied_count() > 0, "refresh should apply new records");
+    assert!(
+        outcome.applied_count() > 0,
+        "refresh should apply new records"
+    );
     assert_eq!(read_kv(&follower, branch, "k2").as_deref(), Some("v2"));
 
     // Original data still intact after refresh
@@ -145,6 +213,71 @@ fn test_follower_refresh_sees_new_data() {
         outcome2.applied_count(),
         0,
         "refresh with no new WAL records should return 0"
+    );
+}
+
+#[test]
+fn test_follower_refresh_updates_json_search_index() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    let primary_json = JsonStore::new(primary.clone());
+    let follower_json = JsonStore::new(follower.clone());
+    let req = SearchRequest::new(branch, "supremacy").with_space("tenant_a");
+
+    primary_json
+        .create(
+            &branch,
+            "tenant_a",
+            "doc1",
+            JsonValue::from_value(serde_json::json!({
+                "title": "breakthrough quantum supremacy result"
+            })),
+        )
+        .unwrap();
+    primary.flush().unwrap();
+
+    let before = follower_json.search(&req).unwrap();
+    assert!(
+        before.hits.is_empty(),
+        "follower search should lag until refresh applies the WAL"
+    );
+
+    let first_refresh = follower.refresh();
+    assert!(first_refresh.is_caught_up(), "refresh should catch up");
+    assert!(
+        first_refresh.applied_count() > 0,
+        "refresh should replay the JSON create transaction"
+    );
+
+    let after_create = follower_json.search(&req).unwrap();
+    assert_eq!(
+        after_create.hits.len(),
+        1,
+        "follower refresh should index JSON docs via the search refresh hook"
+    );
+
+    primary_json.destroy(&branch, "tenant_a", "doc1").unwrap();
+    primary.flush().unwrap();
+
+    let second_refresh = follower.refresh();
+    assert!(second_refresh.is_caught_up(), "refresh should catch up");
+    assert!(
+        second_refresh.applied_count() > 0,
+        "refresh should replay the JSON delete transaction"
+    );
+
+    let after_delete = follower_json.search(&req).unwrap();
+    assert!(
+        after_delete.hits.is_empty(),
+        "follower refresh should remove deleted JSON docs from the search index"
     );
 }
 
@@ -235,7 +368,11 @@ fn test_follower_multiple_refreshes() {
 
         let outcome = follower.refresh();
         assert!(outcome.is_caught_up(), "round {} should catch up", i);
-        assert!(outcome.applied_count() > 0, "round {} should apply records", i);
+        assert!(
+            outcome.applied_count() > 0,
+            "round {} should apply records",
+            i
+        );
         assert_eq!(
             read_kv(&follower, branch, &key).as_deref(),
             Some(val.as_str()),
@@ -448,12 +585,20 @@ fn test_refresh_on_non_follower_returns_zero() {
             .unwrap();
     let outcome = primary.refresh();
     assert!(outcome.is_caught_up());
-    assert_eq!(outcome.applied_count(), 0, "refresh on non-follower should be a no-op");
+    assert_eq!(
+        outcome.applied_count(),
+        0,
+        "refresh on non-follower should be a no-op"
+    );
 
     let cache = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
     let outcome = cache.refresh();
     assert!(outcome.is_caught_up());
-    assert_eq!(outcome.applied_count(), 0, "refresh on cache should be a no-op");
+    assert_eq!(
+        outcome.applied_count(),
+        0,
+        "refresh on cache should be a no-op"
+    );
 }
 
 // ============================================================================
@@ -743,7 +888,10 @@ fn test_follower_status_basic() {
 
     // Initial status: caught up, not blocked
     let status = follower.follower_status();
-    assert!(!status.is_blocked(), "follower should not be blocked initially");
+    assert!(
+        !status.is_blocked(),
+        "follower should not be blocked initially"
+    );
     assert!(!status.refresh_in_progress, "no refresh in progress");
     // applied and received should be equal after recovery
     assert_eq!(
@@ -828,6 +976,274 @@ fn test_admin_skip_rejects_when_not_blocked() {
 }
 
 #[test]
+fn test_admin_skip_after_hook_failure_makes_record_visible() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path()).with_subsystem(FailOnceRefreshSubsystem::new(fail_once)),
+    )
+    .unwrap();
+
+    primary_put(&primary, branch, "blocked", "v2");
+    primary.flush().unwrap();
+
+    let outcome = follower.refresh();
+    let blocked_txn = match outcome {
+        strata_engine::RefreshOutcome::Stuck {
+            applied,
+            applied_through,
+            blocked_at,
+        } => {
+            assert_eq!(applied, 0, "hook failure should block before advancement");
+            assert_eq!(
+                blocked_at.reason.to_string(),
+                "test-fail-once hook failed: injected refresh hook failure"
+            );
+            assert_eq!(
+                applied_through,
+                follower.follower_status().applied_watermark,
+                "stuck outcome must report the last contiguously applied txn"
+            );
+            blocked_at.txn_id
+        }
+        other => panic!("expected refresh to get stuck, got {:?}", other),
+    };
+
+    let blocked_status = follower.follower_status();
+    assert!(
+        blocked_status.is_blocked(),
+        "follower should report blocked"
+    );
+    assert!(
+        blocked_status.received_watermark > blocked_status.applied_watermark,
+        "received watermark should move ahead of applied on hook failure"
+    );
+    assert_eq!(
+        read_kv(&follower, branch, "blocked"),
+        None,
+        "storage apply must remain invisible until the blocked record is resolved"
+    );
+
+    follower
+        .admin_skip_blocked_record(blocked_txn, "operator acknowledged hook failure")
+        .unwrap();
+
+    assert_eq!(
+        read_kv(&follower, branch, "blocked").as_deref(),
+        Some("v2"),
+        "admin skip must make a post-storage blocked record visible"
+    );
+    let recovered = follower.follower_status();
+    assert!(!recovered.is_blocked(), "skip should clear blocked state");
+    assert_eq!(
+        recovered.applied_watermark, recovered.received_watermark,
+        "skip should reconcile the watermarks for the skipped txn"
+    );
+
+    let audit_log = std::fs::read_to_string(dir.path().join("follower_audit.log")).unwrap();
+    assert!(
+        audit_log.contains(&format!("txn_id={}", blocked_txn.as_u64())),
+        "durable audit log must include the skipped txn id"
+    );
+}
+
+#[test]
+fn test_blocked_follower_state_survives_restart() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+
+    primary_put(&primary, branch, "blocked_after_restart", "v2");
+    primary.flush().unwrap();
+
+    let blocked_txn = match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { blocked_at, .. } => blocked_at.txn_id,
+        other => panic!("expected blocked refresh before restart, got {:?}", other),
+    };
+    assert_eq!(
+        read_kv(&follower, branch, "blocked_after_restart"),
+        None,
+        "blocked record must remain invisible before restart"
+    );
+
+    drop(follower);
+
+    let reopened = Database::open_runtime(
+        OpenSpec::follower(dir.path()).with_subsystem(FailOnceRefreshSubsystem::new(fail_once)),
+    )
+    .unwrap();
+
+    let status = reopened.follower_status();
+    assert!(status.is_blocked(), "blocked follower state must persist");
+    assert_eq!(
+        status.blocked_at.as_ref().map(|blocked| blocked.txn_id),
+        Some(blocked_txn),
+        "reopened follower must report the same blocked txn"
+    );
+    assert_eq!(
+        read_kv(&reopened, branch, "blocked_after_restart"),
+        None,
+        "reopened blocked follower must keep the record invisible"
+    );
+    assert!(
+        matches!(
+            reopened.refresh(),
+            strata_engine::RefreshOutcome::NoProgress { .. }
+        ),
+        "blocked follower must stay blocked until operator action"
+    );
+
+    reopened
+        .admin_skip_blocked_record(blocked_txn, "verify blocked follower restart durability")
+        .unwrap();
+    assert_eq!(
+        read_kv(&reopened, branch, "blocked_after_restart").as_deref(),
+        Some("v2"),
+        "admin skip after restart must restore visibility"
+    );
+}
+
+#[test]
+fn test_blocked_follower_restart_keeps_search_state_clamped() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+
+    let primary_json = JsonStore::new(primary.clone());
+    let follower_json = JsonStore::new(follower.clone());
+    let req = SearchRequest::new(branch, "restartblocked").with_space("tenant_a");
+
+    primary_json
+        .create(
+            &branch,
+            "tenant_a",
+            "doc1",
+            JsonValue::from_value(serde_json::json!({
+                "title": "restartblocked must stay invisible across restart"
+            })),
+        )
+        .unwrap();
+    primary.flush().unwrap();
+
+    assert!(
+        matches!(
+            follower.refresh(),
+            strata_engine::RefreshOutcome::Stuck { .. }
+        ),
+        "refresh should block before making the document visible"
+    );
+    assert!(
+        follower_json.search(&req).unwrap().hits.is_empty(),
+        "blocked search updates must remain invisible before restart"
+    );
+
+    drop(follower);
+    primary.shutdown().unwrap();
+    drop(primary);
+
+    let reopened = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(
+                false,
+            )))),
+    )
+    .unwrap();
+    let reopened_json = JsonStore::new(reopened);
+
+    assert!(
+        reopened_json.search(&req).unwrap().hits.is_empty(),
+        "follower reopen must not rebuild blocked search docs from newer primary caches"
+    );
+}
+
+#[test]
+fn test_search_refresh_does_not_leak_before_visibility_advance() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once)),
+    )
+    .unwrap();
+
+    let primary_json = JsonStore::new(primary.clone());
+    let follower_json = JsonStore::new(follower.clone());
+    let req = SearchRequest::new(branch, "blockedterm").with_space("tenant_a");
+
+    primary_json
+        .create(
+            &branch,
+            "tenant_a",
+            "doc1",
+            JsonValue::from_value(serde_json::json!({
+                "title": "blockedterm should stay invisible while refresh is stuck"
+            })),
+        )
+        .unwrap();
+    primary.flush().unwrap();
+
+    match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { .. } => {}
+        other => panic!(
+            "expected refresh to get stuck after search staging, got {:?}",
+            other
+        ),
+    }
+
+    assert!(
+        follower_json.search(&req).unwrap().hits.is_empty(),
+        "staged BM25 updates must not leak before visibility advance"
+    );
+}
+
+#[test]
 fn test_concurrent_refresh_serialized() {
     use std::thread;
 
@@ -865,9 +1281,9 @@ fn test_concurrent_refresh_serialized() {
 
     let results: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 
-    // At most one refresh should have applied records; others should return 0
-    // (either because they couldn't acquire the gate, or because records were
-    // already applied by the first refresher)
+    // Single-flight refresh means exactly one caller should apply the unseen
+    // WAL records. The rest should wait, then observe that the follower is
+    // already caught up.
     let total_applied: usize = results.iter().map(|r| r.applied_count()).sum();
     let non_zero_count = results.iter().filter(|r| r.applied_count() > 0).count();
 
@@ -877,13 +1293,14 @@ fn test_concurrent_refresh_serialized() {
         "all refreshes should report caught up"
     );
 
-    // The total records applied should be exactly the number of new records,
-    // not duplicated across threads
     assert!(
-        non_zero_count <= 1 || total_applied <= 100,
-        "concurrent refreshes should not duplicate work: {} threads applied records, total {}",
+        non_zero_count <= 1,
+        "single-flight refresh should have only one caller apply records, saw {}",
         non_zero_count,
-        total_applied
+    );
+    assert_eq!(
+        total_applied, 100,
+        "concurrent refreshes should apply each unseen record exactly once"
     );
 
     // Verify all data is visible

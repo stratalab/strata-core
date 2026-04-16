@@ -1071,6 +1071,7 @@ impl crate::search::Searchable for EventLog {
         use std::time::Instant;
 
         let start = Instant::now();
+        let _refresh_guard = self.db.refresh_query_guard();
         let index = self.db.extension::<InvertedIndex>()?;
 
         if !index.is_enabled() || index.total_docs() == 0 {

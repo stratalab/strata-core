@@ -6,6 +6,7 @@ use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalRecordError, WalSegment};
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use strata_core::id::TxnId;
 use tracing::warn;
 
 /// Maximum number of bytes to scan forward when searching for the next
@@ -298,6 +299,83 @@ impl WalReader {
         Ok(result)
     }
 
+    /// Read the longest contiguous WAL prefix after `watermark`.
+    ///
+    /// Unlike [`read_all_after_watermark`], this preserves valid records before the
+    /// first unreadable or missing transaction and reports the first blocked txn id.
+    pub fn read_all_after_watermark_contiguous(
+        &self,
+        wal_dir: &Path,
+        watermark: u64,
+    ) -> Result<WatermarkReadResult, WalReaderError> {
+        let mut segments = self.list_segments(wal_dir)?;
+        segments.sort();
+
+        if segments.is_empty() {
+            return Ok(WatermarkReadResult {
+                records: Vec::new(),
+                blocked: None,
+            });
+        }
+
+        let latest_segment = *segments.last().unwrap();
+        let mut records = Vec::new();
+        let mut next_expected = watermark.saturating_add(1);
+
+        for &segment_number in &segments {
+            if segment_number != latest_segment {
+                match SegmentMeta::read_from_file(wal_dir, segment_number) {
+                    Ok(Some(meta))
+                        if meta.segment_number == segment_number
+                            && meta.max_txn_id.as_u64() < next_expected =>
+                    {
+                        continue;
+                    }
+                    Ok(Some(meta)) if meta.segment_number != segment_number => {
+                        warn!(
+                            target: "strata::wal",
+                            segment = segment_number,
+                            meta_segment = meta.segment_number,
+                            "Segment meta has mismatched segment number, reading full segment"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            target: "strata::wal",
+                            segment = segment_number,
+                            error = %e,
+                            "Could not read .meta sidecar, reading full segment"
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            let segment_result = self.read_segment_after_watermark_contiguous(
+                wal_dir,
+                segment_number,
+                next_expected,
+            )?;
+
+            if let Some(last) = segment_result.records.last() {
+                next_expected = last.txn_id.as_u64().saturating_add(1);
+            }
+            records.extend(segment_result.records);
+
+            if let Some(blocked) = segment_result.blocked {
+                return Ok(WatermarkReadResult {
+                    records,
+                    blocked: Some(blocked),
+                });
+            }
+        }
+
+        Ok(WatermarkReadResult {
+            records,
+            blocked: None,
+        })
+    }
+
     /// List all segment numbers in the WAL directory.
     pub fn list_segments(&self, wal_dir: &Path) -> Result<Vec<u64>, WalReaderError> {
         let mut segments = Vec::new();
@@ -316,6 +394,133 @@ impl WalReader {
 
         segments.sort();
         Ok(segments)
+    }
+
+    fn read_segment_after_watermark_contiguous(
+        &self,
+        wal_dir: &Path,
+        segment_number: u64,
+        next_expected: u64,
+    ) -> Result<WatermarkReadResult, WalReaderError> {
+        let mut segment = WalSegment::open_read(wal_dir, segment_number)
+            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        let mut buffer = Vec::new();
+        let hdr_size = segment.header_size() as u64;
+
+        segment
+            .seek_to(hdr_size)
+            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        segment
+            .file_mut()
+            .read_to_end(&mut buffer)
+            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+
+        let mut records = Vec::new();
+        let mut offset = 0usize;
+        let mut next_expected = next_expected;
+
+        while offset < buffer.len() {
+            match WalRecord::from_bytes(&buffer[offset..]) {
+                Ok((record, consumed)) => {
+                    offset += consumed;
+                    let txn_id = record.txn_id.as_u64();
+                    if txn_id < next_expected {
+                        continue;
+                    }
+                    if txn_id == next_expected {
+                        next_expected = next_expected.saturating_add(1);
+                        records.push(record);
+                        continue;
+                    }
+
+                    return Ok(WatermarkReadResult {
+                        records,
+                        blocked: Some(WatermarkBlockedRecord {
+                            txn_id: TxnId(next_expected),
+                            detail: format!(
+                                "non-contiguous WAL: expected txn {}, found txn {}",
+                                next_expected, txn_id
+                            ),
+                            skip_allowed: true,
+                            stop_reason: ReadStopReason::Gap {
+                                expected_txn_id: TxnId(next_expected),
+                                observed_txn_id: record.txn_id,
+                            },
+                        }),
+                    });
+                }
+                Err(WalRecordError::InsufficientData) => break,
+                Err(err) => {
+                    if let Some((scan_offset, next_record)) =
+                        self.scan_forward_to_valid_record(&buffer, offset + 1)
+                    {
+                        let candidate_txn = next_record.txn_id.as_u64();
+                        if candidate_txn < next_expected {
+                            offset = scan_offset;
+                            continue;
+                        }
+                        if candidate_txn == next_expected {
+                            offset = scan_offset;
+                            continue;
+                        }
+
+                        return Ok(WatermarkReadResult {
+                            records,
+                            blocked: Some(WatermarkBlockedRecord {
+                                txn_id: TxnId(next_expected),
+                                detail: format!(
+                                    "{}; next readable txn is {}",
+                                    err, next_record.txn_id
+                                ),
+                                skip_allowed: true,
+                                stop_reason: Self::stop_reason_for_record_error(offset, &err),
+                            }),
+                        });
+                    }
+
+                    return Ok(WatermarkReadResult {
+                        records,
+                        blocked: Some(WatermarkBlockedRecord {
+                            txn_id: TxnId(next_expected),
+                            detail: err.to_string(),
+                            skip_allowed: false,
+                            stop_reason: Self::stop_reason_for_record_error(offset, &err),
+                        }),
+                    });
+                }
+            }
+        }
+
+        Ok(WatermarkReadResult {
+            records,
+            blocked: None,
+        })
+    }
+
+    fn scan_forward_to_valid_record(
+        &self,
+        buffer: &[u8],
+        scan_start: usize,
+    ) -> Option<(usize, WalRecord)> {
+        let scan_end = (scan_start + MAX_RECOVERY_SCAN_WINDOW).min(buffer.len());
+        for scan_offset in scan_start..scan_end {
+            if let Ok((record, _)) = WalRecord::from_bytes(&buffer[scan_offset..]) {
+                return Some((scan_offset, record));
+            }
+        }
+        None
+    }
+
+    fn stop_reason_for_record_error(offset: usize, err: &WalRecordError) -> ReadStopReason {
+        match err {
+            WalRecordError::ChecksumMismatch { .. } | WalRecordError::LengthChecksumMismatch => {
+                ReadStopReason::ChecksumMismatch { offset }
+            }
+            other => ReadStopReason::ParseError {
+                offset,
+                detail: other.to_string(),
+            },
+        }
     }
 
     /// Get the highest transaction ID in a segment.
@@ -540,6 +745,13 @@ pub enum ReadStopReason {
         /// Human-readable error description
         detail: String,
     },
+    /// A later valid record was found after one or more missing transaction IDs.
+    Gap {
+        /// First missing transaction ID in the contiguous sequence.
+        expected_txn_id: TxnId,
+        /// First later transaction ID that was still readable.
+        observed_txn_id: TxnId,
+    },
 }
 
 /// Result of reading all WAL segments.
@@ -576,6 +788,28 @@ impl TruncateInfo {
     pub fn bytes_to_truncate(&self) -> u64 {
         self.original_size - self.valid_end
     }
+}
+
+/// Block encountered while reading a contiguous replay prefix.
+#[derive(Debug, Clone)]
+pub struct WatermarkBlockedRecord {
+    /// First transaction ID in the contiguous sequence that could not be proven readable.
+    pub txn_id: TxnId,
+    /// Diagnostic detail describing the read failure or gap.
+    pub detail: String,
+    /// Whether an exact operator skip can safely advance past this transaction ID.
+    pub skip_allowed: bool,
+    /// Why segment reading stopped.
+    pub stop_reason: ReadStopReason,
+}
+
+/// Records read after a watermark until the first contiguous block, if any.
+#[derive(Debug, Clone)]
+pub struct WatermarkReadResult {
+    /// Contiguous readable records after the requested watermark.
+    pub records: Vec<WalRecord>,
+    /// First blocked txn, if contiguous replay could not continue.
+    pub blocked: Option<WatermarkBlockedRecord>,
 }
 
 /// WAL reader errors.
@@ -1773,6 +2007,102 @@ mod tests {
             matches!(result, Err(WalRecordError::LengthChecksumMismatch)),
             "Expected LengthChecksumMismatch for corrupted length, got: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn test_read_all_after_watermark_contiguous_preserves_prefix_and_exact_skip_resume() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [7u8; 16], i * 1000, vec![i as u8; 24]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        let segment_path = WalSegment::segment_path(&wal_dir, 1);
+        let segment = WalSegment::open_read(&wal_dir, 1).unwrap();
+        let hdr_size = segment.header_size() as usize;
+        let mut bytes = std::fs::read(&segment_path).unwrap();
+        let record_1_len = records[0].to_bytes().len();
+        let record_2_len = records[1].to_bytes().len();
+        let corrupt_offset = hdr_size + record_1_len + (record_2_len / 2);
+        bytes[corrupt_offset] ^= 0x5A;
+        std::fs::write(&segment_path, bytes).unwrap();
+
+        let reader = WalReader::new();
+        let first = reader
+            .read_all_after_watermark_contiguous(&wal_dir, 0)
+            .unwrap();
+        assert_eq!(
+            first
+                .records
+                .iter()
+                .map(|r| r.txn_id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1],
+            "reader must preserve the valid prefix before the corrupted record"
+        );
+        let blocked = first.blocked.expect("expected a blocked txn");
+        assert_eq!(blocked.txn_id, TxnId(2));
+        assert!(
+            blocked.skip_allowed,
+            "a later valid record should make an exact skip resumable"
+        );
+
+        let resumed = reader
+            .read_all_after_watermark_contiguous(&wal_dir, 2)
+            .unwrap();
+        assert_eq!(
+            resumed
+                .records
+                .iter()
+                .map(|r| r.txn_id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![3],
+            "after an exact skip, reader should resume at the next readable txn"
+        );
+        assert!(
+            resumed.blocked.is_none(),
+            "skipping the blocked txn should clear the gap when a later anchor exists"
+        );
+    }
+
+    #[test]
+    fn test_read_all_after_watermark_contiguous_marks_unanchored_tail_corruption_not_skippable() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let records: Vec<_> = (1..=2)
+            .map(|i| WalRecord::new(TxnId(i), [9u8; 16], i * 1000, vec![i as u8; 24]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        let segment_path = WalSegment::segment_path(&wal_dir, 1);
+        let segment = WalSegment::open_read(&wal_dir, 1).unwrap();
+        let hdr_size = segment.header_size() as usize;
+        let mut bytes = std::fs::read(&segment_path).unwrap();
+        let record_1_len = records[0].to_bytes().len();
+        let record_2_len = records[1].to_bytes().len();
+        let corrupt_offset = hdr_size + record_1_len + (record_2_len / 2);
+        bytes[corrupt_offset] ^= 0x33;
+        std::fs::write(&segment_path, bytes).unwrap();
+
+        let reader = WalReader::new();
+        let result = reader
+            .read_all_after_watermark_contiguous(&wal_dir, 0)
+            .unwrap();
+        assert_eq!(
+            result
+                .records
+                .iter()
+                .map(|r| r.txn_id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![1]
+        );
+        let blocked = result.blocked.expect("expected tail corruption to block");
+        assert_eq!(blocked.txn_id, TxnId(2));
+        assert!(
+            !blocked.skip_allowed,
+            "without a later valid anchor, exact skip must fail closed"
         );
     }
 }

@@ -78,8 +78,8 @@ pub use primitives::extensions;
 
 // Re-export refresh types for secondary index subsystems and follower management
 pub use database::refresh::{
-    AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHook, RefreshHookError,
-    RefreshHooks, RefreshOutcome, UnblockError,
+    AdvanceError, BlockReason, BlockedTxn, FollowerStatus, NoopPreparedRefresh, PreparedRefresh,
+    RefreshHook, RefreshHookError, RefreshHooks, RefreshOutcome, UnblockError,
 };
 
 // Re-export primitive types at crate root for convenience
