@@ -497,7 +497,7 @@ impl Database {
     /// Load an existing MANIFEST or create a new one.
     ///
     /// Also updates the active WAL segment from the current WAL writer.
-    fn load_or_create_manifest(&self) -> StrataResult<ManifestManager> {
+    pub(super) fn load_or_create_manifest(&self) -> StrataResult<ManifestManager> {
         let manifest_path = self.data_dir.join("MANIFEST");
 
         let mut manifest = if ManifestManager::exists(&manifest_path) {

@@ -525,6 +525,29 @@ impl Strata {
         SystemBranch::new(&self.backend)
     }
 
+    /// Close this handle, running the authoritative ordered shutdown barrier.
+    ///
+    /// For a local backend, this invokes [`strata_engine::Database::shutdown`],
+    /// which drains in-flight transactions, flushes the WAL, fsyncs the
+    /// MANIFEST, runs subsystem freeze hooks, and releases the process-wide
+    /// registry slot. Returns the underlying engine error on timeout or
+    /// freeze failure (see [`strata_core::StrataError::ShutdownTimeout`]).
+    ///
+    /// For an IPC backend, the server owns the database lifetime; `close`
+    /// just drops this client handle. Shutting down the server process is
+    /// the server's responsibility.
+    pub fn close(self) -> Result<()> {
+        match &self.backend {
+            Backend::Local { .. } => {
+                let db = self.database();
+                db.shutdown().map_err(Error::from)?;
+            }
+            Backend::Ipc { .. } => {}
+        }
+        drop(self);
+        Ok(())
+    }
+
     /// Create a new [`Session`] for interactive transaction support.
     ///
     /// The returned session wraps a fresh executor and can manage an

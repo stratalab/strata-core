@@ -1,10 +1,11 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key};
-use strata_core::StrataResult;
+use strata_core::{StrataError, StrataResult};
 use tracing::{info, warn};
 
 use super::refresh::{
@@ -12,7 +13,10 @@ use super::refresh::{
     BlockedTxn, BlockedTxnState, FollowerStatus, PersistedFollowerState, PreparedRefresh,
     RefreshGuard, RefreshOutcome, UnblockError,
 };
-use super::{Database, PersistenceMode};
+use super::{registry, Database, PersistenceMode};
+
+/// Default deadline for [`Database::shutdown`] when no explicit deadline is given.
+const DEFAULT_SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
 
 impl Database {
     // Branch Lifecycle Cleanup
@@ -566,59 +570,89 @@ impl Database {
         Ok(())
     }
 
-    /// This method:
-    /// 1. Stops accepting new transactions
-    /// 2. Waits for pending operations to complete
-    /// 3. Flushes WAL based on durability mode
+    /// Shut down the database using the default 30s deadline.
     ///
-    /// # Example
-    ///
-    /// ```text
-    /// db.shutdown()?;
-    /// assert!(!db.is_open());
-    /// ```
+    /// Equivalent to [`Database::shutdown_with_deadline`] with the default deadline.
     pub fn shutdown(&self) -> StrataResult<()> {
-        self.shutdown_started.store(true, Ordering::Release);
+        self.shutdown_with_deadline(DEFAULT_SHUTDOWN_DEADLINE)
+    }
 
-        // 1. Stop accepting new transactions
+    /// Authoritative ordered close barrier (CLAUDE.md Hard Rule 11 / D-DR-10).
+    ///
+    /// Ordering on a successful close:
+    /// 1. Flip `accepting_transactions = false` (new `begin_transaction` rejected).
+    /// 2. Drain background scheduler (embed hooks etc.) so no new transactions
+    ///    are spawned after the idle wait begins.
+    /// 3. Wait for the coordinator to report zero active transactions, bounded
+    ///    by `deadline`. On timeout, return [`StrataError::ShutdownTimeout`]
+    ///    **without** stopping the flush thread, flushing the WAL, fsyncing
+    ///    the MANIFEST, or running subsystem freeze hooks. Callers may let
+    ///    their in-flight transactions commit and retry.
+    /// 4. Stop the background flush thread (final sync inside the thread).
+    /// 5. Final `flush()` of the WAL.
+    /// 6. Fsync the MANIFEST atomically (tmp + rename + parent dir fsync).
+    /// 7. Run subsystem freeze hooks in reverse-insertion order.
+    /// 8. Release the `OPEN_DATABASES` registry slot so a fresh open on the
+    ///    same path succeeds immediately, without waiting for `Drop`.
+    ///
+    /// Calling `shutdown*` twice is idempotent: the second call returns
+    /// `Ok(())` once `shutdown_complete` is set.
+    pub fn shutdown_with_deadline(&self, deadline: Duration) -> StrataResult<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        self.shutdown_started.store(true, Ordering::Release);
         self.accepting_transactions.store(false, Ordering::Release);
 
-        // Followers have no background threads, WAL writer, or freeze targets.
+        // Followers have no background flush thread, WAL writer, or freeze targets.
         if self.follower {
+            self.shutdown_complete.store(true, Ordering::Release);
+            self.release_registry_slot();
             return Ok(());
         }
 
-        // 2. Drain background tasks (embeddings etc.) before final WAL flush
+        // Drain background scheduler before the idle wait so its tasks don't
+        // spawn new transactions after `accepting_transactions = false` (they
+        // run via internal paths that bypass that gate).
         self.scheduler.drain();
 
-        // 3. Wait for in-flight transactions to complete FIRST.
-        //    Uses wait_for_idle() which polls with SeqCst ordering, ensuring
-        //    visibility of active_count increments from record_start() on all
-        //    architectures (fixes #1738 / 9.2.B).
-        let timeout = std::time::Duration::from_secs(30);
-        if !self.coordinator.wait_for_idle(timeout) {
-            let remaining = self.coordinator.active_count();
-            warn!(
-                target: "strata::db",
-                remaining,
-                "Shutdown timed out waiting for {} active transaction(s) after {:?}",
-                remaining,
-                timeout,
-            );
+        // Authoritative barrier. Polls with SeqCst ordering; see #1738.
+        if !self.coordinator.wait_for_idle(deadline) {
+            return Err(StrataError::ShutdownTimeout {
+                active_txn_count: self.coordinator.active_count(),
+            });
         }
 
-        // 4. Signal the background flush thread to stop (after transactions are drained)
-        // (E-5: the thread performs a final sync before exiting)
+        // Flush thread performs a final sync on exit (E-5).
         self.stop_flush_thread();
-
-        // 5. Final flush to ensure all data is persisted
         self.flush()?;
+        self.fsync_manifest()?;
 
-        // 6. Freeze all registered subsystems. Attempts all even if one fails.
+        // Freeze attempts all subsystems even if one fails; returns first err.
         let freeze_result = self.run_freeze_hooks();
         self.shutdown_complete.store(true, Ordering::Release);
-        freeze_result?;
+        self.release_registry_slot();
+        freeze_result
+    }
 
-        Ok(())
+    /// Atomically persist the MANIFEST so it is durable before freeze hooks run.
+    ///
+    /// `ManifestManager::persist()` performs tmp-write → `sync_all` → rename →
+    /// parent-dir fsync. Skipped for ephemeral databases (no data_dir).
+    fn fsync_manifest(&self) -> StrataResult<()> {
+        if self.data_dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+        let mut mgr = self.load_or_create_manifest()?;
+        mgr.persist()
+            .map_err(|e| StrataError::internal(format!("manifest fsync on shutdown failed: {}", e)))
+    }
+
+    /// Release this database's entry from the global `OPEN_DATABASES` registry.
+    /// Only disk-backed databases have a registry entry.
+    fn release_registry_slot(&self) {
+        if self.persistence_mode == PersistenceMode::Disk {
+            registry::unregister(&self.data_dir);
+        }
     }
 }

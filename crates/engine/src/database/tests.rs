@@ -4281,3 +4281,222 @@ fn test_checkpoint_compact_preserves_branch_metadata() {
         "branch metadata must survive checkpoint+compact+reopen via snapshot install"
     );
 }
+
+// ============================================================================
+// T3-E6: Shutdown Hardening — acceptance tests
+// ============================================================================
+
+/// Test subsystem that counts how many times `freeze()` is invoked. Used to
+/// prove that a timed-out shutdown does NOT run subsystem freeze hooks.
+struct FreezeCountingSubsystem {
+    name: &'static str,
+    freeze_calls: Arc<AtomicUsize>,
+}
+
+impl FreezeCountingSubsystem {
+    fn new(name: &'static str) -> (Self, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name,
+                freeze_calls: counter.clone(),
+            },
+            counter,
+        )
+    }
+}
+
+impl Subsystem for FreezeCountingSubsystem {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn recover(&self, _db: &Arc<Database>) -> StrataResult<()> {
+        Ok(())
+    }
+    fn freeze(&self, _db: &Database) -> StrataResult<()> {
+        self.freeze_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_twice_is_idempotent() {
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("idempotent_shutdown");
+    let db = Database::open(&db_path).unwrap();
+
+    db.shutdown().expect("first shutdown must succeed");
+    db.shutdown().expect("second shutdown must be a no-op");
+}
+
+#[test]
+#[serial(open_databases)]
+fn drop_without_shutdown_still_cleans_up() {
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("drop_fallback");
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "drop_key");
+
+    {
+        let db = Database::open(&db_path).unwrap();
+        let mut txn = db.begin_transaction(branch_id).unwrap();
+        txn.put(key.clone(), Value::Bytes(b"drop_value".to_vec()))
+            .unwrap();
+        db.commit_transaction(&mut txn).unwrap();
+        db.end_transaction(txn);
+        // Intentionally no shutdown() — rely on Drop flush+freeze fallback.
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open(&db_path).unwrap();
+    let val = db
+        .storage()
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
+    assert_eq!(val.unwrap().value, Value::Bytes(b"drop_value".to_vec()));
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_timeout_returns_error_and_skips_freeze() {
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("shutdown_timeout");
+
+    let (freeze_sub, freeze_count) = FreezeCountingSubsystem::new("freeze-counter");
+    let spec = OpenSpec::primary(&db_path)
+        .with_subsystem(crate::search::SearchSubsystem)
+        .with_subsystem(freeze_sub);
+    let db = Database::open_runtime(spec).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "stuck_key");
+
+    // Hold a transaction open past the deadline; release after shutdown returns.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let db2 = Arc::clone(&db);
+    let key2 = key.clone();
+    let handle = std::thread::spawn(move || {
+        let mut txn = db2.begin_transaction(branch_id).unwrap();
+        started_tx.send(()).unwrap();
+        // Block until main thread releases us.
+        release_rx.recv().unwrap();
+        txn.put(key2, Value::Bytes(b"late".to_vec())).unwrap();
+        db2.commit_transaction(&mut txn).unwrap();
+        db2.end_transaction(txn);
+    });
+    started_rx.recv().unwrap();
+
+    let result = db.shutdown_with_deadline(Duration::from_millis(100));
+    match result {
+        Err(StrataError::ShutdownTimeout { active_txn_count }) => {
+            assert!(
+                active_txn_count >= 1,
+                "expected at least 1 active txn, got {}",
+                active_txn_count
+            );
+        }
+        other => panic!("expected ShutdownTimeout, got {:?}", other),
+    }
+
+    // Freeze hooks must NOT have run on the timeout path.
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        0,
+        "freeze hooks must not run after a shutdown timeout"
+    );
+
+    // Releasing the blocked txn and retrying succeeds; freeze then runs once.
+    release_tx.send(()).unwrap();
+    handle.join().unwrap();
+    db.shutdown_with_deadline(Duration::from_secs(5))
+        .expect("retry after txn completes must succeed");
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        1,
+        "successful retry must run freeze hooks exactly once"
+    );
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_releases_registry_slot() {
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("registry_release");
+
+    let db = Database::open(&db_path).unwrap();
+    let canonical_key: std::path::PathBuf = db.data_dir().to_path_buf();
+    assert!(
+        OPEN_DATABASES.lock().contains_key(&canonical_key),
+        "registry must have an entry while db is open"
+    );
+
+    db.shutdown().unwrap();
+
+    // The entry must be removed even though we still hold the `Arc<Database>`
+    // (i.e. before Drop runs). This is the deterministic-release property.
+    assert!(
+        !OPEN_DATABASES.lock().contains_key(&canonical_key),
+        "successful shutdown must release the registry slot without waiting for Drop"
+    );
+
+    // Drop the remaining handle so the on-disk file lock releases before the
+    // `temp_dir` cleans up.
+    drop(db);
+}
+
+#[test]
+#[serial(open_databases)]
+fn drop_releases_registry_slot_if_shutdown_skipped() {
+    // Drop's removal from OPEN_DATABASES is a `try_lock` best-effort because
+    // cascading drops during recovery failure must not self-deadlock against
+    // `acquire_primary_db`'s guard. The semantic guarantee is that a
+    // subsequent `Database::open` for the same path succeeds (either the
+    // entry was released, or it's stale-Weak and gets overwritten on insert).
+    // Verify that guarantee end-to-end.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("drop_registry_release");
+
+    {
+        let db = Database::open(&db_path).unwrap();
+        let mut txn = db.begin_transaction(BranchId::new()).unwrap();
+        db.commit_transaction(&mut txn).unwrap();
+        db.end_transaction(txn);
+        // No shutdown() — rely on Drop.
+    }
+
+    // Re-open must succeed without error. This exercises either the
+    // clean-release path or the stale-Weak-overwrite fallback path.
+    let db2 = Database::open(&db_path).expect(
+        "reopen after Drop-only cleanup must succeed via registry release or stale overwrite",
+    );
+    drop(db2);
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_fsyncs_manifest() {
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("shutdown_manifest");
+    let db = Database::open(&db_path).unwrap();
+
+    db.shutdown().unwrap();
+
+    let manifest_path = db_path.join("MANIFEST");
+    assert!(
+        strata_durability::ManifestManager::exists(&manifest_path),
+        "shutdown must leave the MANIFEST present on disk"
+    );
+    strata_durability::ManifestManager::load(manifest_path)
+        .expect("persisted MANIFEST must parse after shutdown fsync");
+}

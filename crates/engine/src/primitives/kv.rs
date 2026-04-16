@@ -1671,8 +1671,9 @@ mod tests {
             kv.put(&branch_id, "default", "survive2", Value::Int(42))
                 .unwrap();
 
-            // Explicit shutdown to flush WAL
-            let _ = db.shutdown();
+            // Explicit shutdown to flush WAL — the test asserts recovery, so
+            // any shutdown error would invalidate the post-reopen assertions.
+            db.shutdown().expect("shutdown must succeed before reopen");
         }
 
         // Phase 2: Reopen and verify data survived via WAL recovery

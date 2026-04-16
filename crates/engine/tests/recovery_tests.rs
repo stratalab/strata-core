@@ -1885,3 +1885,38 @@ fn test_mixed_opener_rejects_subsystem_mismatch() {
     // db_a is still valid and has the original subsystem list
     assert_eq!(db_a.installed_subsystem_names(), vec!["search"]);
 }
+
+/// T3-E6: explicit `shutdown()` is the authoritative close barrier — data
+/// committed before shutdown must be readable after reopen, without relying
+/// on Drop for final flush/freeze.
+#[test]
+fn shutdown_is_ordered_and_deterministic() {
+    let (db, temp_dir, branch_id) = setup();
+    let path = get_path(&temp_dir);
+
+    {
+        let kv = KVStore::new(db.clone());
+        kv.put(
+            &branch_id,
+            "default",
+            "ordered_key",
+            Value::String("ordered_value".into()),
+        )
+        .unwrap();
+    }
+
+    db.shutdown()
+        .expect("explicit shutdown must succeed on an idle database");
+    // Release all Arc<Database> refs so the on-disk file lock can be acquired
+    // by the reopen below.
+    drop(db);
+
+    let db2 = Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem))
+        .expect("reopen after shutdown must succeed");
+    let kv2 = KVStore::new(db2.clone());
+    assert_eq!(
+        kv2.get(&branch_id, "default", "ordered_key").unwrap(),
+        Some(Value::String("ordered_value".into())),
+        "data committed before shutdown() must be readable after reopen"
+    );
+}
