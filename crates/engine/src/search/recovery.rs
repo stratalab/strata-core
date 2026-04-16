@@ -141,18 +141,18 @@ fn visible_search_documents_for_branch(
     let mut docs = Vec::new();
 
     for (key, vv) in visible_entries_by_type(db, branch_id, TypeTag::KV) {
-        if let Some(op) = index_replayed_document(&key, &vv.value) {
-            if let SearchRefreshOp::Index { entity_ref, text } = op {
-                docs.push((entity_ref, text));
-            }
+        if let Some(SearchRefreshOp::Index { entity_ref, text }) =
+            index_replayed_document(&key, &vv.value)
+        {
+            docs.push((entity_ref, text));
         }
     }
 
     for (key, vv) in visible_entries_by_type(db, branch_id, TypeTag::Event) {
-        if let Some(op) = index_replayed_document(&key, &vv.value) {
-            if let SearchRefreshOp::Index { entity_ref, text } = op {
-                docs.push((entity_ref, text));
-            }
+        if let Some(SearchRefreshOp::Index { entity_ref, text }) =
+            index_replayed_document(&key, &vv.value)
+        {
+            docs.push((entity_ref, text));
         }
     }
 
@@ -163,10 +163,10 @@ fn visible_search_documents_for_branch(
     }
 
     for (key, vv) in visible_entries_by_type(db, branch_id, TypeTag::Json) {
-        if let Some(op) = index_replayed_document(&key, &vv.value) {
-            if let SearchRefreshOp::Index { entity_ref, text } = op {
-                docs.push((entity_ref, text));
-            }
+        if let Some(SearchRefreshOp::Index { entity_ref, text }) =
+            index_replayed_document(&key, &vv.value)
+        {
+            docs.push((entity_ref, text));
         }
     }
 
@@ -289,9 +289,7 @@ fn index_replayed_document(key: &Key, value: &Value) -> Option<SearchRefreshOp> 
             if is_json_internal_space(&key.namespace.space) {
                 return None;
             }
-            let Some(doc_id) = key.user_key_string() else {
-                return None;
-            };
+            let doc_id = key.user_key_string()?;
             let Ok(doc) = crate::primitives::json::JsonStore::deserialize_doc(value) else {
                 return None;
             };

@@ -186,9 +186,10 @@ impl std::fmt::Display for SubsystemStatus {
 /// is resolved and [`Database::resume_wal_writer`] is called. A successful
 /// resume requires that a sync operation succeed, proving the underlying
 /// storage is healthy again.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WalWriterHealth {
     /// Writer is accepting transactions normally.
+    #[default]
     Healthy,
     /// Writer has halted due to a background sync failure.
     ///
@@ -202,12 +203,6 @@ pub enum WalWriterHealth {
         /// Number of consecutive failed sync attempts.
         failed_sync_count: u64,
     },
-}
-
-impl Default for WalWriterHealth {
-    fn default() -> Self {
-        WalWriterHealth::Healthy
-    }
 }
 
 impl std::fmt::Display for WalWriterHealth {
