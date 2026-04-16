@@ -663,6 +663,7 @@ mod tests {
             final_version: CommitVersion(100),
             max_txn_id: TxnId(6),
             from_checkpoint: false,
+            txns_skipped_below_watermark: 0,
         };
 
         let result = RecoveryResult {
@@ -1126,6 +1127,7 @@ mod tests {
             final_version: CommitVersion(500),
             max_txn_id: TxnId(15),
             from_checkpoint: false,
+            txns_skipped_below_watermark: 0,
         };
 
         let result = RecoveryResult {

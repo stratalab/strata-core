@@ -3914,3 +3914,193 @@ fn test_checkpoint_only_restart_recovers_kv_from_snapshot() {
         assert_eq!(stored.value, Value::String(format!("payload-{}", i)));
     }
 }
+
+/// Checkpoint + delta-WAL replay: keys written before the checkpoint arrive
+/// through snapshot install; keys written after the checkpoint arrive through
+/// WAL replay filtered by the snapshot watermark. Both groups must be visible
+/// after reopen, and the snapshot-covered records must not be double-applied.
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_plus_delta_wal_replay_merges_sources() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    // Phase 1: write 5 "pre-checkpoint" keys, checkpoint, then write 5
+    // "post-checkpoint" keys that only live in the WAL tail.
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        for i in 0u64..5 {
+            let key = Key::new_kv(ns.clone(), format!("pre-{}", i));
+            db.transaction(branch_id, |txn| {
+                txn.put(key, Value::String(format!("v{}", i)))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+        db.checkpoint().unwrap();
+
+        for i in 0u64..5 {
+            let key = Key::new_kv(ns.clone(), format!("post-{}", i));
+            db.transaction(branch_id, |txn| {
+                txn.put(key, Value::String(format!("w{}", i)))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Phase 2: reopen. Both the snapshot-installed pre-* keys and the
+    // delta-replayed post-* keys must be visible.
+    let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+    for i in 0u64..5 {
+        let pre_key = Key::new_kv(ns.clone(), format!("pre-{}", i));
+        let pre = db
+            .storage()
+            .get_versioned(&pre_key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("pre-{} must survive via snapshot install", i));
+        assert_eq!(pre.value, Value::String(format!("v{}", i)));
+
+        let post_key = Key::new_kv(ns.clone(), format!("post-{}", i));
+        let post = db
+            .storage()
+            .get_versioned(&post_key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("post-{} must survive via delta-WAL replay", i));
+        assert_eq!(post.value, Value::String(format!("w{}", i)));
+    }
+
+    // The post-reopen database must be writable at a commit version above
+    // both sources — exercise it to surface monotonicity regressions.
+    let followup_key = Key::new_kv(ns.clone(), "after-reopen");
+    db.transaction(branch_id, |txn| {
+        txn.put(followup_key.clone(), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+    let followup = db
+        .storage()
+        .get_versioned(&followup_key, CommitVersion::MAX)
+        .unwrap()
+        .unwrap();
+    assert_eq!(followup.value, Value::Int(1));
+}
+
+/// Codec mismatch at reopen must fail loud regardless of the
+/// `allow_lossy_recovery` flag. Lossy recovery is for tolerating WAL
+/// corruption, not for silently rewriting the database under a different
+/// codec id. The check belongs ahead of the lossy fallback so an operator
+/// cannot accidentally discard a database by misconfiguring the codec.
+///
+/// Because there is only one WAL-compatible codec in the workspace today
+/// (`identity`), the test simulates codec drift by rewriting the MANIFEST
+/// directly with a foreign codec id, then reopens with `identity`.
+#[test]
+#[serial(open_databases)]
+fn test_codec_mismatch_on_reopen_fails_even_with_lossy_flag() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    // Create the DB with the default identity codec and write a key so there
+    // is real state for lossy mode to potentially discard.
+    let database_uuid;
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.put(Key::new_kv(ns.clone(), "k"), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+        database_uuid = db.database_uuid();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Rewrite the MANIFEST to claim a different codec id without changing
+    // any other on-disk state. This is the smallest faithful simulation of
+    // codec drift we can produce with the currently-shipping codec set.
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::remove_file(&manifest_path).unwrap();
+    strata_durability::ManifestManager::create(
+        manifest_path,
+        database_uuid,
+        "some-other-codec".to_string(),
+    )
+    .unwrap();
+
+    // Reopen with the default (identity) codec AND allow_lossy_recovery.
+    // The lossy flag must not suppress the codec-mismatch error.
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..Default::default()
+    };
+    let result = Database::open_with_config(&db_path, cfg);
+    match result {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("codec mismatch"),
+                "reopen with different codec must fail with codec mismatch, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("reopen with wrong codec + lossy flag must still fail"),
+    }
+}
+
+/// Follower open: after the primary checkpoints, a fresh follower must see
+/// every committed value — including the ones that now live only in the
+/// snapshot on disk — without going through the primary's in-process state.
+/// This exercises the Chunk 3 follower migration to the direct callback API
+/// plus snapshot install.
+#[test]
+fn test_follower_open_installs_checkpoint_snapshot() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    // Primary writes then checkpoints then exits. The data that is now
+    // covered by the snapshot is the follower's only path to see those
+    // values after the WAL is manually truncated.
+    {
+        let primary = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        for i in 0u64..6 {
+            let key = Key::new_kv(ns.clone(), format!("k{}", i));
+            primary
+                .transaction(branch_id, |txn| {
+                    txn.put(key, Value::String(format!("v{}", i)))?;
+                    Ok(())
+                })
+                .unwrap();
+        }
+        primary.checkpoint().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Delete WAL so the follower can only see data through the snapshot.
+    let wal_dir = db_path.join("wal");
+    for entry in std::fs::read_dir(&wal_dir).unwrap().flatten() {
+        let p = entry.path();
+        if p.is_file() {
+            std::fs::remove_file(&p).unwrap();
+        }
+    }
+
+    // Open as follower and verify all pre-checkpoint data is visible.
+    let follower = Database::open_follower(&db_path).unwrap();
+    for i in 0u64..6 {
+        let key = Key::new_kv(ns.clone(), format!("k{}", i));
+        let stored = follower
+            .storage()
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("follower must see k{} via snapshot install", i));
+        assert_eq!(stored.value, Value::String(format!("v{}", i)));
+    }
+}

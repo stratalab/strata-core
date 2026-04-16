@@ -20,7 +20,7 @@ use crate::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::{StrataError, StrataResult};
 use strata_durability::codec::{clone_codec, StorageCodec};
-use strata_durability::format::{snapshot_path, WalRecord, WalSegment};
+use strata_durability::format::{snapshot_path, SegmentMeta, WalRecord, WalSegment};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::WalReader;
 use strata_durability::{LoadedSnapshot, ManifestManager, SnapshotReader};
@@ -331,10 +331,16 @@ impl RecoveryCoordinator {
         // to include the snapshot must fold in their storage's post-install
         // `current_version()` themselves. Doing that here would require
         // the coordinator to reach into caller-owned state.
+        //
+        // `snapshot_watermark_txn` also drives delta-WAL replay below:
+        // records with `txn_id <= snapshot_watermark_txn` are already
+        // covered by the snapshot and must be skipped to avoid double-apply.
+        let mut snapshot_watermark_txn: u64 = 0;
         if let Some(codec) = self.codec.as_deref() {
             if let Some(snapshot) = self.load_snapshot_if_present(codec)? {
                 stats.from_checkpoint = true;
-                max_txn_id = max_txn_id.max(snapshot.watermark_txn());
+                snapshot_watermark_txn = snapshot.watermark_txn();
+                max_txn_id = max_txn_id.max(snapshot_watermark_txn);
                 on_snapshot(snapshot)?;
             }
         }
@@ -361,6 +367,21 @@ impl RecoveryCoordinator {
             let record = record_result
                 .map_err(|e| StrataError::storage(format!("WAL segment read failed: {}", e)))?;
 
+            // Delta-WAL replay: records at or below the snapshot watermark
+            // are already reflected in the installed snapshot. Skip them to
+            // avoid double-apply of puts/deletes. `snapshot_watermark_txn`
+            // is zero when no snapshot was loaded, which degenerates to
+            // full WAL replay (the pre-Epic-5 behavior).
+            //
+            // We still account for the txn id in `max_txn_id` so the
+            // downstream coordinator sees the true max id across both
+            // sources.
+            if snapshot_watermark_txn > 0 && record.txn_id.as_u64() <= snapshot_watermark_txn {
+                max_txn_id = max_txn_id.max(record.txn_id.as_u64());
+                stats.txns_skipped_below_watermark += 1;
+                continue;
+            }
+
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
                 StrataError::storage(format!(
                     "Failed to decode transaction payload for txn {}: {}",
@@ -384,10 +405,103 @@ impl RecoveryCoordinator {
         // WalWriter::new() reopens at a clean record boundary (#1741).
         self.truncate_partial_tail(&reader);
 
+        // Rebuild missing or corrupt `.meta` sidecars from segment records
+        // so subsequent compaction/read paths hit the O(1) fast path rather
+        // than falling back to a full scan per segment. Best-effort: errors
+        // are logged but never fail recovery.
+        self.rebuild_missing_sidecars(&reader);
+
         stats.final_version = CommitVersion(max_version);
         stats.max_txn_id = TxnId(max_txn_id);
 
         Ok(stats)
+    }
+
+    /// Best-effort sidecar rebuild for closed WAL segments whose `.meta`
+    /// file is missing or fails the header/CRC check.
+    ///
+    /// For each segment whose `.meta` cannot be read cleanly, this scans
+    /// the segment records via [`WalReader::read_segment`] and writes a
+    /// freshly-computed [`SegmentMeta`]. Existing valid sidecars are left
+    /// untouched so re-running recovery is cheap.
+    ///
+    /// The active (last) segment is skipped because the WAL writer owns
+    /// and lazily rebuilds the active sidecar on reopen; touching it here
+    /// would race with writer state.
+    ///
+    /// Failures during scan or write are logged at `warn` and do not
+    /// escalate — readers and compaction already fall back to full-segment
+    /// scans when a sidecar is absent, so a failed rebuild only costs
+    /// performance, not correctness.
+    fn rebuild_missing_sidecars(&self, reader: &WalReader) {
+        let wal_dir = self.layout.wal_dir();
+        let segments = match reader.list_segments(wal_dir) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        if segments.is_empty() {
+            return;
+        }
+        // Skip the active (last) segment — the writer owns its sidecar.
+        let closed = &segments[..segments.len().saturating_sub(1)];
+        for &segment_number in closed {
+            match SegmentMeta::read_from_file(wal_dir, segment_number) {
+                Ok(Some(meta)) if meta.segment_number == segment_number => {
+                    // Existing sidecar is structurally valid; leave it alone.
+                    continue;
+                }
+                Ok(Some(_)) => {
+                    warn!(
+                        target: "strata::recovery",
+                        segment = segment_number,
+                        "Sidecar segment_number mismatch; rebuilding"
+                    );
+                }
+                Ok(None) => {
+                    // Missing — rebuild silently.
+                }
+                Err(e) => {
+                    warn!(
+                        target: "strata::recovery",
+                        segment = segment_number,
+                        error = %e,
+                        "Sidecar corrupt; rebuilding"
+                    );
+                }
+            }
+
+            let (records, _, _, _) = match reader.read_segment(wal_dir, segment_number) {
+                Ok(v) => v,
+                Err(e) => {
+                    warn!(
+                        target: "strata::recovery",
+                        segment = segment_number,
+                        error = %e,
+                        "Failed to scan segment for sidecar rebuild; readers will fall back to full scan"
+                    );
+                    continue;
+                }
+            };
+            let mut meta = SegmentMeta::new_empty(segment_number);
+            for record in &records {
+                meta.track_record(record.txn_id, record.timestamp);
+            }
+            if let Err(e) = meta.write_to_file(wal_dir) {
+                warn!(
+                    target: "strata::recovery",
+                    segment = segment_number,
+                    error = %e,
+                    "Failed to persist rebuilt sidecar; readers will fall back to full scan"
+                );
+            } else {
+                info!(
+                    target: "strata::recovery",
+                    segment = segment_number,
+                    records = records.len(),
+                    "Rebuilt missing WAL segment sidecar"
+                );
+            }
+        }
     }
 
     /// Legacy convenience wrapper that constructs a fresh `SegmentedStore`
@@ -525,10 +639,16 @@ pub struct RecoveryStats {
     /// transactions already in the WAL.
     pub max_txn_id: TxnId,
 
-    /// Whether recovery was from checkpoint
-    ///
-    /// In M2, this is always false as checkpoint-based recovery is not implemented.
+    /// Whether a snapshot was loaded during recovery. Set to `true` when
+    /// `recover()` consulted the MANIFEST, found a snapshot reference, and
+    /// handed the decoded payload to `on_snapshot`. Snapshot loading
+    /// requires a codec to be installed via `with_codec()`.
     pub from_checkpoint: bool,
+
+    /// Number of WAL records skipped during delta replay because their
+    /// `txn_id` was at or below the snapshot watermark (already reflected
+    /// in the installed snapshot). Always zero for WAL-only recovery.
+    pub txns_skipped_below_watermark: usize,
 }
 
 impl RecoveryStats {
@@ -851,6 +971,7 @@ mod tests {
             final_version: CommitVersion(100),
             max_txn_id: TxnId(8),
             from_checkpoint: false,
+            txns_skipped_below_watermark: 0,
         };
 
         assert_eq!(stats.total_operations(), 13);
@@ -1888,6 +2009,304 @@ mod tests {
             .unwrap();
         assert_eq!(fired, 0);
         assert!(!stats.from_checkpoint);
+    }
+
+    /// Delta-WAL replay: when a snapshot with watermark=N is loaded, records
+    /// with `txn_id <= N` are skipped (already in the snapshot), and only
+    /// records with `txn_id > N` fire `on_record`. The skipped count surfaces
+    /// in `RecoveryStats::txns_skipped_below_watermark` for observability.
+    #[test]
+    fn test_recover_delta_wal_skips_records_at_or_below_watermark() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Seed a snapshot whose watermark sits in the middle of the WAL.
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 1, 5);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=10 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+        let mut replayed_txns: Vec<u64> = Vec::new();
+        let stats = coord
+            .recover(
+                |_snapshot| Ok(()),
+                |record| {
+                    replayed_txns.push(record.txn_id.as_u64());
+                    Ok(())
+                },
+            )
+            .unwrap();
+
+        assert_eq!(
+            replayed_txns,
+            vec![6, 7, 8, 9, 10],
+            "only records strictly above the watermark must replay"
+        );
+        assert_eq!(stats.txns_replayed, 5);
+        assert_eq!(stats.txns_skipped_below_watermark, 5);
+        assert!(stats.from_checkpoint);
+        assert_eq!(stats.max_txn_id, TxnId(10));
+        assert_eq!(stats.writes_applied, 5);
+    }
+
+    /// When no snapshot is loaded (no codec), every WAL record replays
+    /// regardless of txn id — the delta filter degenerates to full replay.
+    #[test]
+    fn test_recover_without_snapshot_replays_all_records() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=4 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        let coord = test_recovery(temp_dir.path());
+        let mut replayed = 0usize;
+        let stats = coord
+            .recover(|_| Ok(()), |_| {
+                replayed += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(replayed, 4);
+        assert_eq!(stats.txns_replayed, 4);
+        assert_eq!(stats.txns_skipped_below_watermark, 0);
+        assert!(!stats.from_checkpoint);
+    }
+
+    /// Snapshot watermark sits past every WAL record: every record is
+    /// skipped, `on_record` never fires, replay reports zero applied.
+    #[test]
+    fn test_recover_delta_wal_all_records_covered_by_snapshot() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 9, 100);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=3 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(Key::new_kv(ns.clone(), format!("k{}", i)), Value::Int(i as i64))],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+        let mut replayed = 0usize;
+        let stats = coord
+            .recover(|_| Ok(()), |_| {
+                replayed += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(replayed, 0);
+        assert_eq!(stats.txns_replayed, 0);
+        assert_eq!(stats.txns_skipped_below_watermark, 3);
+        // `max_txn_id` still reflects snapshot watermark and any skipped
+        // records so the downstream counter seeds safely above all sources.
+        assert_eq!(stats.max_txn_id, TxnId(100));
+    }
+
+    /// Missing `.meta` sidecars on closed WAL segments are rebuilt during
+    /// recovery so subsequent compaction/read paths hit the O(1) fast path.
+    /// The active segment is deliberately left alone (writer owns it); corrupt
+    /// sidecars on closed segments are replaced with a freshly-computed one.
+    #[test]
+    fn test_recover_rebuilds_missing_sidecar_on_closed_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Force segment rotation by writing records whose combined size
+        // exceeds the test config's 64KB segment_size. Each record carries
+        // a ~40KB Value::Bytes payload, so record 2 rotates the writer and
+        // lands in segment 2 while segment 1 closes with record 1.
+        let big_value = || Value::Bytes(vec![0u8; 40 * 1024]);
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "a"), big_value())],
+                vec![],
+                1,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "b"), big_value())],
+                vec![],
+                2,
+            );
+        }
+
+        // Confirm we actually produced two segments before touching sidecars.
+        let seg1 = WalSegment::segment_path(&wal_dir, 1);
+        let seg2 = WalSegment::segment_path(&wal_dir, 2);
+        assert!(seg1.exists(), "segment 1 must exist");
+        assert!(seg2.exists(), "segment 2 must exist (rotation required)");
+
+        // Delete the sidecar for the closed segment (segment 1) so recovery
+        // has something to rebuild.
+        let closed_sidecar =
+            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        if closed_sidecar.exists() {
+            std::fs::remove_file(&closed_sidecar).unwrap();
+        }
+        assert!(!closed_sidecar.exists(), "precondition: sidecar removed");
+
+        // Recovery should rebuild the closed-segment sidecar as a side effect.
+        let coord = test_recovery(temp_dir.path());
+        let _ = coord.recover(|_| Ok(()), |_| Ok(())).unwrap();
+
+        assert!(
+            closed_sidecar.exists(),
+            "closed-segment sidecar must be rebuilt by recovery"
+        );
+        let rebuilt = strata_durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
+            .expect("rebuilt sidecar must be readable")
+            .expect("rebuilt sidecar must exist");
+        assert_eq!(rebuilt.segment_number, 1);
+        assert_eq!(rebuilt.record_count, 1);
+        assert_eq!(rebuilt.max_txn_id, TxnId(1));
+    }
+
+    /// Corrupt sidecars on closed segments (fails header/CRC check) are
+    /// replaced with a freshly-computed one. A rebuild must restore the
+    /// correct metadata so the fast path can trust the sidecar again.
+    #[test]
+    fn test_recover_rebuilds_corrupt_sidecar_on_closed_segment() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        // Force two segments so the first is a closed segment the rebuild
+        // path targets.
+        let big_value = || Value::Bytes(vec![0u8; 40 * 1024]);
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "a"), big_value())],
+                vec![],
+                1,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "b"), big_value())],
+                vec![],
+                2,
+            );
+        }
+
+        // Overwrite the closed sidecar with bytes that will fail magic/CRC
+        // validation in `SegmentMeta::from_bytes`.
+        let closed_sidecar =
+            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        std::fs::write(&closed_sidecar, b"CORRUPT_GARBAGE_NOT_A_VALID_META").unwrap();
+
+        let coord = test_recovery(temp_dir.path());
+        let _ = coord.recover(|_| Ok(()), |_| Ok(())).unwrap();
+
+        let rebuilt = strata_durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
+            .expect("rebuilt sidecar must be readable after corruption")
+            .expect("rebuilt sidecar must exist");
+        assert_eq!(rebuilt.segment_number, 1);
+        assert_eq!(rebuilt.record_count, 1);
+        assert_eq!(rebuilt.max_txn_id, TxnId(1));
+    }
+
+    /// The active (last) segment's sidecar is deliberately left alone by
+    /// rebuild — the WAL writer owns it. Verify by deleting the active
+    /// sidecar and checking it is NOT rebuilt by recovery.
+    #[test]
+    fn test_recover_does_not_rebuild_active_segment_sidecar() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+
+        let big_value = || Value::Bytes(vec![0u8; 40 * 1024]);
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            write_txn(
+                &mut wal,
+                1,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "a"), big_value())],
+                vec![],
+                1,
+            );
+            write_txn(
+                &mut wal,
+                2,
+                branch_id,
+                vec![(Key::new_kv(ns.clone(), "b"), big_value())],
+                vec![],
+                2,
+            );
+        }
+
+        // Delete the active-segment sidecar (segment 2 is the tail here).
+        let active_sidecar =
+            strata_durability::format::SegmentMeta::meta_path(&wal_dir, 2);
+        if active_sidecar.exists() {
+            std::fs::remove_file(&active_sidecar).unwrap();
+        }
+
+        let coord = test_recovery(temp_dir.path());
+        let _ = coord.recover(|_| Ok(()), |_| Ok(())).unwrap();
+
+        // Recovery must not have rebuilt the active sidecar — that is the
+        // writer's responsibility at reopen time.
+        assert!(
+            !active_sidecar.exists(),
+            "active segment sidecar must remain untouched by the recovery rebuild"
+        );
     }
 
     /// MANIFEST references a snapshot id but the corresponding .chk file was

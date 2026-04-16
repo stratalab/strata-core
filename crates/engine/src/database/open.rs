@@ -429,17 +429,92 @@ impl Database {
         let wal_dir = layout.wal_dir().to_path_buf();
         let manifest_path = layout.manifest_path().to_path_buf();
 
-        // Recovery — purely read-only (no truncation, no file writes)
-        let recovery = RecoveryCoordinator::new(layout, cfg.storage.effective_write_buffer_size())
-            .with_lossy_recovery(cfg.allow_lossy_recovery);
-        let result = match recovery.recover_into_memory_storage() {
-            Ok(result) => result,
+        // Read-only MANIFEST inspection: the follower derives its codec
+        // from whatever the database was created with. When the MANIFEST is
+        // absent (fresh database) or the codec is unsupported on this build,
+        // snapshot loading is skipped and recovery stays WAL-only.
+        let (database_uuid, follower_codec) = if ManifestManager::exists(&manifest_path) {
+            match ManifestManager::load(manifest_path.clone()) {
+                Ok(m) => {
+                    let manifest = m.manifest();
+                    let codec = strata_durability::get_codec(&manifest.codec_id).ok();
+                    if codec.is_none() {
+                        warn!(
+                            target: "strata::db",
+                            codec_id = %manifest.codec_id,
+                            "Follower could not initialize MANIFEST codec; snapshot loading will be skipped"
+                        );
+                    }
+                    (manifest.database_uuid, codec)
+                }
+                Err(e) => {
+                    warn!(
+                        target: "strata::db",
+                        error = %e,
+                        "Follower could not load MANIFEST; continuing with WAL-only recovery"
+                    );
+                    ([0u8; 16], None)
+                }
+            }
+        } else {
+            ([0u8; 16], None)
+        };
+
+        // Drive recovery via the callback-driven API. Snapshot install is
+        // wired only when a codec was resolved above; otherwise the
+        // coordinator falls back to WAL-only, matching the pre-Chunk-3
+        // follower behavior.
+        let mut storage = SegmentedStore::with_dir(
+            layout.segments_dir().to_path_buf(),
+            cfg.storage.effective_write_buffer_size(),
+        );
+        let mut recovery = RecoveryCoordinator::new(
+            layout.clone(),
+            cfg.storage.effective_write_buffer_size(),
+        )
+        .with_lossy_recovery(cfg.allow_lossy_recovery);
+        if let Some(ref c) = follower_codec {
+            recovery = recovery.with_codec(clone_codec(c.as_ref()));
+        }
+        let install_codec_for_follower = follower_codec.as_ref().map(|c| clone_codec(c.as_ref()));
+
+        let recover_result = {
+            let storage_ref = &storage;
+            let install_codec_ref = install_codec_for_follower.as_deref();
+            recovery.recover(
+                |snapshot| {
+                    if let Some(install_codec) = install_codec_ref {
+                        let installed = super::snapshot_install::install_snapshot(
+                            &snapshot,
+                            install_codec,
+                            storage_ref,
+                        )?;
+                        info!(
+                            target: "strata::recovery",
+                            snapshot_id = snapshot.snapshot_id(),
+                            watermark = snapshot.watermark_txn(),
+                            entries = installed.total_installed(),
+                            "Follower installed snapshot into SegmentedStore"
+                        );
+                    }
+                    Ok(())
+                },
+                |record| apply_wal_record_to_memory_storage(storage_ref, record),
+            )
+        };
+
+        let mut stats = match recover_result {
+            Ok(stats) => stats,
             Err(e) => {
                 if cfg.allow_lossy_recovery {
                     warn!(target: "strata::db",
                         error = %e,
                         "Follower recovery failed — starting with empty state");
-                    strata_concurrency::RecoveryResult::empty()
+                    storage = SegmentedStore::with_dir(
+                        layout.segments_dir().to_path_buf(),
+                        cfg.storage.effective_write_buffer_size(),
+                    );
+                    RecoveryStats::default()
                 } else {
                     return Err(StrataError::corruption(format!(
                         "WAL recovery failed in follower mode: {}. \
@@ -450,10 +525,24 @@ impl Database {
             }
         };
 
+        // Fold snapshot-installed storage version into stats so the follower's
+        // TransactionCoordinator bootstraps above snapshot entries.
+        stats.final_version = stats.final_version.max(CommitVersion(storage.version()));
+
         info!(target: "strata::db",
-            txns_replayed = result.stats.txns_replayed,
-            writes_applied = result.stats.writes_applied,
+            txns_replayed = stats.txns_replayed,
+            writes_applied = stats.writes_applied,
+            from_checkpoint = stats.from_checkpoint,
             "Follower recovery complete");
+
+        let result = strata_concurrency::RecoveryResult {
+            storage,
+            txn_manager: strata_concurrency::TransactionManager::with_txn_id(
+                stats.final_version,
+                stats.max_txn_id,
+            ),
+            stats,
+        };
 
         let persisted_follower_state = match load_persisted_follower_state(&canonical_path) {
             Ok(Some(state))
@@ -507,14 +596,9 @@ impl Database {
 
         Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
-        // Load database UUID from MANIFEST if it exists (read-only, no create)
-        let database_uuid = if ManifestManager::exists(&manifest_path) {
-            ManifestManager::load(manifest_path)
-                .map(|m| m.manifest().database_uuid)
-                .unwrap_or([0u8; 16])
-        } else {
-            [0u8; 16]
-        };
+        // `database_uuid` was already resolved from the MANIFEST above (or
+        // defaulted when absent) before recovery ran, so the snapshot-install
+        // codec and the instance UUID come from the same read.
 
         let db = Arc::new(Self {
             data_dir: canonical_path,
@@ -783,11 +867,15 @@ impl Database {
         // Load or create MANIFEST before recovery runs so the coordinator can
         // consult it for snapshot identity and codec validation. On first
         // open: generate a new UUID and persist it with the configured codec.
-        // On subsequent opens: load the existing UUID and validate codec matches.
+        // On subsequent opens: load the existing UUID and reject codec drift.
         //
-        // The coordinator re-validates codec inside `plan_recovery` before any
-        // WAL bytes are read; the check here is kept as fail-fast defense in
-        // depth and can be removed in Chunk 3 once the rewire is complete.
+        // The coordinator's `plan_recovery` also validates codec, but only
+        // while inside `recover()`, whose error path is subject to the
+        // lossy-recovery fallback. Codec mismatch is a configuration error,
+        // not data corruption, and must NOT be swallowed by lossy mode —
+        // otherwise a misconfigured reopen would silently discard the
+        // database instead of alerting the operator. Keeping the check here
+        // keeps it ahead of the lossy branch.
         let database_uuid = if ManifestManager::exists(&manifest_path) {
             let m = ManifestManager::load(manifest_path.clone())
                 .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
