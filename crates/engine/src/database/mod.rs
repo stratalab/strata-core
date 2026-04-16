@@ -1581,6 +1581,10 @@ impl Database {
     /// disk-backed databases, and storage/coordinator/cache parameters are
     /// applied to the live database immediately.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
+        // Rejected after a successful shutdown: this writes `strata.toml`
+        // and applies live storage/coordinator/cache changes, any of which
+        // would race a freshly reopened `Database` on the same path.
+        self.check_not_closed()?;
         let mut guard = self.config.write();
         f(&mut guard);
         // Persist to strata.toml for disk-backed databases
@@ -1701,9 +1705,14 @@ impl Database {
     /// Enable or disable auto-embedding.
     ///
     /// Persists to `strata.toml` for disk-backed databases.
+    ///
+    /// Silent no-op on a closed database — `update_config` rejects the
+    /// mutation and this wrapper discards the error to preserve its
+    /// infallible signature. Production code sets auto-embed via the
+    /// executor's `ConfigSetAutoEmbed` handler, which calls
+    /// `update_config` directly and surfaces the closed error to the
+    /// caller. This method exists for test convenience.
     pub fn set_auto_embed(&self, enabled: bool) {
-        // Use update_config for persistence; ignore error since
-        // auto_embed never triggers the durability rejection.
         let _ = self.update_config(|cfg| {
             cfg.auto_embed = enabled;
         });

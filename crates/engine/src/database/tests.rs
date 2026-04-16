@@ -4991,6 +4991,13 @@ fn shutdown_closes_mutating_maintenance_apis() {
         db.set_durability_mode(DurabilityMode::Always),
         "set_durability_mode",
     );
+    assert_closed(db.freeze_vector_heaps(), "freeze_vector_heaps");
+    assert_closed(
+        db.update_config(|cfg| {
+            cfg.auto_embed = !cfg.auto_embed;
+        }),
+        "update_config",
+    );
 
     // Tuple-returning APIs must early-return zeros rather than exercising
     // the underlying storage on the closed handle.
@@ -4999,6 +5006,18 @@ fn shutdown_closes_mutating_maintenance_apis() {
         db.run_maintenance(),
         (0, 0, 0),
         "run_maintenance must no-op on a closed handle"
+    );
+
+    // `set_auto_embed` inherits the `update_config` guard but discards the
+    // error by design (its signature is infallible). Verify that means it
+    // leaves the on-handle view of the flag unchanged after a closed
+    // shutdown rather than silently reporting success with stale state.
+    let before = db.auto_embed_enabled();
+    db.set_auto_embed(!before);
+    assert_eq!(
+        db.auto_embed_enabled(),
+        before,
+        "set_auto_embed must silently no-op on a closed handle — on-handle flag stays unchanged"
     );
 
     drop(db);

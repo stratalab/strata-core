@@ -558,7 +558,16 @@ impl Database {
     /// for the next recovery to reconstruct embeddings. This is called during
     /// shutdown and drop.
     /// Freeze all registered refresh hooks' state to disk.
+    ///
+    /// Rejected on a closed database — the hook implementations write mmap
+    /// files under `data_dir`, so letting a stale `Arc<Database>` rewrite
+    /// them after a fresh `Database::open` on the same path would corrupt
+    /// the new instance's recovery artifacts. Internal callers
+    /// (`VectorSubsystem::freeze` invoked from `run_freeze_hooks`, and
+    /// `Drop`'s fallback) only run while `shutdown_complete == false`, so
+    /// the guard does not fire on the legitimate shutdown path.
     pub fn freeze_vector_heaps(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
         if let Ok(hooks) = self.extension::<super::refresh::RefreshHooks>() {
             for hook in hooks.hooks() {
                 hook.freeze_to_disk(self)?;
