@@ -196,7 +196,9 @@ pub struct MaterializeResult {
 // ---------------------------------------------------------------------------
 
 /// Entry from version-scoped listing that preserves tombstone status.
-/// Used by three-way merge to reconstruct ancestor state including deletions.
+/// Used by three-way merge to reconstruct ancestor state including deletions,
+/// and by checkpoint collection to carry retention metadata (timestamp, TTL)
+/// into snapshot DTOs without a second storage pass.
 #[derive(Debug, Clone)]
 pub struct VersionedEntry {
     /// The decoded user key.
@@ -207,6 +209,10 @@ pub struct VersionedEntry {
     pub is_tombstone: bool,
     /// The MVCC commit version that wrote this entry.
     pub commit_id: CommitVersion,
+    /// Original commit timestamp in microseconds.
+    pub timestamp_micros: u64,
+    /// Per-key TTL in milliseconds (0 = no expiry).
+    pub ttl_ms: u64,
 }
 
 /// Entry from a branch's own sources (excluding inherited layers).
@@ -2085,6 +2091,8 @@ impl SegmentedStore {
                 value: entry.value.clone(),
                 is_tombstone: entry.is_tombstone,
                 commit_id,
+                timestamp_micros: entry.timestamp.as_micros(),
+                ttl_ms: entry.ttl_ms,
             })
         })
         .collect()

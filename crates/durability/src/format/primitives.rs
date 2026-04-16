@@ -81,11 +81,17 @@ impl<'a> CursorReader<'a> {
     }
 }
 
-/// Snapshot entry for KV primitive
+/// Snapshot entry for KV primitive (v2 format)
 ///
 /// Format:
 /// branch_id(16) + space_len(4) + space + type_tag(1) + user_key_len(4) + user_key
-/// + value_len(4) + value + version(8) + timestamp(8)
+/// + value_len(4) + value + version(8) + timestamp(8) + ttl_ms(8) + is_tombstone(1)
+///
+/// Retention metadata (`ttl_ms`, `is_tombstone`) was added in the T3-E5
+/// follow-up so snapshots are retention-complete — compact() can delete WAL
+/// segments covered by a snapshot without losing TTL or tombstone state.
+/// When `is_tombstone` is true, `value` is conventionally empty but
+/// serialized identically so the format layout stays fixed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct KvSnapshotEntry {
     /// Branch identifier (UUID bytes)
@@ -96,12 +102,16 @@ pub struct KvSnapshotEntry {
     pub type_tag: u8,
     /// Raw user-key bytes
     pub user_key: Vec<u8>,
-    /// Value bytes (pre-codec)
+    /// Value bytes (pre-codec). Empty when `is_tombstone` is true.
     pub value: Vec<u8>,
     /// Version counter
     pub version: u64,
     /// Timestamp (microseconds since epoch)
     pub timestamp: u64,
+    /// Per-key TTL in milliseconds (0 = no expiry).
+    pub ttl_ms: u64,
+    /// Whether this entry is a deletion tombstone.
+    pub is_tombstone: bool,
 }
 
 /// Snapshot entry for Event primitive
@@ -125,27 +135,50 @@ pub struct EventSnapshotEntry {
     pub timestamp: u64,
 }
 
-/// Snapshot entry for Run primitive
+/// Snapshot entry for Branch primitive (v2 format)
 ///
 /// Format:
-/// key_len(4) + key + value_len(4) + value + version(8) + timestamp(8)
+/// branch_id(16) + key_len(4) + key + value_len(4) + value + version(8)
+/// + timestamp(8) + is_tombstone(1)
+///
+/// The explicit `branch_id` field was added in the T3-E5 follow-up so
+/// install can dispatch entries to the correct branch on reopen. In today's
+/// engine all branch metadata lives under the global nil-UUID sentinel
+/// (see `strata_engine::primitives::branch::index::global_branch_id`),
+/// but the DTO carries the id explicitly so future per-branch metadata
+/// scoping works without another format break.
+///
+/// `is_tombstone` is explicit (matching the KV/JSON/Vector pattern) so
+/// `branches.delete(name)` round-trips losslessly through checkpoint +
+/// compact + reopen without install having to infer tombstone status from
+/// a zero-length value payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchSnapshotEntry {
+    /// Branch identifier this entry belongs to (UUID bytes).
+    pub branch_id: [u8; 16],
     /// Branch primitive storage key in the global namespace.
     pub key: String,
-    /// Serialized `Value` bytes for the branch entry.
+    /// Serialized `Value` bytes for the branch entry. Empty when
+    /// `is_tombstone` is true.
     pub value: Vec<u8>,
     /// MVCC commit version
     pub version: u64,
     /// Timestamp (microseconds)
     pub timestamp: u64,
+    /// Whether this entry is a branch-metadata deletion tombstone.
+    pub is_tombstone: bool,
 }
 
-/// Snapshot entry for Json primitive
+/// Snapshot entry for Json primitive (v2 format)
 ///
 /// Format:
 /// branch_id(16) + space_len(4) + space + doc_id_len(4) + doc_id
-/// + content_len(4) + content + version(8) + timestamp(8)
+/// + content_len(4) + content + version(8) + timestamp(8) + is_tombstone(1)
+///
+/// JSON documents can be deleted via the `destroy` operation; the tombstone
+/// marker preserves that state through checkpoint + compact + reopen.
+/// When `is_tombstone` is true, `content` is conventionally empty but
+/// serialized identically so the layout stays fixed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JsonSnapshotEntry {
     /// Branch identifier (UUID bytes)
@@ -154,12 +187,14 @@ pub struct JsonSnapshotEntry {
     pub space: String,
     /// Document identifier
     pub doc_id: String,
-    /// JSON content bytes (pre-codec)
+    /// JSON content bytes (pre-codec). Empty when `is_tombstone` is true.
     pub content: Vec<u8>,
     /// Version counter
     pub version: u64,
     /// Timestamp (microseconds)
     pub timestamp: u64,
+    /// Whether this document entry is a deletion tombstone.
+    pub is_tombstone: bool,
 }
 
 /// Snapshot entry for Vector primitive (collection level)
@@ -186,12 +221,17 @@ pub struct VectorCollectionSnapshotEntry {
     pub vectors: Vec<VectorSnapshotEntry>,
 }
 
-/// Individual vector within a collection
+/// Individual vector within a collection (v2 format)
 ///
 /// Format:
 /// key_len(4) + key + vector_id(8) + dimensions(4) + [f32...]
 /// + metadata_len(4) + metadata + raw_value_len(4) + raw_value
-/// + version(8) + timestamp(8)
+/// + version(8) + timestamp(8) + is_tombstone(1)
+///
+/// Individual vector rows can be deleted (remove-by-vector-id), so the
+/// tombstone marker preserves that state through checkpoint + compact +
+/// reopen. Collection-level config does not carry a tombstone — collection
+/// lifecycle is branch-scoped, not per-row.
 #[derive(Debug, Clone, PartialEq)]
 pub struct VectorSnapshotEntry {
     /// Vector key
@@ -208,6 +248,8 @@ pub struct VectorSnapshotEntry {
     pub version: u64,
     /// Timestamp for this vector entry
     pub timestamp: u64,
+    /// Whether this vector row is a deletion tombstone.
+    pub is_tombstone: bool,
 }
 
 /// Serializer for snapshot primitive data
@@ -221,7 +263,7 @@ impl SnapshotSerializer {
         SnapshotSerializer { codec }
     }
 
-    /// Serialize KV entries to bytes
+    /// Serialize KV entries to bytes (v2 format).
     pub fn serialize_kv(&self, entries: &[KvSnapshotEntry]) -> Vec<u8> {
         let mut data = Vec::new();
 
@@ -240,7 +282,7 @@ impl SnapshotSerializer {
             data.extend_from_slice(&(entry.user_key.len() as u32).to_le_bytes());
             data.extend_from_slice(&entry.user_key);
 
-            // Value (through codec)
+            // Value (through codec). Empty for tombstones.
             let value_bytes = self.codec.encode(&entry.value);
             data.extend_from_slice(&(value_bytes.len() as u32).to_le_bytes());
             data.extend_from_slice(&value_bytes);
@@ -248,12 +290,16 @@ impl SnapshotSerializer {
             // Version and timestamp
             data.extend_from_slice(&entry.version.to_le_bytes());
             data.extend_from_slice(&entry.timestamp.to_le_bytes());
+
+            // Retention metadata (v2)
+            data.extend_from_slice(&entry.ttl_ms.to_le_bytes());
+            data.push(if entry.is_tombstone { 1 } else { 0 });
         }
 
         data
     }
 
-    /// Deserialize KV entries from bytes
+    /// Deserialize KV entries from bytes (v2 format).
     pub fn deserialize_kv(
         &self,
         data: &[u8],
@@ -269,6 +315,8 @@ impl SnapshotSerializer {
             let value = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
+            let ttl_ms = r.read_u64()?;
+            let is_tombstone = r.read_u8()? != 0;
             entries.push(KvSnapshotEntry {
                 branch_id,
                 space,
@@ -277,6 +325,8 @@ impl SnapshotSerializer {
                 value,
                 version,
                 timestamp,
+                ttl_ms,
+                is_tombstone,
             });
         }
         Ok(entries)
@@ -335,13 +385,15 @@ impl SnapshotSerializer {
         Ok(entries)
     }
 
-    /// Serialize Run entries to bytes
+    /// Serialize Branch entries to bytes (v2 format).
     pub fn serialize_branches(&self, entries: &[BranchSnapshotEntry]) -> Vec<u8> {
         let mut data = Vec::new();
 
         data.extend_from_slice(&(entries.len() as u32).to_le_bytes());
 
         for entry in entries {
+            data.extend_from_slice(&entry.branch_id);
+
             let key_bytes = entry.key.as_bytes();
             data.extend_from_slice(&(key_bytes.len() as u32).to_le_bytes());
             data.extend_from_slice(key_bytes);
@@ -352,12 +404,16 @@ impl SnapshotSerializer {
 
             data.extend_from_slice(&entry.version.to_le_bytes());
             data.extend_from_slice(&entry.timestamp.to_le_bytes());
+
+            // Retention metadata (v2): explicit tombstone marker, matching
+            // the KV/JSON/Vector pattern instead of inferring from empty bytes.
+            data.push(if entry.is_tombstone { 1 } else { 0 });
         }
 
         data
     }
 
-    /// Deserialize Run entries from bytes
+    /// Deserialize Branch entries from bytes (v2 format).
     pub fn deserialize_branches(
         &self,
         data: &[u8],
@@ -366,15 +422,19 @@ impl SnapshotSerializer {
         let count = r.read_u32()? as usize;
         let mut entries = Vec::with_capacity(count);
         for _ in 0..count {
+            let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let key = r.read_string()?;
             let value = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
+            let is_tombstone = r.read_u8()? != 0;
             entries.push(BranchSnapshotEntry {
+                branch_id,
                 key,
                 value,
                 version,
                 timestamp,
+                is_tombstone,
             });
         }
         Ok(entries)
@@ -403,12 +463,15 @@ impl SnapshotSerializer {
 
             data.extend_from_slice(&entry.version.to_le_bytes());
             data.extend_from_slice(&entry.timestamp.to_le_bytes());
+
+            // Retention metadata (v2): tombstone marker.
+            data.push(if entry.is_tombstone { 1 } else { 0 });
         }
 
         data
     }
 
-    /// Deserialize Json entries from bytes
+    /// Deserialize Json entries from bytes (v2 format).
     pub fn deserialize_json(
         &self,
         data: &[u8],
@@ -423,6 +486,7 @@ impl SnapshotSerializer {
             let content = self.codec.decode(r.read_blob()?)?;
             let version = r.read_u64()?;
             let timestamp = r.read_u64()?;
+            let is_tombstone = r.read_u8()? != 0;
             entries.push(JsonSnapshotEntry {
                 branch_id,
                 space,
@@ -430,6 +494,7 @@ impl SnapshotSerializer {
                 content,
                 version,
                 timestamp,
+                is_tombstone,
             });
         }
         Ok(entries)
@@ -485,13 +550,16 @@ impl SnapshotSerializer {
                 data.extend_from_slice(&vector.raw_value);
                 data.extend_from_slice(&vector.version.to_le_bytes());
                 data.extend_from_slice(&vector.timestamp.to_le_bytes());
+
+                // Retention metadata (v2): per-vector tombstone marker.
+                data.push(if vector.is_tombstone { 1 } else { 0 });
             }
         }
 
         data
     }
 
-    /// Deserialize Vector collections from bytes
+    /// Deserialize Vector collections from bytes (v2 format).
     pub fn deserialize_vectors(
         &self,
         data: &[u8],
@@ -522,6 +590,7 @@ impl SnapshotSerializer {
                 let raw_value = r.read_blob()?.to_vec();
                 let version = r.read_u64()?;
                 let timestamp = r.read_u64()?;
+                let is_tombstone = r.read_u8()? != 0;
                 vectors.push(VectorSnapshotEntry {
                     key,
                     vector_id,
@@ -530,6 +599,7 @@ impl SnapshotSerializer {
                     raw_value,
                     version,
                     timestamp,
+                    is_tombstone,
                 });
             }
 
@@ -589,6 +659,8 @@ mod tests {
                 value: b"value1".to_vec(),
                 version: 1,
                 timestamp: 1000,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
             KvSnapshotEntry {
                 branch_id: test_branch(2),
@@ -598,6 +670,8 @@ mod tests {
                 value: b"value2".to_vec(),
                 version: 2,
                 timestamp: 2000,
+                ttl_ms: 60_000,
+                is_tombstone: false,
             },
         ];
 
@@ -630,6 +704,8 @@ mod tests {
             value: "value_\u{4E2D}\u{6587}_chinese".as_bytes().to_vec(),
             version: 42,
             timestamp: 9999,
+            ttl_ms: 0,
+            is_tombstone: false,
         }];
 
         let data = serializer.serialize_kv(&entries);
@@ -650,6 +726,8 @@ mod tests {
             value: b"value".to_vec(),
             version: 7,
             timestamp: 12_345,
+            ttl_ms: 0,
+            is_tombstone: false,
         }];
 
         let data = serializer.serialize_kv(&entries);
@@ -691,12 +769,24 @@ mod tests {
     fn test_branches_roundtrip() {
         let serializer = test_serializer();
 
-        let entries = vec![BranchSnapshotEntry {
-            key: "my-branch".to_string(),
-            value: b"{}".to_vec(),
-            version: 17,
-            timestamp: 1000,
-        }];
+        let entries = vec![
+            BranchSnapshotEntry {
+                branch_id: test_branch(0),
+                key: "my-branch".to_string(),
+                value: b"{}".to_vec(),
+                version: 17,
+                timestamp: 1000,
+                is_tombstone: false,
+            },
+            BranchSnapshotEntry {
+                branch_id: test_branch(0),
+                key: "deleted-branch".to_string(),
+                value: Vec::new(),
+                version: 18,
+                timestamp: 2000,
+                is_tombstone: true,
+            },
+        ];
 
         let data = serializer.serialize_branches(&entries);
         let parsed = serializer.deserialize_branches(&data).unwrap();
@@ -716,6 +806,7 @@ mod tests {
                 content: b"{\"name\":\"test\"}".to_vec(),
                 version: 1,
                 timestamp: 1000,
+                is_tombstone: false,
             },
             JsonSnapshotEntry {
                 branch_id: test_branch(6),
@@ -724,6 +815,7 @@ mod tests {
                 content: b"{\"value\":42}".to_vec(),
                 version: 2,
                 timestamp: 2000,
+                is_tombstone: false,
             },
         ];
 
@@ -753,6 +845,7 @@ mod tests {
                     raw_value: b"raw-vec1".to_vec(),
                     version: 31,
                     timestamp: 2222,
+                    is_tombstone: false,
                 },
                 VectorSnapshotEntry {
                     key: "vec2".to_string(),
@@ -762,6 +855,7 @@ mod tests {
                     raw_value: b"raw-vec2".to_vec(),
                     version: 32,
                     timestamp: 3333,
+                    is_tombstone: false,
                 },
             ],
         }];
@@ -794,6 +888,7 @@ mod tests {
                 raw_value: vec![1, 2, 3, 4],
                 version: 51,
                 timestamp: 5555,
+                is_tombstone: false,
             }],
         }];
 

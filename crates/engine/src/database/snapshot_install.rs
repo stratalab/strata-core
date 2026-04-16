@@ -9,14 +9,13 @@
 //! Recovery calls this from the `on_snapshot` callback passed to
 //! `RecoveryCoordinator::recover` so checkpoint-only restart (no WAL covering
 //! some pre-snapshot range) produces the same observable state as the
-//! original commits.
+//! original commits. The T3-E5 follow-up made snapshot install
+//! retention-complete: tombstones are installed as `DecodedSnapshotValue::
+//! Tombstone` so deletes survive checkpoint+compact+reopen; KV TTL carries
+//! through; and the Branch section is dispatched via the new `branch_id`
+//! field on `BranchSnapshotEntry`.
 //!
-//! Branch-primitive sections are currently skipped with a warning: their
-//! snapshot DTO does not carry `branch_id` so install cannot know which
-//! branch to target. Branch metadata remains recoverable through WAL replay;
-//! a DTO fix for Branch is tracked separately from T3-E5.
-//!
-//! Graph-primitive standalone sections are also skipped: today
+//! Graph-primitive standalone sections are still skipped — today
 //! `collect_checkpoint_data` emits Graph entries inside the KV section with
 //! `type_tag = TypeTag::Graph`, and the KV decoder below routes them to the
 //! correct storage type. A future standalone Graph section would need its
@@ -36,27 +35,36 @@ use tracing::warn;
 /// Counts of entries installed per primitive during a snapshot install.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct InstallStats {
-    /// KV entries installed (TypeTag::KV).
+    /// KV entries installed (TypeTag::KV). Includes tombstones.
     pub kv: usize,
     /// Graph entries installed (TypeTag::Graph) — routed through the KV section.
     pub graph: usize,
     /// Event entries installed.
     pub events: usize,
-    /// JSON entries installed.
+    /// JSON entries installed. Includes tombstones.
     pub json: usize,
     /// Vector collection configs installed (the `__config__/{name}` rows).
     pub vector_configs: usize,
-    /// Individual vector records installed.
+    /// Individual vector records installed. Includes tombstones.
     pub vectors: usize,
+    /// Branch metadata entries installed.
+    pub branches: usize,
     /// Sections that were present in the snapshot but intentionally skipped
-    /// (Branch section today; Graph standalone section if ever non-empty).
+    /// (standalone Graph section when non-empty — today KV-section routing
+    /// handles all graph entries).
     pub sections_skipped: usize,
 }
 
 impl InstallStats {
     /// Total number of logical entries written into storage.
     pub(crate) fn total_installed(&self) -> usize {
-        self.kv + self.graph + self.events + self.json + self.vector_configs + self.vectors
+        self.kv
+            + self.graph
+            + self.events
+            + self.json
+            + self.vector_configs
+            + self.vectors
+            + self.branches
     }
 }
 
@@ -89,18 +97,7 @@ pub(crate) fn install_snapshot(
                 install_vector_section(&serializer, &section.data, storage, &mut stats)?
             }
             primitive_tags::BRANCH => {
-                // BranchSnapshotEntry does not carry a `branch_id` field today,
-                // so install cannot dispatch per-branch correctly. Branch
-                // metadata is also recorded in the WAL, so delta-replay
-                // reconstitutes it. Log and skip.
-                warn!(
-                    target: "strata::recovery",
-                    section = "Branch",
-                    bytes = section.data.len(),
-                    "Skipping Branch snapshot section: DTO lacks branch_id; \
-                     Branch metadata will be reconstituted from WAL"
-                );
-                stats.sections_skipped += 1;
+                install_branch_section(&serializer, &section.data, storage, &mut stats)?
             }
             primitive_tags::GRAPH => {
                 // Graph entries are written inside the KV section today; a
@@ -132,7 +129,8 @@ pub(crate) fn install_snapshot(
 /// Decode one KV section and install entries grouped by `(branch_id, type_tag)`.
 ///
 /// The KV section carries both KV and Graph entries (`type_tag` discriminates);
-/// install routes them to the appropriate storage type.
+/// install routes them to the appropriate storage type. Tombstones are
+/// installed as `DecodedSnapshotValue::Tombstone`; TTL is propagated.
 fn install_kv_section(
     serializer: &SnapshotSerializer,
     data: &[u8],
@@ -145,17 +143,18 @@ fn install_kv_section(
 
     let mut groups: HashMap<([u8; 16], u8), Vec<DecodedSnapshotEntry>> = HashMap::new();
     for entry in entries {
-        let value = decode_value_json(&entry.value, "KV")?;
+        let payload = if entry.is_tombstone {
+            DecodedSnapshotValue::Tombstone
+        } else {
+            DecodedSnapshotValue::Value(decode_value_json(&entry.value, "KV")?)
+        };
         let decoded = DecodedSnapshotEntry {
             space: entry.space,
             user_key: entry.user_key,
-            payload: DecodedSnapshotValue::Value(value),
+            payload,
             version: CommitVersion(entry.version),
             timestamp_micros: entry.timestamp,
-            // KV snapshot DTO does not carry TTL today; T3-E4 flagged this
-            // as a retention-completeness follow-up. 0 = no expiry, matching
-            // pre-snapshot-install behavior.
-            ttl_ms: 0,
+            ttl_ms: entry.ttl_ms,
         };
         groups
             .entry((entry.branch_id, entry.type_tag))
@@ -215,7 +214,8 @@ fn install_event_section(
 }
 
 /// Decode a JSON section and install entries per-branch with doc-id as the
-/// user key (matching the Json primitive's key encoding).
+/// user key (matching the Json primitive's key encoding). Tombstones on
+/// deleted documents are preserved as `DecodedSnapshotValue::Tombstone`.
 fn install_json_section(
     serializer: &SnapshotSerializer,
     data: &[u8],
@@ -228,11 +228,15 @@ fn install_json_section(
 
     let mut groups: HashMap<[u8; 16], Vec<DecodedSnapshotEntry>> = HashMap::new();
     for entry in entries {
-        let value = decode_value_json(&entry.content, "Json")?;
+        let payload = if entry.is_tombstone {
+            DecodedSnapshotValue::Tombstone
+        } else {
+            DecodedSnapshotValue::Value(decode_value_json(&entry.content, "Json")?)
+        };
         let decoded = DecodedSnapshotEntry {
             space: entry.space,
             user_key: entry.doc_id.into_bytes(),
-            payload: DecodedSnapshotValue::Value(value),
+            payload,
             version: CommitVersion(entry.version),
             timestamp_micros: entry.timestamp,
             ttl_ms: 0,
@@ -243,6 +247,58 @@ fn install_json_section(
         let branch_id = BranchId::from_bytes(branch_bytes);
         let count = storage.install_snapshot_entries(branch_id, TypeTag::Json, &group_entries)?;
         stats.json += count;
+    }
+    Ok(())
+}
+
+/// Decode a Branch section and install entries grouped by `branch_id`.
+///
+/// Branch metadata in today's engine lives under the global nil-UUID sentinel
+/// (see `strata_engine::primitives::branch::index::global_branch_id`), but
+/// the DTO carries the id explicitly so install stays robust against future
+/// per-branch scoping without another format break.
+///
+/// `user_key` is the UTF-8 bytes of the original key string. Values are
+/// stored as JSON-encoded bytes (matching the checkpoint collector) unless
+/// the entry is a tombstone, in which case the value is empty.
+fn install_branch_section(
+    serializer: &SnapshotSerializer,
+    data: &[u8],
+    storage: &SegmentedStore,
+    stats: &mut InstallStats,
+) -> StrataResult<()> {
+    let entries = serializer
+        .deserialize_branches(data)
+        .map_err(|e| StrataError::corruption(format!("Branch section decode failed: {}", e)))?;
+
+    let mut groups: HashMap<[u8; 16], Vec<DecodedSnapshotEntry>> = HashMap::new();
+    for entry in entries {
+        // Explicit tombstone marker (matches KV/JSON/Vector). Using the flag
+        // instead of inferring from empty-value bytes prevents a silent
+        // misclassification if a live entry ever serializes to zero bytes.
+        let payload = if entry.is_tombstone {
+            DecodedSnapshotValue::Tombstone
+        } else {
+            DecodedSnapshotValue::Value(decode_value_json(&entry.value, "Branch")?)
+        };
+        let decoded = DecodedSnapshotEntry {
+            // Branch metadata lives in the conventional "default" space per
+            // `Namespace::for_branch`; install reconstructs the full
+            // `Namespace` from branch_id + space inside
+            // `SegmentedStore::install_snapshot_entries`.
+            space: "default".to_string(),
+            user_key: entry.key.into_bytes(),
+            payload,
+            version: CommitVersion(entry.version),
+            timestamp_micros: entry.timestamp,
+            ttl_ms: 0,
+        };
+        groups.entry(entry.branch_id).or_default().push(decoded);
+    }
+    for (branch_bytes, group_entries) in groups {
+        let branch_id = BranchId::from_bytes(branch_bytes);
+        let count = storage.install_snapshot_entries(branch_id, TypeTag::Branch, &group_entries)?;
+        stats.branches += count;
     }
     Ok(())
 }
@@ -287,16 +343,21 @@ fn install_vector_section(
 
         for vector in collection.vectors {
             let vec_key = format!("{}/{}", name, vector.key).into_bytes();
+            let payload = if vector.is_tombstone {
+                DecodedSnapshotValue::Tombstone
+            } else {
+                // `raw_value` is the original serialized `VectorRecord`
+                // bytes; reinstalling as `Value::Bytes` preserves the exact
+                // payload that subsystem recovery expects to decode.
+                DecodedSnapshotValue::Value(Value::Bytes(vector.raw_value))
+            };
             groups
                 .entry(branch_bytes)
                 .or_default()
                 .push(DecodedSnapshotEntry {
                     space: space.clone(),
                     user_key: vec_key,
-                    // `raw_value` is the original serialized `VectorRecord`
-                    // bytes; reinstalling as `Value::Bytes` preserves the
-                    // exact payload that subsystem recovery expects to decode.
-                    payload: DecodedSnapshotValue::Value(Value::Bytes(vector.raw_value)),
+                    payload,
                     version: CommitVersion(vector.version),
                     timestamp_micros: vector.timestamp,
                     ttl_ms: 0,
@@ -373,6 +434,8 @@ mod tests {
                 value: serde_json::to_vec(&Value::Int(1)).unwrap(),
                 version: 5,
                 timestamp: 1_000,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
             KvSnapshotEntry {
                 branch_id: *branch_id.as_bytes(),
@@ -382,6 +445,8 @@ mod tests {
                 value: serde_json::to_vec(&Value::String("two".into())).unwrap(),
                 version: 6,
                 timestamp: 2_000,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
         ]);
 
@@ -434,6 +499,8 @@ mod tests {
                 value: serde_json::to_vec(&Value::String("node-one".into())).unwrap(),
                 version: 10,
                 timestamp: 100,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
             KvSnapshotEntry {
                 branch_id: *branch_id.as_bytes(),
@@ -443,6 +510,8 @@ mod tests {
                 value: serde_json::to_vec(&Value::Int(42)).unwrap(),
                 version: 11,
                 timestamp: 200,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
         ]);
 
@@ -481,6 +550,8 @@ mod tests {
             value: serde_json::to_vec(&Value::Int(7)).unwrap(),
             version: 999,
             timestamp: 1_234_567,
+            ttl_ms: 0,
+            is_tombstone: false,
         }]);
 
         let info = writer_for(dir.path())
@@ -553,6 +624,7 @@ mod tests {
             content: serde_json::to_vec(&Value::String("content".into())).unwrap(),
             version: 100,
             timestamp: 77,
+            is_tombstone: false,
         }]);
 
         let info = writer_for(dir.path())
@@ -596,6 +668,7 @@ mod tests {
                 raw_value: b"raw-record-bytes".to_vec(),
                 version: 13,
                 timestamp: 1_600,
+                is_tombstone: false,
             }],
         }]);
 
@@ -643,28 +716,178 @@ mod tests {
     }
 
     #[test]
-    fn install_branch_section_is_skipped_with_warning() {
+    fn install_round_trips_branch_entries() {
         let dir = tempfile::tempdir().unwrap();
+        // Branch metadata lives under the nil-UUID global branch today;
+        // the DTO carries it explicitly so install dispatches correctly.
+        let global_branch = BranchId::from_bytes([0; 16]);
 
-        // Empty Branch section is accepted; non-empty is skipped with a warning.
-        // We use an empty payload here so the test does not rely on the Branch
-        // deserializer's internal format.
+        let branch_bytes = strata_durability::SnapshotSerializer::new(Box::new(IdentityCodec))
+            .serialize_branches(&[strata_durability::format::BranchSnapshotEntry {
+                branch_id: *global_branch.as_bytes(),
+                key: "my-branch".to_string(),
+                value: serde_json::to_vec(&Value::String("branch-metadata".into())).unwrap(),
+                version: 42,
+                timestamp: 1_234,
+                is_tombstone: false,
+            }]);
+
         let info = writer_for(dir.path())
             .create_snapshot(
                 7,
-                0,
-                vec![SnapshotSection::new(
-                    primitive_tags::BRANCH,
-                    vec![0, 0, 0, 0], // entry count = 0
-                )],
+                42,
+                vec![SnapshotSection::new(primitive_tags::BRANCH, branch_bytes)],
             )
             .unwrap();
         let snapshot = load_snapshot(&info.path);
 
         let storage = SegmentedStore::new();
         let stats = install_snapshot(&snapshot, &IdentityCodec, &storage).unwrap();
-        assert_eq!(stats.sections_skipped, 1);
-        assert_eq!(stats.total_installed(), 0);
+        assert_eq!(stats.branches, 1);
+        assert_eq!(stats.sections_skipped, 0);
+
+        // The entry must land under the (global_branch, "default",
+        // TypeTag::Branch) cell with the original key as user_key bytes.
+        let ns = Arc::new(Namespace::for_branch(global_branch));
+        let key = Key::new(ns, TypeTag::Branch, b"my-branch".to_vec());
+        let entry = storage
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .expect("branch entry must be installed");
+        assert_eq!(entry.value, Value::String("branch-metadata".into()));
+        assert_eq!(entry.version, Version::Txn(42));
+    }
+
+    #[test]
+    fn install_propagates_branch_tombstone_as_tombstone() {
+        // An explicit tombstone in `BranchSnapshotEntry` installs as a
+        // storage-level tombstone so deleted branch metadata round-trips
+        // through checkpoint + compact + reopen as a deletion, not as a
+        // resurrected live record.
+        let dir = tempfile::tempdir().unwrap();
+        let global_branch = BranchId::from_bytes([0; 16]);
+
+        let branch_bytes = strata_durability::SnapshotSerializer::new(Box::new(IdentityCodec))
+            .serialize_branches(&[strata_durability::format::BranchSnapshotEntry {
+                branch_id: *global_branch.as_bytes(),
+                key: "dropped".to_string(),
+                value: Vec::new(),
+                version: 99,
+                timestamp: 2_000,
+                is_tombstone: true,
+            }]);
+
+        let info = writer_for(dir.path())
+            .create_snapshot(
+                12,
+                99,
+                vec![SnapshotSection::new(primitive_tags::BRANCH, branch_bytes)],
+            )
+            .unwrap();
+        let snapshot = load_snapshot(&info.path);
+
+        let storage = SegmentedStore::new();
+        install_snapshot(&snapshot, &IdentityCodec, &storage).unwrap();
+
+        let ns = Arc::new(Namespace::for_branch(global_branch));
+        let key = Key::new(ns, TypeTag::Branch, b"dropped".to_vec());
+        let observed = storage.get_versioned(&key, CommitVersion::MAX).unwrap();
+        assert!(
+            observed.is_none(),
+            "branch tombstone must hide the entry on reads"
+        );
+    }
+
+    #[test]
+    fn install_propagates_kv_tombstone_as_tombstone() {
+        // A tombstoned KV entry must be installed as a storage-level
+        // tombstone so reads return `None` after snapshot-only restart.
+        let dir = tempfile::tempdir().unwrap();
+        let branch_id = BranchId::new();
+
+        let kv_bytes = serializer().serialize_kv(&[KvSnapshotEntry {
+            branch_id: *branch_id.as_bytes(),
+            space: "default".to_string(),
+            type_tag: TypeTag::KV.as_byte(),
+            user_key: b"deleted".to_vec(),
+            value: Vec::new(),
+            version: 10,
+            timestamp: 500,
+            ttl_ms: 0,
+            is_tombstone: true,
+        }]);
+
+        let info = writer_for(dir.path())
+            .create_snapshot(
+                10,
+                10,
+                vec![SnapshotSection::new(primitive_tags::KV, kv_bytes)],
+            )
+            .unwrap();
+        let snapshot = load_snapshot(&info.path);
+
+        let storage = SegmentedStore::new();
+        install_snapshot(&snapshot, &IdentityCodec, &storage).unwrap();
+
+        // A tombstoned snapshot entry surfaces as `None` on read.
+        let key = Key::new_kv(ns(branch_id, "default"), "deleted");
+        let observed = storage.get_versioned(&key, CommitVersion::MAX).unwrap();
+        assert!(observed.is_none(), "tombstone must hide the key from reads");
+    }
+
+    #[test]
+    fn install_propagates_kv_ttl_into_storage() {
+        // A KV entry with a non-zero ttl_ms must expire at the correct
+        // timestamp after snapshot install — the TTL barrier survives
+        // checkpoint + compact + reopen.
+        let dir = tempfile::tempdir().unwrap();
+        let branch_id = BranchId::new();
+        let ttl_ms: u64 = 30_000;
+        let commit_ts_micros: u64 = 1_000_000;
+
+        let kv_bytes = serializer().serialize_kv(&[KvSnapshotEntry {
+            branch_id: *branch_id.as_bytes(),
+            space: "default".to_string(),
+            type_tag: TypeTag::KV.as_byte(),
+            user_key: b"expires".to_vec(),
+            value: serde_json::to_vec(&Value::String("temporary".into())).unwrap(),
+            version: 1,
+            timestamp: commit_ts_micros,
+            ttl_ms,
+            is_tombstone: false,
+        }]);
+
+        let info = writer_for(dir.path())
+            .create_snapshot(
+                11,
+                1,
+                vec![SnapshotSection::new(primitive_tags::KV, kv_bytes)],
+            )
+            .unwrap();
+        let snapshot = load_snapshot(&info.path);
+
+        let storage = SegmentedStore::new();
+        install_snapshot(&snapshot, &IdentityCodec, &storage).unwrap();
+
+        let key = Key::new_kv(ns(branch_id, "default"), "expires");
+
+        // Before the TTL elapses, the entry is visible.
+        let pre_expiry = storage
+            .get_at_timestamp(&key, commit_ts_micros + ttl_ms * 1_000 - 1)
+            .unwrap();
+        assert!(
+            pre_expiry.is_some(),
+            "entry must be visible before TTL elapses"
+        );
+
+        // Past the TTL window, the entry expires.
+        let post_expiry = storage
+            .get_at_timestamp(&key, commit_ts_micros + ttl_ms * 1_000 + 1)
+            .unwrap();
+        assert!(
+            post_expiry.is_none(),
+            "TTL barrier from the snapshot must expire the entry after the configured window"
+        );
     }
 
     #[test]

@@ -278,6 +278,8 @@ mod tests {
                 value: b"value1".to_vec(),
                 version: 1,
                 timestamp: 1000,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
             KvSnapshotEntry {
                 branch_id: [2; 16],
@@ -287,6 +289,8 @@ mod tests {
                 value: b"value2".to_vec(),
                 version: 2,
                 timestamp: 2000,
+                ttl_ms: 0,
+                is_tombstone: false,
             },
         ];
 
@@ -351,6 +355,8 @@ mod tests {
                 value: vec![],
                 version: 1,
                 timestamp: 0,
+                ttl_ms: 0,
+                is_tombstone: false,
             }])
             .with_events(vec![EventSnapshotEntry {
                 branch_id: test_uuid(),

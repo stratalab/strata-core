@@ -198,13 +198,13 @@ Implementation note:
   - `.meta` sidecar rebuild
   - Codec mismatch rejection
   - Non-identity codec round-trip
-  - Pre-DR-5 `.chk` fixtures consumable
+  - Snapshot format version enforcement (v1 rejected on load; clean break per pre-release policy — see DR-5 notes in the architecture scope)
   - Vector double-recovery (no state conflicts)
 
 ### Acceptance Criteria
 
 - [ ] All 13 checkpoint recovery test scenarios pass
-- [ ] Pre-DR-5 `.chk` fixtures remain consumable
+- [ ] Snapshot format version enforcement rejects stale formats on load (no v1 compatibility shim while pre-release — see DR-5 notes in the architecture scope)
 - [ ] `test_issue_1730` inverted (compact succeeds)
 - [ ] Codec mismatch rejected with clear error at open
 - [ ] Non-identity codec survives write→crash→reopen→read
