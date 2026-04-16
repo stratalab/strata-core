@@ -26,6 +26,7 @@ impl Database {
     ///
     /// For ephemeral databases, this is a no-op.
     pub fn flush(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
         if let Some(ref wal) = self.wal_writer {
             // Wait up to 10 seconds for any in-flight background sync to complete.
             // This is defensive against pathological cases (flush thread panic, etc.).
@@ -70,6 +71,7 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 6.3
     pub fn checkpoint(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
         if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }
@@ -160,6 +162,7 @@ impl Database {
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 5.6
     pub fn compact(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
         if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
             return Ok(());
         }

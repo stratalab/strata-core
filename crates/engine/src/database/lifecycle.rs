@@ -70,7 +70,12 @@ impl Database {
     /// A future PR will add a background maintenance thread.
     ///
     /// Returns `(safe_point, total_versions_pruned)`.
+    ///
+    /// Returns `(0, 0)` on a closed database (see [`Database::check_not_closed`]).
     pub fn run_gc(&self) -> (u64, usize) {
+        if self.check_not_closed().is_err() {
+            return (0, 0);
+        }
         let safe_point = self.gc_safe_point();
         if safe_point == 0 {
             return (0, 0);
@@ -96,7 +101,12 @@ impl Database {
     /// (e.g., from tests, CLI, or a future background thread).
     ///
     /// Returns `(safe_point, versions_pruned, ttl_entries_expired)`.
+    ///
+    /// Returns `(0, 0, 0)` on a closed database (see [`Database::check_not_closed`]).
     pub fn run_maintenance(&self) -> (u64, usize, usize) {
+        if self.check_not_closed().is_err() {
+            return (0, 0, 0);
+        }
         let (safe_point, pruned) = self.run_gc();
         let expired = self
             .storage

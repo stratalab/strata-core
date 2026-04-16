@@ -4956,3 +4956,50 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
         ITERATIONS
     );
 }
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_closes_mutating_maintenance_apis() {
+    // After a successful `shutdown()`, the registry slot and the on-disk
+    // `.lock` file are both released, so a fresh `Database::open` on the
+    // same path can start writing. The old `Arc<Database>` must therefore
+    // reject every mutating maintenance API — otherwise it could race the
+    // fresh instance and corrupt its WAL / MANIFEST / storage state.
+    // The transaction gate already rejects `begin_transaction`; this test
+    // covers the non-transactional maintenance surface.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("maintenance_after_shutdown");
+    let db = Database::open(&db_path).unwrap();
+
+    db.shutdown().unwrap();
+
+    // Result-returning APIs must return a clear "closed" error rather than
+    // silently succeeding on the stale handle.
+    fn assert_closed(res: StrataResult<()>, api: &str) {
+        match res {
+            Ok(()) => panic!("{} must be rejected after shutdown; got Ok(())", api),
+            Err(StrataError::InvalidInput { message })
+                if message.contains("Database has been shut down") => {}
+            Err(other) => panic!("{}: unexpected error {:?}", api, other),
+        }
+    }
+    assert_closed(db.flush(), "flush");
+    assert_closed(db.checkpoint(), "checkpoint");
+    assert_closed(db.compact(), "compact");
+    assert_closed(
+        db.set_durability_mode(DurabilityMode::Always),
+        "set_durability_mode",
+    );
+
+    // Tuple-returning APIs must early-return zeros rather than exercising
+    // the underlying storage on the closed handle.
+    assert_eq!(db.run_gc(), (0, 0), "run_gc must no-op on a closed handle");
+    assert_eq!(
+        db.run_maintenance(),
+        (0, 0, 0),
+        "run_maintenance must no-op on a closed handle"
+    );
+
+    drop(db);
+}

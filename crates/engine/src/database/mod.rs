@@ -1094,6 +1094,31 @@ impl Database {
         self.accepting_transactions.load(Ordering::Acquire)
     }
 
+    /// Guard for mutating maintenance APIs (flush, checkpoint, compact,
+    /// `set_durability_mode`, etc.) that must not run on a handle whose
+    /// owner has already successfully completed `shutdown()`.
+    ///
+    /// After a successful shutdown the registry slot and the `.lock` file
+    /// are both released, which means a fresh `Database::open` can acquire
+    /// them and start writing. Letting the old `Arc<Database>` still drive
+    /// WAL flushes, checkpoints, compactions, or MANIFEST updates against
+    /// that path would race the fresh instance and corrupt its state.
+    ///
+    /// The transaction gate (`check_accepting`) covers `begin_transaction`;
+    /// this covers the non-transactional admin/maintenance surface. It
+    /// intentionally keys on `shutdown_complete` — a *timed-out* shutdown
+    /// restores the pre-shutdown flags (see `shutdown_with_deadline`) so
+    /// callers can finish work and retry, and maintenance ops are still
+    /// allowed on that retry path.
+    pub(crate) fn check_not_closed(&self) -> StrataResult<()> {
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Err(StrataError::invalid_input(
+                "Database has been shut down".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn writer_halted_error(&self) -> Option<StrataError> {
         match &*self.wal_writer_health.lock() {
             WalWriterHealth::Healthy => None,
@@ -1610,6 +1635,7 @@ impl Database {
     /// Updates the WAL writer's fsync policy and restarts the shared
     /// background flush thread when the Standard-mode configuration changes.
     pub fn set_durability_mode(&self, mode: DurabilityMode) -> StrataResult<()> {
+        self.check_not_closed()?;
         let wal = self.wal_writer.as_ref().ok_or_else(|| {
             StrataError::invalid_input(
                 "Cannot change durability mode on an ephemeral (cache) database".to_string(),
