@@ -584,16 +584,25 @@ impl Database {
     /// 2. Drain background scheduler (embed hooks etc.) so no new transactions
     ///    are spawned after the idle wait begins.
     /// 3. Wait for the coordinator to report zero active transactions, bounded
-    ///    by `deadline`. On timeout, return [`StrataError::ShutdownTimeout`]
-    ///    **without** stopping the flush thread, flushing the WAL, fsyncing
-    ///    the MANIFEST, or running subsystem freeze hooks. Callers may let
-    ///    their in-flight transactions commit and retry.
+    ///    by `deadline`. On timeout, restore `shutdown_started = false` and
+    ///    `accepting_transactions = true` so the database remains usable,
+    ///    then return [`StrataError::ShutdownTimeout`] **without** stopping
+    ///    the flush thread, flushing the WAL, fsyncing the MANIFEST, or
+    ///    running subsystem freeze hooks. Callers may let their in-flight
+    ///    transactions commit, optionally do more work, and retry.
     /// 4. Stop the background flush thread (final sync inside the thread).
     /// 5. Final `flush()` of the WAL.
     /// 6. Fsync the MANIFEST atomically (tmp + rename + parent dir fsync).
-    /// 7. Run subsystem freeze hooks in reverse-insertion order.
-    /// 8. Release the `OPEN_DATABASES` registry slot so a fresh open on the
-    ///    same path succeeds immediately, without waiting for `Drop`.
+    /// 7. Run subsystem freeze hooks in reverse-insertion order. Freeze failure
+    ///    is **not** treated as completion: the registry slot stays claimed,
+    ///    `shutdown_complete` stays `false`, and the `Drop` fallback still
+    ///    gets a chance to run. A retry is safe because every step is
+    ///    idempotent.
+    /// 8. On success, release the `OPEN_DATABASES` registry slot so a fresh
+    ///    open on the same path succeeds immediately, without waiting for
+    ///    `Drop`. Only the primary singleton registers itself; followers
+    ///    intentionally skip this step so their shutdown does not evict a
+    ///    live primary sharing the same path.
     ///
     /// Calling `shutdown*` twice is idempotent: the second call returns
     /// `Ok(())` once `shutdown_complete` is set.
@@ -604,10 +613,13 @@ impl Database {
         self.shutdown_started.store(true, Ordering::Release);
         self.accepting_transactions.store(false, Ordering::Release);
 
-        // Followers have no background flush thread, WAL writer, or freeze targets.
+        // Followers have no background flush thread, WAL writer, or freeze
+        // targets. They also don't own a registry slot (see
+        // `Database::open_runtime_follower` — followers are not deduplicated
+        // via `OPEN_DATABASES`), so we must not call `release_registry_slot`
+        // here: doing so would evict a primary that happens to share the path.
         if self.follower {
             self.shutdown_complete.store(true, Ordering::Release);
-            self.release_registry_slot();
             return Ok(());
         }
 
@@ -618,9 +630,14 @@ impl Database {
 
         // Authoritative barrier. Polls with SeqCst ordering; see #1738.
         if !self.coordinator.wait_for_idle(deadline) {
-            return Err(StrataError::ShutdownTimeout {
-                active_txn_count: self.coordinator.active_count(),
-            });
+            let active_txn_count = self.coordinator.active_count();
+            // Restore the pre-shutdown flags so the database is usable again.
+            // The caller can let in-flight work drain, optionally start new
+            // work, and retry. Every step up to this point is idempotent, so
+            // a subsequent `shutdown*` call replays safely.
+            self.accepting_transactions.store(true, Ordering::Release);
+            self.shutdown_started.store(false, Ordering::Release);
+            return Err(StrataError::ShutdownTimeout { active_txn_count });
         }
 
         // Flush thread performs a final sync on exit (E-5).
@@ -629,10 +646,14 @@ impl Database {
         self.fsync_manifest()?;
 
         // Freeze attempts all subsystems even if one fails; returns first err.
-        let freeze_result = self.run_freeze_hooks();
+        // A freeze error is NOT a successful shutdown: leave `shutdown_complete`
+        // as-is (so an explicit retry can re-run, and Drop's fallback path is
+        // not suppressed) and do not release the registry slot.
+        self.run_freeze_hooks()?;
+
         self.shutdown_complete.store(true, Ordering::Release);
         self.release_registry_slot();
-        freeze_result
+        Ok(())
     }
 
     /// Atomically persist the MANIFEST so it is durable before freeze hooks run.
@@ -649,8 +670,12 @@ impl Database {
     }
 
     /// Release this database's entry from the global `OPEN_DATABASES` registry.
-    /// Only disk-backed databases have a registry entry.
+    ///
+    /// Only disk-backed primaries register themselves (followers skip the
+    /// registry entirely), so callers must ensure this is only invoked on a
+    /// successful primary shutdown.
     fn release_registry_slot(&self) {
+        debug_assert!(!self.follower, "followers must not touch OPEN_DATABASES");
         if self.persistence_mode == PersistenceMode::Disk {
             registry::unregister(&self.data_dir);
         }

@@ -4500,3 +4500,220 @@ fn shutdown_fsyncs_manifest() {
     strata_durability::ManifestManager::load(manifest_path)
         .expect("persisted MANIFEST must parse after shutdown fsync");
 }
+
+/// Subsystem whose `freeze()` fails while `fail_once` is `true` and then flips
+/// the flag off so the next invocation succeeds. Used to exercise the retry
+/// path after a freeze error.
+struct FlakyFreezeSubsystem {
+    name: &'static str,
+    fail_once: Arc<AtomicBool>,
+    freeze_calls: Arc<AtomicUsize>,
+}
+
+impl FlakyFreezeSubsystem {
+    fn new(name: &'static str) -> (Self, Arc<AtomicBool>, Arc<AtomicUsize>) {
+        let fail_once = Arc::new(AtomicBool::new(true));
+        let counter = Arc::new(AtomicUsize::new(0));
+        (
+            Self {
+                name,
+                fail_once: fail_once.clone(),
+                freeze_calls: counter.clone(),
+            },
+            fail_once,
+            counter,
+        )
+    }
+}
+
+impl Subsystem for FlakyFreezeSubsystem {
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn recover(&self, _db: &Arc<Database>) -> StrataResult<()> {
+        Ok(())
+    }
+    fn freeze(&self, _db: &Database) -> StrataResult<()> {
+        self.freeze_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_once.swap(false, Ordering::SeqCst) {
+            Err(StrataError::internal("injected freeze failure".to_string()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_freeze_failure_is_not_marked_complete() {
+    // A subsystem freeze error must not be misclassified as a successful
+    // shutdown: the registry slot must stay claimed, subsequent shutdown()
+    // calls must re-run (not short-circuit), and the Drop fallback must still
+    // get a chance to finish the work. Retry must succeed once the underlying
+    // fault clears because every step of the shutdown path is idempotent.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("flaky_freeze");
+
+    let (flaky, _fail_once, counter) = FlakyFreezeSubsystem::new("flaky-freeze");
+    let spec = OpenSpec::primary(&db_path)
+        .with_subsystem(crate::search::SearchSubsystem)
+        .with_subsystem(flaky);
+    let db = Database::open_runtime(spec).unwrap();
+    let canonical_key = db.data_dir().to_path_buf();
+
+    // First shutdown: freeze fails → error is surfaced, state is NOT completed.
+    let err = db
+        .shutdown()
+        .expect_err("first shutdown must surface the freeze failure");
+    assert!(
+        matches!(err, StrataError::Internal { .. }),
+        "unexpected error kind: {:?}",
+        err
+    );
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "freeze must have run once"
+    );
+    assert!(
+        OPEN_DATABASES.lock().contains_key(&canonical_key),
+        "registry slot must stay claimed when shutdown did not complete"
+    );
+
+    // Second shutdown: idempotency short-circuit must NOT fire; the injected
+    // fault has cleared, so this attempt succeeds and finishes the close.
+    db.shutdown()
+        .expect("retry after freeze failure clears must succeed");
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        2,
+        "retry must re-run freeze (no false idempotency)"
+    );
+    assert!(
+        !OPEN_DATABASES.lock().contains_key(&canonical_key),
+        "successful retry must release the registry slot"
+    );
+
+    drop(db);
+}
+
+#[test]
+#[serial(open_databases)]
+fn follower_shutdown_does_not_evict_primary_registry_entry() {
+    // Followers are not deduplicated via OPEN_DATABASES; only the primary owns
+    // the path's slot. Follower shutdown must therefore never call
+    // `release_registry_slot`, otherwise a live primary at the same path loses
+    // its entry and subsequent `Database::open` no longer reuses it.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("follower_vs_primary");
+
+    let primary = Database::open(&db_path).unwrap();
+    let canonical_key = primary.data_dir().to_path_buf();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(&db_path).with_subsystem(crate::search::SearchSubsystem),
+    )
+    .expect("follower must open alongside the primary");
+    assert!(follower.is_follower());
+
+    // Hold the `OPEN_DATABASES` lock across the follower shutdown. With the
+    // follower-path fix in `shutdown_with_deadline`, follower shutdown never
+    // touches the registry, so this cannot deadlock — and it makes the
+    // assertion immune to unrelated tests that call
+    // `OPEN_DATABASES.lock().clear()` for their own isolation.
+    let registry = OPEN_DATABASES.lock();
+    assert!(
+        registry.contains_key(&canonical_key),
+        "primary must be registered before follower shutdown"
+    );
+    follower.shutdown().expect("follower shutdown must succeed");
+    assert!(
+        registry.contains_key(&canonical_key),
+        "follower shutdown must not evict the primary's registry entry"
+    );
+    drop(registry);
+
+    drop(follower);
+    primary.shutdown().unwrap();
+    drop(primary);
+}
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_timeout_leaves_database_usable_for_new_transactions() {
+    // The scope requires a timed-out shutdown to leave the database usable so
+    // the caller can finish outstanding work and retry. In particular, new
+    // `begin_transaction` calls must succeed after the timeout error.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("timeout_usable");
+    let db = Database::open(&db_path).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let blocker_key = Key::new_kv(ns.clone(), "blocker");
+    let post_key = Key::new_kv(ns, "post_timeout");
+
+    // Hold a long-lived txn open to force the wait_for_idle timeout.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let db_bg = Arc::clone(&db);
+    let blocker_key_bg = blocker_key.clone();
+    let handle = std::thread::spawn(move || {
+        let mut txn = db_bg.begin_transaction(branch_id).unwrap();
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        txn.put(blocker_key_bg, Value::Bytes(b"done".to_vec()))
+            .unwrap();
+        db_bg.commit_transaction(&mut txn).unwrap();
+        db_bg.end_transaction(txn);
+    });
+    started_rx.recv().unwrap();
+
+    let err = db
+        .shutdown_with_deadline(Duration::from_millis(100))
+        .expect_err("shutdown must time out while the blocker txn is held");
+    assert!(
+        matches!(err, StrataError::ShutdownTimeout { .. }),
+        "unexpected error: {:?}",
+        err
+    );
+
+    // After the timeout the caller must be able to start NEW transactions,
+    // not only let pre-existing ones commit. This is the "leave the database
+    // usable" requirement from the T3-E6 scope.
+    let mut new_txn = db
+        .begin_transaction(branch_id)
+        .expect("new transactions must be allowed after a shutdown timeout");
+    new_txn
+        .put(post_key.clone(), Value::Bytes(b"after_timeout".to_vec()))
+        .unwrap();
+    db.commit_transaction(&mut new_txn).unwrap();
+    db.end_transaction(new_txn);
+
+    // Release the blocker so the retry below can drain cleanly.
+    release_tx.send(()).unwrap();
+    handle.join().unwrap();
+
+    // Verify the post-timeout write is visible in live storage before
+    // shutdown — this fully proves the database was usable after the timeout.
+    let post_value = db
+        .storage()
+        .get_versioned(&post_key, CommitVersion::MAX)
+        .unwrap();
+    assert_eq!(
+        post_value.unwrap().value,
+        Value::Bytes(b"after_timeout".to_vec()),
+        "transaction started after shutdown timeout must be visible"
+    );
+    let pre_value = db
+        .storage()
+        .get_versioned(&blocker_key, CommitVersion::MAX)
+        .unwrap();
+    assert_eq!(pre_value.unwrap().value, Value::Bytes(b"done".to_vec()));
+
+    db.shutdown_with_deadline(Duration::from_secs(5))
+        .expect("retry must succeed once every txn has drained");
+    drop(db);
+}
