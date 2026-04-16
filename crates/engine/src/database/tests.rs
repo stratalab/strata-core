@@ -4053,6 +4053,44 @@ fn test_codec_mismatch_on_reopen_fails_even_with_lossy_flag() {
     }
 }
 
+/// Follower open must fail loud when the MANIFEST cannot be parsed.
+/// Pre-fix, this case silently degraded to WAL-only recovery, which is
+/// unsafe once snapshot-aware compaction reclaims pre-snapshot WAL: the
+/// follower would serve stale/empty state without operator visibility.
+#[test]
+#[serial(open_databases)]
+fn test_follower_open_fails_hard_on_corrupt_manifest() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.put(Key::new_kv(ns.clone(), "k"), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Corrupt the MANIFEST on disk so ManifestManager::load fails.
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::write(&manifest_path, b"NOT-A-VALID-MANIFEST").unwrap();
+
+    let err = match Database::open_follower(&db_path) {
+        Ok(_) => panic!("follower must fail on corrupt MANIFEST"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.to_lowercase().contains("manifest"),
+        "error should mention MANIFEST, got: {}",
+        msg
+    );
+}
+
 /// Follower open: after the primary checkpoints, a fresh follower must see
 /// every committed value — including the ones that now live only in the
 /// snapshot on disk — without going through the primary's in-process state.

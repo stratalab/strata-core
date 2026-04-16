@@ -429,33 +429,31 @@ impl Database {
         let wal_dir = layout.wal_dir().to_path_buf();
         let manifest_path = layout.manifest_path().to_path_buf();
 
-        // Read-only MANIFEST inspection: the follower derives its codec
-        // from whatever the database was created with. When the MANIFEST is
-        // absent (fresh database) or the codec is unsupported on this build,
-        // snapshot loading is skipped and recovery stays WAL-only.
+        // Read-only MANIFEST inspection: the follower derives its codec from
+        // whatever the database was created with. Failures here match the
+        // primary's error handling — a MANIFEST that exists but cannot be
+        // parsed is corruption, and a codec id the local build cannot
+        // initialize is a configuration mismatch. Both produce hard errors
+        // so a snapshot-aware compact on the primary does not cause the
+        // follower to silently serve stale / empty state once pre-snapshot
+        // WAL has been reclaimed. Only a genuinely absent MANIFEST (fresh
+        // database) degrades to WAL-only recovery.
         let (database_uuid, follower_codec) = if ManifestManager::exists(&manifest_path) {
-            match ManifestManager::load(manifest_path.clone()) {
-                Ok(m) => {
-                    let manifest = m.manifest();
-                    let codec = strata_durability::get_codec(&manifest.codec_id).ok();
-                    if codec.is_none() {
-                        warn!(
-                            target: "strata::db",
-                            codec_id = %manifest.codec_id,
-                            "Follower could not initialize MANIFEST codec; snapshot loading will be skipped"
-                        );
-                    }
-                    (manifest.database_uuid, codec)
-                }
-                Err(e) => {
-                    warn!(
-                        target: "strata::db",
-                        error = %e,
-                        "Follower could not load MANIFEST; continuing with WAL-only recovery"
-                    );
-                    ([0u8; 16], None)
-                }
-            }
+            let m = ManifestManager::load(manifest_path.clone()).map_err(|e| {
+                StrataError::corruption(format!(
+                    "follower could not load MANIFEST at {}: {}",
+                    manifest_path.display(),
+                    e
+                ))
+            })?;
+            let manifest = m.manifest();
+            let codec = strata_durability::get_codec(&manifest.codec_id).map_err(|e| {
+                StrataError::internal(format!(
+                    "follower could not initialize MANIFEST codec '{}': {}",
+                    manifest.codec_id, e
+                ))
+            })?;
+            (manifest.database_uuid, Some(codec))
         } else {
             ([0u8; 16], None)
         };
