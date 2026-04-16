@@ -26,8 +26,15 @@ use std::path::{Path, PathBuf};
 /// Magic bytes: "SNAP" (0x534E4150)
 pub const SNAPSHOT_MAGIC: [u8; 4] = *b"SNAP";
 
-/// Snapshot format version for forward compatibility
-pub const SNAPSHOT_FORMAT_VERSION: u32 = 1;
+/// Snapshot format version.
+///
+/// v2 added retention metadata to the per-primitive DTOs (tombstone markers
+/// on KV/JSON/Vector; `ttl_ms` on KV; explicit `branch_id` on Branch). Old
+/// v1 snapshots are rejected on load — the T3-E5 follow-up deliberately
+/// made a clean break rather than maintaining dual-format deserializers,
+/// since no pre-release database ships with committed `.chk` fixtures and
+/// any live database can be re-checkpointed after upgrade.
+pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
 /// Snapshot header size in bytes
 pub const SNAPSHOT_HEADER_SIZE: usize = 64;
@@ -112,7 +119,7 @@ impl SnapshotHeader {
                 actual: self.magic,
             });
         }
-        if self.format_version > SNAPSHOT_FORMAT_VERSION {
+        if self.format_version != SNAPSHOT_FORMAT_VERSION {
             return Err(SnapshotHeaderError::UnsupportedVersion {
                 version: self.format_version,
                 max_supported: SNAPSHOT_FORMAT_VERSION,
@@ -268,11 +275,20 @@ mod tests {
             Err(SnapshotHeaderError::InvalidMagic { .. })
         ));
 
-        // Unsupported version
+        // Future version is rejected (exact match required).
         let mut future_header = header.clone();
-        future_header.format_version = 999;
+        future_header.format_version = SNAPSHOT_FORMAT_VERSION + 1;
         assert!(matches!(
             future_header.validate(),
+            Err(SnapshotHeaderError::UnsupportedVersion { .. })
+        ));
+
+        // Past version (pre-retention) is also rejected — the clean break
+        // from v1 is deliberate; see module docs on SNAPSHOT_FORMAT_VERSION.
+        let mut legacy_header = header.clone();
+        legacy_header.format_version = 1;
+        assert!(matches!(
+            legacy_header.validate(),
             Err(SnapshotHeaderError::UnsupportedVersion { .. })
         ));
     }

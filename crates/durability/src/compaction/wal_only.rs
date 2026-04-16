@@ -77,7 +77,13 @@ impl WalOnlyCompactor {
         let start_time = std::time::Instant::now();
         let mut info = CompactInfo::new(CompactMode::WALOnly);
 
-        // Get effective watermark from MANIFEST (flush watermark only; see #1730)
+        // Get effective watermark from MANIFEST — max of flush watermark and
+        // snapshot watermark. Both sources produce retention-complete state
+        // on reopen: segment flush persists records into on-disk SSTs, and
+        // snapshot install (T3-E5 + follow-up) reinstalls every logical
+        // entry including tombstones, TTL, and branch metadata. WAL segments
+        // covered by either source are safe to delete. See
+        // `effective_watermark` for the retention contract.
         let (watermark, manifest_active) = {
             let manifest = self.manifest.lock();
             let m = manifest.manifest();
@@ -309,12 +315,26 @@ impl WalOnlyCompactor {
 
 /// Compute the effective watermark for WAL truncation.
 ///
-/// Returns the flush watermark from the MANIFEST, ignoring the snapshot
-/// watermark. Snapshot-aware recovery is not yet implemented (#1730), so
-/// WAL segments must only be deleted when their data is persisted in
-/// on-disk SST segments (tracked by `flushed_through_commit_id`).
+/// Returns the highest txn id whose data is fully reconstructible on reopen
+/// without the WAL: either flushed to on-disk SSTs (`flushed_through_commit_id`)
+/// or captured in a retention-complete snapshot (`snapshot_watermark`).
+/// A WAL segment covered by the max of these is safe to delete.
+///
+/// The T3-E5 follow-up made snapshot coverage trustworthy by wiring
+/// tombstones, TTL, and Branch metadata through the checkpoint DTOs and
+/// install decoder. Before that work, WAL retention could only trust the
+/// flush watermark (the original `#1730` defensive hardening); after it,
+/// either source is sufficient.
 fn effective_watermark(manifest: &crate::format::Manifest) -> Option<u64> {
-    manifest.flushed_through_commit_id
+    match (
+        manifest.flushed_through_commit_id,
+        manifest.snapshot_watermark,
+    ) {
+        (Some(flushed), Some(snap)) => Some(flushed.max(snap)),
+        (Some(flushed), None) => Some(flushed),
+        (None, Some(snap)) => Some(snap),
+        (None, None) => None,
+    }
 }
 
 /// Generate segment file path
@@ -783,15 +803,20 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_truncation_ignores_snapshot_watermark() {
-        // Issue #1730: snapshot watermark must NOT drive WAL deletion because
-        // recovery is WAL-only and cannot load snapshots.
+    fn test_wal_truncation_accepts_snapshot_watermark_alone() {
+        // Inverted from the pre-retention `test_wal_truncation_ignores_
+        // snapshot_watermark`. Once snapshot install became retention-
+        // complete (tombstones, TTL, branch metadata all round-trip), WAL
+        // segments covered by the snapshot watermark are safe to delete
+        // even without a flush watermark — the snapshot is an authoritative
+        // recovery source on reopen.
         let (_dir, wal_dir, manifest) = setup_test_env();
 
         create_segment_with_records(&wal_dir, 1, &[1, 2, 3]).unwrap();
         create_segment_with_records(&wal_dir, 2, &[4, 5, 6]).unwrap();
 
-        // Set only snapshot watermark (no flush watermark)
+        // Set only snapshot watermark (no flush watermark). watermark=100
+        // covers every record in segments 1 and 2.
         {
             let mut m = manifest.lock();
             m.set_snapshot_watermark(1, TxnId(100)).unwrap();
@@ -800,13 +825,14 @@ mod tests {
         }
 
         let compactor = WalOnlyCompactor::new(wal_dir.clone(), manifest);
-        let result = compactor.compact();
+        let info = compactor
+            .compact()
+            .expect("snapshot watermark alone must drive successful compaction post-retention");
 
-        // Must return NoSnapshot because snapshot watermark alone is not safe
-        assert!(matches!(result, Err(CompactionError::NoSnapshot)));
-        // WAL segments must NOT be deleted
-        assert!(segment_path(&wal_dir, 1).exists());
-        assert!(segment_path(&wal_dir, 2).exists());
+        assert_eq!(info.wal_segments_removed, 2);
+        assert!(!segment_path(&wal_dir, 1).exists());
+        assert!(!segment_path(&wal_dir, 2).exists());
+        assert_eq!(info.snapshot_watermark, Some(100));
     }
 
     #[test]

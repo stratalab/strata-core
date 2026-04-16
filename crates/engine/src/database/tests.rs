@@ -707,10 +707,14 @@ fn test_checkpoint_creates_snapshot() {
 }
 
 #[test]
-fn test_checkpoint_then_compact_without_flush_fails() {
-    // Issue #1730: compact() after checkpoint-only must fail because
-    // recovery cannot load snapshots. WAL compaction is only safe
-    // when driven by the flush watermark (data in SST segments).
+fn test_checkpoint_then_compact_without_flush_succeeds() {
+    // Inverted in the T3-E5 follow-up (retention-complete DTOs + install).
+    //
+    // Pre-retention, compact() refused on snapshot-only coverage because
+    // recovery was either WAL-only or lacked tombstone/TTL/Branch fidelity.
+    // Now that snapshot install is retention-complete, the snapshot
+    // watermark is an authoritative recovery input and compact() succeeds
+    // without a flush watermark.
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
     let db = Database::open(&db_path).unwrap();
@@ -719,19 +723,18 @@ fn test_checkpoint_then_compact_without_flush_fails() {
     let ns = create_test_namespace(branch_id);
     let key = Key::new_kv(ns, "compact_test");
 
-    // Write data
     db.transaction(branch_id, |txn| {
         txn.put(key.clone(), Value::Int(42))?;
         Ok(())
     })
     .unwrap();
 
-    // Checkpoint creates snapshot but no flush watermark
-    assert!(db.checkpoint().is_ok());
+    db.checkpoint()
+        .expect("checkpoint must succeed to populate the snapshot watermark");
 
-    // Compact must fail — snapshot watermark alone is not safe
-    let result = db.compact();
-    assert!(result.is_err());
+    // Compact now succeeds on snapshot-only coverage.
+    db.compact()
+        .expect("compact() must succeed once recovery consumes retention-complete snapshots");
 }
 
 #[test]
@@ -1592,17 +1595,19 @@ fn test_issue_1697_compaction_preserves_snapshot_versions() {
 #[test]
 #[serial(open_databases)]
 fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
-    // Issue #1730: checkpoint+compact deletes WAL segments, but recovery
-    // is WAL-only and never loads snapshots. This causes data loss.
+    // Inverted in the T3-E5 follow-up.
     //
-    // After the fix, compact() must refuse to delete WAL segments based
-    // on the snapshot watermark alone, since recovery cannot load snapshots.
+    // Pre-retention, recovery was either WAL-only or lacked tombstone/TTL
+    // fidelity, so `compact()` had to refuse WAL deletion on snapshot-only
+    // coverage (`#1730`). Now that snapshot install is retention-complete
+    // (tombstones, TTL, branch metadata round-trip), compact() succeeds,
+    // WAL is reclaimed, and the committed data survives reopen through
+    // snapshot install alone.
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
 
     let branch_id = BranchId::new();
 
-    // Step 1: Write data
     {
         let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
         let ns = create_test_namespace(branch_id);
@@ -1614,51 +1619,35 @@ fn test_issue_1730_checkpoint_compact_recovery_data_loss() {
         })
         .unwrap();
 
-        // Step 2: Checkpoint (creates snapshot, sets watermark in MANIFEST)
         db.checkpoint().unwrap();
 
-        // Step 3: Compact — should NOT delete WAL segments since recovery
-        // cannot load snapshots. With the fix, this returns an error.
-        let compact_result = db.compact();
-        assert!(
-            compact_result.is_err(),
-            "compact() must fail when only snapshot watermark exists \
-             (no flush watermark) because recovery cannot load snapshots"
-        );
+        // compact() now succeeds on snapshot-only coverage.
+        db.compact()
+            .expect("compact() must succeed once snapshot coverage is trusted");
     }
-    // Database dropped (simulates clean shutdown)
 
-    // Clear the registry so reopen doesn't return the cached instance
     OPEN_DATABASES.lock().clear();
 
-    // Step 4: Reopen — recovery replays WAL
     {
         let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
-
         let ns = create_test_namespace(branch_id);
         let key = Key::new_kv(ns, "critical_data");
 
-        // Step 5: Data MUST still be present
         let result = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
-            .unwrap();
-        assert!(
-            result.is_some(),
-            "CRITICAL: Data lost after checkpoint+compact+recovery! \
-             WAL segments were deleted but recovery never loaded the snapshot."
-        );
-        assert_eq!(
-            result.unwrap().value,
-            Value::String("must_survive".to_string())
-        );
+            .unwrap()
+            .expect("data must survive checkpoint+compact+recovery via snapshot install");
+        assert_eq!(result.value, Value::String("must_survive".to_string()));
     }
 }
 
 #[test]
 #[serial(open_databases)]
 fn test_issue_1730_standard_durability() {
-    // Same as above but with Standard durability mode (disk-based, batched fsync).
+    // Inverted twin for Standard durability mode. Same contract: compact
+    // succeeds on snapshot-only coverage, data round-trips via snapshot
+    // install.
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");
 
@@ -1679,17 +1668,13 @@ fn test_issue_1730_standard_durability() {
         })
         .unwrap();
 
-        // Ensure WAL is flushed to disk
+        // Flush ensures the record is on disk before checkpoint so the
+        // snapshot + MANIFEST watermark reflect the transaction.
         db.flush().unwrap();
-
         db.checkpoint().unwrap();
 
-        // compact() must fail — only snapshot watermark, no flush watermark
-        let compact_result = db.compact();
-        assert!(
-            compact_result.is_err(),
-            "compact() after checkpoint-only must fail under Standard durability"
-        );
+        db.compact()
+            .expect("compact() must succeed on snapshot-only watermark under Standard durability");
     }
 
     OPEN_DATABASES.lock().clear();
@@ -1703,12 +1688,9 @@ fn test_issue_1730_standard_durability() {
         let result = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
-            .unwrap();
-        assert!(
-            result.is_some(),
-            "Data must survive checkpoint+failed-compact+recovery under Standard durability"
-        );
-        assert_eq!(result.unwrap().value, Value::String("durable".to_string()));
+            .unwrap()
+            .expect("data must survive checkpoint+compact+recovery under Standard durability");
+        assert_eq!(result.value, Value::String("durable".to_string()));
     }
 }
 
@@ -2212,7 +2194,11 @@ fn test_checkpoint_data_preserves_vector_space_metadata() {
 }
 
 #[test]
-fn test_checkpoint_data_omits_tombstones_from_live_only_collection() {
+fn test_checkpoint_data_includes_tombstones() {
+    // Inverted from the pre-retention `test_checkpoint_data_omits_tombstones_*`.
+    // The collector now uses `list_by_type_at_version(…, MAX)` which preserves
+    // tombstones, so a deleted key must appear in the checkpoint payload as
+    // an `is_tombstone = true` entry.
     let db = Database::cache().unwrap();
     let branch_id = BranchId::from_bytes([4; 16]);
     let key = Key::new_kv(create_test_namespace(branch_id), "deleted");
@@ -2225,16 +2211,26 @@ fn test_checkpoint_data_omits_tombstones_from_live_only_collection() {
         .unwrap();
 
     let kv_entries = db.collect_checkpoint_data().kv.unwrap_or_default();
+    let entry = kv_entries
+        .iter()
+        .find(|e| e.user_key == b"deleted".to_vec())
+        .expect("deleted key must appear in checkpoint as a tombstone entry");
     assert!(
-        !kv_entries
-            .iter()
-            .any(|entry| entry.user_key == b"deleted".to_vec()),
-        "Deleted keys are omitted because checkpoint collection uses live-only list_by_type()"
+        entry.is_tombstone,
+        "deleted key must surface with is_tombstone=true, got: {:?}",
+        entry
+    );
+    assert_eq!(
+        entry.version, 2,
+        "tombstone must carry the delete's commit version, not the prior put's"
     );
 }
 
 #[test]
-fn test_checkpoint_data_omits_ttl_metadata() {
+fn test_checkpoint_data_includes_ttl_metadata() {
+    // Inverted from the pre-retention `test_checkpoint_data_omits_ttl_metadata`.
+    // The KV snapshot DTO now carries `ttl_ms`, so the collected entry
+    // reflects the per-key TTL exactly.
     let db = Database::cache().unwrap();
     let branch_id = BranchId::from_bytes([5; 16]);
     let key = Key::new_kv(create_test_namespace(branch_id), "ttl_key");
@@ -2261,33 +2257,15 @@ fn test_checkpoint_data_omits_ttl_metadata() {
         .find(|entry| entry.user_key == b"ttl_key".to_vec())
         .expect("should find ttl_key in checkpoint");
 
-    assert!(
-        db.storage
-            .get_at_timestamp(
-                &key,
-                snapshot_entry
-                    .timestamp
-                    .saturating_add(ttl_ms.saturating_mul(1_000))
-                    .saturating_add(1),
-            )
-            .unwrap()
-            .is_none(),
-        "Storage entry should expire once TTL elapses"
-    );
-
     assert_eq!(
-        snapshot_entry,
-        &KvSnapshotEntry {
-            branch_id: *branch_id.as_bytes(),
-            space: "default".to_string(),
-            type_tag: TypeTag::KV.as_byte(),
-            user_key: b"ttl_key".to_vec(),
-            value: serde_json::to_vec(&value).unwrap(),
-            version: version.as_u64(),
-            timestamp: snapshot_entry.timestamp,
-        },
-        "TTL exists in storage but is not represented in the KV snapshot DTO"
+        snapshot_entry.ttl_ms, ttl_ms,
+        "snapshot entry must carry the original TTL value"
     );
+    assert!(
+        !snapshot_entry.is_tombstone,
+        "live entry must not be tombstoned"
+    );
+    assert_eq!(snapshot_entry.version, version.as_u64());
 }
 
 /// Issue #1738 / 9.2.A: begin_transaction() does not check accepting_transactions.
@@ -4144,4 +4122,163 @@ fn test_follower_open_installs_checkpoint_snapshot() {
             .unwrap_or_else(|| panic!("follower must see k{} via snapshot install", i));
         assert_eq!(stored.value, Value::String(format!("v{}", i)));
     }
+}
+
+// ============================================================================
+// T3-E5 follow-up: retention-complete checkpoint + compact + reopen
+// ============================================================================
+
+/// Tombstones survive checkpoint + compact + reopen.
+///
+/// Write K, delete K, checkpoint, compact (reclaims WAL), reopen — the
+/// key must stay hidden from reads because the snapshot install
+/// reconstructs the tombstone barrier. Before the follow-up, this was
+/// the corruption mode: the WAL delete record vanished with the WAL
+/// and the snapshot didn't carry tombstones, so K would reappear.
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_compact_preserves_tombstones() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "deleted");
+
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.put(key.clone(), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.delete(key.clone())?;
+            Ok(())
+        })
+        .unwrap();
+        db.checkpoint().unwrap();
+        db.compact()
+            .expect("compact must succeed on snapshot-only coverage");
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+    let observed = db
+        .storage()
+        .get_versioned(&key, CommitVersion::MAX)
+        .unwrap();
+    assert!(
+        observed.is_none(),
+        "deleted key must remain hidden after checkpoint+compact+reopen (tombstone survived)"
+    );
+}
+
+/// TTL-bound entries still expire at the original deadline after
+/// checkpoint + compact + reopen.
+///
+/// Today's engine has no public TTL-aware transaction API, so the TTL
+/// key is injected directly via the recovery write path and the
+/// coordinator version is advanced via a separate normal transaction
+/// (so `checkpoint()` writes a non-zero watermark and `compact()` can
+/// run). The critical invariants — `ttl_ms` round-trips through the
+/// snapshot and `get_at_timestamp` still honors the original deadline —
+/// are preserved regardless of which write path set the TTL.
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_compact_preserves_ttl() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let ttl_key = Key::new_kv(ns.clone(), "expires");
+    let ttl = Duration::from_millis(60_000);
+    let version_for_ttl = CommitVersion(1_000);
+
+    let commit_ts_micros: u64;
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+        // Bump coordinator via a normal transaction so checkpoint writes a
+        // real watermark (quiesced_version > 0).
+        let warmup_key = Key::new_kv(ns.clone(), "warmup");
+        db.transaction(branch_id, |txn| {
+            txn.put(warmup_key.clone(), Value::Int(1))?;
+            Ok(())
+        })
+        .unwrap();
+
+        // Inject the TTL-bound entry at a known commit version above the
+        // coordinator's current floor.
+        db.storage
+            .put_with_version_mode(
+                ttl_key.clone(),
+                Value::String("temporary".into()),
+                version_for_ttl,
+                Some(ttl),
+                WriteMode::Append,
+            )
+            .unwrap();
+        commit_ts_micros = db
+            .storage()
+            .get_versioned(&ttl_key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap()
+            .timestamp
+            .as_micros();
+
+        db.checkpoint().unwrap();
+        db.compact()
+            .expect("compact must succeed on snapshot-only coverage");
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+
+    // Before expiry: visible.
+    let pre = db
+        .storage()
+        .get_at_timestamp(&ttl_key, commit_ts_micros + ttl.as_micros() as u64 - 1)
+        .unwrap();
+    assert!(pre.is_some(), "entry must be visible before TTL expiry");
+
+    // After expiry: gone.
+    let post = db
+        .storage()
+        .get_at_timestamp(&ttl_key, commit_ts_micros + ttl.as_micros() as u64 + 1)
+        .unwrap();
+    assert!(
+        post.is_none(),
+        "TTL barrier must survive checkpoint+compact+reopen"
+    );
+}
+
+/// Branch metadata survives checkpoint + compact + reopen.
+///
+/// Create a user branch, checkpoint, compact, reopen — `branches.exists`
+/// must still return true. The Branch section install decoder routes
+/// branch-metadata entries back into the global branch index under the
+/// nil-UUID sentinel so the in-memory branch registry repopulates on
+/// reopen from the snapshot alone.
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_compact_preserves_branch_metadata() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_name = "retention-ctx";
+
+    {
+        let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+        db.branches().create(branch_name).unwrap();
+        assert!(db.branches().exists(branch_name).unwrap());
+        db.checkpoint().unwrap();
+        db.compact()
+            .expect("compact must succeed on snapshot-only coverage");
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
+    assert!(
+        db.branches().exists(branch_name).unwrap(),
+        "branch metadata must survive checkpoint+compact+reopen via snapshot install"
+    );
 }

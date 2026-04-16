@@ -1,7 +1,7 @@
 //! Flush, checkpoint, and compaction.
 
 use std::sync::Arc;
-use strata_core::id::TxnId;
+use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, TypeTag};
 use strata_core::{StrataError, StrataResult};
 use strata_durability::__internal::WalWriterEngineExt;
@@ -251,36 +251,59 @@ impl Database {
         let mut vector_collections = Vec::new();
 
         for branch_id in self.storage.branch_ids() {
-            // KV entries
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::KV) {
-                let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
+            // KV entries — use the version-scoped listing so tombstones survive
+            // into the snapshot payload and retention metadata (timestamp,
+            // ttl_ms) is preserved. `list_by_type_at_version(…, MAX)` returns
+            // every logical key's latest version including deletions.
+            for entry in
+                self.storage
+                    .list_by_type_at_version(&branch_id, TypeTag::KV, CommitVersion::MAX)
+            {
+                let value_bytes = if entry.is_tombstone {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&entry.value).unwrap_or_default()
+                };
                 kv_entries.push(KvSnapshotEntry {
                     branch_id: *branch_id.as_bytes(),
-                    space: key.namespace.space.clone(),
+                    space: entry.key.namespace.space.clone(),
                     type_tag: TypeTag::KV.as_byte(),
-                    user_key: key.user_key.to_vec(),
+                    user_key: entry.key.user_key.to_vec(),
                     value: value_bytes,
-                    version: vv.version.as_u64(),
-                    timestamp: vv.timestamp.as_micros(),
+                    version: entry.commit_id.as_u64(),
+                    timestamp: entry.timestamp_micros,
+                    ttl_ms: entry.ttl_ms,
+                    is_tombstone: entry.is_tombstone,
                 });
             }
 
-            // Graph entries share the same value encoding as KV but keep their
-            // graph type tag and namespace so recovery can reconstruct them exactly.
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Graph) {
-                let value_bytes = serde_json::to_vec(&vv.value).unwrap_or_default();
+            // Graph entries share the KV section (discriminated by `type_tag`).
+            // Same retention-complete treatment.
+            for entry in
+                self.storage
+                    .list_by_type_at_version(&branch_id, TypeTag::Graph, CommitVersion::MAX)
+            {
+                let value_bytes = if entry.is_tombstone {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&entry.value).unwrap_or_default()
+                };
                 kv_entries.push(KvSnapshotEntry {
                     branch_id: *branch_id.as_bytes(),
-                    space: key.namespace.space.clone(),
+                    space: entry.key.namespace.space.clone(),
                     type_tag: TypeTag::Graph.as_byte(),
-                    user_key: key.user_key.to_vec(),
+                    user_key: entry.key.user_key.to_vec(),
                     value: value_bytes,
-                    version: vv.version.as_u64(),
-                    timestamp: vv.timestamp.as_micros(),
+                    version: entry.commit_id.as_u64(),
+                    timestamp: entry.timestamp_micros,
+                    ttl_ms: entry.ttl_ms,
+                    is_tombstone: entry.is_tombstone,
                 });
             }
 
-            // Event entries
+            // Event entries — events are append-only, so tombstones should not
+            // appear. Stay on the live-only `list_by_type` for clarity; if a
+            // future primitive change introduces event retraction, revisit.
             for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Event) {
                 // Skip metadata keys (internal implementation details, reconstructed on restore)
                 if *key.user_key == *b"__meta__" || key.user_key.starts_with(b"__tidx__") {
@@ -302,42 +325,74 @@ impl Database {
                 });
             }
 
-            // Branch entries
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Branch) {
-                // Skip index keys
-                if key.user_key.starts_with(b"__idx_") {
+            // Branch entries — retention-complete via version-scoped listing.
+            // The DTO now carries `branch_id` explicitly so snapshot install
+            // can dispatch. `__idx_` keys are derived indices and are
+            // deliberately excluded from snapshots (rebuilt at read time).
+            for entry in self.storage.list_by_type_at_version(
+                &branch_id,
+                TypeTag::Branch,
+                CommitVersion::MAX,
+            ) {
+                if entry.key.user_key.starts_with(b"__idx_") {
                     continue;
                 }
-                let key_string = match key.user_key_string() {
+                let key_string = match entry.key.user_key_string() {
                     Some(key_string) => key_string,
                     None => continue,
                 };
-                let value = serde_json::to_vec(&vv.value).unwrap_or_default();
+                let value = if entry.is_tombstone {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&entry.value).unwrap_or_default()
+                };
                 branch_entries.push(BranchSnapshotEntry {
+                    branch_id: *branch_id.as_bytes(),
                     key: key_string,
                     value,
-                    version: vv.version.as_u64(),
-                    timestamp: vv.timestamp.as_micros(),
+                    version: entry.commit_id.as_u64(),
+                    timestamp: entry.timestamp_micros,
+                    is_tombstone: entry.is_tombstone,
                 });
             }
 
-            // JSON entries
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Json) {
-                let content = serde_json::to_vec(&vv.value).unwrap_or_default();
+            // JSON entries — retention-complete with tombstone preservation.
+            for entry in
+                self.storage
+                    .list_by_type_at_version(&branch_id, TypeTag::Json, CommitVersion::MAX)
+            {
+                let content = if entry.is_tombstone {
+                    Vec::new()
+                } else {
+                    serde_json::to_vec(&entry.value).unwrap_or_default()
+                };
                 json_entries.push(JsonSnapshotEntry {
                     branch_id: *branch_id.as_bytes(),
-                    space: key.namespace.space.clone(),
-                    doc_id: key.user_key_string().unwrap_or_default(),
+                    space: entry.key.namespace.space.clone(),
+                    doc_id: entry.key.user_key_string().unwrap_or_default(),
                     content,
-                    version: vv.version.as_u64(),
-                    timestamp: vv.timestamp.as_micros(),
+                    version: entry.commit_id.as_u64(),
+                    timestamp: entry.timestamp_micros,
+                    is_tombstone: entry.is_tombstone,
                 });
             }
 
-            // Vector collection configs (stored under TypeTag::Vector with __config__/ prefix)
-            for (key, vv) in self.storage.list_by_type(&branch_id, TypeTag::Vector) {
-                // Only process config entries (user_key starts with "__config__/")
-                let user_key_str = match key.user_key_string() {
+            // Vector collection configs (stored under TypeTag::Vector with
+            // __config__/ prefix). Per-vector rows get tombstone preservation
+            // via the version-scoped listing; config entries don't need a
+            // tombstone (collection lifecycle is branch-scoped, not per-row).
+            for entry in self.storage.list_by_type_at_version(
+                &branch_id,
+                TypeTag::Vector,
+                CommitVersion::MAX,
+            ) {
+                if entry.is_tombstone {
+                    // Config tombstones indicate the collection was dropped;
+                    // ignore here since any trailing vector rows below are
+                    // tombstoned too and round-trip correctly on install.
+                    continue;
+                }
+                let user_key_str = match entry.key.user_key_string() {
                     Some(s) => s,
                     None => continue,
                 };
@@ -346,28 +401,48 @@ impl Database {
                     None => continue,
                 };
 
-                let config_bytes = match &vv.value {
+                let config_bytes = match &entry.value {
                     strata_core::value::Value::Bytes(b) => b.clone(),
-                    _ => serde_json::to_vec(&vv.value).unwrap_or_default(),
+                    _ => serde_json::to_vec(&entry.value).unwrap_or_default(),
                 };
 
-                // Collect vectors belonging to this collection
-                let ns = key.namespace.clone();
+                // Per-collection vector rows — also via version-scoped listing
+                // so deleted vectors survive the checkpoint as tombstones.
+                let ns = entry.key.namespace.clone();
                 let prefix = Key::vector_collection_prefix(ns, &collection_name);
                 let mut snapshot_vectors = Vec::new();
-                for (vec_key, vec_vv) in self.storage.list_by_type(&branch_id, TypeTag::Vector) {
-                    if !vec_key.starts_with(&prefix) {
+                for vec_entry in self.storage.list_by_type_at_version(
+                    &branch_id,
+                    TypeTag::Vector,
+                    CommitVersion::MAX,
+                ) {
+                    if !vec_entry.key.starts_with(&prefix) {
                         continue;
                     }
-                    // Extract vector key: user_key = "collection/vector_key"
-                    let vec_key_str = vec_key.user_key_string().unwrap_or_default();
+                    let vec_key_str = vec_entry.key.user_key_string().unwrap_or_default();
                     let vector_key = vec_key_str
                         .strip_prefix(&format!("{}/", collection_name))
                         .unwrap_or(&vec_key_str)
                         .to_string();
 
-                    // Deserialize VectorRecord from bytes
-                    if let strata_core::value::Value::Bytes(bytes) = &vec_vv.value {
+                    if vec_entry.is_tombstone {
+                        // Tombstoned vector row — preserve the delete through
+                        // checkpoint. Embedding/metadata/raw_value are empty
+                        // since the row no longer carries payload.
+                        snapshot_vectors.push(VectorSnapshotEntry {
+                            key: vector_key,
+                            vector_id: 0,
+                            embedding: Vec::new(),
+                            metadata: Vec::new(),
+                            raw_value: Vec::new(),
+                            version: vec_entry.commit_id.as_u64(),
+                            timestamp: vec_entry.timestamp_micros,
+                            is_tombstone: true,
+                        });
+                        continue;
+                    }
+
+                    if let strata_core::value::Value::Bytes(bytes) = &vec_entry.value {
                         if let Ok(record) = VectorRecord::from_bytes(bytes) {
                             let metadata_bytes = record
                                 .metadata
@@ -380,8 +455,9 @@ impl Database {
                                 embedding: record.embedding,
                                 metadata: metadata_bytes,
                                 raw_value: bytes.clone(),
-                                version: vec_vv.version.as_u64(),
-                                timestamp: vec_vv.timestamp.as_micros(),
+                                version: vec_entry.commit_id.as_u64(),
+                                timestamp: vec_entry.timestamp_micros,
+                                is_tombstone: false,
                             });
                         }
                     }
@@ -389,11 +465,11 @@ impl Database {
 
                 vector_collections.push(VectorCollectionSnapshotEntry {
                     branch_id: *branch_id.as_bytes(),
-                    space: key.namespace.space.clone(),
+                    space: entry.key.namespace.space.clone(),
                     name: collection_name,
                     config: config_bytes,
-                    config_version: vv.version.as_u64(),
-                    config_timestamp: vv.timestamp.as_micros(),
+                    config_version: entry.commit_id.as_u64(),
+                    config_timestamp: entry.timestamp_micros,
                     vectors: snapshot_vectors,
                 });
             }
