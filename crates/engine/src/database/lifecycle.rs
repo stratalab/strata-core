@@ -635,8 +635,18 @@ impl Database {
             // The caller can let in-flight work drain, optionally start new
             // work, and retry. Every step up to this point is idempotent, so
             // a subsequent `shutdown*` call replays safely.
-            self.accepting_transactions.store(true, Ordering::Release);
+            //
+            // Important: `accepting_transactions = false` is dual-purpose —
+            // it also carries the WAL writer-halt signal that the flush
+            // thread publishes at `open.rs:756` after a sync failure. If the
+            // writer halted while we were waiting for idle, we MUST leave
+            // the flag `false` so `check_accepting` keeps returning
+            // `WriterHalted`. Re-admitting transactions here would let new
+            // callers past the gate only to corrupt or fail later at commit.
             self.shutdown_started.store(false, Ordering::Release);
+            if self.writer_halted_error().is_none() {
+                self.accepting_transactions.store(true, Ordering::Release);
+            }
             return Err(StrataError::ShutdownTimeout { active_txn_count });
         }
 

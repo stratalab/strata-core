@@ -4717,3 +4717,94 @@ fn shutdown_timeout_leaves_database_usable_for_new_transactions() {
         .expect("retry must succeed once every txn has drained");
     drop(db);
 }
+
+#[test]
+#[serial]
+fn shutdown_timeout_preserves_writer_halt_signal() {
+    // The WAL flush thread uses `accepting_transactions = false` as a
+    // published signal that the writer has halted after a sync failure
+    // (see `open.rs:756`). If a sync failure halts the writer while
+    // `shutdown_with_deadline` is blocked on `wait_for_idle`, the timeout
+    // path must NOT restore `accepting_transactions = true` — doing so
+    // would erase the halt signal and let new `begin_transaction` calls
+    // past `check_accepting`, failing later at commit. The halt must keep
+    // winning.
+    OPEN_DATABASES.lock().clear();
+    super::test_hooks::clear_sync_failure();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("shutdown_timeout_vs_halt");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let blocker_key = Key::new_kv(ns.clone(), "blocker");
+
+    // Hold a long-lived transaction open to force the wait_for_idle timeout.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let db_bg = Arc::clone(&db);
+    let blocker_key_bg = blocker_key.clone();
+    let handle = std::thread::spawn(move || {
+        let mut txn = db_bg.begin_transaction(branch_id).unwrap();
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        txn.put(blocker_key_bg, Value::Bytes(b"done".to_vec()))
+            .unwrap();
+        // Commit is allowed to fail — the writer may have halted by then.
+        let _ = db_bg.commit_transaction(&mut txn);
+        db_bg.end_transaction(txn);
+    });
+    started_rx.recv().unwrap();
+
+    // Inject a sync failure and commit a txn that forces a background sync,
+    // so the flush thread halts the writer while our blocker is still open.
+    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    db.transaction(branch_id, |txn| {
+        txn.put(Key::new_kv(ns.clone(), "halt_trigger"), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+    wait_until(Duration::from_secs(2), || {
+        matches!(db.wal_writer_health(), WalWriterHealth::Halted { .. })
+    });
+    assert!(
+        matches!(db.wal_writer_health(), WalWriterHealth::Halted { .. }),
+        "writer must be halted before we run the timed-out shutdown"
+    );
+
+    // Run shutdown: the blocker txn is still open, so we'll time out.
+    let err = db
+        .shutdown_with_deadline(Duration::from_millis(100))
+        .expect_err("shutdown must time out while blocker txn is held");
+    assert!(
+        matches!(err, StrataError::ShutdownTimeout { .. }),
+        "unexpected error: {:?}",
+        err
+    );
+
+    // The halt signal must still be observable on new transactions — the
+    // timeout restore path must not have overwritten it with `true`.
+    assert!(
+        matches!(db.wal_writer_health(), WalWriterHealth::Halted { .. }),
+        "writer health must still show Halted after shutdown timeout"
+    );
+    match db.begin_transaction(branch_id) {
+        Ok(_) => panic!("new transaction must be rejected while writer is halted"),
+        Err(StrataError::WriterHalted { .. }) => {}
+        Err(other) => panic!(
+            "expected WriterHalted (halt signal preserved); got {:?}",
+            other
+        ),
+    }
+
+    // Clean up: clear the fault, release the blocker, drop the DB. We don't
+    // attempt a successful shutdown retry here because the WAL is halted
+    // and that recovery path (`resume_wal_writer`) is out of scope for this
+    // test — the Drop fallback will handle teardown.
+    super::test_hooks::clear_sync_failure();
+    release_tx.send(()).unwrap();
+    handle.join().unwrap();
+    drop(db);
+    OPEN_DATABASES.lock().clear();
+}
