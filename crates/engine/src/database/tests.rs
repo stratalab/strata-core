@@ -5022,3 +5022,111 @@ fn shutdown_closes_mutating_maintenance_apis() {
 
     drop(db);
 }
+
+#[test]
+#[serial(open_databases)]
+fn shutdown_in_progress_rejects_maintenance_apis() {
+    // The authoritative ordered close barrier must reject non-transactional
+    // maintenance APIs AS SOON AS `shutdown_started = true`, not only after
+    // `shutdown_complete = true`. Otherwise `flush`, `checkpoint`,
+    // `compact`, `update_config`, `set_durability_mode`, `run_gc`, and
+    // `run_maintenance` can run concurrently with shutdown's own final
+    // flush / MANIFEST fsync / freeze loop. The sharpest case is
+    // `set_durability_mode`, which can stop and restart the flush thread
+    // while shutdown is also manipulating it.
+    //
+    // Force shutdown into a held-open state by blocking `wait_for_idle` on
+    // a long-lived transaction in another thread, call `shutdown()` with a
+    // long deadline in a second thread (it will park on the idle wait),
+    // observe `shutdown_started = true` from the main thread, then assert
+    // every maintenance API is rejected.
+    OPEN_DATABASES.lock().clear();
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("shutdown_in_progress_guards");
+    let db = Database::open(&db_path).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let blocker_key = Key::new_kv(ns, "blocker");
+
+    // Hold a transaction open to keep `wait_for_idle` busy.
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel();
+    let db_blocker = Arc::clone(&db);
+    let blocker_key_bg = blocker_key.clone();
+    let blocker_handle = std::thread::spawn(move || {
+        let mut txn = db_blocker.begin_transaction(branch_id).unwrap();
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+        txn.put(blocker_key_bg, Value::Bytes(b"done".to_vec()))
+            .unwrap();
+        db_blocker.commit_transaction(&mut txn).unwrap();
+        db_blocker.end_transaction(txn);
+    });
+    started_rx.recv().unwrap();
+
+    // Call shutdown in another thread. A long deadline keeps shutdown
+    // parked inside `wait_for_idle` with `shutdown_started = true` and
+    // `shutdown_complete = false` — exactly the window under test.
+    let db_shutter = Arc::clone(&db);
+    let shutdown_handle = std::thread::spawn(move || {
+        db_shutter
+            .shutdown_with_deadline(Duration::from_secs(10))
+            .expect("shutdown must succeed once the blocker releases")
+    });
+
+    // Wait for shutdown_started to be observable. `accepting_transactions`
+    // flips at the same time — use it as a proxy to synchronize without a
+    // test-only hook.
+    wait_until(Duration::from_secs(2), || !db.is_open());
+    assert!(
+        !db.is_open(),
+        "shutdown must have started and flipped the accepting flag"
+    );
+
+    // Every mutating maintenance API must be rejected while shutdown is
+    // parked on `wait_for_idle` — before it ever reaches its own
+    // flush/freeze/registry-release phase.
+    fn assert_in_progress(res: StrataResult<()>, api: &str) {
+        match res {
+            Ok(()) => panic!("{} must be rejected while shutdown is in progress", api),
+            Err(StrataError::InvalidInput { message })
+                if message.contains("shutting down") || message.contains("shut down") => {}
+            Err(other) => panic!("{}: unexpected error {:?}", api, other),
+        }
+    }
+    assert_in_progress(db.flush(), "flush");
+    assert_in_progress(db.checkpoint(), "checkpoint");
+    assert_in_progress(db.compact(), "compact");
+    assert_in_progress(
+        db.set_durability_mode(DurabilityMode::Always),
+        "set_durability_mode",
+    );
+    assert_in_progress(
+        db.update_config(|cfg| {
+            cfg.auto_embed = !cfg.auto_embed;
+        }),
+        "update_config",
+    );
+    assert_eq!(
+        db.run_gc(),
+        (0, 0),
+        "run_gc must no-op while shutdown is in progress"
+    );
+    assert_eq!(
+        db.run_maintenance(),
+        (0, 0, 0),
+        "run_maintenance must no-op while shutdown is in progress"
+    );
+
+    // Let shutdown drain and complete.
+    release_tx.send(()).unwrap();
+    blocker_handle.join().unwrap();
+    shutdown_handle.join().unwrap();
+
+    // After successful shutdown the same guards still reject (keying on
+    // `shutdown_complete` now). Sanity-check one API.
+    assert_in_progress(db.flush(), "flush (post-completion)");
+
+    drop(db);
+}

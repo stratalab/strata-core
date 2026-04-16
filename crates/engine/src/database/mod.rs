@@ -1119,6 +1119,31 @@ impl Database {
         Ok(())
     }
 
+    /// Stricter variant of [`Database::check_not_closed`] used by mutating
+    /// admin / maintenance APIs that must not run concurrently with an
+    /// in-progress `shutdown_with_deadline`.
+    ///
+    /// The authoritative ordered close barrier (CLAUDE.md Hard Rule 11 /
+    /// D-DR-10) requires that once `shutdown_started == true`, nothing
+    /// else mutates WAL / MANIFEST / storage / subsystem state. This
+    /// guard enforces that for the non-transactional surface —
+    /// `begin_transaction` has its own gate via `check_accepting`, and
+    /// `resume_wal_writer` already uses the same two-flag rejection.
+    ///
+    /// A timed-out shutdown restores `shutdown_started = false` before
+    /// returning `ShutdownTimeout`, so maintenance APIs resume working
+    /// on the retry path — the exact usability contract Epic T3-E6
+    /// promises.
+    pub(crate) fn check_not_shutting_down(&self) -> StrataResult<()> {
+        self.check_not_closed()?;
+        if self.shutdown_started.load(Ordering::Acquire) {
+            return Err(StrataError::invalid_input(
+                "Database is shutting down".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     pub(crate) fn writer_halted_error(&self) -> Option<StrataError> {
         match &*self.wal_writer_health.lock() {
             WalWriterHealth::Healthy => None,
@@ -1581,10 +1606,9 @@ impl Database {
     /// disk-backed databases, and storage/coordinator/cache parameters are
     /// applied to the live database immediately.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
-        // Rejected after a successful shutdown: this writes `strata.toml`
-        // and applies live storage/coordinator/cache changes, any of which
-        // would race a freshly reopened `Database` on the same path.
-        self.check_not_closed()?;
+        // Writes `strata.toml` and applies live storage/coordinator/cache
+        // changes — reject while shutdown is in progress or has completed.
+        self.check_not_shutting_down()?;
         let mut guard = self.config.write();
         f(&mut guard);
         // Persist to strata.toml for disk-backed databases
@@ -1639,7 +1663,10 @@ impl Database {
     /// Updates the WAL writer's fsync policy and restarts the shared
     /// background flush thread when the Standard-mode configuration changes.
     pub fn set_durability_mode(&self, mode: DurabilityMode) -> StrataResult<()> {
-        self.check_not_closed()?;
+        // Stops/restarts the flush thread — running this concurrently with
+        // `shutdown_with_deadline` would race shutdown's own
+        // `stop_flush_thread()` call. Reject as soon as shutdown starts.
+        self.check_not_shutting_down()?;
         let wal = self.wal_writer.as_ref().ok_or_else(|| {
             StrataError::invalid_input(
                 "Cannot change durability mode on an ephemeral (cache) database".to_string(),
@@ -1764,8 +1791,11 @@ impl Drop for Database {
 
         // Skip flush/freeze if shutdown() already completed them.
         if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {
-            // Final flush to persist any remaining data
-            if let Err(e) = self.flush() {
+            // Final flush to persist any remaining data. Use the unguarded
+            // internal body because the public `flush()` rejects once
+            // `shutdown_started = true`, and Drop must still do its
+            // best-effort work if shutdown started and errored mid-flight.
+            if let Err(e) = self.flush_internal() {
                 tracing::error!(target: "strata::db", error = %e,
                     "Final flush on drop failed — data may not be durable");
             }

@@ -71,9 +71,10 @@ impl Database {
     ///
     /// Returns `(safe_point, total_versions_pruned)`.
     ///
-    /// Returns `(0, 0)` on a closed database (see [`Database::check_not_closed`]).
+    /// Returns `(0, 0)` while shutdown is in progress or has completed (see
+    /// [`Database::check_not_shutting_down`]).
     pub fn run_gc(&self) -> (u64, usize) {
-        if self.check_not_closed().is_err() {
+        if self.check_not_shutting_down().is_err() {
             return (0, 0);
         }
         let safe_point = self.gc_safe_point();
@@ -102,9 +103,10 @@ impl Database {
     ///
     /// Returns `(safe_point, versions_pruned, ttl_entries_expired)`.
     ///
-    /// Returns `(0, 0, 0)` on a closed database (see [`Database::check_not_closed`]).
+    /// Returns `(0, 0, 0)` while shutdown is in progress or has completed
+    /// (see [`Database::check_not_shutting_down`]).
     pub fn run_maintenance(&self) -> (u64, usize, usize) {
-        if self.check_not_closed().is_err() {
+        if self.check_not_shutting_down().is_err() {
             return (0, 0, 0);
         }
         let (safe_point, pruned) = self.run_gc();
@@ -681,7 +683,10 @@ impl Database {
 
         // Flush thread performs a final sync on exit (E-5).
         self.stop_flush_thread();
-        self.flush()?;
+        // `self.flush()` now rejects once `shutdown_started = true`; use the
+        // unguarded internal body so shutdown can still drive its own final
+        // flush.
+        self.flush_internal()?;
         self.fsync_manifest()?;
 
         // Freeze attempts all subsystems even if one fails; returns first err.
