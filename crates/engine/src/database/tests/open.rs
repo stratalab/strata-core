@@ -600,3 +600,17 @@ fn test_lossy_error_kind_mapping_covers_relevant_variants() {
         LossyErrorKind::Other
     );
 }
+
+#[test]
+fn test_lossy_error_kind_display_covers_all_variants() {
+    // The `Display` impl feeds the `error_kind` field of the
+    // `strata::recovery::lossy` tracing event. A missing arm would
+    // compile-fail in-crate (the match is exhaustive), but a wrong
+    // string would silently regress tracing output. Pin all four
+    // rendered strings so a future rename trips CI.
+    use crate::LossyErrorKind;
+    assert_eq!(format!("{}", LossyErrorKind::Corruption), "corruption");
+    assert_eq!(format!("{}", LossyErrorKind::Storage), "storage");
+    assert_eq!(format!("{}", LossyErrorKind::CodecDecode), "codec_decode");
+    assert_eq!(format!("{}", LossyErrorKind::Other), "other");
+}
