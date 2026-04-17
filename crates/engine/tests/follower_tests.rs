@@ -1495,3 +1495,106 @@ fn test_follower_lossy_recovery_populates_report() {
     // the follower path shares with the primary (Some vs None; wipe flag; error
     // non-empty; typed kind). Exact counts are covered by the primary-path test.
 }
+
+/// T3-E12 Phase 2 §D3 Site 2: follower refresh must decode records
+/// through the cached `wal_codec`.
+///
+/// Pre-part-4, `Database::refresh` at `lifecycle.rs:339` built a raw
+/// `WalReader::new()` with no codec — encrypted followers recovered
+/// cleanly at open but then failed every `refresh()` with a
+/// codec-decode error on the first new record. This test pins the
+/// contract that open + refresh + read all share a single codec all
+/// the way through. The review on PR 2427 flagged the absence of
+/// this test as the gap that let four codec-threading sites slip.
+#[test]
+fn test_follower_refresh_with_non_identity_codec() {
+    use strata_engine::StrataConfig;
+
+    // `STRATA_ENCRYPTION_KEY` is a process-wide env var and the
+    // `aes-gcm-256` codec reads it at construction. Use a stable value
+    // for the whole test so primary and follower both see the same
+    // key. Guard it with a local RAII so the var is released on drop.
+    const TEST_AES_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    struct KeyGuard;
+    impl Drop for KeyGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("STRATA_ENCRYPTION_KEY");
+        }
+    }
+    std::env::set_var("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+    let _key_guard = KeyGuard;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let aes_cfg = StrataConfig {
+        durability: "standard".to_string(),
+        storage: strata_engine::StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..strata_engine::StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    // Primary writes an initial record through the encrypted WAL.
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_config(aes_cfg.clone()),
+    )
+    .expect("primary must open with aes-gcm-256 + standard durability");
+    primary_put(&primary, branch, "pre", "before-follower");
+    primary.flush().unwrap();
+
+    // Follower opens through the MANIFEST-resolved codec (D7) and
+    // recovers the existing record.
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_config(aes_cfg.clone()),
+    )
+    .expect("follower must open cleanly against an encrypted WAL");
+    assert_eq!(
+        read_kv(&follower, branch, "pre").as_deref(),
+        Some("before-follower"),
+        "follower recovery must decode existing encrypted records at open",
+    );
+
+    // Primary writes NEW records post-follower-open. Without the
+    // codec threading at `lifecycle.rs:339`, the follower's
+    // `refresh()` would build a codec-less `WalReader` and fail to
+    // decode the new ciphertext records. This is exactly the gap the
+    // reviewer caught on PR 2427 pre-part-4.
+    primary_put(&primary, branch, "post1", "after-refresh-1");
+    primary_put(&primary, branch, "post2", "after-refresh-2");
+    primary.flush().unwrap();
+
+    let outcome = follower.refresh();
+    assert!(
+        outcome.is_caught_up(),
+        "refresh under aes-gcm-256 must complete without blocking; got {outcome:?}",
+    );
+    assert!(
+        outcome.applied_count() >= 2,
+        "refresh must apply both new records; got applied_count = {}",
+        outcome.applied_count(),
+    );
+    assert_eq!(
+        read_kv(&follower, branch, "post1").as_deref(),
+        Some("after-refresh-1"),
+        "first post-open record must be visible after refresh",
+    );
+    assert_eq!(
+        read_kv(&follower, branch, "post2").as_deref(),
+        Some("after-refresh-2"),
+        "second post-open record must be visible after refresh",
+    );
+    assert_eq!(
+        read_kv(&follower, branch, "pre").as_deref(),
+        Some("before-follower"),
+        "pre-refresh record must still be visible (no wipe during healthy refresh)",
+    );
+
+    primary.shutdown().unwrap();
+    follower.shutdown().unwrap();
+}
