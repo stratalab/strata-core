@@ -235,6 +235,61 @@ pub struct DatabaseDiskUsage {
 // Lossy Recovery Report
 // ============================================================================
 
+/// Typed classification of the error that triggered a lossy-recovery
+/// fallback, alongside the human-readable `error` field on
+/// [`LossyRecoveryReport`]. Lets callers dispatch on failure category
+/// without string-matching — per CLAUDE.md Quality Rule §26 ("typed
+/// reason enums replace string-factory error methods").
+///
+/// The mapping is derived from the underlying [`StrataError`] variant
+/// via [`LossyErrorKind::from_strata_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LossyErrorKind {
+    /// The MANIFEST, snapshot, or codec validation detected a
+    /// corruption signal that the coordinator surfaced as
+    /// `StrataError::Corruption`. Typical triggers: codec mismatch
+    /// against the MANIFEST record, snapshot magic/CRC failure.
+    Corruption,
+    /// A lower-level storage or WAL read operation failed and the
+    /// coordinator surfaced `StrataError::Storage`. Typical triggers:
+    /// WAL segment garbage / header parse failure, partial record at
+    /// segment tail, storage-apply I/O error, disk full, permission
+    /// denied. Note: WAL-level "the bytes on disk look wrong" errors
+    /// currently classify here (not under `Corruption`) because
+    /// `RecoveryCoordinator` wraps WAL read failures with
+    /// `StrataError::storage(...)`.
+    Storage,
+    /// The coordinator returned an error whose variant does not map to
+    /// the categories above. The `error` string on the report remains
+    /// the canonical diagnostic.
+    Other,
+}
+
+impl LossyErrorKind {
+    /// Classify a [`StrataError`] for the `error_kind` field on
+    /// [`LossyRecoveryReport`]. Unrecognized variants return
+    /// [`LossyErrorKind::Other`] rather than panicking, so the enum
+    /// stays forward-compatible with new [`StrataError`] variants.
+    pub fn from_strata_error(err: &StrataError) -> Self {
+        match err {
+            StrataError::Corruption { .. } => LossyErrorKind::Corruption,
+            StrataError::Storage { .. } => LossyErrorKind::Storage,
+            _ => LossyErrorKind::Other,
+        }
+    }
+}
+
+impl std::fmt::Display for LossyErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LossyErrorKind::Corruption => write!(f, "corruption"),
+            LossyErrorKind::Storage => write!(f, "storage"),
+            LossyErrorKind::Other => write!(f, "other"),
+        }
+    }
+}
+
 /// Report surfaced when `allow_lossy_recovery` triggers a whole-database
 /// wipe-and-reopen fallback during [`Database::open`].
 ///
@@ -246,8 +301,10 @@ pub struct DatabaseDiskUsage {
 /// second half of that contract.
 ///
 /// Retrieve via [`Database::last_lossy_recovery_report`]. The report is
-/// `Some(_)` only when the most recent open triggered the lossy branch;
-/// successful strict opens leave it `None`.
+/// `Some(_)` when this `Database` handle's open hit a recovery error and
+/// lossy mode wiped pre-failure state; strict opens and successful lossy
+/// opens leave it `None`. Each open produces a fresh `Database`, so the
+/// report is per-handle — not a process-global log.
 ///
 /// Tracing target `strata::recovery::lossy` emits the same fields at
 /// `warn` level for push-style observability.
@@ -255,7 +312,12 @@ pub struct DatabaseDiskUsage {
 #[non_exhaustive]
 pub struct LossyRecoveryReport {
     /// Root error (rendered via `Display`) that triggered the lossy fallback.
+    /// Pair with [`Self::error_kind`] for programmatic dispatch.
     pub error: String,
+    /// Typed classification of the triggering error. Use this for
+    /// dashboard bucketing, alerting rules, and programmatic branches;
+    /// use [`Self::error`] for the human-readable detail.
+    pub error_kind: LossyErrorKind,
     /// Count of WAL records the engine's `on_record` callback applied
     /// successfully before the recovery coordinator returned `Err`. These
     /// records were installed into storage and then discarded when lossy

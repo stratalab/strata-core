@@ -1483,8 +1483,15 @@ fn test_follower_lossy_recovery_populates_report() {
         !report.error.is_empty(),
         "report.error must render the coordinator error"
     );
+    // The typed classification must be populated on the follower path just
+    // like the primary. WAL read failures surface as `StrataError::Storage`,
+    // which maps to `LossyErrorKind::Storage` (see the mod.rs doc on
+    // `LossyErrorKind::Storage` for why WAL-level corruption currently lands
+    // in this bucket).
+    use strata_engine::LossyErrorKind;
+    assert_eq!(report.error_kind, LossyErrorKind::Storage);
     // records_applied_before_failure may be 0 or positive depending on where
     // in the replay the corrupt segment lands; assert only on the invariants
     // the follower path shares with the primary (Some vs None; wipe flag; error
-    // non-empty). Exact counts are covered by the primary-path test.
+    // non-empty; typed kind). Exact counts are covered by the primary-path test.
 }

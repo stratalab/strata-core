@@ -464,6 +464,20 @@ fn test_lossy_recovery_discards_valid_data_before_corruption() {
         "storage version should have advanced past zero before the wipe, got {}",
         report.version_reached_before_failure.as_u64()
     );
+    // WAL-level corruption currently surfaces as `StrataError::Storage`
+    // (the coordinator wraps WAL read failures with
+    // `StrataError::storage(...)`), so `LossyErrorKind` classifies this
+    // scenario under `Storage`. Lock this in so a future refactor that
+    // regresses the mapping — or that reclassifies WAL corruption
+    // upstream — trips the test and forces a conscious doc/enum update.
+    use crate::LossyErrorKind;
+    assert_eq!(
+        report.error_kind,
+        LossyErrorKind::Storage,
+        "WAL read failure must classify as Storage per current upstream \
+         wrapping, got {:?}",
+        report.error_kind
+    );
 }
 
 #[test]
@@ -535,4 +549,35 @@ fn test_lossy_recovery_report_on_immediate_failure() {
     );
     assert!(report.discarded_on_wipe);
     assert!(!report.error.is_empty());
+    // See note in the sibling `_discards_valid_data_before_corruption` test:
+    // WAL-level garbage surfaces as `StrataError::Storage`.
+    use crate::LossyErrorKind;
+    assert_eq!(report.error_kind, LossyErrorKind::Storage);
+}
+
+#[test]
+fn test_lossy_error_kind_mapping_covers_relevant_variants() {
+    // Direct unit test of `LossyErrorKind::from_strata_error` — the
+    // integration tests above only exercise the Corruption path because
+    // real lossy failures come from WAL corruption. This test locks in
+    // the mapping for Storage and Other so a future refactor that
+    // regresses `from_strata_error` fails without needing a new failure
+    // fixture.
+    use crate::LossyErrorKind;
+    let corruption = StrataError::corruption("bad CRC".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&corruption),
+        LossyErrorKind::Corruption
+    );
+    let storage = StrataError::storage("disk full".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&storage),
+        LossyErrorKind::Storage
+    );
+    // Anything that isn't Corruption or Storage falls through to Other.
+    let internal = StrataError::internal("unexpected".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&internal),
+        LossyErrorKind::Other
+    );
 }

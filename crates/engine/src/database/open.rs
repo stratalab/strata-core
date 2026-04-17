@@ -84,7 +84,7 @@ fn restrict_file(_path: &Path) {}
 
 use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
-use super::{Database, LossyRecoveryReport, PersistenceMode, WalWriterHealth};
+use super::{Database, LossyErrorKind, LossyRecoveryReport, PersistenceMode, WalWriterHealth};
 
 enum AcquiredDatabase {
     Existing(Arc<Database>),
@@ -526,6 +526,7 @@ impl Database {
                 if cfg.allow_lossy_recovery {
                     let report = LossyRecoveryReport {
                         error: e.to_string(),
+                        error_kind: LossyErrorKind::from_strata_error(&e),
                         records_applied_before_failure: records_applied_before_failure
                             .load(Ordering::SeqCst),
                         version_reached_before_failure: CommitVersion(storage.version()),
@@ -534,6 +535,7 @@ impl Database {
                     warn!(
                         target: "strata::recovery::lossy",
                         error = %e,
+                        error_kind = %report.error_kind,
                         records_applied_before_failure = report.records_applied_before_failure,
                         version_reached_before_failure =
                             report.version_reached_before_failure.as_u64(),
@@ -997,6 +999,7 @@ impl Database {
                     // `LossyRecoveryReport` reflects what was discarded.
                     let report = LossyRecoveryReport {
                         error: e.to_string(),
+                        error_kind: LossyErrorKind::from_strata_error(&e),
                         records_applied_before_failure: records_applied_before_failure
                             .load(Ordering::SeqCst),
                         version_reached_before_failure: CommitVersion(storage.version()),
@@ -1005,6 +1008,7 @@ impl Database {
                     warn!(
                         target: "strata::recovery::lossy",
                         error = %e,
+                        error_kind = %report.error_kind,
                         records_applied_before_failure = report.records_applied_before_failure,
                         version_reached_before_failure =
                             report.version_reached_before_failure.as_u64(),
