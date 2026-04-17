@@ -1598,3 +1598,88 @@ fn test_follower_refresh_with_non_identity_codec() {
     primary.shutdown().unwrap();
     follower.shutdown().unwrap();
 }
+
+/// T3-E12 §D7: follower-without-MANIFEST falls back to
+/// `get_codec(&cfg.storage.codec)` so encrypted WAL-only recovery
+/// works even when no MANIFEST has been persisted yet.
+///
+/// Pre-part-4, the absent-MANIFEST branch at `open.rs:441` left
+/// `follower_codec = None` and the recovery-coordinator wire was
+/// conditional on `Some(_)`. An encrypted follower opening against a
+/// directory without a MANIFEST would then read raw ciphertext and
+/// fail.
+///
+/// This test constructs a bare `wal/` directory (no MANIFEST) with an
+/// encrypted segment pre-written by a primary that cleanly shut down
+/// its MANIFEST alongside. We then delete the MANIFEST to simulate
+/// the "MANIFEST absent" state, and open a follower with the same
+/// aes-gcm-256 config. The open must succeed; WAL records must be
+/// readable through the config-derived codec fallback.
+#[test]
+fn test_follower_without_manifest_uses_config_codec() {
+    use strata_engine::StrataConfig;
+
+    const TEST_AES_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+    struct KeyGuard;
+    impl Drop for KeyGuard {
+        fn drop(&mut self) {
+            std::env::remove_var("STRATA_ENCRYPTION_KEY");
+        }
+    }
+    std::env::set_var("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+    let _key_guard = KeyGuard;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let aes_cfg = StrataConfig {
+        durability: "standard".to_string(),
+        storage: strata_engine::StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..strata_engine::StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    // Primary writes an encrypted record then cleanly shuts down.
+    {
+        let primary = Database::open_runtime(
+            OpenSpec::primary(dir.path())
+                .with_subsystem(SearchSubsystem)
+                .with_config(aes_cfg.clone()),
+        )
+        .unwrap();
+        primary_put(&primary, branch, "k", "v-from-primary");
+        primary.flush().unwrap();
+        primary.shutdown().unwrap();
+    }
+
+    // Simulate "MANIFEST absent": remove the persisted MANIFEST but
+    // leave the encrypted WAL segments. This is the D7 fallback case
+    // the reviewer flagged (PR 2427 finding #4) — pre-part-4, the
+    // follower would resolve `follower_codec = None` and silently read
+    // raw ciphertext through a codec-less reader.
+    let manifest_path = dir.path().join("MANIFEST");
+    if manifest_path.exists() {
+        std::fs::remove_file(&manifest_path).unwrap();
+    }
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_config(aes_cfg),
+    )
+    .expect(
+        "follower must fall back to cfg.storage.codec when MANIFEST is \
+         absent so encrypted WAL-only recovery works (T3-E12 §D7)",
+    );
+
+    assert_eq!(
+        read_kv(&follower, branch, "k").as_deref(),
+        Some("v-from-primary"),
+        "follower without MANIFEST must decode the encrypted WAL via \
+         config-codec fallback and expose the primary's record",
+    );
+
+    follower.shutdown().unwrap();
+}
