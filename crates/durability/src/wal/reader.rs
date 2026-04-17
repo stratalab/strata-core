@@ -745,6 +745,18 @@ pub enum ReadStopReason {
         /// Human-readable error description
         detail: String,
     },
+    /// Codec decode failed for a record. Distinct from [`ReadStopReason::ChecksumMismatch`]
+    /// because the outer envelope parsed and its CRC matched — it was the
+    /// installed `StorageCodec`'s `decode()` that rejected the payload.
+    /// Typical cause: wrong encryption key or AES-GCM auth-tag mismatch
+    /// on an encrypted WAL. Produced by the T3-E12 codec-aware reader.
+    CodecDecode {
+        /// Byte offset within the segment where decode failed.
+        offset: usize,
+        /// Human-readable decode failure description (typically the
+        /// `Display` of `CodecError`).
+        detail: String,
+    },
     /// A later valid record was found after one or more missing transaction IDs.
     Gap {
         /// First missing transaction ID in the contiguous sequence.
@@ -838,6 +850,41 @@ pub enum WalReaderError {
         offset: usize,
         /// Number of valid records read before the corruption
         records_before: usize,
+    },
+
+    /// Codec decode failure at a specific record offset.
+    ///
+    /// Returned from the reader when the installed `StorageCodec`'s
+    /// `decode()` rejects a record's codec-encoded payload. Strict
+    /// callers see this error directly; the engine's lossy open branch
+    /// catches it and routes to the whole-DB wipe-and-reopen path
+    /// (T3-E10) with typed `LossyErrorKind::CodecDecode`. Lossy mode
+    /// does NOT scan forward past a codec-decode failure — byte-aligned
+    /// codec scan is unreliable for encrypted payloads (see T3-E12
+    /// tracking doc §D5 for rationale).
+    #[error("Codec decode failure at byte offset {offset}: {detail}")]
+    CodecDecode {
+        /// Byte offset within the segment where decode failed.
+        offset: u64,
+        /// Decode error detail (typically the `Display` of `CodecError`).
+        detail: String,
+    },
+
+    /// Legacy WAL segment format — rejected hard, even under lossy
+    /// recovery.
+    ///
+    /// Produced when a segment's `SEGMENT_FORMAT_VERSION` is older than
+    /// this build supports. The operator must delete the `wal/`
+    /// subdirectory manually before reopening. Lossy recovery does not
+    /// bypass format incompatibility (T3-E12 tracking doc §D6).
+    #[error("Legacy WAL segment: found version {found_version}, build requires {required_version}. {hint}")]
+    LegacyFormat {
+        /// Segment format version read from disk.
+        found_version: u32,
+        /// Segment format version this build expects.
+        required_version: u32,
+        /// Operator remediation hint — filesystem action only.
+        hint: String,
     },
 }
 
