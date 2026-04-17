@@ -51,6 +51,8 @@ criterion = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 serial_test = { workspace = true }
+# Used by T3-E12 tests that craft raw pre-v3 WAL segment headers.
+crc32fast = { workspace = true }
 
 [[bench]]
 name = "transaction_benchmarks"

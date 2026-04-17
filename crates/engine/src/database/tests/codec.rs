@@ -1,20 +1,21 @@
-//! Codec uniformity and reuse-identity acceptance tests (T3-E7).
+//! Codec uniformity and reuse-identity acceptance tests (T3-E7 + T3-E12).
 //!
-//! These tests pin the contract that every open-time-only knob classified
-//! in `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`
-//! triggers [`StrataError::IncompatibleReuse`] when it disagrees between
-//! two openers of the same path — never a silent downgrade, never an
-//! opaque `internal` error. The tests cover codec drift (primary and
-//! follower), early codec validation, and the two knobs that the initial
-//! T3-E7 draft left out of the signature: `background_threads` and
-//! `allow_lossy_recovery`.
+//! These tests pin two related contracts:
 //!
-//! **Why not a full write→crash→reopen→read round-trip with a non-identity
-//! codec?** WAL recovery does not yet support non-identity codecs
-//! (`crates/engine/src/database/open.rs` blocks this at open time). Cache
-//! durability does not persist across opens. So the cross-process
-//! persistence test called for by the scope is deferred until WAL codec
-//! support lands; see the config matrix doc for the target-state note.
+//! 1. **T3-E7 reuse identity** — every open-time-only knob classified in
+//!    `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`
+//!    triggers [`StrataError::IncompatibleReuse`] when it disagrees
+//!    between two openers of the same path (codec drift, background
+//!    threads, `allow_lossy_recovery`). Never a silent downgrade,
+//!    never an opaque `internal` error.
+//!
+//! 2. **T3-E12 codec-aware WAL** — non-identity codecs (`aes-gcm-256`)
+//!    round-trip cleanly through the v3 outer envelope + codec-threaded
+//!    reader for BOTH clean-shutdown and crash-recovery, across large
+//!    records, partial tails, mid-segment corruption, and wrong-key
+//!    reopen. The T3-E12 AES-GCM tests at the bottom of this file pin
+//!    the six contract rows from the tracking doc's §Phase 2 test
+//!    list (`docs/design/execution/t3-e12-phases.md`).
 
 use super::*;
 use crate::SearchSubsystem;
@@ -660,5 +661,479 @@ fn test_registry_reuse_rejects_different_allow_lossy_recovery() {
     }
 
     db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+// ============================================================================
+// T3-E12 Phase 2 — AES-GCM + WAL-durability round-trip contract
+// ============================================================================
+//
+// These six tests pin the core Phase 2 acceptance: a database configured
+// with `codec = "aes-gcm-256"` + `durability = "standard"` (WAL-backed)
+// round-trips cleanly through the v3 outer envelope and the codec-threaded
+// WAL reader on every path the tracking doc enumerates —
+// docs/design/execution/t3-e12-phases.md §"Phase 2 Tests".
+
+/// Build a `StrataConfig` with aes-gcm-256 codec + standard durability.
+/// Shared setup for the T3-E12 round-trip tests.
+fn aes_gcm_standard_config() -> StrataConfig {
+    StrataConfig {
+        durability: "standard".to_string(),
+        storage: StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    }
+}
+
+/// T3-E12 §Phase 2 Test #1: clean-shutdown round-trip.
+///
+/// Write several records through an `aes-gcm-256 + standard` primary,
+/// call `shutdown()`, reopen with the same key + codec, verify every
+/// record is visible. Exercises the happy path for the v3 envelope
+/// writer + codec-aware reader.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_wal_durability_clean_shutdown_roundtrip() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .expect("aes-gcm-256 + standard durability must open post-T3-E12");
+
+        for i in 0..12u8 {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("k{i}")),
+                Value::Bytes(vec![i; 64]),
+            );
+        }
+        db.shutdown().expect("clean shutdown must succeed");
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Reopen with the same key + codec and assert every record is visible.
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("reopen after clean shutdown must succeed");
+
+    for i in 0..12u8 {
+        let key = Key::new_kv(ns.clone(), &format!("k{i}"));
+        let got = db
+            .storage()
+            .get_versioned(&key, CommitVersion::MAX)
+            .expect("get must succeed on reopened encrypted DB");
+        match got.map(|v| v.value) {
+            Some(Value::Bytes(bytes)) => assert_eq!(bytes, vec![i; 64]),
+            other => panic!("key k{i} missing after reopen: {other:?}"),
+        }
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #2: crash recovery (drop without shutdown).
+///
+/// Mirrors the `recovery_tests::test_kv_survives_recovery` idiom for
+/// the encrypted-WAL path: drop the DB without calling `shutdown()`,
+/// reopen, verify records survived the partial-write recovery path.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_wal_crash_recovery() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+
+        for i in 0..8u8 {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("crash_k{i}")),
+                Value::Bytes(vec![i ^ 0x55; 32]),
+            );
+        }
+        // Force a WAL flush but DO NOT call shutdown — mirrors a crash.
+        db.flush().unwrap();
+        drop(db);
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("reopen after crash must succeed via WAL recovery");
+
+    for i in 0..8u8 {
+        let key = Key::new_kv(ns.clone(), &format!("crash_k{i}"));
+        let got = db
+            .storage()
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap();
+        match got.map(|v| v.value) {
+            Some(Value::Bytes(bytes)) => assert_eq!(bytes, vec![i ^ 0x55; 32]),
+            other => panic!("key crash_k{i} missing after crash recovery: {other:?}"),
+        }
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #3: large-record envelope.
+///
+/// Exercises the `u32 outer_len` field against a multi-MB value. A
+/// ~2 MB payload is large enough to stress the envelope but stays
+/// below the default segment-size threshold so no rotation is forced
+/// mid-record. The post-encode envelope size is comfortably within
+/// u32 range.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_large_record_envelope() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    // ~2 MB payload — big enough to exercise the u32 outer_len field
+    // without blowing past the test-default segment size.
+    let big_value: Vec<u8> = (0u32..2 * 1024 * 1024)
+        .map(|i| (i as u8).wrapping_mul(37))
+        .collect();
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        blind_write(
+            &db,
+            Key::new_kv(ns.clone(), "big"),
+            Value::Bytes(big_value.clone()),
+        );
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+
+    let got = db
+        .storage()
+        .get_versioned(&Key::new_kv(ns, "big"), CommitVersion::MAX)
+        .unwrap()
+        .expect("large record must round-trip through the v3 envelope");
+    match got.value {
+        Value::Bytes(bytes) => assert_eq!(
+            bytes.len(),
+            big_value.len(),
+            "recovered size must match written size"
+        ),
+        other => panic!("wrong value type: {other:?}"),
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #6: wrong-key reopen classifies as
+/// `LossyErrorKind::CodecDecode`.
+///
+/// Write with key A, close, then reopen with key B + `allow_lossy_recovery=true`.
+/// The open must succeed with empty state, and
+/// `last_lossy_recovery_report()` must report
+/// `error_kind = LossyErrorKind::CodecDecode` — the typed
+/// classification that separates wrong-key scenarios from
+/// raw-byte-corruption scenarios (§D5).
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_wrong_key_classifies_as_codec_decode() {
+    OPEN_DATABASES.lock().clear();
+    // Write with key A.
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let _key_a = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        for i in 0..4u8 {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("enc_k{i}")),
+                Value::Bytes(vec![i; 16]),
+            );
+        }
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Reopen with key B + lossy. Must succeed with empty state +
+    // typed CodecDecode classification in the report.
+    const TEST_AES_KEY_B: &str = "ffeeddccbbaa99887766554433221100f0e0d0c0b0a090807060504030201000";
+    let _key_b = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY_B);
+    let cfg_lossy = StrataConfig {
+        allow_lossy_recovery: true,
+        ..aes_gcm_standard_config()
+    };
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(cfg_lossy)
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("wrong-key reopen under allow_lossy_recovery=true must succeed (whole-DB wipe)");
+
+    let report = db
+        .last_lossy_recovery_report()
+        .expect("wrong-key reopen must populate a lossy report");
+    use crate::LossyErrorKind;
+    assert_eq!(
+        report.error_kind,
+        LossyErrorKind::CodecDecode,
+        "wrong key → CodecDecode (not Storage, not Corruption); got {:?} with error {:?}",
+        report.error_kind,
+        report.error,
+    );
+    assert!(report.discarded_on_wipe);
+
+    // The pre-wipe records are gone by contract (whole-DB wipe).
+    for i in 0..4u8 {
+        let got = db
+            .storage()
+            .get_versioned(
+                &Key::new_kv(ns.clone(), &format!("enc_k{i}")),
+                CommitVersion::MAX,
+            )
+            .unwrap();
+        assert!(
+            got.is_none(),
+            "record enc_k{i} must be wiped after lossy fallback; found {got:?}"
+        );
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #4: partial-tail truncation on encrypted WAL.
+///
+/// Write N records, then append a deterministic mid-outer-envelope
+/// byte run (3 bytes — less than the 8-byte envelope-header size).
+/// Reopen, assert the first N records survive. Pins the
+/// `InsufficientData → ReadStopReason::PartialRecord` branch of the
+/// envelope-parse loop, which is what differentiates genuine crash
+/// tails (truncate-and-continue) from CRC or codec failures (error).
+///
+/// Appending arbitrary garbage (the pre-§D4-rewrite fixture pattern)
+/// is non-deterministic — random bytes can happen to produce a valid
+/// outer_len_crc by luck (1 in 4 billion) or fail CRC validation
+/// (usual case), which routes through a different error branch.
+/// Truncation mid-envelope-header guarantees the short-read path is
+/// the one that fires.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_partial_tail_truncates_cleanly() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    let record_count = 5u8;
+    let size_after_last_record: u64 = {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        for i in 0..record_count {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                Value::Bytes(vec![i; 16]),
+            );
+        }
+        db.flush().unwrap();
+
+        let seg_path = db_path.join("wal").join("wal-000001.seg");
+        let size = std::fs::metadata(&seg_path).unwrap().len();
+        db.shutdown().unwrap();
+        size
+    };
+    OPEN_DATABASES.lock().clear();
+
+    // Append 3 bytes — mid-outer-envelope-header for record N+1.
+    // `read_outer_envelope` returns `Ok(None)` for any buf.len() < 8,
+    // which the parse loop treats as `PartialRecord` → truncate.
+    let seg_path = db_path.join("wal").join("wal-000001.seg");
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&seg_path)
+            .unwrap();
+        f.write_all(&[0xAB, 0xCD, 0xEF]).unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&seg_path).unwrap().len(),
+        size_after_last_record + 3,
+    );
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("reopen with mid-envelope partial tail must succeed (PartialRecord, not corruption)");
+
+    for i in 0..record_count {
+        let got = db
+            .storage()
+            .get_versioned(
+                &Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                CommitVersion::MAX,
+            )
+            .unwrap();
+        match got.map(|v| v.value) {
+            Some(Value::Bytes(bytes)) => assert_eq!(bytes, vec![i; 16]),
+            other => panic!("record tail_k{i} missing after partial-tail: {other:?}"),
+        }
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #5: mid-segment ciphertext corruption must
+/// NOT silently truncate in strict mode.
+///
+/// Write N records, flip a byte deep inside the first record's
+/// codec-encoded payload (past the outer envelope header). AES-GCM's
+/// auth tag catches the tampered ciphertext on decode; the reader
+/// returns `Err(WalReaderError::CodecDecode)` which the coordinator
+/// maps to `StrataError::CodecDecode` and strict open refuses.
+///
+/// The key regression guard: codec decode failures are ALWAYS `Err`
+/// at the reader layer, never `Ok(stop_reason)` (D5). A silent
+/// truncation would be catastrophic — wrong-key scenarios would
+/// serve partial data without any signal to the operator.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_mid_segment_corruption_not_silently_truncated() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        for i in 0..4u8 {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                Value::Bytes(vec![i ^ 0x77; 32]),
+            );
+        }
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Flip a byte deep inside the first record's ciphertext. The
+    // segment header is 36 bytes; add 8 for the first outer envelope;
+    // byte 50 lands comfortably inside the first encrypted payload.
+    let seg_path = db_path.join("wal").join("wal-000001.seg");
+    {
+        let mut data = std::fs::read(&seg_path).unwrap();
+        let idx = 50usize;
+        assert!(
+            idx < data.len(),
+            "segment file should have grown past offset 50"
+        );
+        data[idx] ^= 0xFF;
+        std::fs::write(&seg_path, &data).unwrap();
+    }
+
+    // Strict open must refuse; no silent truncation path may succeed.
+    let result = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    );
+    match result {
+        Err(_) => { /* strict refuses; expected */ }
+        Ok(db) => {
+            let mut visible = 0usize;
+            for i in 0..4u8 {
+                let got = db
+                    .storage()
+                    .get_versioned(
+                        &Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                        CommitVersion::MAX,
+                    )
+                    .unwrap();
+                if got.is_some() {
+                    visible += 1;
+                }
+            }
+            panic!(
+                "strict open with mid-segment ciphertext corruption must \
+                 error, not silently truncate; {visible}/4 records \
+                 survived — this is a D5 regression"
+            );
+        }
+    }
     OPEN_DATABASES.lock().clear();
 }

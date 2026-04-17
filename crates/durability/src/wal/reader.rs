@@ -2,8 +2,12 @@
 //!
 //! The reader handles reading WAL records from segments for recovery.
 
+use crate::codec::{clone_codec, StorageCodec};
 use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalRecordError, WalSegment};
+use crate::wal::writer::WAL_RECORD_ENVELOPE_OVERHEAD;
+use crc32fast::Hasher;
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use strata_core::id::TxnId;
@@ -13,6 +17,28 @@ use tracing::warn;
 /// valid record after encountering corruption during WAL recovery.
 const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 
+/// Parse the per-record outer envelope (T3-E12 v3):
+/// `[u32 outer_len][u32 outer_len_crc]`. Returns `Ok(Some((outer_len,
+/// bytes_consumed)))` if the envelope header parsed and the length CRC
+/// matched, `Ok(None)` if there are too few bytes to read the header
+/// (caller treats as `PartialRecord` tail), and `Err(stored_crc,
+/// computed_crc)` on CRC mismatch (caller decides strict/lossy).
+fn read_outer_envelope(buf: &[u8]) -> Result<Option<u32>, (u32, u32)> {
+    if buf.len() < WAL_RECORD_ENVELOPE_OVERHEAD {
+        return Ok(None);
+    }
+    let outer_len_bytes: [u8; 4] = buf[0..4].try_into().expect("4-byte slice");
+    let outer_len = u32::from_le_bytes(outer_len_bytes);
+    let stored_crc = u32::from_le_bytes(buf[4..8].try_into().expect("4-byte slice"));
+    let mut h = Hasher::new();
+    h.update(&outer_len_bytes);
+    let computed_crc = h.finalize();
+    if stored_crc != computed_crc {
+        return Err((stored_crc, computed_crc));
+    }
+    Ok(Some(outer_len))
+}
+
 /// WAL reader for iterating over records in segments.
 ///
 /// The reader can read individual segments or scan all segments in order.
@@ -21,9 +47,18 @@ const MAX_RECOVERY_SCAN_WINDOW: usize = 8 * 1_024 * 1_024; // 8 MB
 /// after the corrupted region) is fatal — `read_segment` returns an error.
 /// Use [`with_lossy_recovery`](WalReader::with_lossy_recovery) to opt in to
 /// the scan-ahead behavior that skips corrupted regions.
+///
+/// A codec may be installed via [`with_codec`](WalReader::with_codec).
+/// With no codec, each record's payload is passed through to
+/// `WalRecord::from_bytes` as-is (identity behavior). With a codec,
+/// the payload is decoded first; decode failures surface as
+/// `WalReaderError::CodecDecode` and are NEVER demoted to
+/// `PartialRecord` — the engine's lossy branch catches the typed
+/// error and routes to T3-E10 whole-DB wipe-and-reopen (§D5).
 #[derive(Default)]
 pub struct WalReader {
-    allow_lossy_recovery: bool,
+    pub(crate) allow_lossy_recovery: bool,
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl WalReader {
@@ -31,6 +66,47 @@ impl WalReader {
     pub fn new() -> Self {
         WalReader {
             allow_lossy_recovery: false,
+            codec: None,
+        }
+    }
+
+    /// Install a storage codec. Records read from segments will be
+    /// decoded via this codec before inner-record parsing. If no codec
+    /// is installed (`None`), payloads pass through as-is — equivalent
+    /// to the `IdentityCodec`.
+    ///
+    /// Codec decode failures surface as
+    /// [`WalReaderError::CodecDecode`] and NEVER demote to
+    /// `ReadStopReason::PartialRecord`. Lossy mode does not scan
+    /// forward past a codec decode failure (T3-E12 §D5) — the
+    /// operator's escape hatch is `allow_lossy_recovery=true` at open
+    /// time, which triggers the whole-DB wipe-and-reopen via T3-E10.
+    pub fn with_codec(mut self, codec: Box<dyn StorageCodec>) -> Self {
+        self.codec = Some(codec);
+        self
+    }
+
+    /// Decode one record payload through the installed codec, or pass
+    /// through unchanged if no codec is installed. Returns
+    /// `Err(WalReaderError::CodecDecode)` on decode failure, with the
+    /// caller's offset encoded in the error so operators can locate
+    /// the bad record.
+    fn decode_payload<'a>(
+        &self,
+        payload: &'a [u8],
+        offset_hint: u64,
+    ) -> Result<Cow<'a, [u8]>, WalReaderError> {
+        match self.codec.as_deref() {
+            None => Ok(Cow::Borrowed(payload)),
+            Some(codec) => {
+                codec
+                    .decode(payload)
+                    .map(Cow::Owned)
+                    .map_err(|err| WalReaderError::CodecDecode {
+                        offset: offset_hint,
+                        detail: err.to_string(),
+                    })
+            }
         }
     }
 
@@ -53,13 +129,28 @@ impl WalReader {
         wal_dir: &Path,
         segment_number: u64,
     ) -> Result<(Vec<WalRecord>, u64, ReadStopReason, usize), WalReaderError> {
-        let mut segment = WalSegment::open_read(wal_dir, segment_number)
-            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        let mut segment = WalSegment::open_read(wal_dir, segment_number)?;
 
         self.read_segment_from(&mut segment)
     }
 
     /// Read records from an already-opened segment.
+    ///
+    /// # v3 parse taxonomy (T3-E12 §D4)
+    ///
+    /// Each record on disk is wrapped in `[u32 outer_len][u32 outer_len_crc][encoded payload]`.
+    /// The parse loop handles the envelope + payload in two steps:
+    ///
+    /// 1. Read 8-byte outer envelope. Short read → `PartialRecord`
+    ///    (genuine crash tail, truncate). CRC mismatch on the length
+    ///    field → `CorruptedSegment` (strict) or scan-forward (lossy).
+    /// 2. Read `outer_len` payload bytes. Short read → `PartialRecord`.
+    ///    Phase 3 will decode via the installed `StorageCodec` here
+    ///    (codec-decode failures return `Err(CodecDecode)`, NEVER
+    ///    demote to `PartialRecord`). For the identity-codec slot
+    ///    this is a pass-through.
+    /// 3. Feed the decoded bytes to `WalRecord::from_bytes` — existing
+    ///    inner-record parsing (LenCRC + payload CRC) runs unchanged.
     pub fn read_segment_from(
         &self,
         segment: &mut WalSegment,
@@ -85,21 +176,97 @@ impl WalReader {
         let mut skipped_corrupted = 0usize;
 
         while offset < buffer.len() {
-            // Try to decode through codec first
-            // For identity codec, this is just the raw bytes
-            let remaining = &buffer[offset..];
+            // Step 1: parse the outer envelope header.
+            let outer_len = match read_outer_envelope(&buffer[offset..]) {
+                Ok(Some(len)) => len,
+                Ok(None) => {
+                    // Short read of envelope header → genuine crash tail.
+                    stop_reason = ReadStopReason::PartialRecord;
+                    break;
+                }
+                Err(_crc_mismatch) => {
+                    // outer_len CRC mismatch is the same class as the
+                    // inner `LengthChecksumMismatch`: strict fails,
+                    // lossy scans forward byte-by-byte.
+                    if !self.allow_lossy_recovery {
+                        return Err(WalReaderError::CorruptedSegment {
+                            offset,
+                            records_before: records.len(),
+                        });
+                    }
+                    match self.scan_forward_for_envelope(&buffer, offset) {
+                        Some(new_offset) => {
+                            tracing::warn!(
+                                target: "strata::recovery",
+                                corrupted_offset = offset,
+                                resumed_offset = new_offset,
+                                skipped_bytes = new_offset - offset,
+                                "Skipped corrupted WAL region, found next valid envelope"
+                            );
+                            offset = new_offset;
+                            skipped_corrupted += 1;
+                            continue;
+                        }
+                        None => {
+                            stop_reason = ReadStopReason::ChecksumMismatch { offset };
+                            break;
+                        }
+                    }
+                }
+            };
 
-            // Try to parse a record
-            match WalRecord::from_bytes(remaining) {
-                Ok((record, consumed)) => {
+            // Step 2: read the outer_len payload bytes.
+            let payload_start = offset + WAL_RECORD_ENVELOPE_OVERHEAD;
+            let payload_end = match payload_start.checked_add(outer_len as usize) {
+                Some(end) if end <= buffer.len() => end,
+                _ => {
+                    // Short read on payload → crash tail.
+                    stop_reason = ReadStopReason::PartialRecord;
+                    break;
+                }
+            };
+            let payload = &buffer[payload_start..payload_end];
+
+            // Step 3: decode via the installed codec (or pass through
+            // for identity). Codec errors surface as
+            // `WalReaderError::CodecDecode` with NO demotion to
+            // `PartialRecord` — even at the segment tail (T3-E12 §D5).
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(e) => return Err(e),
+            };
+            let raw_record_bytes: &[u8] = &decoded;
+
+            match WalRecord::from_bytes(raw_record_bytes) {
+                Ok((record, _consumed)) => {
                     records.push(record);
-                    offset += consumed;
+                    offset = payload_end;
                     valid_end = hdr_size + offset as u64;
                 }
                 Err(WalRecordError::InsufficientData) => {
-                    // Partial record at end - this is expected for crash recovery
-                    stop_reason = ReadStopReason::PartialRecord;
-                    break;
+                    // Inner-record short read. This is anomalous — the
+                    // outer_len said N bytes follow, so if we couldn't
+                    // parse a full record in N bytes either the writer
+                    // wrote a malformed record or the payload is
+                    // corrupted. Treat as corruption, not partial tail,
+                    // so mid-segment writes don't get silently dropped.
+                    if !self.allow_lossy_recovery {
+                        return Err(WalReaderError::CorruptedSegment {
+                            offset,
+                            records_before: records.len(),
+                        });
+                    }
+                    match self.scan_forward_for_envelope(&buffer, offset + 1) {
+                        Some(new_offset) => {
+                            offset = new_offset;
+                            skipped_corrupted += 1;
+                            continue;
+                        }
+                        None => {
+                            stop_reason = ReadStopReason::ChecksumMismatch { offset };
+                            break;
+                        }
+                    }
                 }
                 Err(
                     WalRecordError::ChecksumMismatch { .. }
@@ -107,58 +274,33 @@ impl WalReader {
                     | WalRecordError::UnsupportedVersion(_),
                 ) => {
                     if !self.allow_lossy_recovery {
-                        // Strict mode (default): mid-segment corruption is fatal.
                         return Err(WalReaderError::CorruptedSegment {
                             offset,
                             records_before: records.len(),
                         });
                     }
-
-                    // Lossy recovery: scan forward byte-by-byte to find
-                    // the next valid record instead of trusting the corrupted length
-                    // field (which is itself part of the corrupted data).
-                    let scan_start = offset + 1;
-                    let scan_end = (offset + MAX_RECOVERY_SCAN_WINDOW).min(buffer.len());
-                    let mut found = false;
-
-                    for scan_offset in scan_start..scan_end {
-                        if WalRecord::from_bytes(&buffer[scan_offset..]).is_ok() {
+                    match self.scan_forward_for_envelope(&buffer, offset + 1) {
+                        Some(new_offset) => {
                             tracing::warn!(
                                 target: "strata::recovery",
                                 corrupted_offset = offset,
-                                resumed_offset = scan_offset,
-                                skipped_bytes = scan_offset - offset,
-                                "Skipped corrupted WAL region, found valid record"
+                                resumed_offset = new_offset,
+                                skipped_bytes = new_offset - offset,
+                                "Skipped corrupted WAL record, found next valid envelope"
                             );
-                            offset = scan_offset;
+                            offset = new_offset;
                             skipped_corrupted += 1;
-                            found = true;
+                            continue;
+                        }
+                        None => {
+                            stop_reason = ReadStopReason::ChecksumMismatch { offset };
                             break;
                         }
                     }
-
-                    if found {
-                        continue;
-                    }
-
-                    // No valid record found within scan window — stop
-                    let unscanned_bytes = buffer.len() - scan_end;
-                    if unscanned_bytes > 0 {
-                        tracing::warn!(
-                            target: "strata::recovery",
-                            corrupted_offset = offset,
-                            scan_window_bytes = MAX_RECOVERY_SCAN_WINDOW,
-                            unscanned_bytes,
-                            "Corruption scan window exhausted — unscanned data will be lost",
-                        );
-                    }
-                    stop_reason = ReadStopReason::ChecksumMismatch { offset };
-                    break;
                 }
                 Err(e) => {
-                    // CRC was valid but payload couldn't be parsed.
-                    // This indicates codec mismatch or format version incompatibility,
-                    // NOT data corruption.
+                    // CRC passed (outer + inner length) but payload didn't
+                    // parse — codec/version mismatch or bug.
                     stop_reason = ReadStopReason::ParseError {
                         offset,
                         detail: e.to_string(),
@@ -169,6 +311,56 @@ impl WalReader {
         }
 
         Ok((records, valid_end, stop_reason, skipped_corrupted))
+    }
+
+    /// Scan forward within `buffer` looking for the next offset at which
+    /// a valid outer envelope header parses AND whose codec-decoded
+    /// payload parses as a valid `WalRecord`. Used by lossy recovery to
+    /// resume reading past a corrupted region. Returns the byte offset
+    /// of the next readable envelope, or `None` if none is found within
+    /// the scan window.
+    ///
+    /// Codec-awareness matters: on encrypted WAL (`aes-gcm-256`) the
+    /// payload bytes between the envelope header and the next envelope
+    /// are ciphertext. Without routing candidate payloads through
+    /// `decode_payload` first, the inner-record sanity check would
+    /// always fail on encrypted databases and lossy scan-forward would
+    /// never resume past corruption.
+    fn scan_forward_for_envelope(&self, buffer: &[u8], scan_start: usize) -> Option<usize> {
+        let scan_end = scan_start
+            .saturating_add(MAX_RECOVERY_SCAN_WINDOW)
+            .min(buffer.len());
+        for candidate in scan_start..scan_end.saturating_sub(WAL_RECORD_ENVELOPE_OVERHEAD - 1) {
+            if let Ok(Some(outer_len)) = read_outer_envelope(&buffer[candidate..]) {
+                // Additionally require that the claimed payload actually
+                // fits — rejects lucky CRC matches on garbage that would
+                // have been truncated.
+                let payload_end = candidate
+                    .checked_add(WAL_RECORD_ENVELOPE_OVERHEAD)
+                    .and_then(|p| p.checked_add(outer_len as usize));
+                match payload_end {
+                    Some(end) if end <= buffer.len() => {
+                        let payload = &buffer[candidate + WAL_RECORD_ENVELOPE_OVERHEAD..end];
+                        // Decode through the installed codec first
+                        // (identity = pass-through). If decode fails,
+                        // this candidate cannot be the start of a valid
+                        // record — keep scanning.
+                        if let Ok(decoded) = self.decode_payload(payload, candidate as u64) {
+                            // Sanity-check: the decoded payload must
+                            // parse as a valid WalRecord. Without this,
+                            // a random 4-byte value could match its own
+                            // CRC by luck once in ~4 billion attempts
+                            // and we would resume at garbage.
+                            if WalRecord::from_bytes(&decoded).is_ok() {
+                                return Some(candidate);
+                            }
+                        }
+                    }
+                    _ => continue,
+                }
+            }
+        }
+        None
     }
 
     /// Read all records from all segments in a WAL directory.
@@ -193,8 +385,7 @@ impl WalReader {
 
             // Check if this segment needs truncation (only the last one can)
             if idx == segments.len() - 1 {
-                let segment = WalSegment::open_read(wal_dir, *segment_num)
-                    .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+                let segment = WalSegment::open_read(wal_dir, *segment_num)?;
 
                 if valid_end < segment.size() {
                     truncate_info = Some(TruncateInfo {
@@ -402,8 +593,7 @@ impl WalReader {
         segment_number: u64,
         next_expected: u64,
     ) -> Result<WatermarkReadResult, WalReaderError> {
-        let mut segment = WalSegment::open_read(wal_dir, segment_number)
-            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        let mut segment = WalSegment::open_read(wal_dir, segment_number)?;
         let mut buffer = Vec::new();
         let hdr_size = segment.header_size() as u64;
 
@@ -420,9 +610,62 @@ impl WalReader {
         let mut next_expected = next_expected;
 
         while offset < buffer.len() {
-            match WalRecord::from_bytes(&buffer[offset..]) {
-                Ok((record, consumed)) => {
-                    offset += consumed;
+            // Parse the per-record outer envelope (T3-E12 v3) before
+            // delegating to the inner `WalRecord::from_bytes`.
+            let outer_len = match read_outer_envelope(&buffer[offset..]) {
+                Ok(Some(len)) => len,
+                Ok(None) => break, // envelope header short-read = crash tail
+                Err(_crc_mismatch) => {
+                    if let Some((scan_offset, next_record)) =
+                        self.scan_forward_to_valid_envelope(&buffer, offset + 1)
+                    {
+                        let candidate_txn = next_record.txn_id.as_u64();
+                        if candidate_txn < next_expected || candidate_txn == next_expected {
+                            offset = scan_offset;
+                            continue;
+                        }
+                        return Ok(WatermarkReadResult {
+                            records,
+                            blocked: Some(WatermarkBlockedRecord {
+                                txn_id: TxnId(next_expected),
+                                detail: format!(
+                                    "outer envelope CRC mismatch at offset {offset}; next readable txn is {next}",
+                                    next = next_record.txn_id,
+                                ),
+                                skip_allowed: true,
+                                stop_reason: ReadStopReason::ChecksumMismatch { offset },
+                            }),
+                        });
+                    }
+                    return Ok(WatermarkReadResult {
+                        records,
+                        blocked: Some(WatermarkBlockedRecord {
+                            txn_id: TxnId(next_expected),
+                            detail: format!("outer envelope CRC mismatch at offset {offset}"),
+                            skip_allowed: false,
+                            stop_reason: ReadStopReason::ChecksumMismatch { offset },
+                        }),
+                    });
+                }
+            };
+
+            let payload_start = offset + WAL_RECORD_ENVELOPE_OVERHEAD;
+            let payload_end = match payload_start.checked_add(outer_len as usize) {
+                Some(end) if end <= buffer.len() => end,
+                _ => break, // payload short-read = crash tail
+            };
+            let payload = &buffer[payload_start..payload_end];
+
+            // Decode via installed codec or pass through for identity.
+            // Codec decode failures surface unconditionally (T3-E12 §D5).
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(e) => return Err(e),
+            };
+
+            match WalRecord::from_bytes(&decoded) {
+                Ok((record, _consumed)) => {
+                    offset = payload_end;
                     let txn_id = record.txn_id.as_u64();
                     if txn_id < next_expected {
                         continue;
@@ -449,17 +692,12 @@ impl WalReader {
                         }),
                     });
                 }
-                Err(WalRecordError::InsufficientData) => break,
                 Err(err) => {
                     if let Some((scan_offset, next_record)) =
-                        self.scan_forward_to_valid_record(&buffer, offset + 1)
+                        self.scan_forward_to_valid_envelope(&buffer, offset + 1)
                     {
                         let candidate_txn = next_record.txn_id.as_u64();
-                        if candidate_txn < next_expected {
-                            offset = scan_offset;
-                            continue;
-                        }
-                        if candidate_txn == next_expected {
+                        if candidate_txn < next_expected || candidate_txn == next_expected {
                             offset = scan_offset;
                             continue;
                         }
@@ -469,8 +707,8 @@ impl WalReader {
                             blocked: Some(WatermarkBlockedRecord {
                                 txn_id: TxnId(next_expected),
                                 detail: format!(
-                                    "{}; next readable txn is {}",
-                                    err, next_record.txn_id
+                                    "{err}; next readable txn is {next}",
+                                    next = next_record.txn_id
                                 ),
                                 skip_allowed: true,
                                 stop_reason: Self::stop_reason_for_record_error(offset, &err),
@@ -497,15 +735,38 @@ impl WalReader {
         })
     }
 
-    fn scan_forward_to_valid_record(
+    /// Scan forward for the next byte offset at which a valid v3 outer
+    /// envelope parses AND whose codec-decoded payload parses as a
+    /// valid `WalRecord`. Returns the scan offset and the decoded
+    /// record. Used by follower-refresh lossy-scan paths.
+    ///
+    /// Codec-awareness matters for the same reason as
+    /// [`scan_forward_for_envelope`]: encrypted WAL payloads must be
+    /// decoded before inner-record validation, otherwise follower
+    /// exact-skip resume would fail every lookup on encrypted DBs.
+    fn scan_forward_to_valid_envelope(
         &self,
         buffer: &[u8],
         scan_start: usize,
     ) -> Option<(usize, WalRecord)> {
-        let scan_end = (scan_start + MAX_RECOVERY_SCAN_WINDOW).min(buffer.len());
-        for scan_offset in scan_start..scan_end {
-            if let Ok((record, _)) = WalRecord::from_bytes(&buffer[scan_offset..]) {
-                return Some((scan_offset, record));
+        let scan_end = scan_start
+            .saturating_add(MAX_RECOVERY_SCAN_WINDOW)
+            .min(buffer.len());
+        for candidate in scan_start..scan_end.saturating_sub(WAL_RECORD_ENVELOPE_OVERHEAD - 1) {
+            if let Ok(Some(outer_len)) = read_outer_envelope(&buffer[candidate..]) {
+                let payload_end = candidate
+                    .checked_add(WAL_RECORD_ENVELOPE_OVERHEAD)
+                    .and_then(|p| p.checked_add(outer_len as usize));
+                if let Some(end) = payload_end {
+                    if end <= buffer.len() {
+                        let payload = &buffer[candidate + WAL_RECORD_ENVELOPE_OVERHEAD..end];
+                        if let Ok(decoded) = self.decode_payload(payload, candidate as u64) {
+                            if let Ok((record, _)) = WalRecord::from_bytes(&decoded) {
+                                return Some((candidate, record));
+                            }
+                        }
+                    }
+                }
             }
         }
         None
@@ -666,6 +927,7 @@ impl WalReader {
             current_records: Vec::new(),
             current_record_idx: 0,
             allow_lossy_recovery: self.allow_lossy_recovery,
+            codec: self.codec.as_deref().map(clone_codec),
         })
     }
 }
@@ -682,6 +944,10 @@ pub struct WalRecordIterator {
     current_records: Vec<WalRecord>,
     current_record_idx: usize,
     allow_lossy_recovery: bool,
+    /// Codec installed on the parent `WalReader`; threaded into each
+    /// per-segment reader so codec-encoded payloads (AES-GCM, etc.)
+    /// decode correctly (T3-E12 §D3 Site 3).
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl Iterator for WalRecordIterator {
@@ -711,6 +977,9 @@ impl Iterator for WalRecordIterator {
 
             let mut reader = WalReader::new();
             reader.allow_lossy_recovery = self.allow_lossy_recovery;
+            if let Some(c) = self.codec.as_deref() {
+                reader = reader.with_codec(clone_codec(c));
+            }
             match reader.read_segment(&self.wal_dir, seg_num) {
                 Ok((records, _, _, _)) => {
                     self.current_records = records;
@@ -881,14 +1150,12 @@ pub enum WalReaderError {
     /// Legacy WAL segment format — rejected hard, even under lossy
     /// recovery.
     ///
-    /// **Staging note (T3-E12 Phase 1):** variant declared here;
-    /// Phase 2's segment-header reader is the first producer. When a
-    /// segment's `SEGMENT_FORMAT_VERSION` is older than this build
-    /// supports, the reader will surface this error unconditionally
-    /// (strict and lossy paths alike) and the engine will re-raise
-    /// it — the operator must delete the `wal/` subdirectory
-    /// manually before reopening. Lossy recovery does not bypass
-    /// format incompatibility (T3-E12 tracking doc §D6).
+    /// Produced when a segment's `SEGMENT_FORMAT_VERSION` is older than
+    /// this build supports. Surfaces unconditionally (strict and lossy
+    /// alike); the engine's open path re-raises as
+    /// [`strata_core::StrataError::LegacyFormat`] and the operator
+    /// must delete the `wal/` subdirectory manually before reopening.
+    /// Lossy recovery does not bypass format incompatibility (T3-E12 §D6).
     ///
     /// The `hint` carries the full operator-facing message including
     /// the required version number, so the rendered diagnostic stays
@@ -902,6 +1169,27 @@ pub enum WalReaderError {
         /// hint is expected to include the required version number.
         hint: String,
     },
+}
+
+impl From<crate::format::WalSegmentError> for WalReaderError {
+    /// Preserve the typed `LegacyFormat` diagnostic; render other
+    /// header-level errors as `IoError`-wrapped strings. Genuine I/O
+    /// errors (disk full, permission denied) go through `IoError`
+    /// unchanged. T3-E12 §D8.
+    fn from(err: crate::format::WalSegmentError) -> Self {
+        use crate::format::{SegmentHeaderError, WalSegmentError};
+        match err {
+            WalSegmentError::Io(io) => WalReaderError::IoError(io.to_string()),
+            WalSegmentError::Header(SegmentHeaderError::LegacyFormat {
+                found_version,
+                hint,
+            }) => WalReaderError::LegacyFormat {
+                found_version,
+                hint,
+            },
+            WalSegmentError::Header(other) => WalReaderError::IoError(other.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1108,7 +1396,7 @@ mod tests {
             let mut meta = SegmentMeta::new_empty(seg_num);
             for (&txn_id, &ts) in txn_ids.iter().zip(timestamps.iter()) {
                 let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
-                segment.write(&record.to_bytes()).unwrap();
+                write_enveloped_record(&mut segment, &record.to_bytes());
                 meta.track_record(TxnId(txn_id), ts);
             }
             segment.close().unwrap();
@@ -1406,6 +1694,24 @@ mod tests {
     /// Segment 1 (closed): txn_ids 1-2, timestamps 1000-2000
     /// Segment 2 (closed): txn_ids 3-4, timestamps 3000-4000
     /// Segment 3 (active): txn_ids 5-6, timestamps 5000-6000, NO .meta
+    /// Manually emit the T3-E12 v3 outer envelope followed by a raw
+    /// record payload. Used by tests that bypass `WalWriter::append`
+    /// to construct specific on-disk layouts (corruption fixtures,
+    /// watermark scenarios). Mirrors the envelope logic in
+    /// `WalWriter::append_inner`.
+    fn write_enveloped_record(segment: &mut WalSegment, record_bytes: &[u8]) {
+        let outer_len = u32::try_from(record_bytes.len()).unwrap();
+        let outer_len_bytes = outer_len.to_le_bytes();
+        let outer_len_crc = {
+            let mut h = Hasher::new();
+            h.update(&outer_len_bytes);
+            h.finalize()
+        };
+        segment.write(&outer_len_bytes).unwrap();
+        segment.write(&outer_len_crc.to_le_bytes()).unwrap();
+        segment.write(record_bytes).unwrap();
+    }
+
     fn create_segments_with_active(wal_dir: &Path) {
         std::fs::create_dir_all(wal_dir).unwrap();
 
@@ -1418,7 +1724,7 @@ mod tests {
             let mut meta = SegmentMeta::new_empty(seg_num);
             for (&txn_id, &ts) in txn_ids.iter().zip(timestamps.iter()) {
                 let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
-                segment.write(&record.to_bytes()).unwrap();
+                write_enveloped_record(&mut segment, &record.to_bytes());
                 meta.track_record(TxnId(txn_id), ts);
             }
             segment.close().unwrap();
@@ -1429,7 +1735,7 @@ mod tests {
         let mut segment = WalSegment::create(wal_dir, 3, [1u8; 16]).unwrap();
         for (&txn_id, &ts) in [5u64, 6].iter().zip([5000u64, 6000].iter()) {
             let record = WalRecord::new(TxnId(txn_id), [1u8; 16], ts, vec![txn_id as u8; 10]);
-            segment.write(&record.to_bytes()).unwrap();
+            write_enveloped_record(&mut segment, &record.to_bytes());
         }
         // Deliberately NOT closing or writing .meta — this is the active segment
     }
@@ -1828,19 +2134,27 @@ mod tests {
             .collect();
         write_records(&wal_dir, &records);
 
-        // Serialize records to find byte offsets for corruption
+        // Serialize records to find byte offsets for corruption. On-disk
+        // layout (v3+): each record is preceded by an 8-byte outer
+        // envelope `[u32 outer_len][u32 outer_len_crc]`, so record N
+        // starts at `sum(record_bytes[0..N].len()) + N * ENVELOPE`.
         let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
-        let offset_of_record_3: usize = record_bytes[0].len() + record_bytes[1].len();
+        let offset_of_record_3: usize =
+            record_bytes[0].len() + record_bytes[1].len() + 2 * WAL_RECORD_ENVELOPE_OVERHEAD; // two envelopes before record 3
 
-        // Read the segment file, corrupt record 3's payload (not the length
-        // header) so that the length field is still valid but CRC fails.
+        // Read the segment file, corrupt record 3's inner payload so the
+        // outer envelope still parses (valid outer_len + outer_len_crc)
+        // but the inner CRC fails. That tests the mid-segment corruption
+        // path after the envelope has been validated.
         let segment_path = WalSegment::segment_path(&wal_dir, 1);
         let mut seg_data = std::fs::read(&segment_path).unwrap();
-        let hdr_size = 36; // v2 segment header
-        let corrupt_start = hdr_size + offset_of_record_3;
-        // Corrupt payload bytes (skip 4-byte length prefix, flip payload bytes)
-        let payload_start = corrupt_start + 4;
-        let payload_end = corrupt_start + record_bytes[2].len() - 4; // before CRC
+        let hdr_size = 36; // v2/v3 segment header size (unchanged in v3).
+        let envelope_start = hdr_size + offset_of_record_3;
+        let inner_record_start = envelope_start + WAL_RECORD_ENVELOPE_OVERHEAD;
+        // Corrupt payload bytes (skip 4-byte inner length prefix, flip
+        // payload bytes). Inner-record CRC fails, outer envelope is fine.
+        let payload_start = inner_record_start + 4;
+        let payload_end = inner_record_start + record_bytes[2].len() - 4; // before inner CRC
         for byte in seg_data[payload_start..payload_end].iter_mut() {
             *byte ^= 0xFF;
         }
@@ -2023,18 +2337,29 @@ mod tests {
             .collect();
         write_records(&wal_dir, &records);
 
-        // Compute byte offsets to find record 3's position
+        // Compute byte offsets to find record 3's inner length field.
+        // On-disk layout (v3+): each record has an 8-byte outer
+        // envelope in front. Torn-write test target is the INNER
+        // record's length field (4 bytes into the inner record), which
+        // lives 2*ENVELOPE + sum(record_bytes[0..2]) + ENVELOPE bytes
+        // past the segment header.
         let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
-        let offset_of_record_3: usize = record_bytes[0].len() + record_bytes[1].len();
+        let offset_of_record_3_envelope: usize =
+            record_bytes[0].len() + record_bytes[1].len() + 2 * WAL_RECORD_ENVELOPE_OVERHEAD;
 
-        // Corrupt record 3's LENGTH field to a huge value (simulating a torn write)
         let segment_path = WalSegment::segment_path(&wal_dir, 1);
         let mut seg_data = std::fs::read(&segment_path).unwrap();
-        let hdr_size = 36; // v2 segment header
-        let length_offset = hdr_size + offset_of_record_3;
+        let hdr_size = 36; // v2/v3 segment header size.
+        let inner_length_offset =
+            hdr_size + offset_of_record_3_envelope + WAL_RECORD_ENVELOPE_OVERHEAD;
 
-        // Overwrite the 4-byte length prefix with 0x7FFFFFFF (2GB — way past EOF)
-        seg_data[length_offset..length_offset + 4].copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
+        // Overwrite the 4-byte INNER length prefix with 0x7FFFFFFF
+        // (2GB — way past EOF). Outer envelope still parses cleanly,
+        // so the reader enters inner-record parsing and hits the torn
+        // length. With v2 LenCRC, the reader detects the lie and the
+        // lossy scan-forward recovers records 4-6.
+        seg_data[inner_length_offset..inner_length_offset + 4]
+            .copy_from_slice(&0x7FFF_FFFFu32.to_le_bytes());
         std::fs::write(&segment_path, &seg_data).unwrap();
 
         // Lossy reader must detect the bad length and scan forward to records 4-6.
@@ -2167,5 +2492,288 @@ mod tests {
             !blocked.skip_allowed,
             "without a later valid anchor, exact skip must fail closed"
         );
+    }
+
+    // ========================================================================
+    // T3-E12 Phase 2 — envelope-parse + codec-error taxonomy
+    // ========================================================================
+
+    /// Test-only codec that always fails on `decode` while letting
+    /// `encode` pass through. Used to exercise the codec-decode-error
+    /// branch of the reader without pulling in `AesGcmCodec` + env
+    /// vars. `codec_id()` returns a unique name so MANIFEST checks
+    /// don't confuse it with identity.
+    struct AlwaysFailDecodeCodec;
+
+    impl StorageCodec for AlwaysFailDecodeCodec {
+        fn encode(&self, data: &[u8]) -> Vec<u8> {
+            data.to_vec()
+        }
+
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::codec::CodecError> {
+            Err(crate::codec::CodecError::decode(
+                "test codec forcibly fails decode",
+                "always-fail-decode",
+                data.len(),
+            ))
+        }
+
+        fn codec_id(&self) -> &str {
+            "always-fail-decode"
+        }
+
+        fn clone_box(&self) -> Box<dyn StorageCodec> {
+            Box::new(AlwaysFailDecodeCodec)
+        }
+    }
+
+    /// Read the outer envelope + inner record offsets for a segment
+    /// populated by `write_records`. The first record starts
+    /// immediately after the 36-byte v2/v3 segment header.
+    const V3_HEADER_SIZE: usize = 36;
+
+    /// T3-E12 §D4: an outer_len_crc mismatch is corruption, NOT a
+    /// partial-record tail. Strict mode must error immediately; lossy
+    /// mode can scan forward but must NOT demote the failure to
+    /// `Ok(stop_reason = PartialRecord)`.
+    #[test]
+    fn test_outer_len_crc_mismatch_is_corruption_not_partial_tail() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 12]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Flip a byte inside the outer_len_crc field of the first
+        // record. The envelope layout at [segment_header][record_1]
+        // is: 36 bytes segment header, then 4 bytes outer_len, then
+        // 4 bytes outer_len_crc. Byte 36+4+1 = 41 lands in outer_len_crc.
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        {
+            let mut data = std::fs::read(&seg_path).unwrap();
+            data[V3_HEADER_SIZE + 4 + 1] ^= 0xFF;
+            std::fs::write(&seg_path, &data).unwrap();
+        }
+
+        // Strict: expect CorruptedSegment error (NOT a PartialRecord
+        // stop reason buried in an Ok result).
+        let strict = WalReader::new();
+        match strict.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CorruptedSegment { records_before, .. }) => {
+                assert_eq!(
+                    records_before, 0,
+                    "first-record envelope CRC mismatch must fail at offset 0"
+                );
+            }
+            other => panic!(
+                "outer_len_crc mismatch in strict mode must return CorruptedSegment; got {:?}",
+                other.map(|t| format!("Ok({} records, stop_reason={:?})", t.0.len(), t.2,)),
+            ),
+        }
+    }
+
+    /// T3-E12 §D4: in lossy mode, outer_len_crc mismatch on a
+    /// middle record triggers scan-forward to the next valid envelope.
+    /// Records before the corruption are preserved; records after
+    /// the next valid envelope are recovered.
+    #[test]
+    fn test_outer_len_crc_mismatch_lossy_scans_forward() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=4)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 12]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Compute byte offset of record 2's envelope (first byte of
+        // its outer_len_crc) on disk. Each on-disk record is
+        // [8-byte envelope] + record_bytes. Record 2 starts at
+        // hdr + envelope_of_record_1 + record_bytes[0].
+        let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
+        let record_2_envelope_start =
+            V3_HEADER_SIZE + super::WAL_RECORD_ENVELOPE_OVERHEAD + record_bytes[0].len();
+        let crc_byte_offset = record_2_envelope_start + 4 + 1; // first byte of outer_len_crc
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        {
+            let mut data = std::fs::read(&seg_path).unwrap();
+            data[crc_byte_offset] ^= 0xFF;
+            std::fs::write(&seg_path, &data).unwrap();
+        }
+
+        let lossy = WalReader::new().with_lossy_recovery();
+        let (records_recovered, _, stop_reason, skipped) = lossy.read_segment(&wal_dir, 1).unwrap();
+        assert!(
+            skipped > 0,
+            "lossy scan-forward must count the skipped corrupt envelope"
+        );
+        let txn_ids: Vec<u64> = records_recovered
+            .iter()
+            .map(|r| r.txn_id.as_u64())
+            .collect();
+        assert!(
+            txn_ids.contains(&1),
+            "record 1 (before corruption) must survive; got {txn_ids:?}"
+        );
+        assert!(
+            txn_ids.contains(&3) || txn_ids.contains(&4),
+            "at least one post-corruption record must be recovered via scan-forward; got {txn_ids:?}"
+        );
+        // Sanity: the stop reason reflects either end-of-data (full
+        // recovery past corruption) or checksum mismatch (scan window
+        // exhausted before the tail). Either is acceptable — the
+        // point of this test is that lossy does NOT bail as
+        // PartialRecord on an outer_len_crc mismatch.
+        assert!(
+            !matches!(stop_reason, ReadStopReason::PartialRecord),
+            "outer_len_crc mismatch must NOT demote to PartialRecord; got {stop_reason:?}"
+        );
+    }
+
+    /// T3-E12 §D5: codec decode failures ALWAYS return
+    /// `Err(WalReaderError::CodecDecode)` — in BOTH strict and lossy
+    /// modes. No demotion to `Ok(stop_reason)` is permitted, because
+    /// the coordinator iterates records via callback and ignores
+    /// `ReadStopReason` — an `Ok(stop_reason=CodecDecode)` would
+    /// silently short-read the segment and skip the T3-E10 wipe.
+    #[test]
+    fn test_codec_decode_failure_never_partial_tail() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Write via identity codec so the on-disk envelope is valid
+        // and the outer_len_crc passes. Then read with a codec that
+        // refuses every payload — simulates the AES-GCM wrong-key
+        // path at the reader layer, without needing env-var setup.
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 16]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        let strict = WalReader::new().with_codec(Box::new(AlwaysFailDecodeCodec));
+        match strict.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CodecDecode { detail, .. }) => {
+                assert!(
+                    detail.contains("forcibly fails decode")
+                        || detail.contains("always-fail-decode"),
+                    "CodecDecode detail must carry the codec's error message; got {detail:?}"
+                );
+            }
+            other => panic!(
+                "strict codec-decode failure must return Err(CodecDecode); got {:?}",
+                other.map(|t| format!("Ok({} records)", t.0.len()))
+            ),
+        }
+
+        let lossy = WalReader::new()
+            .with_lossy_recovery()
+            .with_codec(Box::new(AlwaysFailDecodeCodec));
+        match lossy.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CodecDecode { .. }) => { /* pass — lossy does NOT demote */ }
+            other => panic!(
+                "lossy codec-decode failure must ALSO return Err(CodecDecode) \
+                 — no demotion to Ok(stop_reason); got {:?}",
+                other.map(|t| format!("Ok({} records, stop_reason={:?})", t.0.len(), t.2,)),
+            ),
+        }
+    }
+
+    /// T3-E12 §D8: a pre-v3 segment header surfaces as the typed
+    /// `WalReaderError::LegacyFormat`, not a stringified `IoError`.
+    /// This is the load-bearing piece that lets the engine's lossy
+    /// branch pattern-match on the error variant and skip the wipe
+    /// (§D6 hard-fail).
+    #[test]
+    fn test_legacy_segment_format_typed_error() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        // Hand-craft a v2 segment header directly (36 bytes: magic +
+        // version=2 + segment_number + database_uuid + header CRC
+        // over the first 32 bytes).
+        let mut header = [0u8; 36];
+        header[0..4].copy_from_slice(b"STRA");
+        header[4..8].copy_from_slice(&2u32.to_le_bytes());
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..32].copy_from_slice(&[0xAA; 16]);
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&header[0..32]);
+            h.finalize()
+        };
+        header[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        std::fs::write(&seg_path, &header).unwrap();
+
+        let reader = WalReader::new();
+        match reader.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::LegacyFormat {
+                found_version,
+                hint,
+            }) => {
+                assert_eq!(found_version, 2);
+                assert!(
+                    hint.contains("requires segment format version"),
+                    "hint must name the required version, got: {hint}"
+                );
+                assert!(
+                    hint.contains("wal/"),
+                    "hint must name the wal/ directory, got: {hint}"
+                );
+            }
+            Ok(_) => panic!("pre-v3 segment open must return an error, not succeed",),
+            Err(other) => panic!(
+                "pre-v3 segment must surface as WalReaderError::LegacyFormat, got: {other:?}",
+            ),
+        }
+    }
+
+    /// T3-E12 §D8: `WalSegment::open_read` returns the TYPED
+    /// `WalSegmentError::Header(SegmentHeaderError::LegacyFormat)`,
+    /// NOT a stringified `io::Error`. This is the layer below
+    /// `test_legacy_segment_format_typed_error` — it proves the typed
+    /// error survives from segment-file open all the way up to
+    /// `WalReader::read_segment` without collapsing into an
+    /// `io::ErrorKind::InvalidData` string.
+    #[test]
+    fn test_wal_segment_open_read_typed_propagation() {
+        use crate::format::{SegmentHeaderError, WalSegmentError};
+
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let mut header = [0u8; 36];
+        header[0..4].copy_from_slice(b"STRA");
+        header[4..8].copy_from_slice(&2u32.to_le_bytes()); // legacy v2
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..32].copy_from_slice(&[0xCC; 16]);
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&header[0..32]);
+            h.finalize()
+        };
+        header[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        std::fs::write(&seg_path, &header).unwrap();
+
+        match WalSegment::open_read(&wal_dir, 1) {
+            Err(WalSegmentError::Header(SegmentHeaderError::LegacyFormat {
+                found_version,
+                ..
+            })) => {
+                assert_eq!(found_version, 2);
+            }
+            Err(other) => panic!(
+                "pre-v3 segment open_read must produce typed Header(LegacyFormat), got: {other:?}"
+            ),
+            Ok(_) => panic!("pre-v3 segment open_read must refuse, not succeed"),
+        }
     }
 }

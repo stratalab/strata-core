@@ -617,3 +617,101 @@ fn test_lossy_error_kind_display_covers_all_variants() {
     assert_eq!(format!("{}", LossyErrorKind::CodecDecode), "codec_decode");
     assert_eq!(format!("{}", LossyErrorKind::Other), "other");
 }
+
+/// T3-E12 §D6: a pre-v3 WAL segment on disk triggers
+/// `StrataError::LegacyFormat` and MUST NOT route through the lossy
+/// wipe, even when `allow_lossy_recovery=true`.
+///
+/// Rationale: the lossy branch only recreates the in-memory
+/// `SegmentedStore` and leaves `wal/` bytes on disk untouched. Without
+/// the hard-fail guard at `open.rs:1000` / `:540`, a pre-v3 segment
+/// would re-poison every subsequent open in an infinite loop.
+/// Operator remediation is manual — delete `wal/` and reopen.
+#[test]
+fn test_legacy_format_under_lossy_flag_still_hard_fails() {
+    use crc32fast::Hasher;
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let wal_dir = db_path.join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+
+    // Craft a 36-byte v2 segment header directly — matches the pre-
+    // T3-E12 on-disk layout (magic + version=2 + segment_number +
+    // database_uuid + header_crc over the first 32 bytes). The v3
+    // reader rejects this with `SegmentHeaderError::LegacyFormat`
+    // before reading any records.
+    let mut header = [0u8; 36];
+    header[0..4].copy_from_slice(b"STRA"); // SEGMENT_MAGIC
+    header[4..8].copy_from_slice(&2u32.to_le_bytes()); // format_version = 2 (legacy)
+    header[8..16].copy_from_slice(&1u64.to_le_bytes()); // segment_number = 1
+    header[16..32].copy_from_slice(&[0xAA; 16]); // database_uuid
+    let header_crc = {
+        let mut h = Hasher::new();
+        h.update(&header[0..32]);
+        h.finalize()
+    };
+    header[32..36].copy_from_slice(&header_crc.to_le_bytes());
+
+    let segment_path = wal_dir.join("wal-000001.seg");
+    std::fs::write(&segment_path, &header).unwrap();
+
+    // Snapshot the on-disk bytes BEFORE the open attempt so we can
+    // prove no wipe occurred.
+    let bytes_before = std::fs::read(&segment_path).unwrap();
+
+    // Open with allow_lossy_recovery=true. The D6 hard-fail guard
+    // must re-raise the `LegacyFormat` error WITHOUT wiping.
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result = Database::open_with_config(&db_path, cfg);
+
+    match result {
+        Err(StrataError::LegacyFormat {
+            found_version,
+            hint,
+        }) => {
+            assert_eq!(found_version, 2);
+            assert!(
+                hint.contains("requires segment format version"),
+                "hint must name required version, got: {hint}"
+            );
+            assert!(
+                hint.contains("wal/"),
+                "hint must name the wal/ directory for remediation, got: {hint}"
+            );
+        }
+        Ok(_) => panic!(
+            "legacy-format open must hard-fail even under allow_lossy_recovery=true; got Ok(Database)",
+        ),
+        Err(other) => panic!(
+            "legacy-format open must produce StrataError::LegacyFormat, got: {other:?}",
+        ),
+    }
+
+    // Filesystem observable: the pre-v3 segment bytes on disk must be
+    // unchanged after the failed open. A wipe would have replaced or
+    // cleared the segment. Re-reading identical bytes proves no
+    // `storage = SegmentedStore::with_dir(...)` branch executed and
+    // no lossy report was populated on the (failed) open attempt.
+    let bytes_after = std::fs::read(&segment_path).unwrap();
+    assert_eq!(
+        bytes_before, bytes_after,
+        "legacy-format open must NOT mutate the pre-v3 segment; the \
+         wipe branch should be skipped entirely",
+    );
+
+    // Reproducible: a second open attempt returns the same typed error
+    // — the failure is deterministic, not a transient recovery artifact.
+    let cfg2 = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result2 = Database::open_with_config(&db_path, cfg2);
+    assert!(
+        matches!(result2, Err(StrataError::LegacyFormat { .. })),
+        "second open must reproduce the same typed LegacyFormat error",
+    );
+}

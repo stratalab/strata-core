@@ -336,7 +336,14 @@ impl Database {
         };
 
         // Read the longest contiguous WAL prefix after the received watermark.
-        let reader = strata_durability::wal::WalReader::new();
+        // T3-E12 §D3 Site 2: thread the cached `wal_codec` so encrypted
+        // followers decode records on refresh. Without this wire,
+        // encrypted followers recover at open and then get stuck on
+        // the first refresh with a codec-decode error on the first
+        // new record (pre-T3-E12 part 4 behavior).
+        let reader = strata_durability::wal::WalReader::new().with_codec(
+            strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
+        );
         let read_result =
             match reader.read_all_after_watermark_contiguous(&self.wal_dir, received_watermark) {
                 Ok(r) => r,
