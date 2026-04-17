@@ -3,6 +3,7 @@
 //! The writer handles appending WAL records to segments with proper
 //! durability guarantees based on the configured mode.
 
+use crc32fast::Hasher;
 use serde::{Deserialize, Serialize};
 use strata_core::id::TxnId;
 
@@ -17,6 +18,14 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime};
 use tracing::{debug, error, info, warn};
+
+/// Per-record outer envelope overhead (v3+): `[u32 outer_len][u32 outer_len_crc]`.
+///
+/// Prefixed to every codec-encoded record by the writer so the reader
+/// can find record boundaries on codec-encoded payloads (AES-GCM, ...)
+/// that have no parseable length prefix inside the ciphertext.
+/// See T3-E12 tracking doc §D1.
+pub(crate) const WAL_RECORD_ENVELOPE_OVERHEAD: usize = 8;
 
 /// WAL disk usage summary.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -342,8 +351,11 @@ impl WalWriter {
     /// Core append logic shared by `append()`, `append_pre_serialized()`,
     /// and `append_and_flush()`.
     ///
-    /// Handles segment rotation, writing, metadata tracking, and counter updates.
-    /// Callers are responsible for encoding and post-write sync behavior.
+    /// Handles segment rotation, writing, metadata tracking, and counter
+    /// updates. Callers are responsible for encoding and post-write sync
+    /// behavior. The per-record outer envelope
+    /// `[u32 outer_len][u32 outer_len_crc]` is written here so the three
+    /// caller paths all produce the same on-disk layout (T3-E12 §D1).
     fn append_inner(
         &mut self,
         encoded: &[u8],
@@ -355,21 +367,48 @@ impl WalWriter {
             .as_mut()
             .expect("Segment should exist for non-Cache mode");
 
+        // Total on-disk bytes this append consumes: 8-byte envelope plus
+        // the codec-encoded payload. Used for both the rotation check and
+        // the accounting below.
+        let total_on_disk = encoded.len() + WAL_RECORD_ENVELOPE_OVERHEAD;
+
         // Do not rotate away from a segment while a background sync is fsyncing
         // a cloned descriptor for that same segment. The size limit is a soft
         // threshold; we can rotate on the next append after the sync commits.
-        if !self.sync_in_flight && segment.size() + encoded.len() as u64 > self.config.segment_size
+        if !self.sync_in_flight && segment.size() + total_on_disk as u64 > self.config.segment_size
         {
             self.rotate_segment()?;
         }
 
-        // Write to segment
+        // Construct the outer envelope: [u32 outer_len][u32 outer_len_crc].
+        // `outer_len_crc` mirrors the inner `LenCRC` pattern — it protects
+        // the outer length field from torn writes so a reader can detect
+        // a mid-envelope crash (see `read_segment_from` parse loop).
+        let outer_len: u32 = encoded.len().try_into().map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "record too large for u32 outer_len",
+            )
+        })?;
+        let outer_len_bytes = outer_len.to_le_bytes();
+        let outer_len_crc = {
+            let mut h = Hasher::new();
+            h.update(&outer_len_bytes);
+            h.finalize()
+        };
+        let outer_len_crc_bytes = outer_len_crc.to_le_bytes();
+
+        // Write to segment: envelope header first, then encoded payload.
+        // `WalSegment::write` uses a BufWriter internally so the three
+        // writes coalesce into a single syscall.
         let segment = self.segment.as_mut().unwrap();
         let tw = if self.profile_wal {
             Some(Instant::now())
         } else {
             None
         };
+        segment.write(&outer_len_bytes)?;
+        segment.write(&outer_len_crc_bytes)?;
         segment.write(encoded)?;
         if let Some(tw) = tw {
             self.profile_write_ns += tw.elapsed().as_nanos() as u64;
@@ -381,11 +420,18 @@ impl WalWriter {
         }
 
         self.total_wal_appends += 1;
-        self.total_bytes_written += encoded.len() as u64;
+        self.total_bytes_written += total_on_disk as u64;
 
-        debug!(target: "strata::wal", txn_id = txn_id.as_u64(), record_bytes = encoded.len(), segment = self.current_segment_number, "WAL record appended");
+        debug!(
+            target: "strata::wal",
+            txn_id = txn_id.as_u64(),
+            record_bytes = encoded.len(),
+            envelope_bytes = WAL_RECORD_ENVELOPE_OVERHEAD,
+            segment = self.current_segment_number,
+            "WAL record appended",
+        );
 
-        self.bytes_since_sync += encoded.len() as u64;
+        self.bytes_since_sync += total_on_disk as u64;
         self.writes_since_sync += 1;
         self.has_unsynced_data = true;
 
