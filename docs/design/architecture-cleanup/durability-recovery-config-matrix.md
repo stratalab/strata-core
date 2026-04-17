@@ -27,7 +27,7 @@ The classification is load-bearing in three places:
 
 | Class | Meaning | Must have |
 |---|---|---|
-| **open-time-only** | Value is locked at open. A second opener with a different value is rejected. | A contribution to `CompatibilitySignature` fingerprint **or** a MANIFEST-backed validator **or** an `OPEN_TIME_ONLY_KEYS` entry. |
+| **open-time-only** | Value is locked at open. A second opener with a different value gets `StrataError::IncompatibleReuse`. | Participation in `CompatibilitySignature` — either as an explicit field checked in `check_compatible` or hashed into `open_config_fingerprint` (typically both, for diagnosability). Runtime-mutation attempts must also be rejected via `OPEN_TIME_ONLY_KEYS` in the executor config handler. |
 | **live-safe** | May change at runtime via an explicit setter or `update_config`; takes effect without reopen. | An explicit setter, or read-through from `Database::config` on every hot-path call. |
 | **unsupported/deferred** | Present on the struct but not consumed. Documented with a target-state pointer. Zero such fields today. | A pointer to the target-state requirement that would implement it. |
 | **non-durability** | Out of the durability/recovery domain. Classified here only so the regression test can confirm full coverage of the public struct. | Nothing — listed for completeness. |
@@ -49,7 +49,7 @@ The classification is load-bearing in three places:
 | `openai_api_key` | non-durability | no | — |
 | `google_api_key` | non-durability | no | — |
 | `storage` | (nested — see below) | — | — |
-| `allow_lossy_recovery` | open-time-only | no (lifted into `RecoveryCoordinator::with_lossy_recovery` at open) | rejected at runtime via `OPEN_TIME_ONLY_KEYS` |
+| `allow_lossy_recovery` | open-time-only | yes (`CompatibilitySignature.allow_lossy_recovery`; also hashed into `open_config_fingerprint`) | rejected at runtime via `OPEN_TIME_ONLY_KEYS` |
 | `telemetry` | non-durability | no | — |
 | `default_vector_dtype` | non-durability | no | — |
 
@@ -66,7 +66,7 @@ The classification is load-bearing in three places:
 | `max_immutable_memtables` | live-safe | no | `Storage::set_max_immutable_memtables` |
 | `l0_slowdown_writes_trigger` | live-safe | no | read per-write in `maybe_apply_write_backpressure` |
 | `l0_stop_writes_trigger` | live-safe | no | read per-write in `maybe_apply_write_backpressure` |
-| `background_threads` | open-time-only | no (thread pool spawned at open; no resize path) | rejected at runtime via `OPEN_TIME_ONLY_KEYS` |
+| `background_threads` | open-time-only | yes (`CompatibilitySignature.background_threads`; also hashed into `open_config_fingerprint`) | thread pool spawned at open with no resize path; rejected at runtime via `OPEN_TIME_ONLY_KEYS` |
 | `target_file_size` | live-safe | no | `Storage::set_target_file_size` |
 | `level_base_bytes` | live-safe | no | `Storage::set_level_base_bytes` |
 | `data_block_size` | live-safe | no | `Storage::set_data_block_size` |
@@ -117,3 +117,9 @@ struct and the regression test iterates the whole thing.
 - 2026-04-16 (T3-E7): initial creation. Classifies all 14 top-level
   `StrataConfig` fields and all 17 nested `StorageConfig` fields. No fields
   deleted — every knob reachable from a runtime code path.
+- 2026-04-16 (T3-E7 review follow-up): `background_threads` and
+  `allow_lossy_recovery` moved into `CompatibilitySignature` as explicit
+  fields so registry reuse rejects drift instead of silently serving an
+  instance sized/recovered differently. Rule statement tightened: an
+  open-time-only knob *must* participate in the signature; `OPEN_TIME_ONLY_KEYS`
+  alone is no longer considered sufficient.

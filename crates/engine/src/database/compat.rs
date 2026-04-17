@@ -54,6 +54,17 @@ pub struct CompatibilitySignature {
     pub codec_name: String,
     /// Default branch name (if any).
     pub default_branch: Option<String>,
+    /// Background worker thread count from `StorageConfig::background_threads`.
+    ///
+    /// Open-time-only (the thread pool is sized once at construction).
+    /// Reuse with a different value returns `IncompatibleReuse`.
+    pub background_threads: usize,
+    /// Whether lossy recovery was permitted at open time.
+    ///
+    /// Open-time-only (recovery has already happened). Reuse with a different
+    /// value returns `IncompatibleReuse` — a strict opener must not silently
+    /// accept an instance that lossy-recovered, and vice versa.
+    pub allow_lossy_recovery: bool,
     /// Fingerprint of runtime-identity/capability config.
     ///
     /// Currently computed from known `OpenSpec` fields.
@@ -65,17 +76,28 @@ impl CompatibilitySignature {
     /// Create a signature from an `OpenSpec` and resolved config.
     ///
     /// The `codec_name` parameter should be the storage codec from config
-    /// (e.g., "identity", "aes-gcm-256").
+    /// (e.g., "identity", "aes-gcm-256"). `background_threads` and
+    /// `allow_lossy_recovery` are pulled from `StrataConfig` and
+    /// `StorageConfig` respectively — see
+    /// `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`
+    /// for why they are part of the reuse identity.
     pub fn from_spec(
         mode: DatabaseMode,
         subsystem_names: Vec<&'static str>,
         durability_mode: DurabilityMode,
         codec_name: String,
         default_branch: Option<String>,
+        background_threads: usize,
+        allow_lossy_recovery: bool,
     ) -> Self {
-        // Compute fingerprint from known fields
-        let fingerprint =
-            compute_fingerprint(&mode, &subsystem_names, &durability_mode, &codec_name);
+        let fingerprint = compute_fingerprint(
+            &mode,
+            &subsystem_names,
+            &durability_mode,
+            &codec_name,
+            background_threads,
+            allow_lossy_recovery,
+        );
 
         Self {
             mode,
@@ -84,6 +106,8 @@ impl CompatibilitySignature {
             codec_id: CURRENT_CODEC_ID,
             codec_name,
             default_branch,
+            background_threads,
+            allow_lossy_recovery,
             open_config_fingerprint: fingerprint,
         }
     }
@@ -97,6 +121,8 @@ impl CompatibilitySignature {
             &signature.subsystem_names,
             &signature.durability_mode,
             &signature.codec_name,
+            signature.background_threads,
+            signature.allow_lossy_recovery,
         );
         signature
     }
@@ -144,6 +170,20 @@ impl CompatibilitySignature {
             return Err(IncompatibleReason::DefaultBranchMismatch {
                 existing: self.default_branch.clone(),
                 requested: other.default_branch.clone(),
+            });
+        }
+
+        if self.background_threads != other.background_threads {
+            return Err(IncompatibleReason::BackgroundThreadsMismatch {
+                existing: self.background_threads,
+                requested: other.background_threads,
+            });
+        }
+
+        if self.allow_lossy_recovery != other.allow_lossy_recovery {
+            return Err(IncompatibleReason::LossyRecoveryMismatch {
+                existing: self.allow_lossy_recovery,
+                requested: other.allow_lossy_recovery,
             });
         }
 
@@ -200,6 +240,20 @@ pub enum IncompatibleReason {
         existing: Option<String>,
         /// The default branch requested by the new open call.
         requested: Option<String>,
+    },
+    /// `StorageConfig::background_threads` values don't match.
+    BackgroundThreadsMismatch {
+        /// The background thread count of the existing database instance.
+        existing: usize,
+        /// The background thread count requested by the new open call.
+        requested: usize,
+    },
+    /// `StrataConfig::allow_lossy_recovery` values don't match.
+    LossyRecoveryMismatch {
+        /// The lossy-recovery flag of the existing database instance.
+        existing: bool,
+        /// The lossy-recovery flag requested by the new open call.
+        requested: bool,
     },
     /// Runtime config fingerprints don't match.
     ConfigFingerprintMismatch,
@@ -268,6 +322,24 @@ impl std::fmt::Display for IncompatibleReason {
                     existing, requested
                 )
             }
+            Self::BackgroundThreadsMismatch {
+                existing,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "background_threads mismatch: existing={existing}, requested={requested}"
+                )
+            }
+            Self::LossyRecoveryMismatch {
+                existing,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "allow_lossy_recovery mismatch: existing={existing}, requested={requested}"
+                )
+            }
             Self::ConfigFingerprintMismatch => {
                 write!(f, "runtime config fingerprint mismatch")
             }
@@ -280,12 +352,18 @@ impl std::error::Error for IncompatibleReason {}
 /// Compute a fingerprint from configuration fields.
 ///
 /// Uses FNV-1a for simplicity. T5 will replace this with a more
-/// sophisticated ControlRegistry-derived fingerprint.
+/// sophisticated ControlRegistry-derived fingerprint. The explicit fields
+/// above (`background_threads`, `allow_lossy_recovery`, etc.) are also
+/// checked individually in `check_compatible`; the fingerprint provides
+/// redundant detection plus a single place for future open-time-only
+/// knobs to feed in.
 fn compute_fingerprint<S: Hash>(
     mode: &DatabaseMode,
     subsystem_names: &[S],
     durability_mode: &DurabilityMode,
     codec_name: &str,
+    background_threads: usize,
+    allow_lossy_recovery: bool,
 ) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     let mut hasher = DefaultHasher::new();
@@ -293,6 +371,8 @@ fn compute_fingerprint<S: Hash>(
     subsystem_names.hash(&mut hasher);
     codec_name.hash(&mut hasher);
     std::mem::discriminant(durability_mode).hash(&mut hasher);
+    background_threads.hash(&mut hasher);
+    allow_lossy_recovery.hash(&mut hasher);
     hasher.finish()
 }
 
@@ -304,163 +384,226 @@ fn compute_fingerprint<S: Hash>(
 mod tests {
     use super::*;
 
+    /// Fixed open-time values used by most tests; exercising mismatches in
+    /// these fields is the job of dedicated tests further down.
+    const TEST_BG_THREADS: usize = 4;
+    const TEST_LOSSY: bool = false;
+
+    fn sig(
+        mode: DatabaseMode,
+        subsystems: Vec<&'static str>,
+        durability: DurabilityMode,
+        codec: &str,
+        default_branch: Option<&str>,
+    ) -> CompatibilitySignature {
+        CompatibilitySignature::from_spec(
+            mode,
+            subsystems,
+            durability,
+            codec.to_string(),
+            default_branch.map(String::from),
+            TEST_BG_THREADS,
+            TEST_LOSSY,
+        )
+    }
+
     #[test]
     fn test_signature_equality() {
-        let sig1 = CompatibilitySignature::from_spec(
+        let sig1 = sig(
             DatabaseMode::Primary,
             vec!["graph", "vector", "search"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
-            Some("main".to_string()),
+            "identity",
+            Some("main"),
         );
-
-        let sig2 = CompatibilitySignature::from_spec(
+        let sig2 = sig(
             DatabaseMode::Primary,
             vec!["graph", "vector", "search"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
-            Some("main".to_string()),
+            "identity",
+            Some("main"),
         );
-
         assert_eq!(sig1, sig2);
         assert!(sig1.check_compatible(&sig2).is_ok());
     }
 
     #[test]
     fn test_mode_mismatch() {
-        let sig1 = CompatibilitySignature::from_spec(
+        let sig1 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let sig2 = CompatibilitySignature::from_spec(
+        let sig2 = sig(
             DatabaseMode::Follower,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let result = sig1.check_compatible(&sig2);
         assert!(matches!(
-            result,
+            sig1.check_compatible(&sig2),
             Err(IncompatibleReason::ModeMismatch { .. })
         ));
     }
 
     #[test]
     fn test_subsystem_mismatch() {
-        let sig1 = CompatibilitySignature::from_spec(
+        let sig1 = sig(
             DatabaseMode::Primary,
             vec!["graph", "vector"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let sig2 = CompatibilitySignature::from_spec(
+        let sig2 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let result = sig1.check_compatible(&sig2);
         assert!(matches!(
-            result,
+            sig1.check_compatible(&sig2),
             Err(IncompatibleReason::SubsystemMismatch { .. })
         ));
     }
 
     #[test]
     fn test_durability_mismatch() {
-        let sig1 = CompatibilitySignature::from_spec(
+        let sig1 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let sig2 = CompatibilitySignature::from_spec(
+        let sig2 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::Always,
-            "identity".to_string(),
+            "identity",
             None,
         );
-
-        let result = sig1.check_compatible(&sig2);
         assert!(matches!(
-            result,
+            sig1.check_compatible(&sig2),
             Err(IncompatibleReason::DurabilityMismatch { .. })
         ));
     }
 
     #[test]
     fn test_default_branch_mismatch() {
-        let sig1 = CompatibilitySignature::from_spec(
+        let sig1 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
-            Some("main".to_string()),
+            "identity",
+            Some("main"),
         );
-
-        let sig2 = CompatibilitySignature::from_spec(
+        let sig2 = sig(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
-            Some("develop".to_string()),
+            "identity",
+            Some("develop"),
         );
-
-        let result = sig1.check_compatible(&sig2);
         assert!(matches!(
-            result,
+            sig1.check_compatible(&sig2),
             Err(IncompatibleReason::DefaultBranchMismatch { .. })
         ));
     }
 
     #[test]
     fn test_codec_name_mismatch() {
+        let sig1 = sig(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "identity",
+            None,
+        );
+        let sig2 = sig(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "aes-gcm-256",
+            None,
+        );
+        assert!(matches!(
+            sig1.check_compatible(&sig2),
+            Err(IncompatibleReason::CodecNameMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_background_threads_mismatch() {
         let sig1 = CompatibilitySignature::from_spec(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
             "identity".to_string(),
             None,
+            4,
+            false,
         );
-
         let sig2 = CompatibilitySignature::from_spec(
             DatabaseMode::Primary,
             vec!["graph"],
             DurabilityMode::standard_default(),
-            "aes-gcm-256".to_string(),
+            "identity".to_string(),
             None,
+            8,
+            false,
         );
-
-        let result = sig1.check_compatible(&sig2);
         assert!(matches!(
-            result,
-            Err(IncompatibleReason::CodecNameMismatch { .. })
+            sig1.check_compatible(&sig2),
+            Err(IncompatibleReason::BackgroundThreadsMismatch {
+                existing: 4,
+                requested: 8,
+            })
+        ));
+    }
+
+    #[test]
+    fn test_allow_lossy_recovery_mismatch() {
+        let sig1 = CompatibilitySignature::from_spec(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "identity".to_string(),
+            None,
+            4,
+            false,
+        );
+        let sig2 = CompatibilitySignature::from_spec(
+            DatabaseMode::Primary,
+            vec!["graph"],
+            DurabilityMode::standard_default(),
+            "identity".to_string(),
+            None,
+            4,
+            true,
+        );
+        assert!(matches!(
+            sig1.check_compatible(&sig2),
+            Err(IncompatibleReason::LossyRecoveryMismatch {
+                existing: false,
+                requested: true,
+            })
         ));
     }
 
     #[test]
     fn test_fingerprint_display() {
-        let sig = CompatibilitySignature::from_spec(
+        let sig = sig(
             DatabaseMode::Primary,
             vec!["graph", "vector"],
             DurabilityMode::standard_default(),
-            "identity".to_string(),
+            "identity",
             None,
         );
-        // Just verify it doesn't panic
         assert!(sig.open_config_fingerprint != 0);
     }
 }

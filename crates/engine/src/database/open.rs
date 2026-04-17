@@ -1342,6 +1342,8 @@ impl Database {
 
         let durability_mode = resolved_cfg.durability_mode()?;
         let codec_name = resolved_cfg.storage.codec.clone();
+        let background_threads = resolved_cfg.storage.background_threads;
+        let allow_lossy_recovery = resolved_cfg.allow_lossy_recovery;
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
@@ -1350,6 +1352,8 @@ impl Database {
             durability_mode,
             codec_name.clone(),
             default_branch.clone(),
+            background_threads,
+            allow_lossy_recovery,
         );
 
         match Self::acquire_primary_db(
@@ -1374,6 +1378,8 @@ impl Database {
                     durability_mode,
                     codec_name,
                     effective_default_branch.clone(),
+                    background_threads,
+                    allow_lossy_recovery,
                 );
                 Self::finish_opened_db(db, &canonical_path, move |db| {
                     db.set_runtime_signature(effective_signature);
@@ -1422,6 +1428,31 @@ impl Database {
         };
         let durability_mode = cfg.durability_mode()?;
         let codec_name = cfg.storage.codec.clone();
+        let background_threads = cfg.storage.background_threads;
+        let allow_lossy_recovery = cfg.allow_lossy_recovery;
+
+        // Validate the configured codec exists before touching any state.
+        // Mirrors the primary path so a follower with an unknown codec is
+        // rejected consistently — with or without an on-disk MANIFEST.
+        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!(
+                "invalid storage codec '{}': {}",
+                cfg.storage.codec, e
+            ))
+        })?;
+
+        // WAL recovery does not yet support non-identity codecs — the WalReader
+        // parses raw bytes without codec decoding. Follower replay goes through
+        // the same reader, so the same block applies here as on primary.
+        if cfg.storage.codec != "identity" && durability_mode.requires_wal() {
+            return Err(StrataError::internal(format!(
+                "codec '{}' is not yet supported with WAL-based durability (Standard/Always). \
+                 Encryption at rest requires WAL reader codec support (tracked). \
+                 Use durability = \"cache\" for encrypted in-memory databases.",
+                cfg.storage.codec
+            )));
+        }
+
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Follower,
@@ -1429,6 +1460,8 @@ impl Database {
             durability_mode,
             codec_name.clone(),
             default_branch,
+            background_threads,
+            allow_lossy_recovery,
         );
 
         // Create follower database — no registry check, followers are independent
@@ -1461,6 +1494,8 @@ impl Database {
             durability_mode,
             codec_name,
             effective_default_branch,
+            background_threads,
+            allow_lossy_recovery,
         );
 
         db.set_subsystems(subsystems);
@@ -1495,6 +1530,8 @@ impl Database {
         let resolved_cfg = db.config();
         let durability_mode = resolved_cfg.durability_mode()?;
         let codec_name = resolved_cfg.storage.codec.clone();
+        let background_threads = resolved_cfg.storage.background_threads;
+        let allow_lossy_recovery = resolved_cfg.allow_lossy_recovery;
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Cache,
@@ -1502,6 +1539,8 @@ impl Database {
             durability_mode,
             codec_name,
             default_branch.clone(),
+            background_threads,
+            allow_lossy_recovery,
         );
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)
