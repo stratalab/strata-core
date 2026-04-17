@@ -251,6 +251,8 @@ pub enum UnblockError {
     },
     /// This database is not a follower.
     NotFollower,
+    /// The database has been shut down.
+    DatabaseClosed,
 }
 
 impl fmt::Display for UnblockError {
@@ -272,6 +274,9 @@ impl fmt::Display for UnblockError {
                 )
             }
             UnblockError::NotFollower => write!(f, "this database is not a follower"),
+            UnblockError::DatabaseClosed => {
+                write!(f, "database has been shut down; admin skip rejected")
+            }
         }
     }
 }
@@ -287,6 +292,16 @@ pub enum AdvanceError {
         /// Transaction currently blocking contiguous advancement.
         blocked_at: TxnId,
     },
+    /// Cannot advance: provided txn id is not the next contiguous id.
+    ///
+    /// The watermark advances only through strictly contiguous successful
+    /// records. A caller that supplies a gap or a duplicate is rejected.
+    NonContiguous {
+        /// The next txn id the watermark was ready to accept.
+        expected: TxnId,
+        /// The txn id the caller tried to advance to.
+        provided: TxnId,
+    },
     /// Cannot advance: not a follower database.
     NotFollower,
 }
@@ -296,6 +311,13 @@ impl fmt::Display for AdvanceError {
         match self {
             AdvanceError::Blocked { blocked_at } => {
                 write!(f, "cannot advance: blocked at {}", blocked_at)
+            }
+            AdvanceError::NonContiguous { expected, provided } => {
+                write!(
+                    f,
+                    "cannot advance: non-contiguous txn id (expected {}, provided {})",
+                    expected, provided
+                )
             }
             AdvanceError::NotFollower => write!(f, "cannot advance: not a follower"),
         }
@@ -506,14 +528,40 @@ impl ContiguousWatermark {
     /// Advance the applied watermark after successful processing.
     ///
     /// This should only be called after storage apply AND all hooks succeed.
+    /// The provided `txn_id` must equal `applied + 1`. A gap or duplicate
+    /// returns `AdvanceError::NonContiguous` so the contiguity invariant
+    /// advertised by the type is load-bearing on the type itself, not only
+    /// on refresh-loop discipline.
+    ///
+    /// Contention is nil: callers hold `RefreshGate` (single-flight), so the
+    /// load-then-CAS dance never races. The CAS is kept so the semantic is
+    /// still correct if the gate is ever relaxed.
     pub(crate) fn try_advance(&self, txn_id: TxnId) -> Result<(), AdvanceError> {
         if let Some(blocked) = self.blocked.read().as_ref() {
             return Err(AdvanceError::Blocked {
                 blocked_at: blocked.blocked.txn_id,
             });
         }
-        self.applied.fetch_max(txn_id.as_u64(), Ordering::SeqCst);
-        Ok(())
+        let current = self.applied.load(Ordering::SeqCst);
+        let expected = TxnId(current + 1);
+        if txn_id != expected {
+            return Err(AdvanceError::NonContiguous {
+                expected,
+                provided: txn_id,
+            });
+        }
+        match self.applied.compare_exchange(
+            current,
+            txn_id.as_u64(),
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+        ) {
+            Ok(_) => Ok(()),
+            Err(actual) => Err(AdvanceError::NonContiguous {
+                expected: TxnId(actual + 1),
+                provided: txn_id,
+            }),
+        }
     }
 
     /// Mark the watermark as blocked at a specific transaction.
@@ -708,5 +756,137 @@ impl RefreshHooks {
     /// Get all registered hooks.
     pub fn hooks(&self) -> Vec<Arc<dyn RefreshHook>> {
         self.hooks.read().clone()
+    }
+}
+
+#[cfg(test)]
+mod watermark_contiguity_tests {
+    use super::*;
+
+    fn blocked_state(txn_id: TxnId) -> BlockedTxnState {
+        BlockedTxnState {
+            blocked: BlockedTxn {
+                txn_id,
+                reason: BlockReason::Decode {
+                    message: "test".into(),
+                },
+            },
+            visibility_version: None,
+            skip_allowed: true,
+        }
+    }
+
+    #[test]
+    fn try_advance_accepts_next_contiguous_id() {
+        let wm = ContiguousWatermark::new(TxnId(10));
+        assert_eq!(wm.applied(), TxnId(10));
+        assert_eq!(wm.try_advance(TxnId(11)), Ok(()));
+        assert_eq!(wm.applied(), TxnId(11));
+        assert_eq!(wm.try_advance(TxnId(12)), Ok(()));
+        assert_eq!(wm.applied(), TxnId(12));
+    }
+
+    #[test]
+    fn try_advance_rejects_gap() {
+        let wm = ContiguousWatermark::new(TxnId(10));
+        assert_eq!(
+            wm.try_advance(TxnId(12)),
+            Err(AdvanceError::NonContiguous {
+                expected: TxnId(11),
+                provided: TxnId(12),
+            })
+        );
+        // Watermark unchanged after rejection.
+        assert_eq!(wm.applied(), TxnId(10));
+    }
+
+    #[test]
+    fn try_advance_rejects_duplicate() {
+        let wm = ContiguousWatermark::new(TxnId(10));
+        assert_eq!(
+            wm.try_advance(TxnId(10)),
+            Err(AdvanceError::NonContiguous {
+                expected: TxnId(11),
+                provided: TxnId(10),
+            })
+        );
+        assert_eq!(wm.applied(), TxnId(10));
+    }
+
+    #[test]
+    fn try_advance_rejects_stale_below_applied() {
+        let wm = ContiguousWatermark::new(TxnId(10));
+        assert_eq!(
+            wm.try_advance(TxnId(5)),
+            Err(AdvanceError::NonContiguous {
+                expected: TxnId(11),
+                provided: TxnId(5),
+            })
+        );
+        assert_eq!(wm.applied(), TxnId(10));
+    }
+
+    #[test]
+    fn blocked_state_takes_precedence_over_contiguity() {
+        let wm = ContiguousWatermark::new(TxnId(10));
+        wm.block_at(blocked_state(TxnId(11)));
+        // Even the perfectly-contiguous next id is rejected when blocked.
+        assert_eq!(
+            wm.try_advance(TxnId(11)),
+            Err(AdvanceError::Blocked {
+                blocked_at: TxnId(11),
+            })
+        );
+        assert_eq!(wm.applied(), TxnId(10));
+    }
+
+    #[test]
+    fn skip_flow_preserves_contiguity() {
+        // Setup: applied at 99, blocked at 100.
+        let wm = ContiguousWatermark::new(TxnId(99));
+        wm.block_at(blocked_state(TxnId(100)));
+
+        // Admin skip the blocked txn.
+        let result = wm.unblock_exact(TxnId(100));
+        assert!(result.is_ok(), "unblock should succeed on exact match");
+        assert_eq!(wm.applied(), TxnId(100));
+        assert!(wm.blocked().is_none());
+
+        // Next refresh cycle's first advance is to 101 — still contiguous.
+        assert_eq!(wm.try_advance(TxnId(101)), Ok(()));
+        assert_eq!(wm.applied(), TxnId(101));
+    }
+
+    #[test]
+    fn unblock_mismatch_leaves_watermark_untouched() {
+        let wm = ContiguousWatermark::new(TxnId(99));
+        wm.block_at(blocked_state(TxnId(100)));
+
+        let err = wm.unblock_exact(TxnId(101)).expect_err("mismatch expected");
+        assert!(matches!(
+            err,
+            UnblockError::Mismatch {
+                expected: TxnId(100),
+                provided: TxnId(101),
+            }
+        ));
+        assert_eq!(wm.applied(), TxnId(99));
+        assert!(wm.blocked().is_some());
+    }
+
+    #[test]
+    fn from_state_respects_contiguity_on_next_advance() {
+        // Follower restarted with persisted state: received=105, applied=100, blocked at 101.
+        let wm = ContiguousWatermark::from_state(
+            TxnId(105),
+            TxnId(100),
+            Some(blocked_state(TxnId(101))),
+        );
+        assert_eq!(wm.applied(), TxnId(100));
+
+        // Skip, then the first advance from the resume point is to 101.
+        wm.unblock_exact(TxnId(101)).unwrap();
+        assert_eq!(wm.applied(), TxnId(101));
+        assert_eq!(wm.try_advance(TxnId(102)), Ok(()));
     }
 }

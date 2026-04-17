@@ -200,6 +200,13 @@ impl Database {
         if !self.follower {
             return Err(UnblockError::NotFollower);
         }
+        // Admin skip writes the audit log, advances the watermark, and
+        // bumps storage version — all mutating operations. Reject on a
+        // closed handle so a stale `Arc<Database>` can't mutate a fresh
+        // instance's recovery artifacts if one opens on the same path.
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Err(UnblockError::DatabaseClosed);
+        }
 
         let blocked = self.watermark.unblock_exact(txn_id)?;
         if let Some(version) = blocked.visibility_version {
@@ -283,6 +290,19 @@ impl Database {
             return RefreshOutcome::CaughtUp {
                 applied: 0,
                 applied_through: TxnId::ZERO,
+            };
+        }
+
+        // Close-barrier guard. A follower returns `Ok(())` from
+        // `shutdown_with_deadline` after quiescing, but nothing in the
+        // mutating follower APIs checked `shutdown_complete` before this
+        // change. Post-shutdown `refresh()` would still touch the WAL and
+        // watermark. Treat a closed follower as a no-op that reports the
+        // last applied state, matching the non-follower branch above.
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return RefreshOutcome::CaughtUp {
+                applied: 0,
+                applied_through: self.watermark.applied(),
             };
         }
 

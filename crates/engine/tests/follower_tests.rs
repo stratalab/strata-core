@@ -1321,3 +1321,80 @@ fn test_concurrent_refresh_serialized() {
         );
     }
 }
+
+/// T3-E9: a follower that has been shut down no longer accepts `refresh()` —
+/// the follower-side shutdown barrier now short-circuits the refresh path
+/// rather than mutating WAL/watermark state through a stale handle.
+#[test]
+fn test_follower_refresh_is_noop_after_shutdown() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    primary_put(&primary, branch, "k1", "v1");
+    primary.flush().unwrap();
+
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    let applied_before = follower.follower_status().applied_watermark;
+
+    // Explicit shutdown on the follower. Per T3-E6, this quiesces the
+    // follower and returns Ok; per T3-E9, a follower refresh after shutdown
+    // must not mutate watermarks.
+    follower.shutdown().unwrap();
+
+    let outcome = follower.refresh();
+    // Post-shutdown refresh reports CaughtUp at the last-applied watermark
+    // (matching the non-follower / ephemeral branch semantics) — no new
+    // records are processed.
+    use strata_engine::RefreshOutcome;
+    match outcome {
+        RefreshOutcome::CaughtUp {
+            applied,
+            applied_through,
+        } => {
+            assert_eq!(applied, 0, "post-shutdown refresh applies zero records");
+            assert_eq!(
+                applied_through, applied_before,
+                "applied watermark must not move after shutdown"
+            );
+        }
+        other => panic!("expected CaughtUp after shutdown, got {:?}", other),
+    }
+    // Watermark is stable: the stale handle has not advanced state.
+    assert_eq!(
+        follower.follower_status().applied_watermark,
+        applied_before,
+        "follower_status must show no post-shutdown drift"
+    );
+}
+
+/// T3-E9: admin_skip on a shut-down follower returns `UnblockError::DatabaseClosed`
+/// rather than mutating watermarks / writing audit logs through a stale handle.
+#[test]
+fn test_admin_skip_rejects_after_shutdown() {
+    use strata_core::id::TxnId;
+    use strata_engine::UnblockError;
+
+    let dir = tempdir().unwrap();
+
+    let _primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    follower.shutdown().unwrap();
+
+    let result = follower.admin_skip_blocked_record(TxnId(1), "post-shutdown attempt");
+    assert!(
+        matches!(result, Err(UnblockError::DatabaseClosed)),
+        "expected DatabaseClosed after shutdown, got {:?}",
+        result
+    );
+}
