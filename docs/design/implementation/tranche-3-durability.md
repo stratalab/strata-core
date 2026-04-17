@@ -1027,7 +1027,7 @@ Opens a follower with `allow_lossy_recovery=true` against a corrupt WAL, verifie
 ## Epic 12: WAL Codec Threading
 
 **Status:** pending
-**Goal:** thread the configured codec through the WAL reader so non-identity codec + WAL durability works end-to-end. Remove the open-time rejection at `open.rs:847-858` (primary) and `:1475-1485` (follower) that currently blocks the combination.
+**Goal:** thread the configured codec through the WAL reader so non-identity codec + WAL durability works end-to-end. Remove the open-time rejection at `open.rs:884-891` (primary) and `:1552-1559` (follower) that currently blocks the combination.
 
 **Why:** DR-009's acceptance clause says "a database configured with a non-identity durable codec can be written, restarted, and recovered without special-case rejection." The shipped code has exactly that special-case rejection. Closing this is the largest closeout epic and the longest pole.
 
@@ -1035,8 +1035,8 @@ Opens a follower with `allow_lossy_recovery=true` against a corrupt WAL, verifie
 
 **1. WAL record envelope format** (~40 lines)
 
-- Bump `WAL_FORMAT_VERSION` in `crates/durability/src/format/wal_record.rs`.
-- New on-disk layout: each record body is `[u32 length][codec-encoded bytes]`. Length is the post-encode byte count. Identity codec has the same envelope (no dual path in the reader).
+- Bump `SEGMENT_FORMAT_VERSION` 2 → 3 in `crates/durability/src/format/wal_record.rs:44`. `WAL_RECORD_FORMAT_VERSION` (a separate per-record byte constant at `:53`) stays at 2 — the envelope change is a segment-level property, not a record-level one.
+- New on-disk layout: each record body is `[u32 outer_len][u32 outer_len_crc][codec-encoded bytes]`. `outer_len` is the post-encode byte count; `outer_len_crc = crc32(&outer_len.to_le_bytes())` mirrors the inner `LenCRC` pattern and catches torn writes to the outer length field. Identity codec has the same envelope (no dual path in the reader).
 - Pre-release clean break per the DR-5 snapshot v2 precedent — pre-PR databases cannot be read post-PR.
 
 **2. WAL reader codec plumbing** (~80 lines)
@@ -1057,8 +1057,8 @@ Opens a follower with `allow_lossy_recovery=true` against a corrupt WAL, verifie
 
 **5. Remove open-time rejection** (~10 lines deleted)
 
-- Delete the block at `crates/engine/src/database/open.rs:847-858` (primary).
-- Delete the block at `:1475-1485` (follower).
+- Delete the block at `crates/engine/src/database/open.rs:884-891` (primary).
+- Delete the block at `:1552-1559` (follower).
 - Verify the codec is installed into the `RecoveryCoordinator` via `with_codec(get_codec(&cfg.storage.codec))` on both paths.
 
 **6. Codec round-trip test** (~80 lines)
