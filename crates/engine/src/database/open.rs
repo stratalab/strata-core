@@ -1337,7 +1337,14 @@ impl Database {
             } else {
                 config::StrataConfig::default()
             };
-            sanitize_config(base)
+            // Apply the hardware profile BEFORE extracting signature fields:
+            // `background_threads` and other profile-rewritten fields must
+            // reflect the post-profile values, otherwise a later opener that
+            // explicitly requests the actual effective thread count would
+            // produce a false IncompatibleReuse mismatch.
+            let mut sanitized = sanitize_config(base);
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut sanitized);
+            sanitized
         };
 
         let durability_mode = resolved_cfg.durability_mode()?;
@@ -1424,7 +1431,11 @@ impl Database {
             } else {
                 config::StrataConfig::default()
             };
-            sanitize_config(base)
+            // Apply the hardware profile BEFORE extracting signature fields
+            // (see `open_runtime_primary` for the rationale).
+            let mut sanitized = sanitize_config(base);
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut sanitized);
+            sanitized
         };
         let durability_mode = cfg.durability_mode()?;
         let codec_name = cfg.storage.codec.clone();

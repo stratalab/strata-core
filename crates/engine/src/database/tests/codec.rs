@@ -291,6 +291,133 @@ fn test_registry_reuse_rejects_different_background_threads() {
     OPEN_DATABASES.lock().clear();
 }
 
+/// Review-found bug (post-commit 5e432cce): the signature must reflect
+/// the *post-hardware-profile* value of `background_threads`, not the
+/// pre-profile default. If the signature captures the pre-profile value,
+/// a second opener who explicitly requests the actual effective thread
+/// count will be falsely rejected as incompatible even though the
+/// scheduler was sized with exactly their value. This test opens with
+/// defaults (profile applies), reads the effective value off the live
+/// signature, then opens again explicitly requesting that value —
+/// which must succeed.
+#[test]
+#[serial(open_databases)]
+fn test_profile_applies_before_signature_so_reuse_with_explicit_value_succeeds() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let db1 = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("first opener with defaults must succeed");
+
+    let effective_threads = db1
+        .runtime_signature()
+        .expect("db1 must publish a runtime signature")
+        .background_threads;
+
+    let mut cfg_explicit = StrataConfig {
+        durability: "cache".to_string(),
+        ..StrataConfig::default()
+    };
+    cfg_explicit.storage.background_threads = effective_threads;
+
+    let db2 = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(cfg_explicit)
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("explicit value matching the profiled effective value must reuse the instance");
+
+    assert!(
+        Arc::ptr_eq(&db1, &db2),
+        "reuse must return the same Arc, not a fresh database"
+    );
+
+    db1.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// `Database::update_config` must reject mutations to open-time-only
+/// fields. Without this gate, a direct Rust caller could bypass the
+/// executor's `OPEN_TIME_ONLY_KEYS` check and silently drift the
+/// persisted config away from the live runtime.
+#[test]
+#[serial(open_databases)]
+fn test_update_config_rejects_open_time_only_field_changes() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+
+    // Capture pre-change live values so we can confirm they are NOT
+    // mutated even though the closure attempted the change.
+    let (before_threads, before_lossy, before_codec) = {
+        let cfg = db.config();
+        (
+            cfg.storage.background_threads,
+            cfg.allow_lossy_recovery,
+            cfg.storage.codec.clone(),
+        )
+    };
+
+    let err = db
+        .update_config(|cfg| {
+            cfg.storage.background_threads = before_threads.wrapping_add(4);
+        })
+        .expect_err("mutating background_threads via update_config must be rejected");
+    assert!(
+        matches!(err, StrataError::InvalidInput { .. }),
+        "expected InvalidInput for open-time-only mutation, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("background_threads"),
+        "error must name the offending field, got: {err}"
+    );
+
+    assert!(
+        db.update_config(|cfg| cfg.allow_lossy_recovery = !before_lossy)
+            .is_err(),
+        "allow_lossy_recovery must also be rejected"
+    );
+    assert!(
+        db.update_config(|cfg| cfg.storage.codec = "aes-gcm-256".to_string())
+            .is_err(),
+        "storage.codec must also be rejected"
+    );
+
+    // Live config unchanged.
+    let after = db.config();
+    assert_eq!(after.storage.background_threads, before_threads);
+    assert_eq!(after.allow_lossy_recovery, before_lossy);
+    assert_eq!(after.storage.codec, before_codec);
+
+    // A live-safe mutation still works.
+    db.update_config(|cfg| cfg.storage.max_branches = 512)
+        .expect("live-safe mutation must succeed");
+    assert_eq!(db.config().storage.max_branches, 512);
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
 /// `allow_lossy_recovery` is open-time-only: by the time we reuse an
 /// already-open instance, recovery has already happened — strictly or
 /// lossily. A second opener must not silently accept an instance whose

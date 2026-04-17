@@ -1605,12 +1605,49 @@ impl Database {
     /// closure returns, the updated config is written to `strata.toml` for
     /// disk-backed databases, and storage/coordinator/cache parameters are
     /// applied to the live database immediately.
+    ///
+    /// Mutations to fields classified as *open-time-only* in
+    /// `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`
+    /// are rejected with [`StrataError::InvalidInput`] — those fields are
+    /// baked into the live runtime at construction and cannot be changed
+    /// without reopening. This mirrors the executor config handler's
+    /// `OPEN_TIME_ONLY_KEYS` guard and closes the direct-Rust-caller
+    /// bypass it would otherwise leave.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
         // Writes `strata.toml` and applies live storage/coordinator/cache
         // changes — reject while shutdown is in progress or has completed.
         self.check_not_shutting_down()?;
         let mut guard = self.config.write();
-        f(&mut guard);
+
+        // Validate on a candidate copy so rejection leaves the live
+        // config untouched — partial mutation would violate the contract.
+        let mut candidate = guard.clone();
+        f(&mut candidate);
+
+        let violation: Option<&'static str> = if candidate.storage.codec != guard.storage.codec {
+            Some("storage.codec")
+        } else if candidate.storage.background_threads != guard.storage.background_threads {
+            Some("storage.background_threads")
+        } else if candidate.allow_lossy_recovery != guard.allow_lossy_recovery {
+            Some("allow_lossy_recovery")
+        } else if (candidate.durability == "cache") != (guard.durability == "cache") {
+            // The `Cache` discriminant is open-time-only; Standard↔Always
+            // is live-safe and goes through `set_durability_mode`.
+            Some("durability (Cache <-> non-Cache)")
+        } else {
+            None
+        };
+
+        if let Some(field) = violation {
+            return Err(StrataError::invalid_input(format!(
+                "update_config cannot mutate open-time-only field '{field}' at runtime; \
+                 reopen the database with the desired value. See \
+                 docs/design/architecture-cleanup/durability-recovery-config-matrix.md"
+            )));
+        }
+
+        *guard = candidate;
+
         // Persist to strata.toml for disk-backed databases
         if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
             let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);

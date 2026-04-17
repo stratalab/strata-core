@@ -2,8 +2,11 @@
 
 **Status:** current state as of T3-E7 (2026-04-16).
 **Normative source:** `durability-recovery-scope.md` §D-DR-11.
-**Regression test:** `crates/engine/tests/config_matrix.rs` (parses this file and
-asserts every `StrataConfig` / `StorageConfig` field is classified exactly once).
+**Regression test:** `crates/engine/tests/config_matrix.rs` parses this file
+and asserts that every `StrataConfig` / `StorageConfig` field appears in
+exactly one row (no duplicates, no omissions), that every class label is
+one of the four approved tokens, and that the hand-maintained const lists
+match the fields the structs actually expose via serde.
 
 ---
 

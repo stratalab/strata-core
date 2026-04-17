@@ -77,12 +77,13 @@ fn read_matrix() -> String {
     fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {display}: {e}"))
 }
 
-/// Return the set of field names that appear as a leading backtick-wrapped
-/// identifier in any markdown table row.
+/// Return the ordered list of field names that appear as a leading
+/// backtick-wrapped identifier in any markdown table row, preserving
+/// multiplicity so duplicate rows can be detected.
 /// Rows whose first cell is prose (e.g. the `Classes` description table)
 /// contain no backtick'd identifier and are ignored.
-fn extract_table_fields(doc: &str) -> HashSet<String> {
-    let mut fields = HashSet::new();
+fn extract_table_field_rows(doc: &str) -> Vec<String> {
+    let mut fields = Vec::new();
     for line in doc.lines() {
         let trimmed = line.trim_start();
         if !trimmed.starts_with('|') {
@@ -106,7 +107,7 @@ fn extract_table_fields(doc: &str) -> HashSet<String> {
                 let name = &rest[..end];
                 // Ignore anything that looks like a placeholder/sub-class cell.
                 if !name.is_empty() && !name.contains(' ') {
-                    fields.insert(name.to_string());
+                    fields.push(name.to_string());
                 }
             }
         }
@@ -152,10 +153,23 @@ fn extract_class_labels(doc: &str) -> HashSet<String> {
 }
 
 #[test]
-fn every_config_field_is_classified_in_matrix() {
+fn every_config_field_is_classified_in_matrix_exactly_once() {
     let doc = read_matrix();
-    let matrix_fields = extract_table_fields(&doc);
+    let rows = extract_table_field_rows(&doc);
 
+    // Exactly-once: every field appears in exactly one row, no duplicates.
+    let mut counts: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for r in &rows {
+        *counts.entry(r.as_str()).or_insert(0) += 1;
+    }
+    let duplicates: Vec<(&&str, &usize)> = counts.iter().filter(|(_, &count)| count > 1).collect();
+    assert!(
+        duplicates.is_empty(),
+        "config matrix has duplicate rows for these fields — each field must be classified \
+         exactly once: {duplicates:?}"
+    );
+
+    let matrix_fields: HashSet<String> = rows.into_iter().collect();
     let mut expected: HashSet<String> = STRATA_CONFIG_FIELDS
         .iter()
         .map(ToString::to_string)
