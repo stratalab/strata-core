@@ -189,9 +189,15 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `UnblockError::Mismatch` if `txn_id` doesn't match the blocked
-    /// transaction, `UnblockError::NotBlocked` if the follower isn't blocked,
-    /// or `UnblockError::NotFollower` if this isn't a follower database.
+    /// - `UnblockError::NotFollower` — this isn't a follower database.
+    /// - `UnblockError::DatabaseClosed` — the database has been shut down;
+    ///   admin skip is rejected to prevent a stale handle from mutating a
+    ///   fresh instance's recovery artifacts after a reopen.
+    /// - `UnblockError::Mismatch` — `txn_id` doesn't match the blocked
+    ///   transaction's id.
+    /// - `UnblockError::NotBlocked` — the follower isn't currently blocked.
+    /// - `UnblockError::NotSkippable` — the blocked record's block reason
+    ///   flags it as unsafe to skip.
     pub fn admin_skip_blocked_record(
         &self,
         txn_id: TxnId,
@@ -199,6 +205,13 @@ impl Database {
     ) -> Result<(), UnblockError> {
         if !self.follower {
             return Err(UnblockError::NotFollower);
+        }
+        // Admin skip writes the audit log, advances the watermark, and
+        // bumps storage version — all mutating operations. Reject on a
+        // closed handle so a stale `Arc<Database>` can't mutate a fresh
+        // instance's recovery artifacts if one opens on the same path.
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return Err(UnblockError::DatabaseClosed);
         }
 
         let blocked = self.watermark.unblock_exact(txn_id)?;
@@ -283,6 +296,19 @@ impl Database {
             return RefreshOutcome::CaughtUp {
                 applied: 0,
                 applied_through: TxnId::ZERO,
+            };
+        }
+
+        // Close-barrier guard. A follower returns `Ok(())` from
+        // `shutdown_with_deadline` after quiescing, but nothing in the
+        // mutating follower APIs checked `shutdown_complete` before this
+        // change. Post-shutdown `refresh()` would still touch the WAL and
+        // watermark. Treat a closed follower as a no-op that reports the
+        // last applied state, matching the non-follower branch above.
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return RefreshOutcome::CaughtUp {
+                applied: 0,
+                applied_through: self.watermark.applied(),
             };
         }
 
