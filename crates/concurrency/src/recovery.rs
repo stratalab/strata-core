@@ -22,7 +22,7 @@ use strata_core::{StrataError, StrataResult};
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::format::{snapshot_path, SegmentMeta, WalRecord, WalSegment};
 use strata_durability::layout::DatabaseLayout;
-use strata_durability::wal::WalReader;
+use strata_durability::wal::{WalReader, WalReaderError};
 use strata_durability::{LoadedSnapshot, ManifestManager, SnapshotReader};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
@@ -354,13 +354,19 @@ impl RecoveryCoordinator {
         if self.allow_lossy_recovery {
             reader = reader.with_lossy_recovery();
         }
+        // T3-E12 §D3 Site 1: thread the coordinator's codec so
+        // codec-encoded payloads (AES-GCM etc.) decode correctly.
+        // Without a codec installed, the reader treats each payload as
+        // identity — the pre-T3-E12 behavior for non-encrypted databases.
+        if let Some(c) = self.codec.as_deref() {
+            reader = reader.with_codec(clone_codec(c));
+        }
         let records_iter = reader
             .iter_all(self.layout.wal_dir())
-            .map_err(|e| StrataError::storage(format!("WAL read failed: {}", e)))?;
+            .map_err(wal_read_error_to_strata_error)?;
 
         for record_result in records_iter {
-            let record = record_result
-                .map_err(|e| StrataError::storage(format!("WAL segment read failed: {}", e)))?;
+            let record = record_result.map_err(wal_read_error_to_strata_error)?;
 
             // Delta-WAL replay: records at or below the snapshot watermark
             // are already reflected in the installed snapshot. Skip them to
@@ -540,6 +546,25 @@ impl RecoveryCoordinator {
 /// engine open paths that drive the callback-driven [`RecoveryCoordinator::recover`]
 /// directly can reuse the exact same apply semantics in their `on_record`
 /// closure without duplicating the decode/apply ladder.
+/// Map a `WalReaderError` to the matching typed `StrataError` variant.
+///
+/// T3-E12 §D8: `CodecDecode` and `LegacyFormat` get typed pass-through
+/// so the engine's open path can `matches!(err, StrataError::LegacyFormat { .. })`
+/// to skip the lossy wipe (D6) and so
+/// `LossyErrorKind::from_strata_error` can classify codec-decode
+/// failures as `LossyErrorKind::CodecDecode` (D5). Everything else
+/// renders as `StrataError::storage`.
+fn wal_read_error_to_strata_error(err: WalReaderError) -> StrataError {
+    match err {
+        WalReaderError::CodecDecode { detail, .. } => StrataError::codec_decode(detail),
+        WalReaderError::LegacyFormat {
+            found_version,
+            hint,
+        } => StrataError::legacy_format(found_version, hint),
+        other => StrataError::storage(format!("WAL read failed: {}", other)),
+    }
+}
+
 pub fn apply_wal_record_to_memory_storage(
     storage: &SegmentedStore,
     record: &WalRecord,

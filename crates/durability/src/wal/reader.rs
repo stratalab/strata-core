@@ -2,10 +2,12 @@
 //!
 //! The reader handles reading WAL records from segments for recovery.
 
+use crate::codec::{clone_codec, StorageCodec};
 use crate::format::segment_meta::SegmentMeta;
 use crate::format::{WalRecord, WalRecordError, WalSegment};
 use crate::wal::writer::WAL_RECORD_ENVELOPE_OVERHEAD;
 use crc32fast::Hasher;
+use std::borrow::Cow;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use strata_core::id::TxnId;
@@ -45,9 +47,18 @@ fn read_outer_envelope(buf: &[u8]) -> Result<Option<u32>, (u32, u32)> {
 /// after the corrupted region) is fatal — `read_segment` returns an error.
 /// Use [`with_lossy_recovery`](WalReader::with_lossy_recovery) to opt in to
 /// the scan-ahead behavior that skips corrupted regions.
+///
+/// A codec may be installed via [`with_codec`](WalReader::with_codec).
+/// With no codec, each record's payload is passed through to
+/// `WalRecord::from_bytes` as-is (identity behavior). With a codec,
+/// the payload is decoded first; decode failures surface as
+/// `WalReaderError::CodecDecode` and are NEVER demoted to
+/// `PartialRecord` — the engine's lossy branch catches the typed
+/// error and routes to T3-E10 whole-DB wipe-and-reopen (§D5).
 #[derive(Default)]
 pub struct WalReader {
-    allow_lossy_recovery: bool,
+    pub(crate) allow_lossy_recovery: bool,
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl WalReader {
@@ -55,6 +66,47 @@ impl WalReader {
     pub fn new() -> Self {
         WalReader {
             allow_lossy_recovery: false,
+            codec: None,
+        }
+    }
+
+    /// Install a storage codec. Records read from segments will be
+    /// decoded via this codec before inner-record parsing. If no codec
+    /// is installed (`None`), payloads pass through as-is — equivalent
+    /// to the `IdentityCodec`.
+    ///
+    /// Codec decode failures surface as
+    /// [`WalReaderError::CodecDecode`] and NEVER demote to
+    /// `ReadStopReason::PartialRecord`. Lossy mode does not scan
+    /// forward past a codec decode failure (T3-E12 §D5) — the
+    /// operator's escape hatch is `allow_lossy_recovery=true` at open
+    /// time, which triggers the whole-DB wipe-and-reopen via T3-E10.
+    pub fn with_codec(mut self, codec: Box<dyn StorageCodec>) -> Self {
+        self.codec = Some(codec);
+        self
+    }
+
+    /// Decode one record payload through the installed codec, or pass
+    /// through unchanged if no codec is installed. Returns
+    /// `Err(WalReaderError::CodecDecode)` on decode failure, with the
+    /// caller's offset encoded in the error so operators can locate
+    /// the bad record.
+    fn decode_payload<'a>(
+        &self,
+        payload: &'a [u8],
+        offset_hint: u64,
+    ) -> Result<Cow<'a, [u8]>, WalReaderError> {
+        match self.codec.as_deref() {
+            None => Ok(Cow::Borrowed(payload)),
+            Some(codec) => {
+                codec
+                    .decode(payload)
+                    .map(Cow::Owned)
+                    .map_err(|err| WalReaderError::CodecDecode {
+                        offset: offset_hint,
+                        detail: err.to_string(),
+                    })
+            }
         }
     }
 
@@ -175,12 +227,15 @@ impl WalReader {
             };
             let payload = &buffer[payload_start..payload_end];
 
-            // Step 3: (T3-E12 Phase 2 part 2) payload is the codec-encoded
-            // inner record. With no codec installed, it is the raw
-            // `WalRecord::to_bytes()` output (identity pass-through).
-            // Phase 2 part 3 threads the real codec here and surfaces
-            // codec-decode failures as `WalReaderError::CodecDecode`.
-            let raw_record_bytes = payload;
+            // Step 3: decode via the installed codec (or pass through
+            // for identity). Codec errors surface as
+            // `WalReaderError::CodecDecode` with NO demotion to
+            // `PartialRecord` — even at the segment tail (T3-E12 §D5).
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(e) => return Err(e),
+            };
+            let raw_record_bytes: &[u8] = &decoded;
 
             match WalRecord::from_bytes(raw_record_bytes) {
                 Ok((record, _consumed)) => {
@@ -587,9 +642,14 @@ impl WalReader {
             };
             let payload = &buffer[payload_start..payload_end];
 
-            // Phase 2 part 2: identity-codec pass-through. Phase 3 threads
-            // the installed codec and surfaces decode failures typed.
-            match WalRecord::from_bytes(payload) {
+            // Decode via installed codec or pass through for identity.
+            // Codec decode failures surface unconditionally (T3-E12 §D5).
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(e) => return Err(e),
+            };
+
+            match WalRecord::from_bytes(&decoded) {
                 Ok((record, _consumed)) => {
                     offset = payload_end;
                     let txn_id = record.txn_id.as_u64();
@@ -846,6 +906,7 @@ impl WalReader {
             current_records: Vec::new(),
             current_record_idx: 0,
             allow_lossy_recovery: self.allow_lossy_recovery,
+            codec: self.codec.as_deref().map(clone_codec),
         })
     }
 }
@@ -862,6 +923,10 @@ pub struct WalRecordIterator {
     current_records: Vec<WalRecord>,
     current_record_idx: usize,
     allow_lossy_recovery: bool,
+    /// Codec installed on the parent `WalReader`; threaded into each
+    /// per-segment reader so codec-encoded payloads (AES-GCM, etc.)
+    /// decode correctly (T3-E12 §D3 Site 3).
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl Iterator for WalRecordIterator {
@@ -891,6 +956,9 @@ impl Iterator for WalRecordIterator {
 
             let mut reader = WalReader::new();
             reader.allow_lossy_recovery = self.allow_lossy_recovery;
+            if let Some(c) = self.codec.as_deref() {
+                reader = reader.with_codec(clone_codec(c));
+            }
             match reader.read_segment(&self.wal_dir, seg_num) {
                 Ok((records, _, _, _)) => {
                     self.current_records = records;

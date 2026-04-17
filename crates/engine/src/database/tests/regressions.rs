@@ -1302,9 +1302,14 @@ fn test_issue_1380_codec_mismatch_rejected() {
 }
 
 #[test]
-fn test_issue_1380_encryption_rejected_with_wal() {
-    // Non-identity codecs must be rejected when WAL recovery is required,
-    // because the WalReader does not yet support codec decoding.
+fn test_issue_1380_encryption_with_wal_succeeds_as_of_t3_e12() {
+    // Pre-T3-E12 (issue #1380) this combination was rejected at open
+    // time because the WAL reader did not decode codec-encoded
+    // payloads. T3-E12 Phase 2 added the per-record outer envelope
+    // and codec-threaded reader, so `aes-gcm-256 + durability =
+    // "standard"` now round-trips through WAL recovery. This test is
+    // flipped to a positive assertion: the open must succeed and a
+    // basic round-trip must work through the codec-aware WAL.
     let _env_guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = TempDir::new().unwrap();
     std::env::set_var(
@@ -1318,7 +1323,6 @@ fn test_issue_1380_encryption_rejected_with_wal() {
         },
         ..StrataConfig::default()
     };
-    // Note: Using config with standard durability mode
     let mut cfg_with_durability = cfg;
     cfg_with_durability.durability = "standard".to_string();
     let spec = super::spec::OpenSpec::primary(temp_dir.path())
@@ -1328,14 +1332,15 @@ fn test_issue_1380_encryption_rejected_with_wal() {
     std::env::remove_var("STRATA_ENCRYPTION_KEY");
 
     match result {
-        Err(e) => {
-            let err = e.to_string();
-            assert!(
-                err.contains("not yet supported with WAL"),
-                "error should mention WAL limitation: {}",
-                err
-            );
+        Ok(db) => {
+            // Shape assertion: a successful open is the contract;
+            // detailed round-trip coverage lives in the new AES-GCM
+            // WAL tests added in Phase 2 part 5.
+            assert!(!db.is_cache(), "standard-durability DB is not a cache DB");
         }
-        Ok(_) => panic!("should reject encryption with WAL-based durability"),
+        Err(e) => panic!(
+            "aes-gcm-256 + WAL durability must open successfully post-T3-E12, got: {}",
+            e
+        ),
     }
 }

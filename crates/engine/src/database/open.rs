@@ -523,6 +523,15 @@ impl Database {
         let mut stats = match recover_result {
             Ok(stats) => stats,
             Err(e) => {
+                // T3-E12 §D6: LegacyFormat is a hard-fail error that
+                // MUST NOT route through the lossy wipe (the wipe only
+                // recreates in-memory state and leaves pre-v3 segments
+                // on disk to re-poison every subsequent open). Operator
+                // must wipe `wal/` manually.
+                if matches!(e, StrataError::LegacyFormat { .. }) {
+                    return Err(e);
+                }
+
                 if cfg.allow_lossy_recovery {
                     let report = LossyRecoveryReport {
                         error: e.to_string(),
@@ -877,18 +886,11 @@ impl Database {
             ))
         })?;
 
-        // WAL recovery does not yet support non-identity codecs — the WalReader
-        // parses raw bytes without codec decoding. Encrypted WAL records would be
-        // unreadable on restart, causing data loss. Block until WAL codec support
-        // is implemented (requires length-prefix envelope + reader codec threading).
-        if cfg.storage.codec != "identity" && durability_mode.requires_wal() {
-            return Err(StrataError::internal(format!(
-                "codec '{}' is not yet supported with WAL-based durability (Standard/Always). \
-                 Encryption at rest requires WAL reader codec support (tracked). \
-                 Use durability = \"cache\" for encrypted in-memory databases.",
-                cfg.storage.codec
-            )));
-        }
+        // T3-E12 Phase 2 removed the codec+WAL rejection that used to
+        // live here. Non-identity codecs now round-trip through the
+        // v3 outer envelope + codec-aware reader. Codec name is still
+        // validated earlier via `get_codec(&cfg.storage.codec)`;
+        // MANIFEST codec-mismatch checks on reopen stay as-is.
 
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
@@ -994,6 +996,16 @@ impl Database {
         let mut stats = match recover_result {
             Ok(stats) => stats,
             Err(e) => {
+                // T3-E12 §D6: LegacyFormat is a hard-fail error that
+                // MUST NOT route through the lossy wipe — the lossy
+                // branch only recreates the in-memory `SegmentedStore`
+                // and does NOT delete `wal/` on disk, so a pre-v3
+                // segment would re-poison the next open in an
+                // infinite loop. Operator must wipe `wal/` manually.
+                if matches!(e, StrataError::LegacyFormat { .. }) {
+                    return Err(e);
+                }
+
                 if cfg.allow_lossy_recovery {
                     // Sample partial progress BEFORE the wipe so the
                     // `LossyRecoveryReport` reflects what was discarded.
@@ -1546,17 +1558,9 @@ impl Database {
             ))
         })?;
 
-        // WAL recovery does not yet support non-identity codecs — the WalReader
-        // parses raw bytes without codec decoding. Follower replay goes through
-        // the same reader, so the same block applies here as on primary.
-        if cfg.storage.codec != "identity" && durability_mode.requires_wal() {
-            return Err(StrataError::internal(format!(
-                "codec '{}' is not yet supported with WAL-based durability (Standard/Always). \
-                 Encryption at rest requires WAL reader codec support (tracked). \
-                 Use durability = \"cache\" for encrypted in-memory databases.",
-                cfg.storage.codec
-            )));
-        }
+        // T3-E12 Phase 2 removed the follower codec+WAL rejection;
+        // the v3 envelope + codec-threaded reader now handle
+        // non-identity codecs on follower replay.
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
