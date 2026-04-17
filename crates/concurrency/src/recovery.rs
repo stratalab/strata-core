@@ -85,7 +85,7 @@ impl RecoveryPlan {
 
 /// Coordinates database recovery after crash or restart.
 ///
-/// Epic 5 reshapes the coordinator into a callback-driven driver:
+/// The coordinator is a callback-driven driver:
 ///
 /// 1. `plan_recovery` validates MANIFEST codec identity before any WAL read.
 /// 2. `recover(on_snapshot, on_record)` streams snapshot install and WAL
@@ -93,8 +93,10 @@ impl RecoveryPlan {
 ///    directory layout and record streaming; the engine owns storage
 ///    construction and application.
 ///
-/// The legacy `recover_into_memory_storage` wrapper preserves the pre-Epic-5
-/// engine open surface until the callback-driven open path lands.
+/// A `recover_into_memory_storage` convenience wrapper is kept for
+/// in-crate tests and snapshot-less tooling paths that construct the
+/// coordinator directly; `Database::open_runtime` uses the direct
+/// callback API with a codec wired in.
 pub struct RecoveryCoordinator {
     /// Canonical database layout.
     layout: DatabaseLayout,
@@ -103,9 +105,10 @@ pub struct RecoveryCoordinator {
     /// When true, WAL reader scans past corrupted regions instead of erroring.
     allow_lossy_recovery: bool,
     /// Storage codec used to decode snapshot payloads. When unset, the
-    /// coordinator skips snapshot loading — callers that stay on the legacy
-    /// `recover_into_memory_storage` wrapper preserve WAL-only behavior until
-    /// they migrate to the direct callback API with a codec wired in.
+    /// coordinator skips snapshot loading and falls back to full WAL
+    /// replay. The `recover_into_memory_storage` wrapper does not
+    /// install a codec; engine opens drive `recover` directly and
+    /// install the codec via `with_codec`.
     codec: Option<Box<dyn StorageCodec>>,
 }
 
@@ -284,9 +287,11 @@ impl RecoveryCoordinator {
     ///
     /// The engine owns storage construction; the coordinator only:
     ///
-    /// 1. (future) Loads the snapshot declared in the MANIFEST and invokes
-    ///    `on_snapshot` with the decoded `LoadedSnapshot`. Snapshot loading
-    ///    is wired in Epic 5 Chunk 2 — until then `on_snapshot` never fires.
+    /// 1. Loads the snapshot declared in the MANIFEST (when a codec is
+    ///    installed via `with_codec`) and invokes `on_snapshot` with the
+    ///    decoded `LoadedSnapshot`. When no codec is installed the
+    ///    coordinator skips snapshot loading and falls back to full WAL
+    ///    replay; `on_snapshot` does not fire in that path.
     /// 2. Streams committed WAL records and invokes `on_record` for each,
     ///    preserving arrival order. Partial tails on the active segment
     ///    are truncated before return so reopens land on clean boundaries.
@@ -315,8 +320,9 @@ impl RecoveryCoordinator {
         // `with_codec()`, the coordinator consults the MANIFEST for a
         // recorded snapshot and invokes `on_snapshot` with the decoded
         // `LoadedSnapshot`. When no codec is installed, snapshot loading
-        // is skipped to preserve the pre-Epic-5 WAL-only behavior that the
-        // compat wrapper depends on.
+        // is skipped — the WAL-only replay path still produces
+        // `RecoveryStats` and the `recover_into_memory_storage`
+        // convenience wrapper depends on this no-codec default.
         //
         // The snapshot's `watermark_txn` is the max TxnId covered by the
         // snapshot and is folded into `max_txn_id` so the txn-id counter
@@ -372,7 +378,7 @@ impl RecoveryCoordinator {
             // are already reflected in the installed snapshot. Skip them to
             // avoid double-apply of puts/deletes. `snapshot_watermark_txn`
             // is zero when no snapshot was loaded, which degenerates to
-            // full WAL replay (the pre-Epic-5 behavior).
+            // full WAL replay (the no-codec fallback path).
             //
             // We still account for the txn id in `max_txn_id` so the
             // downstream coordinator sees the true max id across both
@@ -505,17 +511,17 @@ impl RecoveryCoordinator {
         }
     }
 
-    /// Legacy convenience wrapper that constructs a fresh `SegmentedStore`
-    /// rooted at the layout's segments directory and applies all WAL records
-    /// into it, returning the fully-materialized `RecoveryResult`.
+    /// Convenience wrapper that constructs a fresh `SegmentedStore` rooted
+    /// at the layout's segments directory and applies all WAL records into
+    /// it, returning the fully-materialized `RecoveryResult`.
     ///
-    /// This preserves the pre-Epic-5 surface so the engine open paths and
-    /// existing tests keep working while callback-driven recovery is staged.
-    /// Snapshot loading is not performed here; that arrives in later Epic 5
-    /// chunks alongside the engine-side decoder.
-    ///
-    /// Epic 5 Chunk 3 removes this wrapper once `Database::open` drives
-    /// `recover` directly with its own snapshot and WAL apply closures.
+    /// Used by in-crate tests and snapshot-less tooling paths that
+    /// construct the coordinator directly. `Database::open_runtime`
+    /// drives `recover` directly with its own snapshot and WAL apply
+    /// closures, so the shipped open path does not go through this
+    /// wrapper. Snapshot loading is not performed here — this entry
+    /// point intentionally skips the codec + snapshot path to keep
+    /// test fixtures simple.
     pub fn recover_into_memory_storage(self) -> StrataResult<RecoveryResult> {
         let storage = SegmentedStore::with_dir(
             self.layout.segments_dir().to_path_buf(),
@@ -1603,7 +1609,7 @@ mod tests {
     }
 
     // ========================================
-    // Epic 5 Chunk 1: plan_recovery + callback API
+    // plan_recovery + callback API tests
     // ========================================
 
     use strata_durability::ManifestManager;
@@ -1671,8 +1677,8 @@ mod tests {
         assert!(message.contains("aes-gcm-256"));
     }
 
-    /// plan_recovery reports snapshot identity and watermark so Epic 5
-    /// Chunk 2 can drive snapshot-install from the plan.
+    /// plan_recovery reports snapshot identity and watermark so the
+    /// coordinator's snapshot-install path can drive from the plan.
     #[test]
     fn test_plan_recovery_reports_snapshot_identity_and_watermark() {
         let temp_dir = TempDir::new().unwrap();
@@ -1693,8 +1699,9 @@ mod tests {
     }
 
     /// The callback-driven `recover()` fires `on_record` once per WAL record
-    /// in ascending txn-id order, never fires `on_snapshot` (Chunk 1 stub),
-    /// and returns aggregated stats matching the pre-Epic-5 surface.
+    /// in ascending txn-id order, does not fire `on_snapshot` when no codec
+    /// is installed, and returns aggregated stats matching the
+    /// `recover_into_memory_storage` convenience wrapper's semantics.
     #[test]
     fn test_recover_callback_fires_on_record_in_order() {
         let temp_dir = TempDir::new().unwrap();
@@ -1956,7 +1963,7 @@ mod tests {
     }
 
     // ========================================
-    // Epic 5 Chunk 2: coordinator snapshot loading
+    // Coordinator snapshot-loading tests
     // ========================================
 
     use strata_durability::disk_snapshot::{SnapshotSection, SnapshotWriter};

@@ -292,7 +292,7 @@ Implementation note:
 - [ ] **Historical cleanup (DR-6):**
   - Delete M2-phase comments from `crates/concurrency/src/recovery.rs`
   - Delete dead `with_snapshot_path()` stub if still present
-  - Update research docs: mark Gap 1 resolved, update prioritized-fixes, refresh architectural-gaps
+  - Research-docs updates: not executable against this tree — the `research/core-engine/` directory that the T3 planning corpus references (`gaps/01-checkpoint-recovery-gap.md`, `prioritized-fixes.md`, `architectural-gaps.md`) was never checked into this repo. Confirmed by grep in the T3-E8 PR; this bullet is closed with the inventory mismatch documented rather than by manufacturing research docs.
   - Delete or mark `checkpoint-recovery-unification-plan.md` as superseded
 - [ ] **Doc alignment (DR-10):**
   - Add "current state as of [commit/date]" banner
