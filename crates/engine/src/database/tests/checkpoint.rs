@@ -483,6 +483,11 @@ fn test_codec_mismatch_on_reopen_fails_even_with_lossy_flag() {
                 "reopen with different codec must fail with codec mismatch, got: {}",
                 msg
             );
+            assert!(
+                matches!(e, StrataError::IncompatibleReuse { .. }),
+                "codec drift must surface as IncompatibleReuse (not internal/corruption), got: {:?}",
+                e
+            );
         }
         Ok(_) => panic!("reopen with wrong codec + lossy flag must still fail"),
     }

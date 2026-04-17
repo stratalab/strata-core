@@ -447,6 +447,15 @@ impl Database {
                 ))
             })?;
             let manifest = m.manifest();
+            if manifest.codec_id != cfg.storage.codec {
+                return Err(StrataError::incompatible_reuse(format!(
+                    "codec mismatch: follower target at {} was created with '{}' but config specifies '{}'. \
+                     A follower must be configured with the same codec as the primary database.",
+                    canonical_path.display(),
+                    manifest.codec_id,
+                    cfg.storage.codec
+                )));
+            }
             let codec = strata_durability::get_codec(&manifest.codec_id).map_err(|e| {
                 StrataError::internal(format!(
                     "follower could not initialize MANIFEST codec '{}': {}",
@@ -877,10 +886,12 @@ impl Database {
                 .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
             let stored_codec = &m.manifest().codec_id;
             if stored_codec != &cfg.storage.codec {
-                return Err(StrataError::internal(format!(
-                    "codec mismatch: database was created with '{}' but config specifies '{}'. \
+                return Err(StrataError::incompatible_reuse(format!(
+                    "codec mismatch: database at {} was created with '{}' but config specifies '{}'. \
                      A database cannot be reopened with a different codec.",
-                    stored_codec, cfg.storage.codec
+                    canonical_path.display(),
+                    stored_codec,
+                    cfg.storage.codec
                 )));
             }
             m.manifest().database_uuid

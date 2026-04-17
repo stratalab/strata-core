@@ -110,6 +110,8 @@ pub struct StorageConfig {
     pub l0_stop_writes_trigger: usize,
     /// Number of background worker threads for compaction, flush, and maintenance.
     /// Default: min(4, available CPU cores). On single-core devices set to 1.
+    ///
+    /// Class: open-time-only. See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default = "default_background_threads")]
     pub background_threads: usize,
     /// Target size for a single output segment file in bytes.
@@ -144,6 +146,9 @@ pub struct StorageConfig {
     ///
     /// **Warning:** A database created with one codec cannot be opened with a
     /// different codec — the MANIFEST records the codec ID and validates on open.
+    /// A second opener with a mismatched codec gets [`StrataError::IncompatibleReuse`].
+    ///
+    /// Class: open-time-only. See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default = "default_codec")]
     pub codec: String,
 }
@@ -276,6 +281,9 @@ impl Default for StorageConfig {
 pub struct StrataConfig {
     /// Durability mode: `"standard"` or `"always"` (switchable at runtime).
     /// `"cache"` is valid in strata.toml for backward compat but cannot be set at runtime.
+    ///
+    /// Class: live-safe (Standard ↔ Always); `"cache"` is open-time-only.
+    /// See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default = "default_durability_str")]
     pub durability: String,
     /// Enable automatic text embedding for semantic search.
@@ -317,6 +325,8 @@ pub struct StrataConfig {
     pub storage: StorageConfig,
     /// If true, silently start with empty state when WAL recovery fails.
     /// Default: false (refuse to open — safer).
+    ///
+    /// Class: open-time-only. See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default)]
     pub allow_lossy_recovery: bool,
     /// Whether the user opted in to anonymous usage telemetry.
