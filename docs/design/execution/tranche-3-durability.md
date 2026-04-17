@@ -391,3 +391,167 @@ Every code-changing PR runs PR-grade YCSB + BEIR per the universal gate. The tab
 | E6 | redb + ycsb | Shutdown path + MANIFEST fsync |
 | E7 | redb + ycsb | Codec validation at open |
 | E8 | — | Doc-only, no benchmark needed |
+
+---
+
+## Closeout Addendum (review-driven)
+
+**Status:** in progress (2026-04-17)
+
+After the original 8 epics shipped (#2411–#2421), independent review against
+the 17 DR-### requirements in `docs/requirements/durability-recovery-requirements.md`
+found that per-epic mechanical acceptance tests had passed but **4 aggregate
+contract gaps remained**:
+
+- DR-009 codec uniformity — non-identity codec + WAL durability rejected at
+  open time despite the acceptance clause saying it must work "without
+  special-case rejection."
+- DR-011 lossy recovery — wipe-and-reopen on any recovery error with no
+  programmatic observability; failed the "surfaced in status/telemetry"
+  clause.
+- DR-012 `ContiguousWatermark` — `try_advance` used `fetch_max` with no
+  contiguity check; the documented structural invariant lived only in
+  refresh-loop discipline, not on the type.
+- DR-015 follower close-barrier residual — follower `refresh()` and
+  `admin_skip_blocked_record()` did not honor `shutdown_complete`.
+
+The epics below are the review-driven closeout track that lands the
+corresponding fixes. They are **not part of the original tranche plan**;
+they are numbered contiguously (E9 onwards) only so PR tracking stays
+simple. The original 8-epic plan is the normative record for the tranche's
+design intent; the closeout epics are post-hoc corrections to the shipped
+contract.
+
+### Epic T3-E9: Contract Hardening
+
+**Status:** shipped 2026-04-17 (PR #2422)
+**Findings closed:** DR-012 (contiguity on the type), DR-015 follower close residual
+**Change class:** additive
+**Assurance:** S3
+**Benchmark:** YCSB smoke (cold path)
+
+#### Tasks
+
+- [x] Make `ContiguousWatermark::try_advance` enforce `txn_id == applied + 1`; return new `AdvanceError::NonContiguous { expected, provided }` on any gap, duplicate, or stale id.
+- [x] Use `checked_add` on the increment so `applied == u64::MAX` returns `NonContiguous` rather than panicking in debug or wrapping in release.
+- [x] Verify the admin-skip flow (`unblock_exact` → next cycle's `try_advance`) still produces contiguous advances.
+- [x] Add `UnblockError::DatabaseClosed` variant for admin_skip on a shut-down follower.
+- [x] Add `shutdown_complete` guard to `Database::refresh()` — short-circuit to `RefreshOutcome::CaughtUp { applied: 0, applied_through: wm.applied() }` when the follower is closed (matches the non-follower / ephemeral branch).
+- [x] Add `shutdown_complete` guard to `Database::admin_skip_blocked_record()` — return `UnblockError::DatabaseClosed` before any watermark / audit mutation.
+
+#### Acceptance Criteria
+
+- [x] `try_advance(applied + 1)` succeeds; `try_advance(applied + 2)`, `try_advance(applied)`, `try_advance(stale)` all return `NonContiguous` with correct expected/provided
+- [x] Blocked state still takes precedence over contiguity
+- [x] Skip flow preserves contiguity after unblock_exact
+- [x] Follower `refresh()` post-`shutdown()` is a no-op; watermark stable
+- [x] Follower `admin_skip_blocked_record` post-`shutdown()` returns `UnblockError::DatabaseClosed`; state-invariance assertions pass
+- [x] `try_advance` at `u64::MAX` returns `NonContiguous`, not panic
+- [x] `cargo test -p strata-engine --lib -- --test-threads=1` — 952→955 passing
+
+### Epic T3-E10: Lossy Recovery Telemetry + Pinned Contract
+
+**Status:** shipped 2026-04-17 (PR #2423)
+**Findings closed:** DR-011 observability (partial — policy-matrix half is T3-E11)
+**Change class:** additive
+**Assurance:** S3
+**Benchmark:** none (cold open-time path)
+
+#### Tasks
+
+- [x] Add `LossyRecoveryReport` struct to the engine public surface with fields `error: String`, `error_kind: LossyErrorKind`, `records_applied_before_failure: u64`, `version_reached_before_failure: CommitVersion`, `discarded_on_wipe: bool`.
+- [x] Add `LossyErrorKind` enum (`Corruption`, `Storage`, `Other`) with a `from_strata_error(&StrataError)` mapper, per CLAUDE.md Quality Rule §26 (typed reason enums replace string-factory methods).
+- [x] Add field to `Database`: `last_lossy_recovery_report: Arc<ParkingMutex<Option<LossyRecoveryReport>>>`, initialized in all three constructors (primary, follower, cache).
+- [x] Add accessor `Database::last_lossy_recovery_report(&self) -> Option<LossyRecoveryReport>`.
+- [x] Wrap the engine's `on_record` closure in both primary and follower open paths with an `Arc<AtomicU64>` counter; capture `storage.version()` before the wipe.
+- [x] Add tracing target `strata::recovery::lossy` (warn-level, structured fields `error`, `error_kind`, `records_applied_before_failure`, `version_reached_before_failure`, `discarded_on_wipe`, `follower`).
+- [x] Export `LossyRecoveryReport` and `LossyErrorKind` from `crates/engine/src/lib.rs`; add both to the CLAUDE.md D4 durability surface list and to `durability-recovery-scope.md`.
+- [x] Rewrite DR-011 "Acceptance" in `docs/requirements/durability-recovery-requirements.md` to pin the "whole-database wipe-and-reopen" semantic and list the two observability surfaces.
+- [x] Update D-DR-9 in `durability-recovery-scope.md` to match.
+- [x] Update the `allow_lossy_recovery` row in `durability-recovery-config-matrix.md` with the observability pointer.
+
+#### Acceptance Criteria
+
+- [x] Existing `test_lossy_recovery_discards_valid_data_before_corruption` passes with new report assertions (records ≥ 1, discarded_on_wipe, non-empty error, version > 0, `error_kind == Storage`)
+- [x] New `test_non_lossy_recovery_has_no_report` — strict open + cache open both leave the slot `None`
+- [x] New `test_lossy_recovery_report_on_immediate_failure` — failure before any record applied produces a report with zero counters and `CommitVersion::ZERO`
+- [x] New `test_lossy_error_kind_mapping_covers_relevant_variants` — direct unit test covering `Corruption`, `Storage`, `Other` mapping
+- [x] New `test_follower_lossy_recovery_populates_report` — follower-path coverage; confirms typed `error_kind` populates on the follower branch too
+- [x] 955→956 engine lib tests pass; clippy + fmt clean
+
+### Epic T3-E11: Follower Open/Refresh Policy Matrix
+
+**Status:** pending
+**Findings closed:** DR-011 (the policy-matrix clause that T3-E10 deferred)
+**Change class:** doc-heavy + minimal code alignment
+**Assurance:** S2 (doc) + S3 (any code alignment)
+**Benchmark:** none
+
+#### Tasks
+
+- [ ] Document the mixed policy in `docs/design/architecture-cleanup/durability-recovery-scope.md` — a new subsection (under DR-3 or adjacent to D-DR-9) stating: follower open honors `allow_lossy_recovery` via whole-DB fallback; follower refresh is strict-only (blocks on failure; operator-gated via `admin_skip_blocked_record`). Include a rationale paragraph explaining why the mixed policy is deliberate (open is one-time and caller-authorized; refresh is live and operator-observable).
+- [ ] Mirror the policy matrix in `docs/architecture/durability-and-recovery.md` (lands with T3-E8 / PR 5).
+- [ ] Add an integration test `follower_lossy_open_and_strict_refresh_coexist` — opens a follower with `allow_lossy_recovery=true` against a corrupt WAL (verifies open falls back and report populates), then corrupts a later record and confirms `refresh()` returns `RefreshOutcome::Stuck`, not a silent skip.
+- [ ] No code change required: exploration confirmed `refresh()` at `crates/engine/src/database/lifecycle.rs:281` already ignores `allow_lossy_recovery`. The policy is implemented; only undocumented.
+
+#### Acceptance Criteria
+
+- [ ] Policy matrix section exists in `durability-recovery-scope.md` with the rationale paragraph
+- [ ] Integration test demonstrates lossy open + strict refresh coexist on the same follower instance
+- [ ] DR-011's "follower open and follower refresh use a consistent documented policy matrix" acceptance clause is now satisfied
+- [ ] `cargo test -p strata-engine --test follower_tests` — all tests green
+
+### Epic T3-E12: WAL Codec Threading
+
+**Status:** pending
+**Findings closed:** DR-009 codec uniformity
+**Change class:** intentional semantic change (new WAL envelope format) + cutover (WAL reader signature)
+**Assurance:** S4 (WAL read path correctness)
+**Benchmark:** **required** — full PR-grade YCSB + WAL latency + redb + open-time + BEIR smoke; characterization tests before refactor; differential test identity-codec vs before/after
+
+#### Tasks
+
+- [ ] Design: pick WAL record envelope format (`[u32 length][codec-encoded bytes]` after the post-encode step); decide clean-break vs dual-path for identity codec.
+- [ ] Bump `WAL_FORMAT_VERSION` in `crates/durability/src/format/wal_record.rs`.
+- [ ] Add codec decode to `crates/durability/src/wal/reader.rs` — `codec` field on `WalReader`, `with_codec(codec)` builder, decode step before `WalRecord::from_bytes`.
+- [ ] Add length-prefix write wrapper to `crates/durability/src/wal/writer.rs` (writer already calls `codec.encode_cow(...)` — add the envelope).
+- [ ] Wire codec through `RecoveryCoordinator::recover()` — construct `WalReader` with the coordinator's installed codec.
+- [ ] Delete the open-time rejection blocks at `crates/engine/src/database/open.rs:847-858` (primary) and `:1475-1485` (follower).
+- [ ] Add the deferred test `write_non_identity_codec_then_crash_then_reopen_then_read` in `crates/engine/src/database/tests/codec.rs`; remove the deferral comment at lines 12-17.
+- [ ] Update `durability-recovery-config-matrix.md` — remove the "target-state note" about WAL codec; update the codec row to note all durability modes support non-identity codecs.
+- [ ] Capture a pre-PR baseline via `cargo run --release -p strata-benchmarks --bin regression -- --capture-baseline` before code changes land; gate merge on `--tranche 3 --epic "T3-E12"` within thresholds.
+
+#### Acceptance Criteria
+
+- [ ] Identity codec round-trip: existing tests pass unchanged (regression guard)
+- [ ] Non-identity codec write → crash → reopen → read succeeds with the same data visible
+- [ ] Codec mismatch on reopen is still rejected (MANIFEST codec check preserved)
+- [ ] Large record stress: envelope handles multi-MB records without overflow
+- [ ] Partial-tail truncation still works with envelope (CRC + length boundary)
+- [ ] Codec decode error surfaces distinctly from corruption; does not trigger lossy wipe unless `allow_lossy_recovery`
+- [ ] WAL latency benchmark: ≤5% regression median, ≤10% tail
+- [ ] Redb 5M benchmark: ≤5% throughput regression
+- [ ] Open-time latency: ≤5% regression
+
+### Closeout Dependency Graph
+
+```
+T3-E9  (contract hardening)  ──┐
+T3-E10 (lossy telemetry)     ──┼─→ T3-E11 (follower policy matrix)
+                                │
+                                └─→ T3-E12 (WAL codec threading) ──→ T3-E8 (arch doc closeout)
+```
+
+- T3-E9 and T3-E10 are independent and shipped in parallel.
+- T3-E11 depends on T3-E10 (lossy observability surfaces referenced in the policy doc).
+- T3-E12 is the largest-scope closeout epic and the longest pole; independent of T3-E11.
+- T3-E8 (historical cleanup + architecture doc) lands last so the architecture doc reflects all closeout-era state. See the original Epic T3-E8 entry above.
+
+### Closeout Rollback
+
+| Epic | Reversible | Notes |
+|------|-----------|-------|
+| E9 | Yes | Additive new error variants + guards; reverting restores prior behavior without on-disk changes |
+| E10 | Yes | Additive new type + accessor + tracing target; reverting removes observability but no semantic regression |
+| E11 | Yes | Doc + additive test |
+| E12 | Partially | WAL format version bump — reverting leaves pre-PR databases readable, post-PR databases unreadable. Same playbook as DR-5 snapshot v2 (pre-release clean break acceptable) |

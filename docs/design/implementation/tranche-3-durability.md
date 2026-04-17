@@ -857,3 +857,230 @@ From sibling scopes and post-cleanup backlog:
 - Quality cleanup: full error taxonomy, visibility tightening, unsafe documentation, file decomposition, and catalog-to-test mapping.
 - Forced transaction abort on shutdown timeout. T3 deliberately returns `ShutdownTimeout` and leaves retry/abort decisions to callers.
 - Further checkpoint-format optimization beyond the retention-complete fidelity introduced here. T3's concern is restart correctness, not later throughput or storage-efficiency tuning.
+
+---
+
+## Closeout Addendum (review-driven)
+
+**Status:** in progress (2026-04-17)
+
+After the original 8 epics shipped (#2411–#2421), independent review against
+`docs/requirements/durability-recovery-requirements.md` surfaced 4 aggregate
+contract gaps that per-epic tests had not caught. This addendum tracks the
+follow-on implementation work that closes those gaps. Epics below are
+numbered E9–E12 for contiguous PR tracking; they are **not part of the
+original tranche plan**. The 8-epic plan above is the normative record for
+this tranche's design intent.
+
+See the matching addendum in `docs/design/execution/tranche-3-durability.md`
+for tasks and acceptance criteria.
+
+### Epic 9: Contract Hardening
+
+**Status:** shipped 2026-04-17 (PR #2422)
+**Goal:** make the `ContiguousWatermark` type enforce the contiguity invariant it documents, and close the follower-side shutdown barrier so post-`shutdown()` calls to `refresh()` and `admin_skip_blocked_record()` can't mutate watermark / audit state through a stale handle.
+
+**Why:** Independent review found (a) `try_advance` used `fetch_max` without a contiguity check — the "never skips a record" invariant lived in refresh-loop discipline, not on the type, making it a future footgun; and (b) follower shutdown returned `Ok(())` after setting `shutdown_complete = true`, but the two mutating follower APIs did not consult that flag. Both are structural fixes, not behavior regressions.
+
+### Changes
+
+**1. Strict contiguity on `ContiguousWatermark::try_advance`** (~30 lines)
+
+- Load the current `applied`, require `txn_id == applied + 1` or return new variant `AdvanceError::NonContiguous { expected, provided }`.
+- Use `checked_add` so `applied == u64::MAX` returns `NonContiguous` rather than panicking in debug or wrapping in release.
+- CAS the advance so the semantic stays correct even if `RefreshGate`'s single-flight discipline is ever relaxed.
+
+**2. `UnblockError::DatabaseClosed` variant** (~10 lines additive)
+
+- New variant on the existing `#[non_exhaustive]` enum. Returned by `admin_skip_blocked_record` when called on a shut-down follower.
+
+**3. Follower close-barrier guards** (~15 lines)
+
+- `Database::refresh()`: short-circuit to `RefreshOutcome::CaughtUp { applied: 0, applied_through: watermark.applied() }` when `shutdown_complete.load(Acquire)`, matching the existing non-follower / ephemeral branch.
+- `Database::admin_skip_blocked_record()`: short-circuit to `UnblockError::DatabaseClosed` before any mutating work.
+
+### Verification
+
+- Unit tests (inline in `refresh.rs`): contiguous advance / gap / duplicate / stale / blocked-precedence / skip-flow-preserves-contiguity / `from_state` contiguity / overflow-at-u64-MAX. 9 tests total.
+- Integration tests (`follower_tests.rs`): post-shutdown refresh is no-op with stable watermark; post-shutdown admin_skip returns `DatabaseClosed` with state-invariance assertions.
+- All 952 pre-existing engine lib tests pass → 955 after new unit tests (the flake under parallel tmp-file-lock contention is pre-existing on main).
+- Clippy + fmt clean.
+
+### Effort: 1 day
+
+---
+
+## Epic 10: Lossy Recovery Telemetry and Pinned Contract
+
+**Status:** shipped 2026-04-17 (PR #2423)
+**Goal:** pin the current "whole-database wipe-and-reopen" lossy semantic explicitly and make the fallback observable via both a pull accessor and a push tracing target, so DR-011's "surfaced in status/telemetry" clause is satisfied without narrowing the semantic (narrower modes conflict with DR-012/DR-013).
+
+**Why:** Current code silently replaced pre-failure recovered state with an empty store on any recovery error when `allow_lossy_recovery = true`. Callers could not distinguish "database opened empty because genuinely empty" from "database fell back to empty because recovery failed after applying N records." DR-011's acceptance required the lossy path be "surfaced in status/telemetry"; a `warn!` log alone didn't satisfy it programmatically.
+
+### Changes
+
+**1. `LossyErrorKind` enum** (~40 lines)
+
+Typed classification for the triggering error, per CLAUDE.md Quality Rule §26 ("typed reason enums replace string-factory error methods"):
+
+```rust
+pub enum LossyErrorKind { Corruption, Storage, Other }
+
+impl LossyErrorKind {
+    pub fn from_strata_error(err: &StrataError) -> Self {
+        match err {
+            StrataError::Corruption { .. } => LossyErrorKind::Corruption,
+            StrataError::Storage { .. }    => LossyErrorKind::Storage,
+            _                              => LossyErrorKind::Other,
+        }
+    }
+}
+```
+
+Note: WAL-level "bytes on disk look wrong" errors currently classify as `Storage` because `RecoveryCoordinator` wraps WAL read failures with `StrataError::storage(...)`. Documented inline and in the enum rustdoc so a future upstream reclassification is a conscious, test-gated choice.
+
+**2. `LossyRecoveryReport` struct** (~25 lines)
+
+```rust
+#[non_exhaustive]
+pub struct LossyRecoveryReport {
+    pub error: String,
+    pub error_kind: LossyErrorKind,
+    pub records_applied_before_failure: u64,
+    pub version_reached_before_failure: CommitVersion,
+    pub discarded_on_wipe: bool,
+}
+```
+
+`#[non_exhaustive]` so later narrower modes can add fields without a breaking change.
+
+**3. `Database::last_lossy_recovery_report()` accessor** (~15 lines)
+
+Mirrors `wal_writer_health`: `Arc<ParkingMutex<Option<LossyRecoveryReport>>>` field, populated in the lossy branch before the wipe, read by cloning under the lock. `None` on strict opens and on lossy opens that did not need to fall back.
+
+**4. Stats threading in `open.rs`** (~60 lines)
+
+Wrap the engine's `on_record` closure in both primary and follower paths with an `Arc<AtomicU64>` counter (increments on successful `apply_wal_record_to_memory_storage` return). Sample `storage.version()` before the wipe. Construct the report; stash into the per-Database slot.
+
+**5. Tracing target `strata::recovery::lossy`** (~10 lines, two emissions)
+
+Warn-level structured event with fields `error`, `error_kind`, `records_applied_before_failure`, `version_reached_before_failure`, `discarded_on_wipe`, `follower`. Mirrors the pull accessor so push/pull observability stay in sync.
+
+**6. Doc updates** (~50 lines)
+
+- `docs/requirements/durability-recovery-requirements.md` DR-011 "Acceptance" rewritten to state the pinned wipe-and-reopen contract and list both observability surfaces.
+- `docs/design/architecture-cleanup/durability-recovery-scope.md` D-DR-9 mirrored.
+- `docs/design/architecture-cleanup/durability-recovery-config-matrix.md` `allow_lossy_recovery` row updated with the observability pointer.
+- `CLAUDE.md` D4 durability surface list updated with `LossyRecoveryReport` and `LossyErrorKind`.
+
+### Verification
+
+- Augmented `test_lossy_recovery_discards_valid_data_before_corruption` with assertions on `records_applied_before_failure >= 1`, `discarded_on_wipe`, non-empty error, version > 0, `error_kind == Storage`.
+- New `test_non_lossy_recovery_has_no_report`: strict + cache opens leave the slot `None`.
+- New `test_lossy_recovery_report_on_immediate_failure`: error before any record applied → zero counters, `CommitVersion::ZERO`.
+- New `test_lossy_error_kind_mapping_covers_relevant_variants`: direct unit test of `from_strata_error` for `Corruption`, `Storage`, `Other`.
+- New `test_follower_lossy_recovery_populates_report`: follower-path coverage with typed `error_kind == Storage` assertion.
+- 956 engine lib tests + 28 follower integration tests all green; clippy + fmt clean.
+
+### Effort: 1 day
+
+---
+
+## Epic 11: Follower Open/Refresh Policy Matrix
+
+**Status:** pending
+**Goal:** document the mixed lossy policy — follower open honors `allow_lossy_recovery` via whole-DB fallback, while follower refresh is strict-only — and add an integration test that pins the coexistence so DR-011's "consistent documented policy matrix" acceptance clause is satisfied.
+
+**Why:** Independent review found the shipped behavior is internally consistent but undocumented. The follower `refresh()` implementation already ignores `allow_lossy_recovery`; the follower open path honors it. No code change is needed to satisfy DR-011's matrix clause — only documentation and a regression-guard test.
+
+### Changes
+
+**1. Policy matrix subsection in `durability-recovery-scope.md`** (~40 lines)
+
+Add under DR-3 or adjacent to D-DR-9:
+
+| Phase            | Lossy-capable?                        | Mechanism                                                                           |
+|------------------|---------------------------------------|-------------------------------------------------------------------------------------|
+| follower open    | yes (via `allow_lossy_recovery`)      | whole-DB fallback: wipe + start empty; surface `LossyRecoveryReport`                |
+| follower refresh | no (always strict)                    | block on failure; operator-gated unblock via `admin_skip_blocked_record`            |
+
+Plus a rationale paragraph: open is a one-time caller-authorized recovery event; refresh is a continuous ingestion loop where silent record skipping would desynchronize followers without operator knowledge. Skipping at refresh time requires an explicit admin action with audit logging (see DR-012).
+
+**2. Architecture doc mirror** — lands with T3-E8 / PR 5 (closeout doc PR), not this PR.
+
+**3. Integration test `follower_lossy_open_and_strict_refresh_coexist`** (~30 lines)
+
+Opens a follower with `allow_lossy_recovery=true` against a corrupt WAL, verifies the strict path refuses and the lossy path falls back (populates report); then corrupts a later WAL record and calls `refresh()`, verifying it returns `RefreshOutcome::Stuck` (NOT a silent skip despite `allow_lossy_recovery=true`).
+
+**4. No code change required.** Exploration confirmed `refresh()` at `crates/engine/src/database/lifecycle.rs:281` already ignores `allow_lossy_recovery`. The policy is shipped; only undocumented.
+
+### Verification
+
+- Policy matrix section exists in `durability-recovery-scope.md` with rationale paragraph
+- Integration test green on first run (the policy is already the shipped behavior)
+- DR-011 matrix clause satisfied
+
+### Effort: 1 day
+
+---
+
+## Epic 12: WAL Codec Threading
+
+**Status:** pending
+**Goal:** thread the configured codec through the WAL reader so non-identity codec + WAL durability works end-to-end. Remove the open-time rejection at `open.rs:847-858` (primary) and `:1475-1485` (follower) that currently blocks the combination.
+
+**Why:** DR-009's acceptance clause says "a database configured with a non-identity durable codec can be written, restarted, and recovered without special-case rejection." The shipped code has exactly that special-case rejection. Closing this is the largest closeout epic and the longest pole.
+
+### Changes
+
+**1. WAL record envelope format** (~40 lines)
+
+- Bump `WAL_FORMAT_VERSION` in `crates/durability/src/format/wal_record.rs`.
+- New on-disk layout: each record body is `[u32 length][codec-encoded bytes]`. Length is the post-encode byte count. Identity codec has the same envelope (no dual path in the reader).
+- Pre-release clean break per the DR-5 snapshot v2 precedent — pre-PR databases cannot be read post-PR.
+
+**2. WAL reader codec plumbing** (~80 lines)
+
+- Add `codec: Box<dyn StorageCodec>` field to `WalReader` in `crates/durability/src/wal/reader.rs`.
+- Add `with_codec(codec)` builder (parallel to existing `with_lossy_recovery`).
+- Per-record read: read length prefix, read N bytes, call `self.codec.decode(bytes)`, then `WalRecord::from_bytes(decoded)`.
+- Codec decode errors surface as a distinct `WalReadError::CodecDecode { position, source }` so lossy recovery can classify them separately from corruption.
+
+**3. WAL writer length-prefix wrapper** (~30 lines)
+
+- The writer already calls `codec.encode_cow(...)` at `crates/durability/src/wal/writer.rs:289-318`. Add the length-prefix write around the encoded bytes. CRC is over the enveloped bytes.
+
+**4. Coordinator codec wire-through** (~20 lines)
+
+- `RecoveryCoordinator::recover()` constructs `WalReader::new()` around line 353; change to clone the coordinator's installed codec into the reader via `with_codec`.
+- The coordinator already has `codec: Option<Box<dyn StorageCodec>>`. Pass it; if `None`, default to identity.
+
+**5. Remove open-time rejection** (~10 lines deleted)
+
+- Delete the block at `crates/engine/src/database/open.rs:847-858` (primary).
+- Delete the block at `:1475-1485` (follower).
+- Verify the codec is installed into the `RecoveryCoordinator` via `with_codec(get_codec(&cfg.storage.codec))` on both paths.
+
+**6. Codec round-trip test** (~80 lines)
+
+- Remove the deferral comment at `crates/engine/src/database/tests/codec.rs:12-17`.
+- Add `write_non_identity_codec_then_crash_then_reopen_then_read`: create DB with `codec = "aes-gcm-256"`, write records, drop without shutdown (simulate crash), reopen with same codec + key, verify records round-trip.
+- Large-record stress test: multi-MB record round-trip through envelope.
+- Codec decode error test: reopen with wrong key surfaces distinctly from corruption.
+
+**7. Config matrix + docs** (~30 lines)
+
+- `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`: remove "target-state note" about WAL codec; update codec row to note all durability modes supported.
+- `docs/requirements/durability-recovery-requirements.md` DR-009: no change needed — the acceptance is now met.
+
+### Verification
+
+- Identity codec round-trip: existing tests pass unchanged (regression)
+- Non-identity codec round-trip: new test passes
+- Codec mismatch on reopen: existing behavior preserved (MANIFEST codec check)
+- Large record stress: envelope handles multi-MB without overflow
+- Partial-tail truncation: still works with envelope boundary
+- Codec decode error surfaces distinctly from corruption; does not trigger lossy wipe unless `allow_lossy_recovery`
+- **Benchmarks (gated for merge):** WAL latency ≤5% regression median / ≤10% tail; redb 5M throughput ≤5% regression; open-time latency ≤5% regression. Baseline captured before implementation via `cargo run --release -p strata-benchmarks --bin regression -- --capture-baseline`.
+
+### Effort: 5 days
