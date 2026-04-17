@@ -745,11 +745,17 @@ pub enum ReadStopReason {
         /// Human-readable error description
         detail: String,
     },
-    /// Codec decode failed for a record. Distinct from [`ReadStopReason::ChecksumMismatch`]
-    /// because the outer envelope parsed and its CRC matched — it was the
-    /// installed `StorageCodec`'s `decode()` that rejected the payload.
-    /// Typical cause: wrong encryption key or AES-GCM auth-tag mismatch
-    /// on an encrypted WAL. Produced by the T3-E12 codec-aware reader.
+    /// Codec decode failed for a record. Distinct from
+    /// [`ReadStopReason::ChecksumMismatch`] because the outer envelope
+    /// parsed and its CRC matched — it was the installed
+    /// `StorageCodec`'s `decode()` that rejected the payload. Typical
+    /// cause: wrong encryption key or AES-GCM auth-tag mismatch on an
+    /// encrypted WAL.
+    ///
+    /// **Staging note (T3-E12 Phase 1):** variant declared here for
+    /// follower-refresh blocked-state classification. Phase 2's
+    /// codec-aware reader is the first producer; Phase 1 only stages
+    /// the enum arm and the `lifecycle.rs` follower-refresh match.
     CodecDecode {
         /// Byte offset within the segment where decode failed.
         offset: usize,
@@ -854,14 +860,16 @@ pub enum WalReaderError {
 
     /// Codec decode failure at a specific record offset.
     ///
-    /// Returned from the reader when the installed `StorageCodec`'s
-    /// `decode()` rejects a record's codec-encoded payload. Strict
-    /// callers see this error directly; the engine's lossy open branch
-    /// catches it and routes to the whole-DB wipe-and-reopen path
-    /// (T3-E10) with typed `LossyErrorKind::CodecDecode`. Lossy mode
-    /// does NOT scan forward past a codec-decode failure — byte-aligned
-    /// codec scan is unreliable for encrypted payloads (see T3-E12
-    /// tracking doc §D5 for rationale).
+    /// **Staging note (T3-E12 Phase 1):** this variant is declared
+    /// for Phase 1's cross-crate scaffolding. No production code
+    /// path in `WalReader` constructs it yet. Phase 2 will wire the
+    /// codec-aware reader; at that point strict callers will see
+    /// this error directly, and the engine's lossy open branch will
+    /// catch it and route to the whole-DB wipe-and-reopen path
+    /// (T3-E10) with typed `LossyErrorKind::CodecDecode`. Lossy
+    /// mode will NOT scan forward past a codec-decode failure —
+    /// byte-aligned codec scan is unreliable for encrypted payloads
+    /// (see T3-E12 tracking doc §D5 for rationale).
     #[error("Codec decode failure at byte offset {offset}: {detail}")]
     CodecDecode {
         /// Byte offset within the segment where decode failed.
@@ -873,17 +881,25 @@ pub enum WalReaderError {
     /// Legacy WAL segment format — rejected hard, even under lossy
     /// recovery.
     ///
-    /// Produced when a segment's `SEGMENT_FORMAT_VERSION` is older than
-    /// this build supports. The operator must delete the `wal/`
-    /// subdirectory manually before reopening. Lossy recovery does not
-    /// bypass format incompatibility (T3-E12 tracking doc §D6).
-    #[error("Legacy WAL segment: found version {found_version}, build requires {required_version}. {hint}")]
+    /// **Staging note (T3-E12 Phase 1):** variant declared here;
+    /// Phase 2's segment-header reader is the first producer. When a
+    /// segment's `SEGMENT_FORMAT_VERSION` is older than this build
+    /// supports, the reader will surface this error unconditionally
+    /// (strict and lossy paths alike) and the engine will re-raise
+    /// it — the operator must delete the `wal/` subdirectory
+    /// manually before reopening. Lossy recovery does not bypass
+    /// format incompatibility (T3-E12 tracking doc §D6).
+    ///
+    /// The `hint` carries the full operator-facing message including
+    /// the required version number, so the rendered diagnostic stays
+    /// stable across future `SEGMENT_FORMAT_VERSION` bumps without a
+    /// separate `required_version` struct field.
+    #[error("Legacy WAL segment format: found version {found_version}. {hint}")]
     LegacyFormat {
         /// Segment format version read from disk.
         found_version: u32,
-        /// Segment format version this build expects.
-        required_version: u32,
-        /// Operator remediation hint — filesystem action only.
+        /// Operator remediation hint — filesystem action only. The
+        /// hint is expected to include the required version number.
         hint: String,
     },
 }

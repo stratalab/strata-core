@@ -588,7 +588,10 @@ fn test_lossy_error_kind_mapping_covers_relevant_variants() {
     // is ever misordered — the intent is that this arm is unreachable
     // in normal operation, not that LegacyFormat is a lossy-recoverable
     // class.
-    let legacy = StrataError::legacy_format(2, 3, "Delete wal/ and reopen.");
+    let legacy = StrataError::legacy_format(
+        2,
+        "this build requires version 3. Delete the `wal/` subdirectory and reopen.",
+    );
     assert_eq!(
         LossyErrorKind::from_strata_error(&legacy),
         LossyErrorKind::Other

@@ -831,9 +831,14 @@ pub enum StrataError {
     ///
     /// A codec (`aes-gcm-256`, ...) failed to decode a stored artifact.
     /// Typical triggers: wrong encryption key, AES-GCM auth-tag
-    /// mismatch, truncated codec payload. Surfaced from the WAL read
-    /// path as of T3-E12; see also `LossyErrorKind::CodecDecode` for
-    /// programmatic classification when lossy recovery is active.
+    /// mismatch, truncated codec payload.
+    ///
+    /// **Staging note (T3-E12 Phase 1):** this variant is declared
+    /// here for Phase 1's cross-crate typed-error scaffolding. No
+    /// production code path constructs it yet. Phase 2 will produce
+    /// it from the WAL read path and the recovery coordinator will
+    /// map it to [`LossyErrorKind::CodecDecode`] when
+    /// `allow_lossy_recovery` is active.
     ///
     /// Wire code: `StorageError`
     ///
@@ -842,12 +847,19 @@ pub enum StrataError {
     /// # use strata_core::StrataError;
     /// StrataError::CodecDecode {
     ///     message: "AES-GCM authentication tag mismatch".to_string(),
+    ///     source: None,
     /// };
     /// ```
     #[error("codec decode failure: {message}")]
     CodecDecode {
         /// Description of the decode failure.
         message: String,
+        /// Optional underlying error. Phase 2 wires the installed
+        /// `StorageCodec`'s `CodecError` through this field so
+        /// callers can downcast to the codec-specific cause without
+        /// string-matching `message`.
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
     /// Legacy WAL segment format
@@ -857,6 +869,15 @@ pub enum StrataError {
     /// The operator must delete the `wal/` subdirectory under the
     /// database path and reopen with a fresh state.
     ///
+    /// **Staging note (T3-E12 Phase 1):** the variant is declared
+    /// here; Phase 2's segment-header reader is the first producer.
+    /// The `hint` string carries the full operator-facing message
+    /// (typical content: *"this build requires segment format
+    /// version 3. Delete the `wal/` subdirectory and reopen."*)
+    /// so the error's `Display` rendering stays stable across
+    /// future `SEGMENT_FORMAT_VERSION` bumps without needing a
+    /// dedicated `required_version` struct field.
+    ///
     /// Wire code: `StorageError`
     ///
     /// ## Example
@@ -864,18 +885,17 @@ pub enum StrataError {
     /// # use strata_core::StrataError;
     /// StrataError::LegacyFormat {
     ///     found_version: 2,
-    ///     required_version: 3,
-    ///     hint: "Delete the `wal/` subdirectory and reopen.".to_string(),
+    ///     hint: "this build requires version 3. Delete the `wal/` subdirectory and reopen.".to_string(),
     /// };
     /// ```
-    #[error("legacy WAL segment: found version {found_version}, build requires {required_version}. {hint}")]
+    #[error("legacy WAL segment format: found version {found_version}. {hint}")]
     LegacyFormat {
         /// Segment format version read from disk.
         found_version: u32,
-        /// Segment format version this build expects.
-        required_version: u32,
         /// Operator remediation hint — filesystem action only (no CLI
-        /// tool is promised by this error variant).
+        /// tool is promised by this error variant). The hint is
+        /// expected to include the required version number so the
+        /// rendered diagnostic is self-contained.
         hint: String,
     },
 
@@ -1279,11 +1299,14 @@ impl StrataError {
         }
     }
 
-    /// Create a CodecDecode error
+    /// Create a CodecDecode error without a typed source.
     ///
     /// Use this when an installed `StorageCodec` returned an error
     /// decoding a stored artifact — typically a wrong encryption key
     /// or AES-GCM authentication-tag failure on the WAL read path.
+    /// Callers that have access to the underlying `CodecError` should
+    /// prefer [`StrataError::codec_decode_with_source`] so
+    /// downstream consumers can downcast on the typed source.
     ///
     /// ## Example
     /// ```no_run
@@ -1293,33 +1316,52 @@ impl StrataError {
     pub fn codec_decode(message: impl Into<String>) -> Self {
         StrataError::CodecDecode {
             message: message.into(),
+            source: None,
+        }
+    }
+
+    /// Create a CodecDecode error with a typed source.
+    ///
+    /// Phase 2 of T3-E12 uses this to wire the installed codec's
+    /// `CodecError` through to the engine boundary for typed
+    /// downcasting on `StrataError::source()`.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// # let io_error = std::io::Error::new(std::io::ErrorKind::Other, "auth tag");
+    /// StrataError::codec_decode_with_source("AES-GCM auth tag mismatch", io_error);
+    /// ```
+    pub fn codec_decode_with_source(
+        message: impl Into<String>,
+        source: impl std::error::Error + Send + Sync + 'static,
+    ) -> Self {
+        StrataError::CodecDecode {
+            message: message.into(),
+            source: Some(Box::new(source)),
         }
     }
 
     /// Create a `LegacyFormat` error.
     ///
-    /// `hint` should name the operator remediation (typically
-    /// `"Delete the `wal/` subdirectory and reopen."`). The constructor
-    /// does not promise any specific remediation — callers own the
-    /// hint wording.
+    /// `hint` should name the operator remediation **and** the
+    /// required segment format version, since the constructor does
+    /// not carry `required_version` as a separate field (the hint is
+    /// the stable diagnostic surface across version bumps). A typical
+    /// hint: *"this build requires version 3. Delete the `wal/`
+    /// subdirectory and reopen."*
     ///
     /// ## Example
     /// ```no_run
     /// # use strata_core::StrataError;
     /// StrataError::legacy_format(
     ///     2,
-    ///     3,
-    ///     "Delete the `wal/` subdirectory and reopen.",
+    ///     "this build requires version 3. Delete the `wal/` subdirectory and reopen.",
     /// );
     /// ```
-    pub fn legacy_format(
-        found_version: u32,
-        required_version: u32,
-        hint: impl Into<String>,
-    ) -> Self {
+    pub fn legacy_format(found_version: u32, hint: impl Into<String>) -> Self {
         StrataError::LegacyFormat {
             found_version,
-            required_version,
             hint: hint.into(),
         }
     }
@@ -1574,16 +1616,14 @@ impl StrataError {
             StrataError::Corruption { message } => {
                 ErrorDetails::new().with_string("message", message)
             }
-            StrataError::CodecDecode { message } => {
+            StrataError::CodecDecode { message, .. } => {
                 ErrorDetails::new().with_string("message", message)
             }
             StrataError::LegacyFormat {
                 found_version,
-                required_version,
                 hint,
             } => ErrorDetails::new()
-                .with_int("found_version", *found_version as i64)
-                .with_int("required_version", *required_version as i64)
+                .with_int("found_version", i64::from(*found_version))
                 .with_string("hint", hint),
             StrataError::CapacityExceeded {
                 resource,
@@ -2453,42 +2493,79 @@ mod strata_error_tests {
 
         assert!(matches!(
             &e,
-            StrataError::CodecDecode { message } if message == "AES-GCM auth tag mismatch"
+            StrataError::CodecDecode { message, source: None } if message == "AES-GCM auth tag mismatch"
         ));
         assert_eq!(e.code(), ErrorCode::StorageError);
         assert!(e.is_storage_error());
         assert!(e.is_serious());
         assert!(!e.is_retryable());
         assert!(!e.is_resource_error());
+        // No typed source on the plain constructor — callers wire
+        // sources via `codec_decode_with_source` (below).
+        assert!(std::error::Error::source(&e).is_none());
+    }
+
+    #[test]
+    fn test_codec_decode_with_source_constructor() {
+        // Phase 2 of T3-E12 will pass the installed codec's
+        // `CodecError` through the `source` field so downstream
+        // callers can downcast without string-matching `message`.
+        // Use `io::Error` as a stand-in source here so this test
+        // does not take a dependency on `strata-durability`.
+        let io_err = std::io::Error::new(std::io::ErrorKind::InvalidData, "auth tag mismatch");
+        let e = StrataError::codec_decode_with_source("codec rejected payload", io_err);
+
+        assert!(matches!(
+            &e,
+            StrataError::CodecDecode {
+                source: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(e.code(), ErrorCode::StorageError);
+        assert!(e.is_storage_error());
+        assert!(e.is_serious());
+        // Source is wired through `thiserror`'s `#[source]` attribute
+        // and reachable via `std::error::Error::source`.
+        let wired_source =
+            std::error::Error::source(&e).expect("codec_decode_with_source must install a source");
+        assert!(
+            wired_source.to_string().contains("auth tag mismatch"),
+            "source rendering should carry the original io::Error message, got: {wired_source}"
+        );
     }
 
     #[test]
     fn test_legacy_format_constructor() {
-        let e = StrataError::legacy_format(2, 3, "Delete the `wal/` subdirectory and reopen.");
+        let e = StrataError::legacy_format(
+            2,
+            "this build requires version 3. Delete the `wal/` subdirectory and reopen.",
+        );
 
         assert!(matches!(
             &e,
             StrataError::LegacyFormat {
                 found_version: 2,
-                required_version: 3,
                 hint,
-            } if hint == "Delete the `wal/` subdirectory and reopen."
+            } if hint.contains("requires version 3") && hint.contains("wal/")
         ));
         assert_eq!(e.code(), ErrorCode::StorageError);
         assert!(e.is_storage_error());
         assert!(e.is_serious());
         assert!(!e.is_retryable());
         assert!(!e.is_resource_error());
-        // Version fields render in the Display impl so operators see
-        // the exact version mismatch in logs without structured access.
+        // `found_version` renders in the Display impl so operators see
+        // the actual on-disk version in logs without structured access.
+        // The required version is expected to be in the hint, not a
+        // separate struct field — see the variant rustdoc.
         let rendered = e.to_string();
         assert!(
             rendered.contains("found version 2"),
             "Display should include found_version, got: {rendered}"
         );
         assert!(
-            rendered.contains("requires 3"),
-            "Display should include required_version, got: {rendered}"
+            rendered.contains("requires version 3"),
+            "hint (which carries the required version) should render, got: {rendered}"
         );
     }
 
