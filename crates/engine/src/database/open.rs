@@ -1009,6 +1009,7 @@ impl Database {
                         version_reached_before_failure =
                             report.version_reached_before_failure.as_u64(),
                         discarded_on_wipe = report.discarded_on_wipe,
+                        follower = false,
                         "Lossy recovery fallback — discarding pre-failure state"
                     );
                     warn!(

@@ -1417,3 +1417,74 @@ fn test_admin_skip_rejects_after_shutdown() {
         "admin_skip on a non-blocked follower must not introduce a blocked_at state"
     );
 }
+
+/// T3-E10: a follower opening a corrupt WAL with `allow_lossy_recovery=true`
+/// falls back to an empty database and populates the same
+/// `LossyRecoveryReport` surface as the primary path.
+///
+/// Primary-path coverage lives in `crates/engine/src/database/tests/open.rs`.
+/// The follower lossy branch is a distinct code path in `open.rs` with its
+/// own `on_record` wrapper and lossy report construction; a regression that
+/// breaks one without the other would slip past the primary-only test.
+#[test]
+fn test_follower_lossy_recovery_populates_report() {
+    use strata_engine::StrataConfig;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    // Primary writes one valid record + flushes so the WAL has persisted
+    // data for the follower to discover.
+    {
+        let primary =
+            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+                .unwrap();
+        primary_put(&primary, branch, "k1", "v1");
+        primary.flush().unwrap();
+        primary.shutdown().unwrap(); // release WAL lock + registry slot
+    }
+
+    // Append garbage to the WAL as a fresh segment so the reader fails
+    // mid-recovery. Using a new segment file avoids racing with any
+    // partial-tail truncation on the existing active segment.
+    let wal_dir = dir.path().join("wal");
+    let corrupt_segment = wal_dir.join("wal-000099.seg");
+    std::fs::write(&corrupt_segment, b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER").unwrap();
+
+    // Strict follower open must refuse.
+    let strict =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem));
+    assert!(
+        strict.is_err(),
+        "strict follower open must refuse a corrupt WAL, got {:?}",
+        strict.as_ref().map(|_| "Ok(Database)")
+    );
+
+    // Lossy follower open succeeds with an empty state + populated report.
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_config(cfg),
+    )
+    .expect("lossy follower open must succeed");
+
+    let report = follower
+        .last_lossy_recovery_report()
+        .expect("follower lossy fallback must populate LossyRecoveryReport");
+    assert!(
+        report.discarded_on_wipe,
+        "whole-database wipe is the pinned contract on the follower path too"
+    );
+    assert!(
+        !report.error.is_empty(),
+        "report.error must render the coordinator error"
+    );
+    // records_applied_before_failure may be 0 or positive depending on where
+    // in the replay the corrupt segment lands; assert only on the invariants
+    // the follower path shares with the primary (Some vs None; wipe flag; error
+    // non-empty). Exact counts are covered by the primary-path test.
+}
