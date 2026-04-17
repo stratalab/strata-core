@@ -2493,4 +2493,287 @@ mod tests {
             "without a later valid anchor, exact skip must fail closed"
         );
     }
+
+    // ========================================================================
+    // T3-E12 Phase 2 — envelope-parse + codec-error taxonomy
+    // ========================================================================
+
+    /// Test-only codec that always fails on `decode` while letting
+    /// `encode` pass through. Used to exercise the codec-decode-error
+    /// branch of the reader without pulling in `AesGcmCodec` + env
+    /// vars. `codec_id()` returns a unique name so MANIFEST checks
+    /// don't confuse it with identity.
+    struct AlwaysFailDecodeCodec;
+
+    impl StorageCodec for AlwaysFailDecodeCodec {
+        fn encode(&self, data: &[u8]) -> Vec<u8> {
+            data.to_vec()
+        }
+
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::codec::CodecError> {
+            Err(crate::codec::CodecError::decode(
+                "test codec forcibly fails decode",
+                "always-fail-decode",
+                data.len(),
+            ))
+        }
+
+        fn codec_id(&self) -> &str {
+            "always-fail-decode"
+        }
+
+        fn clone_box(&self) -> Box<dyn StorageCodec> {
+            Box::new(AlwaysFailDecodeCodec)
+        }
+    }
+
+    /// Read the outer envelope + inner record offsets for a segment
+    /// populated by `write_records`. The first record starts
+    /// immediately after the 36-byte v2/v3 segment header.
+    const V3_HEADER_SIZE: usize = 36;
+
+    /// T3-E12 §D4: an outer_len_crc mismatch is corruption, NOT a
+    /// partial-record tail. Strict mode must error immediately; lossy
+    /// mode can scan forward but must NOT demote the failure to
+    /// `Ok(stop_reason = PartialRecord)`.
+    #[test]
+    fn test_outer_len_crc_mismatch_is_corruption_not_partial_tail() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 12]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Flip a byte inside the outer_len_crc field of the first
+        // record. The envelope layout at [segment_header][record_1]
+        // is: 36 bytes segment header, then 4 bytes outer_len, then
+        // 4 bytes outer_len_crc. Byte 36+4+1 = 41 lands in outer_len_crc.
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        {
+            let mut data = std::fs::read(&seg_path).unwrap();
+            data[V3_HEADER_SIZE + 4 + 1] ^= 0xFF;
+            std::fs::write(&seg_path, &data).unwrap();
+        }
+
+        // Strict: expect CorruptedSegment error (NOT a PartialRecord
+        // stop reason buried in an Ok result).
+        let strict = WalReader::new();
+        match strict.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CorruptedSegment { records_before, .. }) => {
+                assert_eq!(
+                    records_before, 0,
+                    "first-record envelope CRC mismatch must fail at offset 0"
+                );
+            }
+            other => panic!(
+                "outer_len_crc mismatch in strict mode must return CorruptedSegment; got {:?}",
+                other.map(|t| format!("Ok({} records, stop_reason={:?})", t.0.len(), t.2,)),
+            ),
+        }
+    }
+
+    /// T3-E12 §D4: in lossy mode, outer_len_crc mismatch on a
+    /// middle record triggers scan-forward to the next valid envelope.
+    /// Records before the corruption are preserved; records after
+    /// the next valid envelope are recovered.
+    #[test]
+    fn test_outer_len_crc_mismatch_lossy_scans_forward() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        let records: Vec<_> = (1..=4)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 12]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        // Compute byte offset of record 2's envelope (first byte of
+        // its outer_len_crc) on disk. Each on-disk record is
+        // [8-byte envelope] + record_bytes. Record 2 starts at
+        // hdr + envelope_of_record_1 + record_bytes[0].
+        let record_bytes: Vec<Vec<u8>> = records.iter().map(|r| r.to_bytes()).collect();
+        let record_2_envelope_start =
+            V3_HEADER_SIZE + super::WAL_RECORD_ENVELOPE_OVERHEAD + record_bytes[0].len();
+        let crc_byte_offset = record_2_envelope_start + 4 + 1; // first byte of outer_len_crc
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        {
+            let mut data = std::fs::read(&seg_path).unwrap();
+            data[crc_byte_offset] ^= 0xFF;
+            std::fs::write(&seg_path, &data).unwrap();
+        }
+
+        let lossy = WalReader::new().with_lossy_recovery();
+        let (records_recovered, _, stop_reason, skipped) = lossy.read_segment(&wal_dir, 1).unwrap();
+        assert!(
+            skipped > 0,
+            "lossy scan-forward must count the skipped corrupt envelope"
+        );
+        let txn_ids: Vec<u64> = records_recovered
+            .iter()
+            .map(|r| r.txn_id.as_u64())
+            .collect();
+        assert!(
+            txn_ids.contains(&1),
+            "record 1 (before corruption) must survive; got {txn_ids:?}"
+        );
+        assert!(
+            txn_ids.contains(&3) || txn_ids.contains(&4),
+            "at least one post-corruption record must be recovered via scan-forward; got {txn_ids:?}"
+        );
+        // Sanity: the stop reason reflects either end-of-data (full
+        // recovery past corruption) or checksum mismatch (scan window
+        // exhausted before the tail). Either is acceptable — the
+        // point of this test is that lossy does NOT bail as
+        // PartialRecord on an outer_len_crc mismatch.
+        assert!(
+            !matches!(stop_reason, ReadStopReason::PartialRecord),
+            "outer_len_crc mismatch must NOT demote to PartialRecord; got {stop_reason:?}"
+        );
+    }
+
+    /// T3-E12 §D5: codec decode failures ALWAYS return
+    /// `Err(WalReaderError::CodecDecode)` — in BOTH strict and lossy
+    /// modes. No demotion to `Ok(stop_reason)` is permitted, because
+    /// the coordinator iterates records via callback and ignores
+    /// `ReadStopReason` — an `Ok(stop_reason=CodecDecode)` would
+    /// silently short-read the segment and skip the T3-E10 wipe.
+    #[test]
+    fn test_codec_decode_failure_never_partial_tail() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+
+        // Write via identity codec so the on-disk envelope is valid
+        // and the outer_len_crc passes. Then read with a codec that
+        // refuses every payload — simulates the AES-GCM wrong-key
+        // path at the reader layer, without needing env-var setup.
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![i as u8; 16]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        let strict = WalReader::new().with_codec(Box::new(AlwaysFailDecodeCodec));
+        match strict.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CodecDecode { detail, .. }) => {
+                assert!(
+                    detail.contains("forcibly fails decode")
+                        || detail.contains("always-fail-decode"),
+                    "CodecDecode detail must carry the codec's error message; got {detail:?}"
+                );
+            }
+            other => panic!(
+                "strict codec-decode failure must return Err(CodecDecode); got {:?}",
+                other.map(|t| format!("Ok({} records)", t.0.len()))
+            ),
+        }
+
+        let lossy = WalReader::new()
+            .with_lossy_recovery()
+            .with_codec(Box::new(AlwaysFailDecodeCodec));
+        match lossy.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::CodecDecode { .. }) => { /* pass — lossy does NOT demote */ }
+            other => panic!(
+                "lossy codec-decode failure must ALSO return Err(CodecDecode) \
+                 — no demotion to Ok(stop_reason); got {:?}",
+                other.map(|t| format!("Ok({} records, stop_reason={:?})", t.0.len(), t.2,)),
+            ),
+        }
+    }
+
+    /// T3-E12 §D8: a pre-v3 segment header surfaces as the typed
+    /// `WalReaderError::LegacyFormat`, not a stringified `IoError`.
+    /// This is the load-bearing piece that lets the engine's lossy
+    /// branch pattern-match on the error variant and skip the wipe
+    /// (§D6 hard-fail).
+    #[test]
+    fn test_legacy_segment_format_typed_error() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        // Hand-craft a v2 segment header directly (36 bytes: magic +
+        // version=2 + segment_number + database_uuid + header CRC
+        // over the first 32 bytes).
+        let mut header = [0u8; 36];
+        header[0..4].copy_from_slice(b"STRA");
+        header[4..8].copy_from_slice(&2u32.to_le_bytes());
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..32].copy_from_slice(&[0xAA; 16]);
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&header[0..32]);
+            h.finalize()
+        };
+        header[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        std::fs::write(&seg_path, &header).unwrap();
+
+        let reader = WalReader::new();
+        match reader.read_segment(&wal_dir, 1) {
+            Err(WalReaderError::LegacyFormat {
+                found_version,
+                hint,
+            }) => {
+                assert_eq!(found_version, 2);
+                assert!(
+                    hint.contains("requires segment format version"),
+                    "hint must name the required version, got: {hint}"
+                );
+                assert!(
+                    hint.contains("wal/"),
+                    "hint must name the wal/ directory, got: {hint}"
+                );
+            }
+            Ok(_) => panic!("pre-v3 segment open must return an error, not succeed",),
+            Err(other) => panic!(
+                "pre-v3 segment must surface as WalReaderError::LegacyFormat, got: {other:?}",
+            ),
+        }
+    }
+
+    /// T3-E12 §D8: `WalSegment::open_read` returns the TYPED
+    /// `WalSegmentError::Header(SegmentHeaderError::LegacyFormat)`,
+    /// NOT a stringified `io::Error`. This is the layer below
+    /// `test_legacy_segment_format_typed_error` — it proves the typed
+    /// error survives from segment-file open all the way up to
+    /// `WalReader::read_segment` without collapsing into an
+    /// `io::ErrorKind::InvalidData` string.
+    #[test]
+    fn test_wal_segment_open_read_typed_propagation() {
+        use crate::format::{SegmentHeaderError, WalSegmentError};
+
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        std::fs::create_dir_all(&wal_dir).unwrap();
+
+        let mut header = [0u8; 36];
+        header[0..4].copy_from_slice(b"STRA");
+        header[4..8].copy_from_slice(&2u32.to_le_bytes()); // legacy v2
+        header[8..16].copy_from_slice(&1u64.to_le_bytes());
+        header[16..32].copy_from_slice(&[0xCC; 16]);
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&header[0..32]);
+            h.finalize()
+        };
+        header[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        let seg_path = WalSegment::segment_path(&wal_dir, 1);
+        std::fs::write(&seg_path, &header).unwrap();
+
+        match WalSegment::open_read(&wal_dir, 1) {
+            Err(WalSegmentError::Header(SegmentHeaderError::LegacyFormat {
+                found_version,
+                ..
+            })) => {
+                assert_eq!(found_version, 2);
+            }
+            Err(other) => panic!(
+                "pre-v3 segment open_read must produce typed Header(LegacyFormat), got: {other:?}"
+            ),
+            Ok(_) => panic!("pre-v3 segment open_read must refuse, not succeed"),
+        }
+    }
 }
