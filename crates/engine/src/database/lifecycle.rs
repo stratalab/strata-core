@@ -550,7 +550,8 @@ impl Database {
                     ),
                 },
                 strata_durability::wal::ReadStopReason::ChecksumMismatch { .. }
-                | strata_durability::wal::ReadStopReason::ParseError { .. } => {
+                | strata_durability::wal::ReadStopReason::ParseError { .. }
+                | strata_durability::wal::ReadStopReason::CodecDecode { .. } => {
                     BlockReason::Decode { message: detail }
                 }
                 strata_durability::wal::ReadStopReason::EndOfData

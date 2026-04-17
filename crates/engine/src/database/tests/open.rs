@@ -560,9 +560,9 @@ fn test_lossy_error_kind_mapping_covers_relevant_variants() {
     // Direct unit test of `LossyErrorKind::from_strata_error` — the
     // integration tests above only exercise the Corruption path because
     // real lossy failures come from WAL corruption. This test locks in
-    // the mapping for Storage and Other so a future refactor that
-    // regresses `from_strata_error` fails without needing a new failure
-    // fixture.
+    // the mapping for Storage, CodecDecode, LegacyFormat, and Other so a
+    // future refactor that regresses `from_strata_error` fails without
+    // needing a new failure fixture.
     use crate::LossyErrorKind;
     let corruption = StrataError::corruption("bad CRC".to_string());
     assert_eq!(
@@ -574,7 +574,26 @@ fn test_lossy_error_kind_mapping_covers_relevant_variants() {
         LossyErrorKind::from_strata_error(&storage),
         LossyErrorKind::Storage
     );
-    // Anything that isn't Corruption or Storage falls through to Other.
+    // T3-E12 Phase 1: codec-decode failures classify as their own
+    // category (key-rotation / key-recovery dispatch) rather than
+    // `Storage`.
+    let codec_decode = StrataError::codec_decode("AES-GCM auth tag mismatch");
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&codec_decode),
+        LossyErrorKind::CodecDecode
+    );
+    // T3-E12 §D6: `LegacyFormat` is a hard-fail error that never
+    // reaches the lossy-report slot at runtime. The mapping falls
+    // through to `Other` as a safe default in case the open.rs guard
+    // is ever misordered — the intent is that this arm is unreachable
+    // in normal operation, not that LegacyFormat is a lossy-recoverable
+    // class.
+    let legacy = StrataError::legacy_format(2, 3, "Delete wal/ and reopen.");
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&legacy),
+        LossyErrorKind::Other
+    );
+    // Anything that isn't one of the above falls through to Other.
     let internal = StrataError::internal("unexpected".to_string());
     assert_eq!(
         LossyErrorKind::from_strata_error(&internal),

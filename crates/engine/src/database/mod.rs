@@ -259,7 +259,24 @@ pub enum LossyErrorKind {
     /// currently classify here (not under `Corruption`) because
     /// `RecoveryCoordinator` wraps WAL read failures with
     /// `StrataError::storage(...)`.
+    ///
+    /// As of T3-E12, WAL codec-decode failures (wrong key / AES-GCM
+    /// auth-tag mismatch on encrypted WAL) reclassify as
+    /// [`LossyErrorKind::CodecDecode`] instead of `Storage` — the
+    /// split lets operators dispatch key-rotation / key-recovery
+    /// paths programmatically without string-matching the `error`
+    /// field.
     Storage,
+    /// Codec decode failure during WAL read — typically a wrong
+    /// encryption key or corrupt AES-GCM auth tag on the encrypted
+    /// WAL payload. Distinct from `Storage` so operators can dispatch
+    /// key-rotation / key-recovery paths programmatically. Mapped
+    /// from `StrataError::CodecDecode` by the recovery coordinator
+    /// in T3-E12 Phase 2. Pre-T3-E12 code classified this scenario
+    /// under `Storage`; callers that matched on `Storage` to handle
+    /// "the WAL bytes on disk look wrong" now need to also handle
+    /// `CodecDecode` for the codec-specific subset.
+    CodecDecode,
     /// The coordinator returned an error whose variant does not map to
     /// the categories above. The `error` string on the report remains
     /// the canonical diagnostic.
@@ -275,6 +292,13 @@ impl LossyErrorKind {
         match err {
             StrataError::Corruption { .. } => LossyErrorKind::Corruption,
             StrataError::Storage { .. } => LossyErrorKind::Storage,
+            StrataError::CodecDecode { .. } => LossyErrorKind::CodecDecode,
+            // `StrataError::LegacyFormat` deliberately has no explicit arm:
+            // per the T3-E12 tracking doc §D6, legacy format is a hard-fail
+            // error that never reaches the lossy-report slot (the engine's
+            // open.rs lossy branches guard against it before constructing a
+            // report). The `_ => Other` fallback classifies it safely if
+            // that guard is ever misordered.
             _ => LossyErrorKind::Other,
         }
     }
@@ -285,6 +309,7 @@ impl std::fmt::Display for LossyErrorKind {
         match self {
             LossyErrorKind::Corruption => write!(f, "corruption"),
             LossyErrorKind::Storage => write!(f, "storage"),
+            LossyErrorKind::CodecDecode => write!(f, "codec_decode"),
             LossyErrorKind::Other => write!(f, "other"),
         }
     }
