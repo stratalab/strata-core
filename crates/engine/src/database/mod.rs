@@ -523,6 +523,17 @@ pub struct Database {
     /// Using parking_lot::Mutex to avoid lock poisoning on panic
     wal_writer: Option<Arc<ParkingMutex<WalWriter>>>,
 
+    /// Storage codec installed for this database's WAL read paths
+    /// (Site 2: follower refresh in [`Database::refresh`]). Populated
+    /// unconditionally at open time: primary and cache use
+    /// `get_codec(&cfg.storage.codec)`; follower with MANIFEST uses the
+    /// MANIFEST-persisted codec; follower without MANIFEST falls back
+    /// to `get_codec(&cfg.storage.codec)` (T3-E12 §D7). Without this
+    /// field, encrypted followers would recover at open but then fail
+    /// every subsequent refresh with a codec-decode error on the first
+    /// new record.
+    wal_codec: Box<dyn strata_durability::codec::StorageCodec>,
+
     /// Persistence mode (ephemeral vs disk-backed)
     persistence_mode: PersistenceMode,
 

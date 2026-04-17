@@ -256,8 +256,11 @@ impl WalWriter {
 
         // Build initial segment metadata
         let current_segment_meta = if is_reopened {
-            // Reopening an existing segment — rebuild metadata from its records
-            Self::rebuild_meta_for_segment(&wal_dir, segment_number)
+            // Reopening an existing segment — rebuild metadata from its records.
+            // T3-E12 §D3 Site 4: pass the codec so the reader decodes the
+            // on-disk payloads for encrypted WALs; without this, rebuild
+            // on an encrypted segment would fail and `.meta` would be empty.
+            Self::rebuild_meta_for_segment(codec.as_ref(), &wal_dir, segment_number)
         } else {
             Some(SegmentMeta::new_empty(segment_number))
         };
@@ -828,8 +831,21 @@ impl WalWriter {
     ///
     /// Returns `Some(meta)` on success, or `Some(empty_meta)` if the segment
     /// cannot be read (best-effort).
-    fn rebuild_meta_for_segment(wal_dir: &Path, segment_number: u64) -> Option<SegmentMeta> {
-        let reader = WalReader::new();
+    ///
+    /// Takes `codec` as a parameter (rather than reading `self.codec`)
+    /// so it can be called from both `WalWriter::new` — which runs
+    /// BEFORE `self` exists — and from in-place segment-rotation paths
+    /// that have a live `self`. T3-E12 §D3 Site 4: threading the codec
+    /// here is load-bearing because on an encrypted WAL, reopening
+    /// without a codec would fail to rebuild `.meta` sidecars, and
+    /// follower-segment-skip via meta and compaction watermark-coverage
+    /// would then use stale / empty metadata.
+    fn rebuild_meta_for_segment(
+        codec: &dyn StorageCodec,
+        wal_dir: &Path,
+        segment_number: u64,
+    ) -> Option<SegmentMeta> {
+        let reader = WalReader::new().with_codec(crate::codec::clone_codec(codec));
         match reader.read_segment(wal_dir, segment_number) {
             Ok((records, _, _, _)) => {
                 let mut meta = SegmentMeta::new_empty(segment_number);
@@ -897,8 +913,10 @@ impl WalWriter {
                     Ok(seg) => {
                         self.segment = Some(seg);
                         self.current_segment_number = num;
+                        // T3-E12 §D3 Site 4: pass `self.codec` so rebuild
+                        // works on encrypted WALs.
                         self.current_segment_meta =
-                            Self::rebuild_meta_for_segment(&self.wal_dir, num);
+                            Self::rebuild_meta_for_segment(self.codec.as_ref(), &self.wal_dir, num);
                     }
                     Err(e) => {
                         warn!(target: "strata::wal", segment = num, error = %e,

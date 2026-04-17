@@ -467,10 +467,30 @@ impl Database {
             ([0u8; 16], None)
         };
 
+        // T3-E12 §D7: follower-without-MANIFEST falls back to the
+        // follower's own config codec so encrypted WAL-only recovery
+        // works. Primary and cache paths already use `cfg.storage.codec`
+        // directly; the follower now matches that when MANIFEST is
+        // absent. `follower_codec` (Some/None) stays meaningful for
+        // snapshot-install wiring below, which is only wired with a
+        // MANIFEST-persisted codec — without MANIFEST we don't know
+        // which snapshot schema to install against.
+        let wal_codec: Box<dyn strata_durability::codec::StorageCodec> = match &follower_codec {
+            Some(c) => clone_codec(c.as_ref()),
+            None => strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+                StrataError::internal(format!(
+                    "follower (MANIFEST absent) could not initialize config codec '{}': {}",
+                    cfg.storage.codec, e
+                ))
+            })?,
+        };
+
         // Drive recovery via the callback-driven API. Snapshot install is
-        // wired only when a codec was resolved above; otherwise the
-        // coordinator falls back to WAL-only, matching the pre-Chunk-3
-        // follower behavior.
+        // wired only when a codec was resolved from the MANIFEST above;
+        // otherwise the coordinator falls back to WAL-only, matching
+        // the pre-Chunk-3 follower behavior. The WAL reader, however,
+        // is always codec-aware via `wal_codec` so encrypted WAL-only
+        // recovery works even without a MANIFEST (T3-E12 §D7).
         let mut storage = SegmentedStore::with_dir(
             layout.segments_dir().to_path_buf(),
             cfg.storage.effective_write_buffer_size(),
@@ -478,9 +498,7 @@ impl Database {
         let mut recovery =
             RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
                 .with_lossy_recovery(cfg.allow_lossy_recovery);
-        if let Some(ref c) = follower_codec {
-            recovery = recovery.with_codec(clone_codec(c.as_ref()));
-        }
+        recovery = recovery.with_codec(clone_codec(wal_codec.as_ref()));
         let install_codec_for_follower = follower_codec.as_ref().map(|c| clone_codec(c.as_ref()));
 
         // Count records applied before any coordinator error so the lossy
@@ -651,6 +669,7 @@ impl Database {
             database_uuid,
             storage,
             wal_writer: None, // No WAL writer — read-only
+            wal_codec,
 
             persistence_mode: PersistenceMode::Disk,
             coordinator,
@@ -1071,6 +1090,14 @@ impl Database {
             "Recovery complete"
         );
 
+        // T3-E12 §D3 Site 2: clone codec BEFORE the move into WalWriter
+        // so the Database can cache its own copy for the follower-
+        // refresh path (via `Database.wal_codec`). Primary doesn't
+        // typically call `refresh()`, but we populate uniformly across
+        // all three constructors so the field type stays
+        // `Box<dyn StorageCodec>` rather than `Option`.
+        let wal_codec_for_db = clone_codec(codec.as_ref());
+
         // Open segmented WAL writer for appending
         let wal_writer = WalWriter::new(
             wal_dir.clone(),
@@ -1141,6 +1168,7 @@ impl Database {
             database_uuid,
             storage,
             wal_writer: Some(Arc::clone(&wal_arc)),
+            wal_codec: wal_codec_for_db,
             persistence_mode: PersistenceMode::Disk,
             coordinator,
             durability_mode: parking_lot::RwLock::new(durability_mode),
@@ -1284,11 +1312,25 @@ impl Database {
         let coordinator = TransactionCoordinator::new(CommitVersion(1));
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
 
+        // T3-E12 §D7: cache-mode databases still populate `wal_codec`
+        // uniformly — the field is always `Box<dyn StorageCodec>`, not
+        // `Option`, so the type signature does not leak "this is a
+        // cache database" into the field type. `IdentityCodec` is the
+        // typical resolution here and is effectively a no-op at runtime.
+        let wal_codec_for_cache =
+            strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+                StrataError::internal(format!(
+                    "cache database could not initialize codec '{}': {}",
+                    cfg.storage.codec, e
+                ))
+            })?;
+
         let db = Arc::new(Self {
             data_dir: PathBuf::new(), // Empty path for ephemeral
             database_uuid: [0u8; 16], // No persistence — UUID not needed
             storage: Arc::new(storage),
             wal_writer: None, // No WAL for ephemeral
+            wal_codec: wal_codec_for_cache,
 
             persistence_mode: PersistenceMode::Ephemeral,
             coordinator,

@@ -314,10 +314,18 @@ impl WalReader {
     }
 
     /// Scan forward within `buffer` looking for the next offset at which
-    /// a valid outer envelope header parses. Used by lossy recovery to
+    /// a valid outer envelope header parses AND whose codec-decoded
+    /// payload parses as a valid `WalRecord`. Used by lossy recovery to
     /// resume reading past a corrupted region. Returns the byte offset
     /// of the next readable envelope, or `None` if none is found within
     /// the scan window.
+    ///
+    /// Codec-awareness matters: on encrypted WAL (`aes-gcm-256`) the
+    /// payload bytes between the envelope header and the next envelope
+    /// are ciphertext. Without routing candidate payloads through
+    /// `decode_payload` first, the inner-record sanity check would
+    /// always fail on encrypted databases and lossy scan-forward would
+    /// never resume past corruption.
     fn scan_forward_for_envelope(&self, buffer: &[u8], scan_start: usize) -> Option<usize> {
         let scan_end = scan_start
             .saturating_add(MAX_RECOVERY_SCAN_WINDOW)
@@ -332,14 +340,20 @@ impl WalReader {
                     .and_then(|p| p.checked_add(outer_len as usize));
                 match payload_end {
                     Some(end) if end <= buffer.len() => {
-                        // Sanity-check: the claimed payload must parse
-                        // as a valid WalRecord. Without this, a random
-                        // 4-byte value could match its own CRC by luck
-                        // once in ~4 billion attempts and we would
-                        // resume at garbage.
                         let payload = &buffer[candidate + WAL_RECORD_ENVELOPE_OVERHEAD..end];
-                        if WalRecord::from_bytes(payload).is_ok() {
-                            return Some(candidate);
+                        // Decode through the installed codec first
+                        // (identity = pass-through). If decode fails,
+                        // this candidate cannot be the start of a valid
+                        // record — keep scanning.
+                        if let Ok(decoded) = self.decode_payload(payload, candidate as u64) {
+                            // Sanity-check: the decoded payload must
+                            // parse as a valid WalRecord. Without this,
+                            // a random 4-byte value could match its own
+                            // CRC by luck once in ~4 billion attempts
+                            // and we would resume at garbage.
+                            if WalRecord::from_bytes(&decoded).is_ok() {
+                                return Some(candidate);
+                            }
                         }
                     }
                     _ => continue,
@@ -722,9 +736,14 @@ impl WalReader {
     }
 
     /// Scan forward for the next byte offset at which a valid v3 outer
-    /// envelope parses AND whose payload parses as a valid `WalRecord`.
-    /// Returns the scan offset and the decoded record. Used by
-    /// follower-refresh lossy-scan paths.
+    /// envelope parses AND whose codec-decoded payload parses as a
+    /// valid `WalRecord`. Returns the scan offset and the decoded
+    /// record. Used by follower-refresh lossy-scan paths.
+    ///
+    /// Codec-awareness matters for the same reason as
+    /// [`scan_forward_for_envelope`]: encrypted WAL payloads must be
+    /// decoded before inner-record validation, otherwise follower
+    /// exact-skip resume would fail every lookup on encrypted DBs.
     fn scan_forward_to_valid_envelope(
         &self,
         buffer: &[u8],
@@ -741,8 +760,10 @@ impl WalReader {
                 if let Some(end) = payload_end {
                     if end <= buffer.len() {
                         let payload = &buffer[candidate + WAL_RECORD_ENVELOPE_OVERHEAD..end];
-                        if let Ok((record, _)) = WalRecord::from_bytes(payload) {
-                            return Some((candidate, record));
+                        if let Ok(decoded) = self.decode_payload(payload, candidate as u64) {
+                            if let Ok((record, _)) = WalRecord::from_bytes(&decoded) {
+                                return Some((candidate, record));
+                            }
                         }
                     }
                 }
