@@ -543,7 +543,16 @@ impl ContiguousWatermark {
             });
         }
         let current = self.applied.load(Ordering::SeqCst);
-        let expected = TxnId(current + 1);
+        // `checked_add` guards the practically-impossible case of applied ==
+        // u64::MAX. In release builds plain `+` would wrap silently; in debug
+        // it panics. Treat overflow as a non-contiguous advance so the error
+        // shape stays uniform.
+        let expected = current.checked_add(1).map(TxnId).ok_or({
+            AdvanceError::NonContiguous {
+                expected: TxnId(u64::MAX),
+                provided: txn_id,
+            }
+        })?;
         if txn_id != expected {
             return Err(AdvanceError::NonContiguous {
                 expected,
@@ -557,10 +566,13 @@ impl ContiguousWatermark {
             Ordering::SeqCst,
         ) {
             Ok(_) => Ok(()),
-            Err(actual) => Err(AdvanceError::NonContiguous {
-                expected: TxnId(actual + 1),
-                provided: txn_id,
-            }),
+            Err(actual) => {
+                let expected = actual.checked_add(1).map(TxnId).unwrap_or(TxnId(u64::MAX));
+                Err(AdvanceError::NonContiguous {
+                    expected,
+                    provided: txn_id,
+                })
+            }
         }
     }
 
@@ -872,6 +884,20 @@ mod watermark_contiguity_tests {
         ));
         assert_eq!(wm.applied(), TxnId(99));
         assert!(wm.blocked().is_some());
+    }
+
+    #[test]
+    fn try_advance_handles_applied_at_u64_max_without_panicking() {
+        // Defensive: u64::MAX is practically unreachable (18 quintillion txns)
+        // but debug builds would panic on `current + 1` without `checked_add`.
+        // A caller at saturation must see a NonContiguous error, not a panic.
+        let wm = ContiguousWatermark::new(TxnId(u64::MAX));
+        let err = wm
+            .try_advance(TxnId(0))
+            .expect_err("advance at saturation must fail without panic");
+        assert!(matches!(err, AdvanceError::NonContiguous { .. }));
+        // Watermark remains at saturation.
+        assert_eq!(wm.applied(), TxnId(u64::MAX));
     }
 
     #[test]

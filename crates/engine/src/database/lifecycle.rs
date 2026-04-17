@@ -189,9 +189,15 @@ impl Database {
     ///
     /// # Errors
     ///
-    /// Returns `UnblockError::Mismatch` if `txn_id` doesn't match the blocked
-    /// transaction, `UnblockError::NotBlocked` if the follower isn't blocked,
-    /// or `UnblockError::NotFollower` if this isn't a follower database.
+    /// - `UnblockError::NotFollower` — this isn't a follower database.
+    /// - `UnblockError::DatabaseClosed` — the database has been shut down;
+    ///   admin skip is rejected to prevent a stale handle from mutating a
+    ///   fresh instance's recovery artifacts after a reopen.
+    /// - `UnblockError::Mismatch` — `txn_id` doesn't match the blocked
+    ///   transaction's id.
+    /// - `UnblockError::NotBlocked` — the follower isn't currently blocked.
+    /// - `UnblockError::NotSkippable` — the blocked record's block reason
+    ///   flags it as unsafe to skip.
     pub fn admin_skip_blocked_record(
         &self,
         txn_id: TxnId,

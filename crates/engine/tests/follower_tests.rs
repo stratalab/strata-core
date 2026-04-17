@@ -1389,6 +1389,8 @@ fn test_admin_skip_rejects_after_shutdown() {
         Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
             .unwrap();
 
+    let status_before = follower.follower_status();
+
     follower.shutdown().unwrap();
 
     let result = follower.admin_skip_blocked_record(TxnId(1), "post-shutdown attempt");
@@ -1396,5 +1398,22 @@ fn test_admin_skip_rejects_after_shutdown() {
         matches!(result, Err(UnblockError::DatabaseClosed)),
         "expected DatabaseClosed after shutdown, got {:?}",
         result
+    );
+
+    // Defence-in-depth: the guard must reject *before* any state mutates. If
+    // a future refactor inadvertently reorders guards past the audit / watermark
+    // writes, this assertion catches it.
+    let status_after = follower.follower_status();
+    assert_eq!(
+        status_after.received_watermark, status_before.received_watermark,
+        "received_watermark must not drift after a rejected admin_skip"
+    );
+    assert_eq!(
+        status_after.applied_watermark, status_before.applied_watermark,
+        "applied_watermark must not drift after a rejected admin_skip"
+    );
+    assert!(
+        status_after.blocked_at.is_none(),
+        "admin_skip on a non-blocked follower must not introduce a blocked_at state"
     );
 }
