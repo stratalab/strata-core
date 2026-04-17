@@ -291,6 +291,98 @@ fn test_registry_reuse_rejects_different_background_threads() {
     OPEN_DATABASES.lock().clear();
 }
 
+/// Hardware profiling must stay ephemeral: the first open on any host
+/// must not persist profile-rewritten values into `strata.toml`. If it
+/// did, moving the database directory to a different host class would
+/// inherit the first host's tuning instead of re-profiling.
+///
+/// The test compares the pre-profile default config to the post-profile
+/// version. If they match on this host (e.g. a Desktop box where the
+/// profile is a no-op), we skip — there is nothing to leak. Otherwise we
+/// open a database with defaults, shut down, parse `strata.toml` from
+/// disk, and assert it still shows the pre-profile values.
+#[test]
+#[serial(open_databases)]
+fn test_profiled_defaults_are_not_persisted_to_strata_toml() {
+    OPEN_DATABASES.lock().clear();
+
+    let baseline = StorageConfig::default();
+    let profiled = {
+        let mut cfg = StrataConfig::default();
+        crate::apply_hardware_profile_if_defaults(&mut cfg);
+        cfg.storage
+    };
+
+    // Skip on hosts where the profile happens to be a no-op for the
+    // fields we check. Otherwise the test is a tautology here.
+    if baseline.background_threads == profiled.background_threads
+        && baseline.write_buffer_size == profiled.write_buffer_size
+        && baseline.target_file_size == profiled.target_file_size
+        && baseline.level_base_bytes == profiled.level_base_bytes
+    {
+        return;
+    }
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+
+    let persisted = StrataConfig::from_file(&db_path.join("strata.toml"))
+        .expect("strata.toml must be written on first open");
+
+    // Every field the profile could have rewritten must still match the
+    // pre-profile baseline on disk, even if the profile diverges from it.
+    assert_eq!(
+        persisted.storage.background_threads, baseline.background_threads,
+        "background_threads must not be profiled onto disk"
+    );
+    assert_eq!(
+        persisted.storage.write_buffer_size, baseline.write_buffer_size,
+        "write_buffer_size must not be profiled onto disk"
+    );
+    assert_eq!(
+        persisted.storage.target_file_size, baseline.target_file_size,
+        "target_file_size must not be profiled onto disk"
+    );
+    assert_eq!(
+        persisted.storage.level_base_bytes, baseline.level_base_bytes,
+        "level_base_bytes must not be profiled onto disk"
+    );
+
+    // But the running runtime did see the profile — the signature shows
+    // the post-profile thread count.
+    // (db was moved into shutdown; open a fresh handle to confirm.)
+    let db2 = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+    assert_eq!(
+        db2.runtime_signature()
+            .expect("signature must exist")
+            .background_threads,
+        profiled.background_threads,
+        "the live signature must still reflect the profiled value"
+    );
+    db2.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
 /// Review-found bug (post-commit 5e432cce): the signature must reflect
 /// the *post-hardware-profile* value of `background_threads`, not the
 /// pre-profile default. If the signature captures the pre-profile value,

@@ -1337,20 +1337,33 @@ impl Database {
             } else {
                 config::StrataConfig::default()
             };
-            // Apply the hardware profile BEFORE extracting signature fields:
-            // `background_threads` and other profile-rewritten fields must
-            // reflect the post-profile values, otherwise a later opener that
-            // explicitly requests the actual effective thread count would
-            // produce a false IncompatibleReuse mismatch.
-            let mut sanitized = sanitize_config(base);
-            crate::database::profile::apply_hardware_profile_if_defaults(&mut sanitized);
-            sanitized
+            sanitize_config(base)
         };
 
-        let durability_mode = resolved_cfg.durability_mode()?;
-        let codec_name = resolved_cfg.storage.codec.clone();
-        let background_threads = resolved_cfg.storage.background_threads;
-        let allow_lossy_recovery = resolved_cfg.allow_lossy_recovery;
+        // Hardware profiling is ephemeral — it rewrites fields left at their
+        // baseline defaults for a given host profile (embedded / desktop /
+        // server) without persisting the result. `resolved_cfg` above stays
+        // un-profiled so the `strata.toml` write below preserves the
+        // "profile per host at open time" contract: moving the database
+        // directory to a different host class must re-profile, not inherit
+        // the first host's values.
+        //
+        // For signature construction, however, the post-profile values are
+        // what the running runtime actually uses, so we extract signature
+        // fields from a profiled copy. `acquire_primary_db` applies the
+        // profile internally (idempotent for fields already at non-baseline
+        // values), so the running database ends up sized with the same
+        // post-profile values the signature advertises.
+        let profiled_for_signature = {
+            let mut c = resolved_cfg.clone();
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut c);
+            c
+        };
+
+        let durability_mode = profiled_for_signature.durability_mode()?;
+        let codec_name = profiled_for_signature.storage.codec.clone();
+        let background_threads = profiled_for_signature.storage.background_threads;
+        let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
@@ -1431,16 +1444,23 @@ impl Database {
             } else {
                 config::StrataConfig::default()
             };
-            // Apply the hardware profile BEFORE extracting signature fields
-            // (see `open_runtime_primary` for the rationale).
-            let mut sanitized = sanitize_config(base);
-            crate::database::profile::apply_hardware_profile_if_defaults(&mut sanitized);
-            sanitized
+            sanitize_config(base)
         };
-        let durability_mode = cfg.durability_mode()?;
-        let codec_name = cfg.storage.codec.clone();
-        let background_threads = cfg.storage.background_threads;
-        let allow_lossy_recovery = cfg.allow_lossy_recovery;
+
+        // Profile into a separate copy for signature extraction so the
+        // un-profiled `cfg` is what the caller sees if it ever gets
+        // persisted. Hardware profiling is ephemeral — see
+        // `open_runtime_primary` for the full rationale.
+        let profiled_for_signature = {
+            let mut c = cfg.clone();
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut c);
+            c
+        };
+
+        let durability_mode = profiled_for_signature.durability_mode()?;
+        let codec_name = profiled_for_signature.storage.codec.clone();
+        let background_threads = profiled_for_signature.storage.background_threads;
+        let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
 
         // Validate the configured codec exists before touching any state.
         // Mirrors the primary path so a follower with an unknown codec is
