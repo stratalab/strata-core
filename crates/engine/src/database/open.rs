@@ -447,6 +447,15 @@ impl Database {
                 ))
             })?;
             let manifest = m.manifest();
+            if manifest.codec_id != cfg.storage.codec {
+                return Err(StrataError::incompatible_reuse(format!(
+                    "codec mismatch: follower target at {} was created with '{}' but config specifies '{}'. \
+                     A follower must be configured with the same codec as the primary database.",
+                    canonical_path.display(),
+                    manifest.codec_id,
+                    cfg.storage.codec
+                )));
+            }
             let codec = strata_durability::get_codec(&manifest.codec_id).map_err(|e| {
                 StrataError::internal(format!(
                     "follower could not initialize MANIFEST codec '{}': {}",
@@ -877,10 +886,12 @@ impl Database {
                 .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
             let stored_codec = &m.manifest().codec_id;
             if stored_codec != &cfg.storage.codec {
-                return Err(StrataError::internal(format!(
-                    "codec mismatch: database was created with '{}' but config specifies '{}'. \
+                return Err(StrataError::incompatible_reuse(format!(
+                    "codec mismatch: database at {} was created with '{}' but config specifies '{}'. \
                      A database cannot be reopened with a different codec.",
-                    stored_codec, cfg.storage.codec
+                    canonical_path.display(),
+                    stored_codec,
+                    cfg.storage.codec
                 )));
             }
             m.manifest().database_uuid
@@ -1329,8 +1340,30 @@ impl Database {
             sanitize_config(base)
         };
 
-        let durability_mode = resolved_cfg.durability_mode()?;
-        let codec_name = resolved_cfg.storage.codec.clone();
+        // Hardware profiling is ephemeral — it rewrites fields left at their
+        // baseline defaults for a given host profile (embedded / desktop /
+        // server) without persisting the result. `resolved_cfg` above stays
+        // un-profiled so the `strata.toml` write below preserves the
+        // "profile per host at open time" contract: moving the database
+        // directory to a different host class must re-profile, not inherit
+        // the first host's values.
+        //
+        // For signature construction, however, the post-profile values are
+        // what the running runtime actually uses, so we extract signature
+        // fields from a profiled copy. `acquire_primary_db` applies the
+        // profile internally (idempotent for fields already at non-baseline
+        // values), so the running database ends up sized with the same
+        // post-profile values the signature advertises.
+        let profiled_for_signature = {
+            let mut c = resolved_cfg.clone();
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut c);
+            c
+        };
+
+        let durability_mode = profiled_for_signature.durability_mode()?;
+        let codec_name = profiled_for_signature.storage.codec.clone();
+        let background_threads = profiled_for_signature.storage.background_threads;
+        let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
 
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
@@ -1339,6 +1372,8 @@ impl Database {
             durability_mode,
             codec_name.clone(),
             default_branch.clone(),
+            background_threads,
+            allow_lossy_recovery,
         );
 
         match Self::acquire_primary_db(
@@ -1363,6 +1398,8 @@ impl Database {
                     durability_mode,
                     codec_name,
                     effective_default_branch.clone(),
+                    background_threads,
+                    allow_lossy_recovery,
                 );
                 Self::finish_opened_db(db, &canonical_path, move |db| {
                     db.set_runtime_signature(effective_signature);
@@ -1409,8 +1446,44 @@ impl Database {
             };
             sanitize_config(base)
         };
-        let durability_mode = cfg.durability_mode()?;
-        let codec_name = cfg.storage.codec.clone();
+
+        // Profile into a separate copy for signature extraction so the
+        // un-profiled `cfg` is what the caller sees if it ever gets
+        // persisted. Hardware profiling is ephemeral — see
+        // `open_runtime_primary` for the full rationale.
+        let profiled_for_signature = {
+            let mut c = cfg.clone();
+            crate::database::profile::apply_hardware_profile_if_defaults(&mut c);
+            c
+        };
+
+        let durability_mode = profiled_for_signature.durability_mode()?;
+        let codec_name = profiled_for_signature.storage.codec.clone();
+        let background_threads = profiled_for_signature.storage.background_threads;
+        let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
+
+        // Validate the configured codec exists before touching any state.
+        // Mirrors the primary path so a follower with an unknown codec is
+        // rejected consistently — with or without an on-disk MANIFEST.
+        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!(
+                "invalid storage codec '{}': {}",
+                cfg.storage.codec, e
+            ))
+        })?;
+
+        // WAL recovery does not yet support non-identity codecs — the WalReader
+        // parses raw bytes without codec decoding. Follower replay goes through
+        // the same reader, so the same block applies here as on primary.
+        if cfg.storage.codec != "identity" && durability_mode.requires_wal() {
+            return Err(StrataError::internal(format!(
+                "codec '{}' is not yet supported with WAL-based durability (Standard/Always). \
+                 Encryption at rest requires WAL reader codec support (tracked). \
+                 Use durability = \"cache\" for encrypted in-memory databases.",
+                cfg.storage.codec
+            )));
+        }
+
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Follower,
@@ -1418,6 +1491,8 @@ impl Database {
             durability_mode,
             codec_name.clone(),
             default_branch,
+            background_threads,
+            allow_lossy_recovery,
         );
 
         // Create follower database — no registry check, followers are independent
@@ -1450,6 +1525,8 @@ impl Database {
             durability_mode,
             codec_name,
             effective_default_branch,
+            background_threads,
+            allow_lossy_recovery,
         );
 
         db.set_subsystems(subsystems);
@@ -1484,6 +1561,8 @@ impl Database {
         let resolved_cfg = db.config();
         let durability_mode = resolved_cfg.durability_mode()?;
         let codec_name = resolved_cfg.storage.codec.clone();
+        let background_threads = resolved_cfg.storage.background_threads;
+        let allow_lossy_recovery = resolved_cfg.allow_lossy_recovery;
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Cache,
@@ -1491,6 +1570,8 @@ impl Database {
             durability_mode,
             codec_name,
             default_branch.clone(),
+            background_threads,
+            allow_lossy_recovery,
         );
 
         // Run subsystem recovery (no-op for cache, but maintains consistency)

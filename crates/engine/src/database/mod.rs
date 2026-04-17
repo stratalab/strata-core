@@ -1605,12 +1605,53 @@ impl Database {
     /// closure returns, the updated config is written to `strata.toml` for
     /// disk-backed databases, and storage/coordinator/cache parameters are
     /// applied to the live database immediately.
+    ///
+    /// Mutations to fields classified as *open-time-only* in
+    /// `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`
+    /// are rejected with [`StrataError::InvalidInput`] — those fields are
+    /// baked into the live runtime at construction and cannot be changed
+    /// without reopening. This mirrors the executor config handler's
+    /// `OPEN_TIME_ONLY_KEYS` guard and closes the direct-Rust-caller
+    /// bypass it would otherwise leave.
     pub fn update_config<F: FnOnce(&mut StrataConfig)>(&self, f: F) -> StrataResult<()> {
         // Writes `strata.toml` and applies live storage/coordinator/cache
         // changes — reject while shutdown is in progress or has completed.
         self.check_not_shutting_down()?;
         let mut guard = self.config.write();
-        f(&mut guard);
+
+        // Validate on a candidate copy so rejection leaves the live
+        // config untouched — partial mutation would violate the contract.
+        let mut candidate = guard.clone();
+        f(&mut candidate);
+
+        let violation: Option<&'static str> = if candidate.storage.codec != guard.storage.codec {
+            Some("storage.codec")
+        } else if candidate.storage.background_threads != guard.storage.background_threads {
+            Some("storage.background_threads")
+        } else if candidate.allow_lossy_recovery != guard.allow_lossy_recovery {
+            Some("allow_lossy_recovery")
+        } else if candidate.durability != guard.durability {
+            // `durability` is live-safe only through `set_durability_mode`,
+            // which reconfigures the WAL writer, restarts the flush thread,
+            // updates the runtime signature, and persists the string form
+            // atomically. Mutating the config string via `update_config`
+            // would leave the live runtime out of sync with `db.config()`
+            // and `strata.toml` — route the caller to the canonical path.
+            Some("durability (use Database::set_durability_mode)")
+        } else {
+            None
+        };
+
+        if let Some(field) = violation {
+            return Err(StrataError::invalid_input(format!(
+                "update_config cannot mutate open-time-only field '{field}' at runtime; \
+                 reopen the database with the desired value. See \
+                 docs/design/architecture-cleanup/durability-recovery-config-matrix.md"
+            )));
+        }
+
+        *guard = candidate;
+
         // Persist to strata.toml for disk-backed databases
         if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
             let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
@@ -1716,6 +1757,29 @@ impl Database {
 
         *self.durability_mode.write() = mode;
         self.update_runtime_signature_durability(mode);
+
+        // Keep `self.config.durability` and the persisted `strata.toml`
+        // in sync with the runtime switch. Without this, a caller that
+        // reads `db.config().durability` after a successful mode change
+        // would see the stale pre-switch value, and a later reopen would
+        // read the stale string off disk. Done AFTER the runtime change
+        // succeeds so a failed WAL reconfigure cannot leave disk ahead
+        // of the live state.
+        let mode_str = match mode {
+            DurabilityMode::Always => "always",
+            DurabilityMode::Standard { .. } => "standard",
+            DurabilityMode::Cache => unreachable!("Cache transitions rejected above"),
+        };
+        {
+            let mut cfg = self.config.write();
+            cfg.durability = mode_str.to_string();
+            if self.persistence_mode == PersistenceMode::Disk
+                && !self.data_dir.as_os_str().is_empty()
+            {
+                let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
+                cfg.write_to_file(&config_path)?;
+            }
+        }
 
         Ok(())
     }

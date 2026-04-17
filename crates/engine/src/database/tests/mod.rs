@@ -14,8 +14,8 @@ pub use serial_test::serial;
 pub use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub use std::sync::Arc;
 pub use std::time::Duration;
-pub use strata_concurrency::__internal as concurrency_test_hooks;
 pub use strata_concurrency::TransactionPayload;
+pub use strata_concurrency::__internal as concurrency_test_hooks;
 pub use strata_core::id::{CommitVersion, TxnId};
 pub use strata_core::types::{Key, Namespace, TypeTag};
 pub use strata_core::value::Value;
@@ -36,6 +36,7 @@ pub use tempfile::TempDir;
 use super::test_hooks;
 
 mod checkpoint;
+mod codec;
 mod contention;
 mod open;
 mod regressions;

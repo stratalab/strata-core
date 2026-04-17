@@ -262,28 +262,26 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
         })?;
     }
 
-    // Durability: update config + apply live to WAL writer
+    // Durability: one canonical path — `Database::set_durability_mode`
+    // handles the WAL switch, signature update, config-string update, and
+    // strata.toml persist atomically. A prior version of this handler also
+    // called `update_config`; that was redundant after the engine-side
+    // persist landed, and is now rejected by `update_config` itself.
     if key_lower == "durability" {
         let v = value.trim().to_ascii_lowercase();
-        let effective = v.clone();
-        // Parse the target mode
         let mode = match v.as_str() {
             "standard" => crate::DurabilityMode::standard_default(),
             "always" => crate::DurabilityMode::Always,
             _ => unreachable!(), // validated above
         };
-        p.db.update_config(|cfg| {
-            cfg.durability = v;
-        })
-        .map_err(crate::Error::from)?;
-        // Apply live to the WAL writer (no-op on ephemeral/cache databases)
         if let Err(e) = p.db.set_durability_mode(mode) {
-            // Ephemeral databases have no WAL — durability change is config-only
-            tracing::debug!(target: "strata::config", error = %e, "Durability mode not applied to WAL (ephemeral database)");
+            // Ephemeral databases have no WAL — surface the engine's
+            // rejection rather than pretending the change took effect.
+            return Err(crate::Error::from(e));
         }
         return Ok(Output::ConfigSetResult {
             key: key_lower,
-            new_value: effective,
+            new_value: v,
         });
     }
 

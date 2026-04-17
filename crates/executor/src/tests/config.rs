@@ -839,7 +839,15 @@ fn configure_get_durability_default_is_standard() {
 
 #[test]
 fn configure_set_durability_valid_modes() {
-    let executor = create_test_executor();
+    // Durability switches only apply to disk-backed databases — cache
+    // databases have no WAL and surface `InvalidInput` for any runtime
+    // durability change. Use a tempdir-backed primary so the standard ↔
+    // always round-trip actually exercises the WAL reconfigure path.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spec = strata_engine::database::spec::OpenSpec::primary(tmp.path())
+        .with_subsystem(strata_engine::search::SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
+    let executor = Executor::new(db);
 
     // Only standard and always are valid at runtime; cache is open-time only.
     for mode in ["standard", "always"] {
@@ -866,6 +874,45 @@ fn configure_set_durability_valid_modes() {
             mode
         );
     }
+}
+
+#[test]
+fn configure_set_durability_on_cache_database_returns_error() {
+    // Cache databases have no WAL. A prior version of this handler silently
+    // swallowed the `set_durability_mode` error and persisted the config
+    // string anyway — leaving `db.config().durability` claiming "always"
+    // while the live runtime stayed in Cache. The handler now surfaces the
+    // engine's rejection.
+    //
+    // Note: `OpenSpec::cache()` does not set `cfg.durability = "cache"` —
+    // cache mode lives on `DatabaseMode`, while the config string stays
+    // at its default ("standard"). The post-rejection value below reflects
+    // that default, not "cache".
+    let executor = create_test_executor();
+    let before = executor
+        .execute(Command::ConfigureGetKey {
+            key: "durability".into(),
+        })
+        .unwrap();
+
+    let result = executor.execute(Command::ConfigureSet {
+        key: "durability".into(),
+        value: "always".into(),
+    });
+    assert!(
+        result.is_err(),
+        "durability change on a cache database must not succeed"
+    );
+
+    let after = executor
+        .execute(Command::ConfigureGetKey {
+            key: "durability".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        after, before,
+        "rejected set must leave db.config().durability untouched"
+    );
 }
 
 #[test]
@@ -900,7 +947,13 @@ fn configure_set_durability_invalid_rejected() {
 
 #[test]
 fn configure_set_durability_case_insensitive() {
-    let executor = create_test_executor();
+    // Like `configure_set_durability_valid_modes`, the actual durability
+    // switch requires a disk-backed database.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spec = strata_engine::database::spec::OpenSpec::primary(tmp.path())
+        .with_subsystem(strata_engine::search::SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
+    let executor = Executor::new(db);
 
     let result = executor.execute(Command::ConfigureSet {
         key: "durability".into(),
@@ -1477,7 +1530,14 @@ fn configure_set_result_matches_get_key() {
 
 #[test]
 fn configure_set_result_durability() {
-    let executor = create_test_executor();
+    // Disk-backed executor — the live durability switch requires a WAL,
+    // so the cache-mode helper can't exercise this path. See
+    // `configure_set_durability_valid_modes` for the rationale.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let spec = strata_engine::database::spec::OpenSpec::primary(tmp.path())
+        .with_subsystem(strata_engine::search::SearchSubsystem);
+    let db = Database::open_runtime(spec).unwrap();
+    let executor = Executor::new(db);
 
     let result = executor
         .execute(Command::ConfigureSet {
