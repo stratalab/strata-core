@@ -1683,3 +1683,154 @@ fn test_follower_without_manifest_uses_config_codec() {
 
     follower.shutdown().unwrap();
 }
+
+/// T3-E11 / DR-011 regression guard for the follower open/refresh policy matrix.
+///
+/// The mixed policy is documented in
+/// `docs/design/architecture-cleanup/durability-recovery-scope.md` §"Follower
+/// open/refresh policy matrix":
+///
+/// * follower *open* honors `allow_lossy_recovery` (whole-DB wipe-and-reopen,
+///   surfaced via `LossyRecoveryReport`)
+/// * follower *refresh* is strict-only (`RefreshOutcome::Stuck` on apply
+///   failure, operator-gated unblock via `admin_skip_blocked_record`)
+///
+/// Both behaviors already ship — the refresh-side strictness came from Phase
+/// DR-3 (`ContiguousWatermark`) and the T3-E9 `AdvanceError::NonContiguous`
+/// guard; the open-side lossy path came from T3-E10. DR-011's "consistent
+/// documented policy matrix" acceptance clause was the one piece still
+/// missing. This test locks the matrix in code so a future change that
+/// widens `allow_lossy_recovery` to the refresh loop fails CI.
+#[test]
+fn follower_lossy_open_and_strict_refresh_coexist() {
+    use strata_engine::StrataConfig;
+
+    // -- Row 1: follower open honors allow_lossy_recovery ------------------
+    // Mirrors the T3-E10 lossy-open regression (`test_follower_lossy_recovery_populates_report`)
+    // so this test does not regress if the T3-E10 test is renamed or gated.
+    {
+        let dir = tempdir().unwrap();
+        let branch = BranchId::default();
+
+        {
+            let primary = Database::open_runtime(
+                OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem),
+            )
+            .unwrap();
+            primary_put(&primary, branch, "pre-corruption", "v1");
+            primary.flush().unwrap();
+            primary.shutdown().unwrap();
+        }
+
+        let corrupt_segment = dir.path().join("wal").join("wal-000099.seg");
+        std::fs::write(&corrupt_segment, b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER").unwrap();
+
+        // The strict path (no allow_lossy_recovery) must refuse — this is the
+        // negative side of the open row; if it passed, the distinction between
+        // strict and lossy open would be vacuous.
+        let strict =
+            Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem));
+        assert!(
+            strict.is_err(),
+            "strict follower open must refuse a corrupt WAL"
+        );
+
+        let lossy_cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let lossy_follower = Database::open_runtime(
+            OpenSpec::follower(dir.path())
+                .with_subsystem(SearchSubsystem)
+                .with_config(lossy_cfg),
+        )
+        .expect("lossy follower open must succeed against a corrupt WAL");
+
+        let report = lossy_follower.last_lossy_recovery_report().expect(
+            "follower open must populate LossyRecoveryReport when allow_lossy_recovery=true",
+        );
+        assert!(
+            report.discarded_on_wipe,
+            "whole-DB wipe-and-reopen is the pinned contract"
+        );
+        assert!(!report.error.is_empty());
+    }
+
+    // -- Row 2: follower refresh is strict even with allow_lossy_recovery=true
+    //
+    // If the refresh path incorrectly widened `allow_lossy_recovery` to mean
+    // "auto-skip apply failures," the assertions below would fail: refresh
+    // would silently advance the applied watermark and the `"blocked"` record
+    // would become visible without operator action.
+    {
+        let dir = tempdir().unwrap();
+        let branch = BranchId::default();
+        let fail_once = Arc::new(AtomicBool::new(true));
+
+        let primary = Database::open_runtime(
+            OpenSpec::primary(dir.path())
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+        )
+        .unwrap();
+        primary_put(&primary, branch, "base", "v1");
+        primary.flush().unwrap();
+
+        let lossy_cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let follower = Database::open_runtime(
+            OpenSpec::follower(dir.path())
+                .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone()))
+                .with_config(lossy_cfg),
+        )
+        .unwrap();
+        // The open-row fallback did NOT fire on this follower — its WAL is
+        // clean. Assert the slot is None so the cross-row isolation is pinned:
+        // a lossy config alone must not produce a report.
+        assert!(
+            follower.last_lossy_recovery_report().is_none(),
+            "a clean lossy follower open must not populate LossyRecoveryReport"
+        );
+
+        primary_put(&primary, branch, "blocked", "v2");
+        primary.flush().unwrap();
+
+        let outcome = follower.refresh();
+        let blocked_txn = match outcome {
+            strata_engine::RefreshOutcome::Stuck { blocked_at, .. } => blocked_at.txn_id,
+            other => panic!(
+                "follower refresh must be strict (return Stuck) regardless of \
+                 allow_lossy_recovery; a silent skip here means the policy \
+                 matrix has regressed. Got {:?}",
+                other
+            ),
+        };
+
+        let blocked = follower.follower_status();
+        assert!(
+            blocked.is_blocked(),
+            "refresh must leave the follower blocked, not silently advanced"
+        );
+        assert_eq!(
+            read_kv(&follower, branch, "blocked"),
+            None,
+            "the failed record must remain invisible — refresh does not skip on allow_lossy_recovery"
+        );
+
+        // `admin_skip_blocked_record` is the only documented unblock path.
+        // Exercising it proves the refresh row's "operator-gated unblock"
+        // mechanism is the one the matrix names; a future change that adds a
+        // second path would violate CLAUDE.md §2 "one canonical path".
+        follower
+            .admin_skip_blocked_record(blocked_txn, "T3-E11 policy matrix: operator unblocks")
+            .expect("admin_skip_blocked_record is the matrix-documented unblock");
+
+        assert_eq!(
+            read_kv(&follower, branch, "blocked").as_deref(),
+            Some("v2"),
+            "post-skip record becomes visible, confirming refresh honored the \
+             skip rather than auto-advancing earlier"
+        );
+    }
+}
