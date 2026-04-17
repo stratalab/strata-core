@@ -52,7 +52,7 @@ The classification is load-bearing in three places:
 | `openai_api_key` | non-durability | no | — |
 | `google_api_key` | non-durability | no | — |
 | `storage` | (nested — see below) | — | — |
-| `allow_lossy_recovery` | open-time-only | yes (`CompatibilitySignature.allow_lossy_recovery`; also hashed into `open_config_fingerprint`) | rejected at runtime via `OPEN_TIME_ONLY_KEYS` |
+| `allow_lossy_recovery` | open-time-only | yes (`CompatibilitySignature.allow_lossy_recovery`; also hashed into `open_config_fingerprint`) | rejected at runtime via `OPEN_TIME_ONLY_KEYS`. When `true`, any recovery error triggers a whole-database wipe-and-reopen; the fallback is observable via `Database::last_lossy_recovery_report()` (`Option<LossyRecoveryReport>`) and tracing target `strata::recovery::lossy` (see DR-011 and D-DR-9 in `durability-recovery-scope.md`). |
 | `telemetry` | non-durability | no | — |
 | `default_vector_dtype` | non-durability | no | — |
 

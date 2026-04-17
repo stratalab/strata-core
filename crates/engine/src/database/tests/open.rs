@@ -437,4 +437,147 @@ fn test_lossy_recovery_discards_valid_data_before_corruption() {
     );
     // Only system branch init transactions present (user data was discarded)
     assert!(db.storage().current_version() <= CommitVersion(3));
+
+    // T3-E10: lossy fallback must be observable. The report must carry the
+    // count of records applied before the coordinator errored and the
+    // storage version reached, so operators can distinguish "empty because
+    // lossy wipe" from "empty because genuinely empty".
+    let report = db
+        .last_lossy_recovery_report()
+        .expect("lossy fallback must populate LossyRecoveryReport");
+    assert!(
+        report.records_applied_before_failure >= 1,
+        "at least one valid record was applied before the corrupt segment; \
+         got records_applied_before_failure = {}",
+        report.records_applied_before_failure
+    );
+    assert!(
+        report.discarded_on_wipe,
+        "whole-database wipe is the current pinned contract"
+    );
+    assert!(
+        !report.error.is_empty(),
+        "report.error must render the coordinator error, got empty string"
+    );
+    assert!(
+        report.version_reached_before_failure > CommitVersion::ZERO,
+        "storage version should have advanced past zero before the wipe, got {}",
+        report.version_reached_before_failure.as_u64()
+    );
+    // WAL-level corruption currently surfaces as `StrataError::Storage`
+    // (the coordinator wraps WAL read failures with
+    // `StrataError::storage(...)`), so `LossyErrorKind` classifies this
+    // scenario under `Storage`. Lock this in so a future refactor that
+    // regresses the mapping — or that reclassifies WAL corruption
+    // upstream — trips the test and forces a conscious doc/enum update.
+    use crate::LossyErrorKind;
+    assert_eq!(
+        report.error_kind,
+        LossyErrorKind::Storage,
+        "WAL read failure must classify as Storage per current upstream \
+         wrapping, got {:?}",
+        report.error_kind
+    );
+}
+
+#[test]
+fn test_non_lossy_recovery_has_no_report() {
+    // A healthy, strict open leaves the lossy-report slot at `None`.
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let wal_dir = db_path.join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    write_wal_txn(
+        &wal_dir,
+        1,
+        branch_id,
+        vec![(Key::new_kv(ns.clone(), "k"), Value::Bytes(b"v".to_vec()))],
+        vec![],
+        1,
+    );
+
+    let db = Database::open(&db_path).unwrap();
+    assert!(
+        db.last_lossy_recovery_report().is_none(),
+        "strict open must not populate a lossy-recovery report"
+    );
+
+    // Cache databases never perform recovery — also `None`.
+    let cache = Database::cache().unwrap();
+    assert!(cache.last_lossy_recovery_report().is_none());
+}
+
+#[test]
+fn test_lossy_recovery_report_on_immediate_failure() {
+    // When recovery errors before any record is applied, the report must
+    // still populate with zero counters — differentiating "lossy fired but
+    // nothing was in-flight" from "lossy did not fire".
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    // Write a single corrupt segment with no preceding valid records. The
+    // coordinator will error on the first read attempt; `on_record` never
+    // fires, so records_applied_before_failure must be zero.
+    let wal_dir = db_path.join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    std::fs::write(
+        wal_dir.join("wal-000001.seg"),
+        b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER",
+    )
+    .unwrap();
+
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let db = Database::open_with_config(&db_path, cfg).unwrap();
+
+    let report = db
+        .last_lossy_recovery_report()
+        .expect("lossy fallback must populate LossyRecoveryReport even on immediate failure");
+    assert_eq!(
+        report.records_applied_before_failure, 0,
+        "no records should have been applied before the immediate failure"
+    );
+    assert_eq!(
+        report.version_reached_before_failure,
+        CommitVersion::ZERO,
+        "storage version must stay at zero when no records applied"
+    );
+    assert!(report.discarded_on_wipe);
+    assert!(!report.error.is_empty());
+    // See note in the sibling `_discards_valid_data_before_corruption` test:
+    // WAL-level garbage surfaces as `StrataError::Storage`.
+    use crate::LossyErrorKind;
+    assert_eq!(report.error_kind, LossyErrorKind::Storage);
+}
+
+#[test]
+fn test_lossy_error_kind_mapping_covers_relevant_variants() {
+    // Direct unit test of `LossyErrorKind::from_strata_error` — the
+    // integration tests above only exercise the Corruption path because
+    // real lossy failures come from WAL corruption. This test locks in
+    // the mapping for Storage and Other so a future refactor that
+    // regresses `from_strata_error` fails without needing a new failure
+    // fixture.
+    use crate::LossyErrorKind;
+    let corruption = StrataError::corruption("bad CRC".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&corruption),
+        LossyErrorKind::Corruption
+    );
+    let storage = StrataError::storage("disk full".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&storage),
+        LossyErrorKind::Storage
+    );
+    // Anything that isn't Corruption or Storage falls through to Other.
+    let internal = StrataError::internal("unexpected".to_string());
+    assert_eq!(
+        LossyErrorKind::from_strata_error(&internal),
+        LossyErrorKind::Other
+    );
 }

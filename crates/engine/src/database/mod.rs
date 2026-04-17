@@ -231,6 +231,109 @@ pub struct DatabaseDiskUsage {
     pub snapshot_bytes: u64,
 }
 
+// ============================================================================
+// Lossy Recovery Report
+// ============================================================================
+
+/// Typed classification of the error that triggered a lossy-recovery
+/// fallback, alongside the human-readable `error` field on
+/// [`LossyRecoveryReport`]. Lets callers dispatch on failure category
+/// without string-matching — per CLAUDE.md Quality Rule §26 ("typed
+/// reason enums replace string-factory error methods").
+///
+/// The mapping is derived from the underlying [`StrataError`] variant
+/// via [`LossyErrorKind::from_strata_error`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LossyErrorKind {
+    /// The MANIFEST, snapshot, or codec validation detected a
+    /// corruption signal that the coordinator surfaced as
+    /// `StrataError::Corruption`. Typical triggers: codec mismatch
+    /// against the MANIFEST record, snapshot magic/CRC failure.
+    Corruption,
+    /// A lower-level storage or WAL read operation failed and the
+    /// coordinator surfaced `StrataError::Storage`. Typical triggers:
+    /// WAL segment garbage / header parse failure, partial record at
+    /// segment tail, storage-apply I/O error, disk full, permission
+    /// denied. Note: WAL-level "the bytes on disk look wrong" errors
+    /// currently classify here (not under `Corruption`) because
+    /// `RecoveryCoordinator` wraps WAL read failures with
+    /// `StrataError::storage(...)`.
+    Storage,
+    /// The coordinator returned an error whose variant does not map to
+    /// the categories above. The `error` string on the report remains
+    /// the canonical diagnostic.
+    Other,
+}
+
+impl LossyErrorKind {
+    /// Classify a [`StrataError`] for the `error_kind` field on
+    /// [`LossyRecoveryReport`]. Unrecognized variants return
+    /// [`LossyErrorKind::Other`] rather than panicking, so the enum
+    /// stays forward-compatible with new [`StrataError`] variants.
+    pub fn from_strata_error(err: &StrataError) -> Self {
+        match err {
+            StrataError::Corruption { .. } => LossyErrorKind::Corruption,
+            StrataError::Storage { .. } => LossyErrorKind::Storage,
+            _ => LossyErrorKind::Other,
+        }
+    }
+}
+
+impl std::fmt::Display for LossyErrorKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LossyErrorKind::Corruption => write!(f, "corruption"),
+            LossyErrorKind::Storage => write!(f, "storage"),
+            LossyErrorKind::Other => write!(f, "other"),
+        }
+    }
+}
+
+/// Report surfaced when `allow_lossy_recovery` triggers a whole-database
+/// wipe-and-reopen fallback during [`Database::open`].
+///
+/// DR-011's acceptance contract requires lossy recovery to be an "explicit
+/// and narrow" escape hatch: opt-in via config, and surfaced in status /
+/// telemetry so operators can tell the difference between "this database
+/// opened empty" and "this database fell back to empty because recovery
+/// failed." This report is the observability surface that satisfies the
+/// second half of that contract.
+///
+/// Retrieve via [`Database::last_lossy_recovery_report`]. The report is
+/// `Some(_)` when this `Database` handle's open hit a recovery error and
+/// lossy mode wiped pre-failure state; strict opens and successful lossy
+/// opens leave it `None`. Each open produces a fresh `Database`, so the
+/// report is per-handle — not a process-global log.
+///
+/// Tracing target `strata::recovery::lossy` emits the same fields at
+/// `warn` level for push-style observability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LossyRecoveryReport {
+    /// Root error (rendered via `Display`) that triggered the lossy fallback.
+    /// Pair with [`Self::error_kind`] for programmatic dispatch.
+    pub error: String,
+    /// Typed classification of the triggering error. Use this for
+    /// dashboard bucketing, alerting rules, and programmatic branches;
+    /// use [`Self::error`] for the human-readable detail.
+    pub error_kind: LossyErrorKind,
+    /// Count of WAL records the engine's `on_record` callback applied
+    /// successfully before the recovery coordinator returned `Err`. These
+    /// records were installed into storage and then discarded when lossy
+    /// mode wiped the segment directory.
+    pub records_applied_before_failure: u64,
+    /// Storage commit version reached before the wipe. `CommitVersion::ZERO`
+    /// when the error occurred before any record was applied (for example,
+    /// snapshot load or codec validation failure).
+    pub version_reached_before_failure: strata_core::id::CommitVersion,
+    /// Whether the lossy path discarded all pre-failure state. Always
+    /// `true` under the current "whole-DB wipe" contract; reserved as a
+    /// field so future narrower modes can set it to `false` without a
+    /// breaking change.
+    pub discarded_on_wipe: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifecycleState {
     Uninitialized,
@@ -409,6 +512,12 @@ pub struct Database {
     /// `resume_wal_writer()` succeeds. Per-database, not process-global.
     /// Arc-wrapped to share with the flush thread (for halt behavior).
     wal_writer_health: Arc<ParkingMutex<WalWriterHealth>>,
+
+    /// Report populated by [`Database::open`] when the lossy recovery
+    /// fallback fired. `None` for strict (default) opens and for lossy
+    /// opens that did not need to fall back. Read via
+    /// [`Database::last_lossy_recovery_report`]. Per-database.
+    last_lossy_recovery_report: Arc<ParkingMutex<Option<LossyRecoveryReport>>>,
 
     /// Type-erased extension storage for primitive state
     ///
@@ -1197,6 +1306,21 @@ impl Database {
     /// ```
     pub fn wal_writer_health(&self) -> WalWriterHealth {
         self.wal_writer_health.lock().clone()
+    }
+
+    /// Returns the report from the most recent lossy-recovery fallback, if
+    /// the current open triggered one.
+    ///
+    /// `Some(LossyRecoveryReport)` when `allow_lossy_recovery = true` was set
+    /// AND recovery errored during this open, causing the engine to wipe the
+    /// segment directory and reopen empty. `None` on strict (default) opens
+    /// and on lossy opens that recovered cleanly.
+    ///
+    /// See [`LossyRecoveryReport`] for field semantics and DR-011 in
+    /// `docs/requirements/durability-recovery-requirements.md` for the
+    /// pinned lossy-recovery contract.
+    pub fn last_lossy_recovery_report(&self) -> Option<LossyRecoveryReport> {
+        self.last_lossy_recovery_report.lock().clone()
     }
 
     /// Attempt to resume a halted WAL writer.

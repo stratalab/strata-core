@@ -139,7 +139,7 @@ architecture scope documents. The current allowed surface:
 
 **Durability:** `WalWriterHealth`, `FollowerStatus`, `ContiguousWatermark`,
 `RefreshOutcome`, `BlockedTxn`, `BlockReason`, `DatabaseLayout`, `RefreshHookError`,
-`AdvanceError`, `UnblockError`
+`AdvanceError`, `UnblockError`, `LossyRecoveryReport`, `LossyErrorKind`
 
 **Product:** `SystemBranchCapability` (`pub` type, `pub(crate)` constructor), `Provider`,
 `ControlRegistry`, `ControlEntry`, `ControlOwner`, `BehaviorClass`, `PersistenceClass`
