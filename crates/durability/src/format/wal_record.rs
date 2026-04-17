@@ -30,6 +30,22 @@
 //! ```
 //!
 //! v1 records (FmtVer=1) lack the LenCRC field and are still readable.
+//!
+//! # Segment format versions
+//!
+//! * v1: original 32-byte header, no CRC. Read-only compatibility path
+//!       (pre-March 2026).
+//! * v2: 36-byte header with CRC32 over the first 32 bytes (March 2026,
+//!       commit 77e9f258 / issue #1577). Records within the segment
+//!       carry their own `LenCRC` for torn-write detection.
+//! * v3: adds a per-record outer envelope `[u32 outer_len][u32 outer_len_crc]`
+//!       wrapping the codec-encoded inner record (T3-E12 Phase 2, this
+//!       build). The envelope is required so codec-encoded payloads
+//!       (AES-GCM, etc.) have discoverable record boundaries — without
+//!       it the reader cannot find the start of the next record on an
+//!       encrypted WAL. Pre-v3 segments are rejected with
+//!       [`SegmentHeaderError::LegacyFormat`]; clean break, no dual-path
+//!       parsing.
 
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
@@ -40,8 +56,17 @@ use strata_core::id::TxnId;
 /// Magic bytes identifying a WAL segment file: "STRA"
 pub const SEGMENT_MAGIC: [u8; 4] = *b"STRA";
 
-/// Current segment format version (v2 adds header CRC)
-pub const SEGMENT_FORMAT_VERSION: u32 = 2;
+/// Current segment format version.
+///
+/// * v2 added the header CRC.
+/// * v3 adds the per-record outer envelope for codec-aware reads.
+pub const SEGMENT_FORMAT_VERSION: u32 = 3;
+
+/// Oldest segment format version this build can read. Segments with a
+/// `format_version` below this value are rejected with
+/// [`SegmentHeaderError::LegacyFormat`] — operators must wipe `wal/`
+/// and reopen.
+pub const MIN_SUPPORTED_SEGMENT_FORMAT_VERSION: u32 = 3;
 
 /// Size of v1 segment header in bytes (without CRC)
 pub const SEGMENT_HEADER_SIZE: usize = 32;
@@ -51,6 +76,94 @@ pub const SEGMENT_HEADER_SIZE_V2: usize = 36;
 
 /// Current WAL record format version (v2 adds length CRC — see issue #1577)
 pub const WAL_RECORD_FORMAT_VERSION: u8 = 2;
+
+/// Typed errors from [`SegmentHeader::from_bytes_slice`].
+///
+/// Segment-header parsing folds minimum-size, magic, version, and CRC
+/// checks into a single call so callers see a typed variant rather than
+/// the `io::Error` / `Option<Self>` collapse the pre-T3-E12 code used.
+/// `LegacyFormat` in particular is the load-bearing diagnostic the
+/// engine's open path routes to [`strata_core::StrataError::LegacyFormat`]
+/// — see the T3-E12 tracking doc §D6 / §D8.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SegmentHeaderError {
+    /// Fewer than `SEGMENT_HEADER_SIZE` bytes available. Typical cause:
+    /// truncated segment file (disk full mid-create).
+    #[error(
+        "segment file too small for header: have {got} bytes, need at least {minimum_required}"
+    )]
+    InsufficientData {
+        /// Bytes actually available.
+        got: usize,
+        /// Minimum header size required (`SEGMENT_HEADER_SIZE`).
+        minimum_required: usize,
+    },
+
+    /// Magic bytes do not match [`SEGMENT_MAGIC`]. Typical cause: file
+    /// is not a Strata WAL segment, or the leading bytes were corrupted.
+    #[error("invalid segment magic bytes")]
+    InvalidMagic,
+
+    /// Segment was written by an older build whose on-disk format this
+    /// build does not support. Operator action is required — the hint
+    /// names the remediation (filesystem only; no CLI tool promised).
+    #[error("legacy segment format: found version {found_version}. {hint}")]
+    LegacyFormat {
+        /// Format version read from disk.
+        found_version: u32,
+        /// Operator remediation hint.
+        hint: String,
+    },
+
+    /// Segment was written by a newer build; this build refuses to
+    /// guess at unfamiliar layouts.
+    #[error("segment format version {found_version} is newer than this build supports (max {max_supported}). Upgrade Strata to read this database.")]
+    FutureFormat {
+        /// Format version read from disk.
+        found_version: u32,
+        /// Highest format version this build understands.
+        max_supported: u32,
+    },
+
+    /// v2+ header CRC mismatch. Header bytes were corrupted in place
+    /// (bit flip, partial overwrite).
+    #[error("segment header CRC mismatch: expected {expected:#010x}, computed {computed:#010x}")]
+    CrcMismatch {
+        /// CRC read from disk.
+        expected: u32,
+        /// CRC recomputed over the header bytes.
+        computed: u32,
+    },
+
+    /// Segment header's `segment_number` disagrees with the file name
+    /// (`wal-NNNNNN.seg`). File was renamed or the header was swapped in.
+    #[error("segment number mismatch: expected {expected}, header reports {got}")]
+    SegmentNumberMismatch {
+        /// Segment number derived from the file name.
+        expected: u64,
+        /// Segment number recorded in the header body.
+        got: u64,
+    },
+}
+
+/// Typed errors from [`WalSegment::open_read`] / [`WalSegment::open_append`].
+///
+/// Separates genuine I/O failures (disk full, permission denied) from
+/// header-level failures (`Header(SegmentHeaderError::LegacyFormat)`,
+/// etc.) so the reader layer can propagate typed `WalReaderError`
+/// variants — T3-E12 §D8.
+#[non_exhaustive]
+#[derive(Debug, thiserror::Error)]
+pub enum WalSegmentError {
+    /// Genuine filesystem-layer error (open failed, read failed, etc.).
+    #[error("WAL segment I/O error: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// Header-level failure surfaced from [`SegmentHeader::from_bytes_slice`].
+    #[error("WAL segment header error: {0}")]
+    Header(#[from] SegmentHeaderError),
+}
 
 /// WAL segment header (32 bytes for v1, 36 bytes for v2).
 ///
@@ -116,69 +229,100 @@ impl SegmentHeader {
         bytes
     }
 
-    /// Deserialize header from a byte slice.
+    /// Deserialize and validate a segment header from a byte slice.
     ///
-    /// Accepts both v1 (32-byte) and v2 (36-byte) headers.
-    /// For v2, validates the CRC; for v1, CRC is set to 0.
-    pub fn from_bytes_slice(bytes: &[u8]) -> Option<Self> {
+    /// This method is the single validation point for header-level
+    /// failures: it folds the minimum-size, magic, version, CRC, and
+    /// segment-number-mismatch checks that pre-T3-E12 callers performed
+    /// ad-hoc with `io::Error` construction. Callers propagate the typed
+    /// [`SegmentHeaderError`] via `?` and never fall back to generic
+    /// `InvalidData` for header reasons (T3-E12 §D8).
+    ///
+    /// Segments with `format_version < MIN_SUPPORTED_SEGMENT_FORMAT_VERSION`
+    /// are rejected with [`SegmentHeaderError::LegacyFormat`] — the
+    /// hint names the manual filesystem remediation.
+    ///
+    /// `expected_segment_number`, when provided, enforces that the
+    /// header's recorded segment number matches the file name; pass
+    /// `None` when parsing a header slice without a corresponding file.
+    pub fn from_bytes_slice(
+        bytes: &[u8],
+        expected_segment_number: Option<u64>,
+    ) -> Result<Self, SegmentHeaderError> {
         if bytes.len() < SEGMENT_HEADER_SIZE {
-            return None;
+            return Err(SegmentHeaderError::InsufficientData {
+                got: bytes.len(),
+                minimum_required: SEGMENT_HEADER_SIZE,
+            });
         }
 
-        let magic: [u8; 4] = bytes[0..4].try_into().ok()?;
+        let magic: [u8; 4] = bytes[0..4].try_into().expect("4-byte slice fits [u8;4]");
         if magic != SEGMENT_MAGIC {
-            return None;
+            return Err(SegmentHeaderError::InvalidMagic);
         }
-        let format_version = u32::from_le_bytes(bytes[4..8].try_into().ok()?);
+
+        let format_version =
+            u32::from_le_bytes(bytes[4..8].try_into().expect("4-byte slice fits [u8;4]"));
         if format_version > SEGMENT_FORMAT_VERSION {
-            tracing::error!(
-                target: "strata::format",
-                format_version,
-                max_supported = SEGMENT_FORMAT_VERSION,
-                "WAL segment format version {} is newer than this build supports (max {}). \
-                 Upgrade Strata to read this database.",
-                format_version,
-                SEGMENT_FORMAT_VERSION,
-            );
-            return None;
+            return Err(SegmentHeaderError::FutureFormat {
+                found_version: format_version,
+                max_supported: SEGMENT_FORMAT_VERSION,
+            });
         }
-        let segment_number = u64::from_le_bytes(bytes[8..16].try_into().ok()?);
-        let database_uuid: [u8; 16] = bytes[16..32].try_into().ok()?;
+        if format_version < MIN_SUPPORTED_SEGMENT_FORMAT_VERSION {
+            return Err(SegmentHeaderError::LegacyFormat {
+                found_version: format_version,
+                hint: format!(
+                    "this build requires segment format version {required} \
+                     (T3-E12 added a per-record outer envelope for codec-aware reads). \
+                     Delete the `wal/` subdirectory and reopen with a fresh state.",
+                    required = MIN_SUPPORTED_SEGMENT_FORMAT_VERSION,
+                ),
+            });
+        }
 
-        let header_crc = if format_version >= 2 && bytes.len() >= SEGMENT_HEADER_SIZE_V2 {
-            let stored_crc = u32::from_le_bytes(bytes[32..36].try_into().ok()?);
-
-            // Verify CRC
-            let mut hasher = Hasher::new();
-            hasher.update(&bytes[0..SEGMENT_HEADER_SIZE]);
-            let computed_crc = hasher.finalize();
-            if stored_crc != computed_crc {
-                return None; // CRC mismatch — header corrupted
+        let segment_number =
+            u64::from_le_bytes(bytes[8..16].try_into().expect("8-byte slice fits [u8;8]"));
+        if let Some(expected) = expected_segment_number {
+            if segment_number != expected {
+                return Err(SegmentHeaderError::SegmentNumberMismatch {
+                    expected,
+                    got: segment_number,
+                });
             }
-            stored_crc
-        } else {
-            tracing::warn!(
-                target: "strata::format",
-                segment_number,
-                format_version,
-                "Reading v1 segment header without CRC — lacks integrity protection. \
-                 Will be replaced after next checkpoint + compaction cycle.",
-            );
-            0 // v1 header, no CRC
-        };
+        }
+        let database_uuid: [u8; 16] = bytes[16..32]
+            .try_into()
+            .expect("16-byte slice fits [u8;16]");
 
-        Some(SegmentHeader {
+        // v3+ segments always carry the CRC (v3 inherited the v2 CRC
+        // layout). Short reads would have been caught by the initial
+        // minimum-size check for a v2/v3 header length.
+        if bytes.len() < SEGMENT_HEADER_SIZE_V2 {
+            return Err(SegmentHeaderError::InsufficientData {
+                got: bytes.len(),
+                minimum_required: SEGMENT_HEADER_SIZE_V2,
+            });
+        }
+        let stored_crc =
+            u32::from_le_bytes(bytes[32..36].try_into().expect("4-byte slice fits [u8;4]"));
+        let mut hasher = Hasher::new();
+        hasher.update(&bytes[0..SEGMENT_HEADER_SIZE]);
+        let computed_crc = hasher.finalize();
+        if stored_crc != computed_crc {
+            return Err(SegmentHeaderError::CrcMismatch {
+                expected: stored_crc,
+                computed: computed_crc,
+            });
+        }
+
+        Ok(SegmentHeader {
             magic,
             format_version,
             segment_number,
             database_uuid,
-            header_crc,
+            header_crc: stored_crc,
         })
-    }
-
-    /// Deserialize header from a fixed-size v1 byte array (backward compat).
-    pub fn from_bytes(bytes: &[u8; SEGMENT_HEADER_SIZE]) -> Option<Self> {
-        Self::from_bytes_slice(bytes)
     }
 
     /// Validate the header has correct magic bytes.
@@ -269,67 +413,19 @@ impl WalSegment {
 
     /// Open an existing WAL segment for reading.
     ///
-    /// Validates the header and positions at the end for size calculation.
-    /// Handles both v1 (32-byte) and v2 (36-byte) headers.
-    pub fn open_read(dir: &Path, segment_number: u64) -> std::io::Result<Self> {
+    /// Validates the header through the typed [`SegmentHeader::from_bytes_slice`]
+    /// path — magic, version, CRC, and segment-number-matches-filename
+    /// checks all surface as [`SegmentHeaderError`] variants rather than
+    /// generic `io::Error::InvalidData` strings (T3-E12 §D8).
+    pub fn open_read(dir: &Path, segment_number: u64) -> Result<Self, WalSegmentError> {
         let path = Self::segment_path(dir, segment_number);
-
         let mut file = OpenOptions::new().read(true).open(&path)?;
 
-        // Try reading v2 header (36 bytes); fall back to v1 (32 bytes) if file is too small
-        let mut header_buf = [0u8; SEGMENT_HEADER_SIZE_V2];
-        let bytes_read = {
-            let mut total = 0;
-            loop {
-                match file.read(&mut header_buf[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        total += n;
-                        if total >= SEGMENT_HEADER_SIZE_V2 {
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-            total
-        };
-
-        if bytes_read < SEGMENT_HEADER_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Segment file too small for header",
-            ));
-        }
-
+        // Read the full v2/v3-size header. `from_bytes_slice` treats a
+        // short read as `SegmentHeaderError::InsufficientData`.
+        let (header_buf, bytes_read) = Self::read_header_bytes(&mut file)?;
         let header =
-            SegmentHeader::from_bytes_slice(&header_buf[..bytes_read]).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid segment header")
-            })?;
-
-        if !header.is_valid() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid segment magic bytes",
-            ));
-        }
-
-        if header.segment_number != segment_number {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!(
-                    "Segment number mismatch: expected {}, got {}",
-                    segment_number, header.segment_number
-                ),
-            ));
-        }
-
-        let actual_header_size = if header.format_version >= 2 {
-            SEGMENT_HEADER_SIZE_V2
-        } else {
-            SEGMENT_HEADER_SIZE
-        };
+            SegmentHeader::from_bytes_slice(&header_buf[..bytes_read], Some(segment_number))?;
 
         let write_position = file.seek(SeekFrom::End(0))?;
 
@@ -340,63 +436,46 @@ impl WalSegment {
             path,
             closed: true, // Opened for reading = treat as closed
             database_uuid: header.database_uuid,
-            header_size: actual_header_size,
+            header_size: SEGMENT_HEADER_SIZE_V2,
         })
+    }
+
+    /// Read exactly `SEGMENT_HEADER_SIZE_V2` bytes (or fewer if EOF) into
+    /// a fresh buffer. Retries on `Interrupted`. Shared between
+    /// `open_read` and `open_append`.
+    fn read_header_bytes(
+        file: &mut File,
+    ) -> std::io::Result<([u8; SEGMENT_HEADER_SIZE_V2], usize)> {
+        let mut header_buf = [0u8; SEGMENT_HEADER_SIZE_V2];
+        let mut total = 0;
+        loop {
+            match file.read(&mut header_buf[total..]) {
+                Ok(0) => break,
+                Ok(n) => {
+                    total += n;
+                    if total >= SEGMENT_HEADER_SIZE_V2 {
+                        break;
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Ok((header_buf, total))
     }
 
     /// Open an existing WAL segment for appending.
     ///
     /// Used when resuming writes to an existing active segment.
-    /// Handles both v1 (32-byte) and v2 (36-byte) headers.
-    pub fn open_append(dir: &Path, segment_number: u64) -> std::io::Result<Self> {
+    /// Shares the typed [`SegmentHeader::from_bytes_slice`] validation
+    /// path with [`WalSegment::open_read`].
+    pub fn open_append(dir: &Path, segment_number: u64) -> Result<Self, WalSegmentError> {
         let path = Self::segment_path(dir, segment_number);
-
         let mut file = OpenOptions::new().read(true).write(true).open(&path)?;
 
-        // Try reading v2 header (36 bytes); fall back to v1 (32 bytes) if file is too small
-        let mut header_buf = [0u8; SEGMENT_HEADER_SIZE_V2];
-        let bytes_read = {
-            let mut total = 0;
-            loop {
-                match file.read(&mut header_buf[total..]) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        total += n;
-                        if total >= SEGMENT_HEADER_SIZE_V2 {
-                            break;
-                        }
-                    }
-                    Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                    Err(e) => return Err(e),
-                }
-            }
-            total
-        };
-
-        if bytes_read < SEGMENT_HEADER_SIZE {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Segment file too small for header",
-            ));
-        }
-
+        let (header_buf, bytes_read) = Self::read_header_bytes(&mut file)?;
         let header =
-            SegmentHeader::from_bytes_slice(&header_buf[..bytes_read]).ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::InvalidData, "Invalid segment header")
-            })?;
-
-        if !header.is_valid() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "Invalid segment magic bytes",
-            ));
-        }
-
-        let actual_header_size = if header.format_version >= 2 {
-            SEGMENT_HEADER_SIZE_V2
-        } else {
-            SEGMENT_HEADER_SIZE
-        };
+            SegmentHeader::from_bytes_slice(&header_buf[..bytes_read], Some(segment_number))?;
 
         // Seek to end for appending
         let write_position = file.seek(SeekFrom::End(0))?;
@@ -408,7 +487,7 @@ impl WalSegment {
             path,
             closed: false,
             database_uuid: header.database_uuid,
-            header_size: actual_header_size,
+            header_size: SEGMENT_HEADER_SIZE_V2,
         })
     }
 
@@ -845,7 +924,7 @@ mod tests {
 
         let bytes = header.to_bytes();
         assert_eq!(bytes.len(), SEGMENT_HEADER_SIZE_V2);
-        let parsed = SegmentHeader::from_bytes_slice(&bytes).unwrap();
+        let parsed = SegmentHeader::from_bytes_slice(&bytes, Some(12345)).unwrap();
 
         assert_eq!(parsed.magic, SEGMENT_MAGIC);
         assert_eq!(parsed.format_version, SEGMENT_FORMAT_VERSION);
@@ -853,6 +932,46 @@ mod tests {
         assert_eq!(parsed.database_uuid, [0xAB; 16]);
         assert!(parsed.is_valid());
         assert_ne!(parsed.header_crc, 0);
+    }
+
+    #[test]
+    fn test_segment_header_rejects_pre_v3_as_legacy_format() {
+        // T3-E12 Phase 2: v2 (and older) segment headers must surface
+        // a typed `LegacyFormat` error, not silently parse. This is the
+        // discriminator the engine's open path uses to produce
+        // `StrataError::LegacyFormat` and skip the T3-E10 wipe.
+        let mut bytes = [0u8; SEGMENT_HEADER_SIZE_V2];
+        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
+        bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // v2
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+        bytes[16..32].copy_from_slice(&[0xAB; 16]);
+        let crc = {
+            let mut h = Hasher::new();
+            h.update(&bytes[0..SEGMENT_HEADER_SIZE]);
+            h.finalize()
+        };
+        bytes[32..36].copy_from_slice(&crc.to_le_bytes());
+
+        match SegmentHeader::from_bytes_slice(&bytes, Some(1)) {
+            Err(SegmentHeaderError::LegacyFormat {
+                found_version,
+                hint,
+            }) => {
+                assert_eq!(found_version, 2);
+                assert!(
+                    hint.contains(&format!(
+                        "requires segment format version {}",
+                        MIN_SUPPORTED_SEGMENT_FORMAT_VERSION
+                    )),
+                    "hint should name the required version, got: {hint}"
+                );
+                assert!(
+                    hint.contains("wal/"),
+                    "hint should name the wal/ directory for remediation, got: {hint}"
+                );
+            }
+            other => panic!("expected LegacyFormat, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1045,51 +1164,40 @@ mod tests {
     // D-10: V1/V2 segment header tests
     // ========================================================================
 
-    #[test]
-    fn test_v1_header_still_readable() {
-        // Construct a 32-byte v1 header manually (format_version=1, no CRC)
-        let mut bytes = [0u8; SEGMENT_HEADER_SIZE];
-        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1
-        bytes[8..16].copy_from_slice(&42u64.to_le_bytes()); // segment_number = 42
-        bytes[16..32].copy_from_slice(&[0xAB; 16]); // database_uuid
-
-        let header = SegmentHeader::from_bytes_slice(&bytes).unwrap();
-        assert!(header.is_valid());
-        assert_eq!(header.format_version, 1);
-        assert_eq!(header.segment_number, 42);
-        assert_eq!(header.database_uuid, [0xAB; 16]);
-        assert_eq!(header.header_crc, 0); // v1 has no CRC
-    }
+    // T3-E12 Phase 2: v1 and v2 segment headers are no longer readable.
+    // The `test_v1_header_still_readable` test was intentionally removed
+    // with the `SEGMENT_FORMAT_VERSION` 2→3 bump; its replacement
+    // (`test_segment_header_rejects_pre_v3_as_legacy_format` above)
+    // covers the new typed-rejection contract.
 
     #[test]
-    fn test_v2_header_rejects_bad_crc() {
-        // Create a valid v2 header, then corrupt the CRC
+    fn test_segment_header_rejects_bad_crc() {
+        // Create a valid (v3) header, then corrupt the CRC.
         let header = SegmentHeader::new(1, [0; 16]);
         let mut bytes = header.to_bytes();
-
-        // Corrupt the CRC bytes (last 4 bytes of the 36-byte header)
         bytes[32] ^= 0xFF;
 
-        let result = SegmentHeader::from_bytes_slice(&bytes);
-        assert!(result.is_none(), "Should reject v2 header with bad CRC");
+        assert!(matches!(
+            SegmentHeader::from_bytes_slice(&bytes, Some(1)),
+            Err(SegmentHeaderError::CrcMismatch { .. })
+        ));
     }
 
     #[test]
-    fn test_v2_header_rejects_corrupted_payload() {
-        // Create a valid v2 header, then corrupt a data byte (not the CRC)
+    fn test_segment_header_rejects_corrupted_payload() {
+        // Create a valid (v3) header, then corrupt a byte inside the
+        // `database_uuid` field (bytes 16..32). CRC recomputation
+        // mismatches the stored CRC. We deliberately avoid the
+        // `segment_number` bytes (8..16) so the earlier
+        // `SegmentNumberMismatch` check does not fire first.
         let header = SegmentHeader::new(42, [0xCC; 16]);
         let mut bytes = header.to_bytes();
+        bytes[20] ^= 0xFF;
 
-        // Corrupt a byte in the segment_number field
-        bytes[10] ^= 0xFF;
-
-        // CRC should now mismatch because the payload changed
-        let result = SegmentHeader::from_bytes_slice(&bytes);
-        assert!(
-            result.is_none(),
-            "Should reject v2 header with corrupted payload"
-        );
+        assert!(matches!(
+            SegmentHeader::from_bytes_slice(&bytes, Some(42)),
+            Err(SegmentHeaderError::CrcMismatch { .. })
+        ));
     }
 
     /// Issue #1711: WalSegment::create() must fsync the parent directory so the
@@ -1139,35 +1247,18 @@ mod tests {
         dir_fd.sync_all().unwrap();
     }
 
-    #[test]
-    fn test_v1_header_with_trailing_data_not_confused_as_v2() {
-        // 32-byte v1 header followed by 4 bytes of unrelated data.
-        // from_bytes_slice should parse it as v1 (format_version=1),
-        // not try to read a CRC from the trailing bytes.
-        let mut bytes = [0u8; 36];
-        bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
-        bytes[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1
-        bytes[8..16].copy_from_slice(&7u64.to_le_bytes()); // segment_number = 7
-        bytes[16..32].copy_from_slice(&[0xBB; 16]); // database_uuid
-        bytes[32..36].copy_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // garbage trailing
-
-        let header = SegmentHeader::from_bytes_slice(&bytes).unwrap();
-        assert!(header.is_valid());
-        assert_eq!(header.format_version, 1);
-        assert_eq!(header.segment_number, 7);
-        // v1 path — trailing bytes ignored, CRC set to 0
-        assert_eq!(header.header_crc, 0);
-    }
+    // T3-E12 Phase 2: the v1-trailing-data test was deleted with the
+    // 2→3 bump — v1/v2 headers now surface `LegacyFormat`, not a
+    // successful parse.
 
     #[test]
     fn test_segment_header_rejects_future_version() {
-        // Build a header with format_version = 99 (far beyond current)
+        // Build a header with format_version = 99 (far beyond current).
         let mut bytes = [0u8; SEGMENT_HEADER_SIZE_V2];
         bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
-        bytes[4..8].copy_from_slice(&99u32.to_le_bytes()); // future version
-        bytes[8..16].copy_from_slice(&1u64.to_le_bytes()); // segment_number
-        bytes[16..32].copy_from_slice(&[0xAA; 16]); // database_uuid
-                                                    // CRC of first 32 bytes (would be valid if version were accepted)
+        bytes[4..8].copy_from_slice(&99u32.to_le_bytes());
+        bytes[8..16].copy_from_slice(&1u64.to_le_bytes());
+        bytes[16..32].copy_from_slice(&[0xAA; 16]);
         let crc = {
             let mut hasher = Hasher::new();
             hasher.update(&bytes[0..SEGMENT_HEADER_SIZE]);
@@ -1175,10 +1266,15 @@ mod tests {
         };
         bytes[32..36].copy_from_slice(&crc.to_le_bytes());
 
-        let result = SegmentHeader::from_bytes_slice(&bytes);
-        assert!(
-            result.is_none(),
-            "Expected None for future segment format version 99",
-        );
+        match SegmentHeader::from_bytes_slice(&bytes, Some(1)) {
+            Err(SegmentHeaderError::FutureFormat {
+                found_version,
+                max_supported,
+            }) => {
+                assert_eq!(found_version, 99);
+                assert_eq!(max_supported, SEGMENT_FORMAT_VERSION);
+            }
+            other => panic!("expected FutureFormat, got {other:?}"),
+        }
     }
 }

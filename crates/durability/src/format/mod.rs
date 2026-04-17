@@ -26,8 +26,9 @@ pub use snapshot::{
     SNAPSHOT_MAGIC,
 };
 pub use wal_record::{
-    SegmentHeader, WalRecord, WalRecordError, WalSegment, SEGMENT_FORMAT_VERSION,
-    SEGMENT_HEADER_SIZE, SEGMENT_HEADER_SIZE_V2, SEGMENT_MAGIC, WAL_RECORD_FORMAT_VERSION,
+    SegmentHeader, SegmentHeaderError, WalRecord, WalRecordError, WalSegment, WalSegmentError,
+    MIN_SUPPORTED_SEGMENT_FORMAT_VERSION, SEGMENT_FORMAT_VERSION, SEGMENT_HEADER_SIZE,
+    SEGMENT_HEADER_SIZE_V2, SEGMENT_MAGIC, WAL_RECORD_FORMAT_VERSION,
 };
 pub use writeset::{Mutation, Writeset, WritesetError};
 

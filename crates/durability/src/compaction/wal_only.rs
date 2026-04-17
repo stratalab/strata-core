@@ -256,16 +256,14 @@ impl WalOnlyCompactor {
             )));
         }
 
-        let header = SegmentHeader::from_bytes_slice(&file_data).ok_or_else(|| {
-            CompactionError::internal(format!("Invalid segment {} header", segment_number))
-        })?;
-
-        if !header.is_valid() {
-            return Err(CompactionError::internal(format!(
-                "Segment {} has invalid magic",
-                segment_number
-            )));
-        }
+        let header =
+            SegmentHeader::from_bytes_slice(&file_data, Some(segment_number)).map_err(|e| {
+                CompactionError::internal(format!("Invalid segment {segment_number} header: {e}"))
+            })?;
+        // `from_bytes_slice` now enforces magic + segment-number match,
+        // so the earlier `is_valid` / segment-number re-check is folded
+        // into the typed-error path above.
+        debug_assert!(header.is_valid());
 
         // Determine actual header size based on format version
         let actual_header_size = if header.format_version >= 2 {

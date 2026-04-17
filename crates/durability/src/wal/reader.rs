@@ -53,8 +53,7 @@ impl WalReader {
         wal_dir: &Path,
         segment_number: u64,
     ) -> Result<(Vec<WalRecord>, u64, ReadStopReason, usize), WalReaderError> {
-        let mut segment = WalSegment::open_read(wal_dir, segment_number)
-            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        let mut segment = WalSegment::open_read(wal_dir, segment_number)?;
 
         self.read_segment_from(&mut segment)
     }
@@ -193,8 +192,7 @@ impl WalReader {
 
             // Check if this segment needs truncation (only the last one can)
             if idx == segments.len() - 1 {
-                let segment = WalSegment::open_read(wal_dir, *segment_num)
-                    .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+                let segment = WalSegment::open_read(wal_dir, *segment_num)?;
 
                 if valid_end < segment.size() {
                     truncate_info = Some(TruncateInfo {
@@ -402,8 +400,7 @@ impl WalReader {
         segment_number: u64,
         next_expected: u64,
     ) -> Result<WatermarkReadResult, WalReaderError> {
-        let mut segment = WalSegment::open_read(wal_dir, segment_number)
-            .map_err(|e: std::io::Error| WalReaderError::IoError(e.to_string()))?;
+        let mut segment = WalSegment::open_read(wal_dir, segment_number)?;
         let mut buffer = Vec::new();
         let hdr_size = segment.header_size() as u64;
 
@@ -881,14 +878,12 @@ pub enum WalReaderError {
     /// Legacy WAL segment format — rejected hard, even under lossy
     /// recovery.
     ///
-    /// **Staging note (T3-E12 Phase 1):** variant declared here;
-    /// Phase 2's segment-header reader is the first producer. When a
-    /// segment's `SEGMENT_FORMAT_VERSION` is older than this build
-    /// supports, the reader will surface this error unconditionally
-    /// (strict and lossy paths alike) and the engine will re-raise
-    /// it — the operator must delete the `wal/` subdirectory
-    /// manually before reopening. Lossy recovery does not bypass
-    /// format incompatibility (T3-E12 tracking doc §D6).
+    /// Produced when a segment's `SEGMENT_FORMAT_VERSION` is older than
+    /// this build supports. Surfaces unconditionally (strict and lossy
+    /// alike); the engine's open path re-raises as
+    /// [`strata_core::StrataError::LegacyFormat`] and the operator
+    /// must delete the `wal/` subdirectory manually before reopening.
+    /// Lossy recovery does not bypass format incompatibility (T3-E12 §D6).
     ///
     /// The `hint` carries the full operator-facing message including
     /// the required version number, so the rendered diagnostic stays
@@ -902,6 +897,27 @@ pub enum WalReaderError {
         /// hint is expected to include the required version number.
         hint: String,
     },
+}
+
+impl From<crate::format::WalSegmentError> for WalReaderError {
+    /// Preserve the typed `LegacyFormat` diagnostic; render other
+    /// header-level errors as `IoError`-wrapped strings. Genuine I/O
+    /// errors (disk full, permission denied) go through `IoError`
+    /// unchanged. T3-E12 §D8.
+    fn from(err: crate::format::WalSegmentError) -> Self {
+        use crate::format::{SegmentHeaderError, WalSegmentError};
+        match err {
+            WalSegmentError::Io(io) => WalReaderError::IoError(io.to_string()),
+            WalSegmentError::Header(SegmentHeaderError::LegacyFormat {
+                found_version,
+                hint,
+            }) => WalReaderError::LegacyFormat {
+                found_version,
+                hint,
+            },
+            WalSegmentError::Header(other) => WalReaderError::IoError(other.to_string()),
+        }
+    }
 }
 
 #[cfg(test)]
