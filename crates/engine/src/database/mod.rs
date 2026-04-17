@@ -231,6 +231,47 @@ pub struct DatabaseDiskUsage {
     pub snapshot_bytes: u64,
 }
 
+// ============================================================================
+// Lossy Recovery Report
+// ============================================================================
+
+/// Report surfaced when `allow_lossy_recovery` triggers a whole-database
+/// wipe-and-reopen fallback during [`Database::open`].
+///
+/// DR-011's acceptance contract requires lossy recovery to be an "explicit
+/// and narrow" escape hatch: opt-in via config, and surfaced in status /
+/// telemetry so operators can tell the difference between "this database
+/// opened empty" and "this database fell back to empty because recovery
+/// failed." This report is the observability surface that satisfies the
+/// second half of that contract.
+///
+/// Retrieve via [`Database::last_lossy_recovery_report`]. The report is
+/// `Some(_)` only when the most recent open triggered the lossy branch;
+/// successful strict opens leave it `None`.
+///
+/// Tracing target `strata::recovery::lossy` emits the same fields at
+/// `warn` level for push-style observability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct LossyRecoveryReport {
+    /// Root error (rendered via `Display`) that triggered the lossy fallback.
+    pub error: String,
+    /// Count of WAL records the engine's `on_record` callback applied
+    /// successfully before the recovery coordinator returned `Err`. These
+    /// records were installed into storage and then discarded when lossy
+    /// mode wiped the segment directory.
+    pub records_applied_before_failure: u64,
+    /// Storage commit version reached before the wipe. `CommitVersion::ZERO`
+    /// when the error occurred before any record was applied (for example,
+    /// snapshot load or codec validation failure).
+    pub version_reached_before_failure: strata_core::id::CommitVersion,
+    /// Whether the lossy path discarded all pre-failure state. Always
+    /// `true` under the current "whole-DB wipe" contract; reserved as a
+    /// field so future narrower modes can set it to `false` without a
+    /// breaking change.
+    pub discarded_on_wipe: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum LifecycleState {
     Uninitialized,
@@ -409,6 +450,12 @@ pub struct Database {
     /// `resume_wal_writer()` succeeds. Per-database, not process-global.
     /// Arc-wrapped to share with the flush thread (for halt behavior).
     wal_writer_health: Arc<ParkingMutex<WalWriterHealth>>,
+
+    /// Report populated by [`Database::open`] when the lossy recovery
+    /// fallback fired. `None` for strict (default) opens and for lossy
+    /// opens that did not need to fall back. Read via
+    /// [`Database::last_lossy_recovery_report`]. Per-database.
+    last_lossy_recovery_report: Arc<ParkingMutex<Option<LossyRecoveryReport>>>,
 
     /// Type-erased extension storage for primitive state
     ///
@@ -1197,6 +1244,21 @@ impl Database {
     /// ```
     pub fn wal_writer_health(&self) -> WalWriterHealth {
         self.wal_writer_health.lock().clone()
+    }
+
+    /// Returns the report from the most recent lossy-recovery fallback, if
+    /// the current open triggered one.
+    ///
+    /// `Some(LossyRecoveryReport)` when `allow_lossy_recovery = true` was set
+    /// AND recovery errored during this open, causing the engine to wipe the
+    /// segment directory and reopen empty. `None` on strict (default) opens
+    /// and on lossy opens that recovered cleanly.
+    ///
+    /// See [`LossyRecoveryReport`] for field semantics and DR-011 in
+    /// `docs/requirements/durability-recovery-requirements.md` for the
+    /// pinned lossy-recovery contract.
+    pub fn last_lossy_recovery_report(&self) -> Option<LossyRecoveryReport> {
+        self.last_lossy_recovery_report.lock().clone()
     }
 
     /// Attempt to resume a halted WAL writer.

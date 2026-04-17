@@ -84,7 +84,7 @@ fn restrict_file(_path: &Path) {}
 
 use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
-use super::{Database, PersistenceMode, WalWriterHealth};
+use super::{Database, LossyRecoveryReport, PersistenceMode, WalWriterHealth};
 
 enum AcquiredDatabase {
     Existing(Arc<Database>),
@@ -483,9 +483,14 @@ impl Database {
         }
         let install_codec_for_follower = follower_codec.as_ref().map(|c| clone_codec(c.as_ref()));
 
+        // Count records applied before any coordinator error so the lossy
+        // branch below can surface how far recovery progressed.
+        let records_applied_before_failure = Arc::new(AtomicU64::new(0));
+
         let recover_result = {
             let storage_ref = &storage;
             let install_codec_ref = install_codec_for_follower.as_deref();
+            let counter = Arc::clone(&records_applied_before_failure);
             recovery.recover(
                 |snapshot| {
                     if let Some(install_codec) = install_codec_ref {
@@ -504,17 +509,42 @@ impl Database {
                     }
                     Ok(())
                 },
-                |record| apply_wal_record_to_memory_storage(storage_ref, record),
+                |record| {
+                    let result = apply_wal_record_to_memory_storage(storage_ref, record);
+                    if result.is_ok() {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    result
+                },
             )
         };
 
+        let mut lossy_report: Option<LossyRecoveryReport> = None;
         let mut stats = match recover_result {
             Ok(stats) => stats,
             Err(e) => {
                 if cfg.allow_lossy_recovery {
+                    let report = LossyRecoveryReport {
+                        error: e.to_string(),
+                        records_applied_before_failure: records_applied_before_failure
+                            .load(Ordering::SeqCst),
+                        version_reached_before_failure: CommitVersion(storage.version()),
+                        discarded_on_wipe: true,
+                    };
+                    warn!(
+                        target: "strata::recovery::lossy",
+                        error = %e,
+                        records_applied_before_failure = report.records_applied_before_failure,
+                        version_reached_before_failure =
+                            report.version_reached_before_failure.as_u64(),
+                        discarded_on_wipe = report.discarded_on_wipe,
+                        follower = true,
+                        "Lossy recovery fallback — discarding pre-failure state"
+                    );
                     warn!(target: "strata::db",
                         error = %e,
                         "Follower recovery failed — starting with empty state");
+                    lossy_report = Some(report);
                     storage = SegmentedStore::with_dir(
                         layout.segments_dir().to_path_buf(),
                         cfg.storage.effective_write_buffer_size(),
@@ -616,6 +646,7 @@ impl Database {
             durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant for follower
             accepting_transactions: Arc::new(AtomicBool::new(true)),
             wal_writer_health: Arc::new(ParkingMutex::new(WalWriterHealth::Healthy)),
+            last_lossy_recovery_report: Arc::new(ParkingMutex::new(lossy_report)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
@@ -921,9 +952,16 @@ impl Database {
                 .with_lossy_recovery(cfg.allow_lossy_recovery)
                 .with_codec(clone_codec(codec.as_ref()));
 
+        // Count records applied by `on_record` before a coordinator error so
+        // a subsequent lossy-fallback branch can surface how far recovery
+        // got. The coordinator drops its own stats on error; we track
+        // independently on the engine side.
+        let records_applied_before_failure = Arc::new(AtomicU64::new(0));
+
         let recover_result = {
             let storage_ref = &storage;
             let install_codec = recovery_codec_for_install.as_ref();
+            let counter = Arc::clone(&records_applied_before_failure);
             recovery.recover(
                 |snapshot| {
                     let installed = super::snapshot_install::install_snapshot(
@@ -940,19 +978,45 @@ impl Database {
                     );
                     Ok(())
                 },
-                |record| apply_wal_record_to_memory_storage(storage_ref, record),
+                |record| {
+                    let result = apply_wal_record_to_memory_storage(storage_ref, record);
+                    if result.is_ok() {
+                        counter.fetch_add(1, Ordering::SeqCst);
+                    }
+                    result
+                },
             )
         };
 
+        let mut lossy_report: Option<LossyRecoveryReport> = None;
         let mut stats = match recover_result {
             Ok(stats) => stats,
             Err(e) => {
                 if cfg.allow_lossy_recovery {
+                    // Sample partial progress BEFORE the wipe so the
+                    // `LossyRecoveryReport` reflects what was discarded.
+                    let report = LossyRecoveryReport {
+                        error: e.to_string(),
+                        records_applied_before_failure: records_applied_before_failure
+                            .load(Ordering::SeqCst),
+                        version_reached_before_failure: CommitVersion(storage.version()),
+                        discarded_on_wipe: true,
+                    };
+                    warn!(
+                        target: "strata::recovery::lossy",
+                        error = %e,
+                        records_applied_before_failure = report.records_applied_before_failure,
+                        version_reached_before_failure =
+                            report.version_reached_before_failure.as_u64(),
+                        discarded_on_wipe = report.discarded_on_wipe,
+                        "Lossy recovery fallback — discarding pre-failure state"
+                    );
                     warn!(
                         target: "strata::db",
                         error = %e,
                         "Recovery failed — starting with empty state (allow_lossy_recovery=true)"
                     );
+                    lossy_report = Some(report);
                     // Discard any partial writes accumulated before the
                     // failure so lossy-mode semantics match the pre-Epic-5
                     // `RecoveryResult::empty()` fallback: no user data
@@ -1065,6 +1129,7 @@ impl Database {
             durability_mode: parking_lot::RwLock::new(durability_mode),
             accepting_transactions: Arc::clone(&accepting_transactions),
             wal_writer_health: Arc::clone(&wal_writer_health),
+            last_lossy_recovery_report: Arc::new(ParkingMutex::new(lossy_report)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::clone(&flush_shutdown),
@@ -1213,6 +1278,10 @@ impl Database {
             durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant but set for consistency
             accepting_transactions: Arc::new(AtomicBool::new(true)),
             wal_writer_health: Arc::new(ParkingMutex::new(WalWriterHealth::Healthy)),
+            // Ephemeral/cache never performs WAL recovery, so lossy fallback
+            // cannot fire here — the slot stays `None` for the life of the
+            // instance.
+            last_lossy_recovery_report: Arc::new(ParkingMutex::new(None)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
