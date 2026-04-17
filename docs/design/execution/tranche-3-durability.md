@@ -511,12 +511,12 @@ contract.
 
 #### Tasks
 
-- [ ] Design: pick WAL record envelope format (`[u32 length][codec-encoded bytes]` after the post-encode step); decide clean-break vs dual-path for identity codec.
-- [ ] Bump `WAL_FORMAT_VERSION` in `crates/durability/src/format/wal_record.rs`.
+- [ ] Envelope format and version decision: per-record on-disk layout is `[u32 outer_len][u32 outer_len_crc][codec-encoded bytes]`, with `SEGMENT_FORMAT_VERSION` bumped 2 → 3 for a clean break (no dual-path read; pre-v3 segments rejected with `SegmentHeaderError::LegacyFormat`). See the T3-E12 phase tracking doc §D1 for rationale.
+- [ ] Bump `SEGMENT_FORMAT_VERSION` 2 → 3 in `crates/durability/src/format/wal_record.rs:44`. (The per-record byte `WAL_RECORD_FORMAT_VERSION` is a separate constant and is NOT bumped — the envelope change is segment-level, not record-level.)
 - [ ] Add codec decode to `crates/durability/src/wal/reader.rs` — `codec` field on `WalReader`, `with_codec(codec)` builder, decode step before `WalRecord::from_bytes`.
 - [ ] Add length-prefix write wrapper to `crates/durability/src/wal/writer.rs` (writer already calls `codec.encode_cow(...)` — add the envelope).
 - [ ] Wire codec through `RecoveryCoordinator::recover()` — construct `WalReader` with the coordinator's installed codec.
-- [ ] Delete the open-time rejection blocks at `crates/engine/src/database/open.rs:847-858` (primary) and `:1475-1485` (follower).
+- [ ] Delete the open-time rejection blocks at `crates/engine/src/database/open.rs:884-891` (primary) and `:1552-1559` (follower) — the exact lines where the blocks lived prior to Phase 2's removal.
 - [ ] Add the deferred test `write_non_identity_codec_then_crash_then_reopen_then_read` in `crates/engine/src/database/tests/codec.rs`; remove the deferral comment at lines 12-17.
 - [ ] Update `durability-recovery-config-matrix.md` — remove the "target-state note" about WAL codec; update the codec row to note all durability modes support non-identity codecs.
 - [ ] Capture a pre-PR baseline via `cargo run --release -p strata-benchmarks --bin regression -- --capture-baseline` before code changes land; gate merge on `--tranche 3 --epic "T3-E12"` within thresholds.

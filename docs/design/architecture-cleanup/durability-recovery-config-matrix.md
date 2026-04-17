@@ -76,7 +76,7 @@ The classification is load-bearing in three places:
 | `bloom_bits_per_key` | live-safe | no | `Storage::set_bloom_bits_per_key` |
 | `compaction_rate_limit` | live-safe | no | `Storage::set_compaction_rate_limit` |
 | `write_stall_timeout_ms` | live-safe | no | read per-stall in `maybe_apply_write_backpressure` |
-| `codec` | open-time-only | yes (`codec_id` + `codec_name` in signature) | MANIFEST validates on open (primary: `open.rs`; follower: `open.rs`); `plan_recovery` re-validates before WAL read; mismatch at reuse returns `StrataError::IncompatibleReuse` |
+| `codec` | open-time-only | yes (`codec_id` + `codec_name` in signature) | MANIFEST validates on open (primary: `open.rs`; follower: `open.rs`); `plan_recovery` re-validates before WAL read; mismatch at reuse returns `StrataError::IncompatibleReuse`. As of T3-E12, every `durability` mode supports every registered codec — the pre-T3-E12 open-time rejection that blocked non-identity codecs under Standard/Always durability has been removed. Legacy pre-v3 segments on disk surface as `StrataError::LegacyFormat` with an operator hint (delete `wal/` and reopen); lossy recovery does not bypass this. |
 
 ---
 
@@ -105,16 +105,6 @@ struct and the regression test iterates the whole thing.
 
 **Unsupported/deferred:** none today.
 
-## Target-state notes
-
-- **Non-identity-codec persistence.** The WAL reader does not yet decode via
-  the configured codec (`open.rs` blocks `codec != "identity"` combined with
-  any WAL-based durability mode). Cache-durability databases may use a
-  non-identity codec within a single session but cannot survive restart.
-  Lifting this is tracked separately from T3-E7 and will be reflected here
-  when the block is removed. Until then, a write → crash → reopen → read
-  round-trip with a non-identity codec is not testable.
-
 ## Change log
 
 - 2026-04-16 (T3-E7): initial creation. Classifies all 14 top-level
@@ -126,3 +116,13 @@ struct and the regression test iterates the whole thing.
   instance sized/recovered differently. Rule statement tightened: an
   open-time-only knob *must* participate in the signature; `OPEN_TIME_ONLY_KEYS`
   alone is no longer considered sufficient.
+- 2026-04-17 (T3-E12): WAL codec threading landed. The `codec` row's
+  "target-state note" about non-identity-codec persistence under WAL
+  durability is deleted — the WAL reader now decodes via the configured
+  codec end-to-end, the open-time rejection at `open.rs:884-891` /
+  `:1552-1559` is removed, and `aes-gcm-256 + durability = "standard"`
+  round-trips through crash recovery. A new v3 on-disk envelope
+  (`[u32 outer_len][u32 outer_len_crc][codec-encoded bytes]`) plus a
+  `SEGMENT_FORMAT_VERSION` bump from 2 → 3 delivered this; pre-v3
+  segments on disk surface as `StrataError::LegacyFormat` with a
+  manual-wipe operator hint.
