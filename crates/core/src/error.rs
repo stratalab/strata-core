@@ -827,6 +827,58 @@ pub enum StrataError {
         message: String,
     },
 
+    /// Codec decode failure
+    ///
+    /// A codec (`aes-gcm-256`, ...) failed to decode a stored artifact.
+    /// Typical triggers: wrong encryption key, AES-GCM auth-tag
+    /// mismatch, truncated codec payload. Surfaced from the WAL read
+    /// path as of T3-E12; see also `LossyErrorKind::CodecDecode` for
+    /// programmatic classification when lossy recovery is active.
+    ///
+    /// Wire code: `StorageError`
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::CodecDecode {
+    ///     message: "AES-GCM authentication tag mismatch".to_string(),
+    /// };
+    /// ```
+    #[error("codec decode failure: {message}")]
+    CodecDecode {
+        /// Description of the decode failure.
+        message: String,
+    },
+
+    /// Legacy WAL segment format
+    ///
+    /// A WAL segment on disk has a `SEGMENT_FORMAT_VERSION` older than
+    /// this build supports. Hard fail — not a lossy-recoverable error.
+    /// The operator must delete the `wal/` subdirectory under the
+    /// database path and reopen with a fresh state.
+    ///
+    /// Wire code: `StorageError`
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::LegacyFormat {
+    ///     found_version: 2,
+    ///     required_version: 3,
+    ///     hint: "Delete the `wal/` subdirectory and reopen.".to_string(),
+    /// };
+    /// ```
+    #[error("legacy WAL segment: found version {found_version}, build requires {required_version}. {hint}")]
+    LegacyFormat {
+        /// Segment format version read from disk.
+        found_version: u32,
+        /// Segment format version this build expects.
+        required_version: u32,
+        /// Operator remediation hint — filesystem action only (no CLI
+        /// tool is promised by this error variant).
+        hint: String,
+    },
+
     // =========================================================================
     // Resource Errors
     // =========================================================================
@@ -1227,6 +1279,51 @@ impl StrataError {
         }
     }
 
+    /// Create a CodecDecode error
+    ///
+    /// Use this when an installed `StorageCodec` returned an error
+    /// decoding a stored artifact — typically a wrong encryption key
+    /// or AES-GCM authentication-tag failure on the WAL read path.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::codec_decode("AES-GCM auth tag mismatch");
+    /// ```
+    pub fn codec_decode(message: impl Into<String>) -> Self {
+        StrataError::CodecDecode {
+            message: message.into(),
+        }
+    }
+
+    /// Create a `LegacyFormat` error.
+    ///
+    /// `hint` should name the operator remediation (typically
+    /// `"Delete the `wal/` subdirectory and reopen."`). The constructor
+    /// does not promise any specific remediation — callers own the
+    /// hint wording.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::legacy_format(
+    ///     2,
+    ///     3,
+    ///     "Delete the `wal/` subdirectory and reopen.",
+    /// );
+    /// ```
+    pub fn legacy_format(
+        found_version: u32,
+        required_version: u32,
+        hint: impl Into<String>,
+    ) -> Self {
+        StrataError::LegacyFormat {
+            found_version,
+            required_version,
+            hint: hint.into(),
+        }
+    }
+
     /// Create a CapacityExceeded error
     ///
     /// ## Example
@@ -1368,6 +1465,8 @@ impl StrataError {
             StrataError::Storage { .. } => ErrorCode::StorageError,
             StrataError::Serialization { .. } => ErrorCode::SerializationError,
             StrataError::Corruption { .. } => ErrorCode::StorageError,
+            StrataError::CodecDecode { .. } => ErrorCode::StorageError,
+            StrataError::LegacyFormat { .. } => ErrorCode::StorageError,
 
             // Internal errors
             StrataError::Internal { .. } => ErrorCode::InternalError,
@@ -1475,6 +1574,17 @@ impl StrataError {
             StrataError::Corruption { message } => {
                 ErrorDetails::new().with_string("message", message)
             }
+            StrataError::CodecDecode { message } => {
+                ErrorDetails::new().with_string("message", message)
+            }
+            StrataError::LegacyFormat {
+                found_version,
+                required_version,
+                hint,
+            } => ErrorDetails::new()
+                .with_int("found_version", *found_version as i64)
+                .with_int("required_version", *required_version as i64)
+                .with_string("hint", hint),
             StrataError::CapacityExceeded {
                 resource,
                 limit,
@@ -1535,6 +1645,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1583,6 +1695,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1622,6 +1736,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1670,6 +1786,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1720,6 +1838,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1752,7 +1872,9 @@ impl StrataError {
         match self {
             StrataError::Storage { .. }
             | StrataError::Serialization { .. }
-            | StrataError::Corruption { .. } => true,
+            | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. } => true,
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
@@ -1826,6 +1948,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -1861,7 +1985,10 @@ impl StrataError {
     /// ```
     pub fn is_serious(&self) -> bool {
         match self {
-            StrataError::Corruption { .. } | StrataError::Internal { .. } => true,
+            StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
+            | StrataError::Internal { .. } => true,
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
@@ -1927,6 +2054,8 @@ impl StrataError {
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
+            | StrataError::CodecDecode { .. }
+            | StrataError::LegacyFormat { .. }
             | StrataError::Internal { .. } => false,
 
             // Catch-all for future variants (due to #[non_exhaustive])
@@ -2316,6 +2445,51 @@ mod strata_error_tests {
 
         assert!(e.is_storage_error());
         assert!(e.is_serious());
+    }
+
+    #[test]
+    fn test_codec_decode_constructor() {
+        let e = StrataError::codec_decode("AES-GCM auth tag mismatch");
+
+        assert!(matches!(
+            &e,
+            StrataError::CodecDecode { message } if message == "AES-GCM auth tag mismatch"
+        ));
+        assert_eq!(e.code(), ErrorCode::StorageError);
+        assert!(e.is_storage_error());
+        assert!(e.is_serious());
+        assert!(!e.is_retryable());
+        assert!(!e.is_resource_error());
+    }
+
+    #[test]
+    fn test_legacy_format_constructor() {
+        let e = StrataError::legacy_format(2, 3, "Delete the `wal/` subdirectory and reopen.");
+
+        assert!(matches!(
+            &e,
+            StrataError::LegacyFormat {
+                found_version: 2,
+                required_version: 3,
+                hint,
+            } if hint == "Delete the `wal/` subdirectory and reopen."
+        ));
+        assert_eq!(e.code(), ErrorCode::StorageError);
+        assert!(e.is_storage_error());
+        assert!(e.is_serious());
+        assert!(!e.is_retryable());
+        assert!(!e.is_resource_error());
+        // Version fields render in the Display impl so operators see
+        // the exact version mismatch in logs without structured access.
+        let rendered = e.to_string();
+        assert!(
+            rendered.contains("found version 2"),
+            "Display should include found_version, got: {rendered}"
+        );
+        assert!(
+            rendered.contains("requires 3"),
+            "Display should include required_version, got: {rendered}"
+        );
     }
 
     #[test]
