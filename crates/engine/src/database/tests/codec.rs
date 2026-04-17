@@ -437,6 +437,106 @@ fn test_profile_applies_before_signature_so_reuse_with_explicit_value_succeeds()
     OPEN_DATABASES.lock().clear();
 }
 
+/// `durability` is live-safe via `set_durability_mode` only. Mutating
+/// `cfg.durability` through `update_config` would persist a new string
+/// to `strata.toml` without reconfiguring the WAL writer, the flush
+/// thread, or the runtime signature — leaving `db.config()` disagreeing
+/// with the live database. `update_config` must reject the mutation and
+/// point the caller to the canonical path.
+#[test]
+#[serial(open_databases)]
+fn test_update_config_rejects_durability_string_changes() {
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "standard".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+
+    // A Standard → Always string swap via `update_config` must be rejected.
+    let err = db
+        .update_config(|cfg| cfg.durability = "always".to_string())
+        .expect_err("update_config must reject durability changes");
+    assert!(
+        matches!(err, StrataError::InvalidInput { .. }),
+        "expected InvalidInput, got: {err:?}"
+    );
+    assert!(
+        err.to_string().contains("set_durability_mode"),
+        "error must point callers at the canonical path, got: {err}"
+    );
+
+    // A typo like `"turbo"` would previously have been silently persisted
+    // and only tripped on later parsing. Rejecting any string change
+    // catches it here too.
+    assert!(
+        db.update_config(|cfg| cfg.durability = "turbo".to_string())
+            .is_err(),
+        "unknown durability strings must also be rejected"
+    );
+
+    // Live and persisted state both still say "standard".
+    assert_eq!(db.config().durability, "standard");
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// `set_durability_mode` is the canonical path for durability switches;
+/// it must update `self.config.durability`, the runtime signature, and
+/// persist `strata.toml` atomically, so a reopen reads the same value.
+#[test]
+#[serial(open_databases)]
+fn test_set_durability_mode_persists_and_updates_config_string() {
+    use strata_durability::wal::DurabilityMode;
+
+    OPEN_DATABASES.lock().clear();
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "standard".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+
+    db.set_durability_mode(DurabilityMode::Always)
+        .expect("Standard → Always must succeed");
+
+    // In-process state.
+    assert_eq!(db.config().durability, "always");
+    assert_eq!(
+        db.runtime_signature()
+            .expect("signature must exist")
+            .durability_mode,
+        DurabilityMode::Always,
+    );
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+
+    // Persisted state — a fresh process would see "always" here.
+    let persisted = StrataConfig::from_file(&db_path.join("strata.toml"))
+        .expect("strata.toml must exist after a successful durability switch");
+    assert_eq!(
+        persisted.durability, "always",
+        "set_durability_mode must persist the string form to strata.toml"
+    );
+}
+
 /// `Database::update_config` must reject mutations to open-time-only
 /// fields. Without this gate, a direct Rust caller could bypass the
 /// executor's `OPEN_TIME_ONLY_KEYS` check and silently drift the

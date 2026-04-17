@@ -505,17 +505,40 @@ fn test_set_durability_mode_updates_runtime_signature_for_reuse_checks() {
         "runtime signature must track live durability mode"
     );
 
+    // Second opener that *explicitly* requests the old Standard mode must
+    // be rejected on signature mismatch. (T3-E7 review: `set_durability_mode`
+    // now also persists "always" to strata.toml, so a second opener that
+    // reads the default config no longer has a stale-config problem —
+    // hence the explicit request here.)
+    let stale_cfg = crate::StrataConfig {
+        durability: "standard".to_string(),
+        ..crate::StrataConfig::default()
+    };
     let err = match Database::open_runtime(
         OpenSpec::primary(&db_path)
+            .with_config(stale_cfg)
             .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
     ) {
-        Ok(_) => panic!("reopen with stale config should not reuse a live-switched database"),
+        Ok(_) => panic!("explicit request for Standard must not reuse a switched-to-Always db"),
         Err(err) => err,
     };
     assert!(
         matches!(err, StrataError::IncompatibleReuse { .. }),
         "expected IncompatibleReuse, got {:?}",
         err
+    );
+
+    // A second opener whose requested config matches the post-switch state
+    // (either because they read the now-persisted strata.toml or because
+    // they explicitly asked for Always) must succeed and reuse the instance.
+    let ok_reuse = Database::open_runtime(
+        OpenSpec::primary(&db_path)
+            .with_subsystem(TestRuntimeSubsystem::named("runtime-subsystem")),
+    )
+    .expect("reopen with no-config reads the now-persisted 'always' and reuses");
+    assert!(
+        Arc::ptr_eq(&db, &ok_reuse),
+        "matching signature must return the same Arc, not a fresh instance"
     );
 
     db.shutdown().unwrap();

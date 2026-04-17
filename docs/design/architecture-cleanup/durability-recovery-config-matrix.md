@@ -41,7 +41,7 @@ The classification is load-bearing in three places:
 
 | Field | Class | Signature? | Setter / enforcement |
 |---|---|---|---|
-| `durability` | live-safe | yes (`durability_mode` in signature; `Cache` discriminant treated as open-time-only) | `Database::set_durability_mode` (Standard↔Always only; Cache rejected at runtime) |
+| `durability` | live-safe | yes (`durability_mode` in signature; `Cache` discriminant treated as open-time-only) | `Database::set_durability_mode` is the **only** live-safe path (Standard↔Always; Cache rejected). It atomically reconfigures the WAL writer, restarts the flush thread, updates the runtime signature, updates `self.config.durability`, and persists `strata.toml`. `update_config` explicitly rejects any `durability` string change and points the caller here. |
 | `auto_embed` | non-durability | no | `Database::set_auto_embed` |
 | `model` | non-durability | no | — |
 | `embed_batch_size` | non-durability | no | — |
