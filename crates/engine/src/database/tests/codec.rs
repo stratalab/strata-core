@@ -956,3 +956,184 @@ fn test_aes_gcm_wrong_key_classifies_as_codec_decode() {
     db.shutdown().unwrap();
     OPEN_DATABASES.lock().clear();
 }
+
+/// T3-E12 §Phase 2 Test #4: partial-tail truncation on encrypted WAL.
+///
+/// Write N records, then append a deterministic mid-outer-envelope
+/// byte run (3 bytes — less than the 8-byte envelope-header size).
+/// Reopen, assert the first N records survive. Pins the
+/// `InsufficientData → ReadStopReason::PartialRecord` branch of the
+/// envelope-parse loop, which is what differentiates genuine crash
+/// tails (truncate-and-continue) from CRC or codec failures (error).
+///
+/// Appending arbitrary garbage (the pre-§D4-rewrite fixture pattern)
+/// is non-deterministic — random bytes can happen to produce a valid
+/// outer_len_crc by luck (1 in 4 billion) or fail CRC validation
+/// (usual case), which routes through a different error branch.
+/// Truncation mid-envelope-header guarantees the short-read path is
+/// the one that fires.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_partial_tail_truncates_cleanly() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    let record_count = 5u8;
+    let size_after_last_record: u64 = {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        for i in 0..record_count {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                Value::Bytes(vec![i; 16]),
+            );
+        }
+        db.flush().unwrap();
+
+        let seg_path = db_path.join("wal").join("wal-000001.seg");
+        let size = std::fs::metadata(&seg_path).unwrap().len();
+        db.shutdown().unwrap();
+        size
+    };
+    OPEN_DATABASES.lock().clear();
+
+    // Append 3 bytes — mid-outer-envelope-header for record N+1.
+    // `read_outer_envelope` returns `Ok(None)` for any buf.len() < 8,
+    // which the parse loop treats as `PartialRecord` → truncate.
+    let seg_path = db_path.join("wal").join("wal-000001.seg");
+    {
+        use std::io::Write as _;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&seg_path)
+            .unwrap();
+        f.write_all(&[0xAB, 0xCD, 0xEF]).unwrap();
+    }
+    assert_eq!(
+        std::fs::metadata(&seg_path).unwrap().len(),
+        size_after_last_record + 3,
+    );
+
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    )
+    .expect("reopen with mid-envelope partial tail must succeed (PartialRecord, not corruption)");
+
+    for i in 0..record_count {
+        let got = db
+            .storage()
+            .get_versioned(
+                &Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                CommitVersion::MAX,
+            )
+            .unwrap();
+        match got.map(|v| v.value) {
+            Some(Value::Bytes(bytes)) => assert_eq!(bytes, vec![i; 16]),
+            other => panic!("record tail_k{i} missing after partial-tail: {other:?}"),
+        }
+    }
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+/// T3-E12 §Phase 2 Test #5: mid-segment ciphertext corruption must
+/// NOT silently truncate in strict mode.
+///
+/// Write N records, flip a byte deep inside the first record's
+/// codec-encoded payload (past the outer envelope header). AES-GCM's
+/// auth tag catches the tampered ciphertext on decode; the reader
+/// returns `Err(WalReaderError::CodecDecode)` which the coordinator
+/// maps to `StrataError::CodecDecode` and strict open refuses.
+///
+/// The key regression guard: codec decode failures are ALWAYS `Err`
+/// at the reader layer, never `Ok(stop_reason)` (D5). A silent
+/// truncation would be catastrophic — wrong-key scenarios would
+/// serve partial data without any signal to the operator.
+#[test]
+#[serial(open_databases)]
+fn test_aes_gcm_mid_segment_corruption_not_silently_truncated() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(SearchSubsystem),
+        )
+        .unwrap();
+        for i in 0..4u8 {
+            blind_write(
+                &db,
+                Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                Value::Bytes(vec![i ^ 0x77; 32]),
+            );
+        }
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    // Flip a byte deep inside the first record's ciphertext. The
+    // segment header is 36 bytes; add 8 for the first outer envelope;
+    // byte 50 lands comfortably inside the first encrypted payload.
+    let seg_path = db_path.join("wal").join("wal-000001.seg");
+    {
+        let mut data = std::fs::read(&seg_path).unwrap();
+        let idx = 50usize;
+        assert!(
+            idx < data.len(),
+            "segment file should have grown past offset 50"
+        );
+        data[idx] ^= 0xFF;
+        std::fs::write(&seg_path, &data).unwrap();
+    }
+
+    // Strict open must refuse; no silent truncation path may succeed.
+    let result = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(SearchSubsystem),
+    );
+    match result {
+        Err(_) => { /* strict refuses; expected */ }
+        Ok(db) => {
+            let mut visible = 0usize;
+            for i in 0..4u8 {
+                let got = db
+                    .storage()
+                    .get_versioned(
+                        &Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                        CommitVersion::MAX,
+                    )
+                    .unwrap();
+                if got.is_some() {
+                    visible += 1;
+                }
+            }
+            panic!(
+                "strict open with mid-segment ciphertext corruption must \
+                 error, not silently truncate; {visible}/4 records \
+                 survived — this is a D5 regression"
+            );
+        }
+    }
+    OPEN_DATABASES.lock().clear();
+}
