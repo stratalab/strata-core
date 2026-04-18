@@ -347,16 +347,37 @@ impl Database {
         // the prefix of already-decoded records is preserved and the blocked
         // txn id is the real failing record. The stop-reason match further
         // below dispatches each class uniformly through `BlockReason`.
+        //
         // Residual `Err(_)` cases — directory-list I/O, segment-open I/O,
-        // legacy-format header — would mean the follower can no longer read
-        // its WAL at all; treat them as follower-fatal rather than synthesize
-        // a misleading blocked-at txn id.
+        // legacy-format header — mean the reader failed before it could
+        // identify a concrete blocked record. Refresh must still degrade into
+        // the documented blocked-state path rather than panic the process, so
+        // pin the follower at the next expected txn with the typed error
+        // detail for operator visibility.
         let reader = strata_durability::wal::WalReader::new().with_codec(
             strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
         );
-        let read_result = reader
-            .read_all_after_watermark_contiguous(&self.wal_dir, received_watermark)
-            .expect("follower WAL read failed: I/O or format error; codec-decode is Ok(blocked)");
+        let read_result =
+            match reader.read_all_after_watermark_contiguous(&self.wal_dir, received_watermark) {
+                Ok(r) => r,
+                Err(e) => {
+                    let blocked = make_blocked_state(
+                        TxnId(received_watermark.saturating_add(1)),
+                        BlockReason::Decode {
+                            message: format!("WAL read failed: {}", e),
+                        },
+                        None,
+                        false,
+                    );
+                    self.watermark.block_at(blocked.clone());
+                    self.persist_blocked_follower_state(&blocked);
+                    return RefreshOutcome::Stuck {
+                        applied: 0,
+                        applied_through: self.watermark.applied(),
+                        blocked_at: blocked.blocked,
+                    };
+                }
+            };
 
         if read_result.records.is_empty() && read_result.blocked.is_none() {
             return RefreshOutcome::CaughtUp {
