@@ -341,6 +341,19 @@ impl Database {
         // encrypted followers recover at open and then get stuck on
         // the first refresh with a codec-decode error on the first
         // new record (pre-T3-E12 part 4 behavior).
+        //
+        // D2 / DG-002: codec-decode, gap, checksum, and parse failures all
+        // come back via `Ok(WatermarkReadResult { blocked: Some(..) })` so
+        // the prefix of already-decoded records is preserved and the blocked
+        // txn id is the real failing record. The stop-reason match further
+        // below dispatches each class uniformly through `BlockReason`.
+        //
+        // Residual `Err(_)` cases — directory-list I/O, segment-open I/O,
+        // legacy-format header — mean the reader failed before it could
+        // identify a concrete blocked record. Refresh must still degrade into
+        // the documented blocked-state path rather than panic the process, so
+        // pin the follower at the next expected txn with the typed error
+        // detail for operator visibility.
         let reader = strata_durability::wal::WalReader::new().with_codec(
             strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
         );

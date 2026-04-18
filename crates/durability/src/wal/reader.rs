@@ -654,8 +654,56 @@ impl WalReader {
             let payload = &buffer[payload_start..payload_end];
 
             // Decode via installed codec or pass through for identity.
-            // Codec decode failures surface unconditionally (T3-E12 §D5).
-            let decoded = self.decode_payload(payload, offset as u64)?;
+            // Preserve the already-read prefix on codec-decode failure
+            // (D2 / DG-002). If scan-forward finds only stale records at or
+            // below `next_expected`, skip past them just like the
+            // checksum/parse paths; otherwise surface the first missing txn as
+            // blocked and include the next readable anchor when one exists.
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(WalReaderError::CodecDecode {
+                    offset: fail_offset,
+                    detail,
+                }) => {
+                    if let Some((scan_offset, next_record)) =
+                        self.scan_forward_to_valid_envelope(&buffer, offset + 1)
+                    {
+                        let candidate_txn = next_record.txn_id.as_u64();
+                        if candidate_txn <= next_expected {
+                            offset = scan_offset;
+                            continue;
+                        }
+                        return Ok(WatermarkReadResult {
+                            records,
+                            blocked: Some(WatermarkBlockedRecord {
+                                txn_id: TxnId(next_expected),
+                                detail: format!(
+                                    "codec decode failed: {detail}; next readable txn is {next}",
+                                    next = next_record.txn_id,
+                                ),
+                                skip_allowed: true,
+                                stop_reason: ReadStopReason::CodecDecode {
+                                    offset: fail_offset as usize,
+                                    detail,
+                                },
+                            }),
+                        });
+                    }
+                    return Ok(WatermarkReadResult {
+                        records,
+                        blocked: Some(WatermarkBlockedRecord {
+                            txn_id: TxnId(next_expected),
+                            detail: format!("codec decode failed: {detail}"),
+                            skip_allowed: false,
+                            stop_reason: ReadStopReason::CodecDecode {
+                                offset: fail_offset as usize,
+                                detail,
+                            },
+                        }),
+                    });
+                }
+                Err(e) => return Err(e),
+            };
 
             match WalRecord::from_bytes(&decoded) {
                 Ok((record, _consumed)) => {
@@ -2488,6 +2536,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_read_all_after_watermark_contiguous_skips_stale_codec_failure_before_watermark() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let records: Vec<_> = (1..=3)
+            .map(|i| WalRecord::new(TxnId(i), [5u8; 16], i * 1000, vec![i as u8; 16]))
+            .collect();
+        write_records(&wal_dir, &records);
+
+        let reader =
+            WalReader::new().with_codec(Box::new(RejectTxnDecodeCodec { reject_txn_id: 1 }));
+        let resumed = reader
+            .read_all_after_watermark_contiguous(&wal_dir, 2)
+            .unwrap();
+
+        assert_eq!(
+            resumed
+                .records
+                .iter()
+                .map(|r| r.txn_id.as_u64())
+                .collect::<Vec<_>>(),
+            vec![3],
+            "codec-decode failure on an already-applied txn must not block later contiguous records"
+        );
+        assert!(
+            resumed.blocked.is_none(),
+            "stale codec-decode failures below the watermark should be skipped when the next expected txn is readable"
+        );
+    }
+
     // ========================================================================
     // T3-E12 Phase 2 — envelope-parse + codec-error taxonomy
     // ========================================================================
@@ -2518,6 +2596,45 @@ mod tests {
 
         fn clone_box(&self) -> Box<dyn StorageCodec> {
             Box::new(AlwaysFailDecodeCodec)
+        }
+    }
+
+    /// Test-only codec that rejects a specific txn id while passing all other
+    /// payloads through unchanged. The contiguous reader uses this to prove
+    /// codec-decode failures below the watermark can be scanned past without
+    /// blocking later records.
+    struct RejectTxnDecodeCodec {
+        reject_txn_id: u64,
+    }
+
+    impl StorageCodec for RejectTxnDecodeCodec {
+        fn encode(&self, data: &[u8]) -> Vec<u8> {
+            data.to_vec()
+        }
+
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::codec::CodecError> {
+            let txn_id = data
+                .get(9..17)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u64::from_le_bytes);
+            if txn_id == Some(self.reject_txn_id) {
+                return Err(crate::codec::CodecError::decode(
+                    format!("test codec rejects txn {}", self.reject_txn_id),
+                    "reject-txn-decode",
+                    data.len(),
+                ));
+            }
+            Ok(data.to_vec())
+        }
+
+        fn codec_id(&self) -> &str {
+            "reject-txn-decode"
+        }
+
+        fn clone_box(&self) -> Box<dyn StorageCodec> {
+            Box::new(Self {
+                reject_txn_id: self.reject_txn_id,
+            })
         }
     }
 

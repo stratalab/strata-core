@@ -220,7 +220,12 @@ impl Database {
             loop {
                 match self.storage.flush_oldest_frozen(branch_id) {
                     Ok(true) => {
-                        Self::update_flush_watermark(&self.storage, &self.data_dir, &self.wal_dir);
+                        Self::update_flush_watermark(
+                            &self.storage,
+                            &self.data_dir,
+                            &self.wal_dir,
+                            self.wal_codec.as_ref(),
+                        );
                     }
                     Ok(false) => break,
                     Err(e) => {
@@ -273,6 +278,7 @@ impl Database {
             let data_dir = self.data_dir.clone();
             let wal_dir = self.wal_dir.clone();
             let flush_flag = Arc::clone(&self.flush_in_flight);
+            let wal_codec = strata_durability::codec::clone_codec(self.wal_codec.as_ref());
             let _ = self
                 .scheduler
                 .submit(crate::background::TaskPriority::High, move || {
@@ -290,7 +296,12 @@ impl Database {
                             loop {
                                 match storage.flush_oldest_frozen(branch_id) {
                                     Ok(true) => {
-                                        Self::update_flush_watermark(&storage, &data_dir, &wal_dir);
+                                        Self::update_flush_watermark(
+                                            &storage,
+                                            &data_dir,
+                                            &wal_dir,
+                                            wal_codec.as_ref(),
+                                        );
                                     }
                                     Ok(false) => break,
                                     Err(e) => {
@@ -469,8 +480,17 @@ impl Database {
     /// across all branches. WAL segments fully below this watermark are safe
     /// to delete because their data is in segments.
     ///
+    /// `wal_codec` threads the same codec the runtime uses so retention
+    /// decisions on non-identity-codec databases don't diverge from the
+    /// shipped v3 envelope format (D2 / DG-001).
+    ///
     /// Best-effort: errors are logged, not propagated.
-    fn update_flush_watermark(storage: &SegmentedStore, data_dir: &Path, wal_dir: &Path) {
+    fn update_flush_watermark(
+        storage: &SegmentedStore,
+        data_dir: &Path,
+        wal_dir: &Path,
+        wal_codec: &dyn strata_durability::codec::StorageCodec,
+    ) {
         // Compute global flush watermark: min of max_flushed_commit across all branches
         let branch_ids = storage.branch_ids();
         if branch_ids.is_empty() {
@@ -522,7 +542,8 @@ impl Database {
 
         // Truncate WAL segments below watermark
         let manifest_arc = Arc::new(ParkingMutex::new(mgr));
-        let compactor = WalOnlyCompactor::new(wal_dir.to_path_buf(), manifest_arc);
+        let compactor = WalOnlyCompactor::new(wal_dir.to_path_buf(), manifest_arc)
+            .with_codec(strata_durability::codec::clone_codec(wal_codec));
         match compactor.compact() {
             Ok(info) => {
                 if info.wal_segments_removed > 0 {

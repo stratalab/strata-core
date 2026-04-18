@@ -1601,6 +1601,75 @@ fn test_follower_refresh_with_non_identity_codec() {
     follower.shutdown().unwrap();
 }
 
+/// D2 regression: follower refresh must degrade into persisted blocked state
+/// on residual WAL-read failures instead of panicking the process.
+#[test]
+#[serial(open_databases)]
+fn test_follower_refresh_corrupt_wal_returns_stuck_instead_of_panicking() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    assert_eq!(read_kv(&follower, branch, "base").as_deref(), Some("v1"));
+
+    let corrupt_segment = dir.path().join("wal").join("wal-000099.seg");
+    std::fs::write(&corrupt_segment, b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER").unwrap();
+
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| follower.refresh()))
+        .expect("refresh must return blocked state instead of panicking on malformed WAL");
+    let blocked_at = match outcome {
+        strata_engine::RefreshOutcome::Stuck {
+            applied,
+            blocked_at,
+            ..
+        } => {
+            assert_eq!(
+                applied, 0,
+                "malformed WAL should block before new records apply"
+            );
+            blocked_at
+        }
+        other => panic!(
+            "malformed WAL during refresh must return Stuck, not {:?}",
+            other
+        ),
+    };
+
+    assert_eq!(
+        blocked_at.txn_id.as_u64(),
+        2,
+        "residual WAL read failure should pin the next expected txn"
+    );
+    assert!(
+        blocked_at.reason.to_string().contains("WAL read failed"),
+        "blocked reason must preserve the reader failure detail: {:?}",
+        blocked_at
+    );
+
+    let status = follower.follower_status();
+    assert!(status.is_blocked(), "follower must surface blocked status");
+    assert!(
+        dir.path().join("follower_state.json").exists(),
+        "blocked refresh must persist follower_state.json"
+    );
+    assert_eq!(
+        read_kv(&follower, branch, "base").as_deref(),
+        Some("v1"),
+        "existing visible state must remain readable after blocked refresh"
+    );
+
+    primary.shutdown().unwrap();
+    follower.shutdown().unwrap();
+}
+
 /// T3-E12 §D7: follower-without-MANIFEST falls back to
 /// `get_codec(&cfg.storage.codec)` so encrypted WAL-only recovery
 /// works even when no MANIFEST has been persisted yet.
