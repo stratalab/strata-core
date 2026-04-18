@@ -273,21 +273,18 @@ impl WalOnlyCompactor {
         if let Some(codec) = self.codec.as_deref() {
             reader = reader.with_codec(clone_codec(codec));
         }
-        let (records, _, _, _) = reader
-            .read_segment(&self.wal_dir, segment_number)
-            .map_err(|e| {
-                CompactionError::internal(format!(
-                    "Failed to read segment {segment_number} for coverage check: {e}"
-                ))
-            })?;
+        let (records, _, _, _) =
+            reader
+                .read_segment(&self.wal_dir, segment_number)
+                .map_err(|e| {
+                    CompactionError::internal(format!(
+                        "Failed to read segment {segment_number} for coverage check: {e}"
+                    ))
+                })?;
 
         // Empty segment (no records after the header) is covered by any
         // watermark — preserves the legacy empty-segment semantics.
-        let max_txn_id = records
-            .iter()
-            .map(|r| r.txn_id.as_u64())
-            .max()
-            .unwrap_or(0);
+        let max_txn_id = records.iter().map(|r| r.txn_id.as_u64()).max().unwrap_or(0);
         Ok(max_txn_id <= watermark)
     }
 
