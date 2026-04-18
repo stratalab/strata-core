@@ -715,7 +715,7 @@ fn test_aes_gcm_wal_durability_clean_shutdown_roundtrip() {
         for i in 0..12u8 {
             blind_write(
                 &db,
-                Key::new_kv(ns.clone(), &format!("k{i}")),
+                Key::new_kv(ns.clone(), format!("k{i}")),
                 Value::Bytes(vec![i; 64]),
             );
         }
@@ -732,7 +732,7 @@ fn test_aes_gcm_wal_durability_clean_shutdown_roundtrip() {
     .expect("reopen after clean shutdown must succeed");
 
     for i in 0..12u8 {
-        let key = Key::new_kv(ns.clone(), &format!("k{i}"));
+        let key = Key::new_kv(ns.clone(), format!("k{i}"));
         let got = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
@@ -774,7 +774,7 @@ fn test_aes_gcm_wal_crash_recovery() {
         for i in 0..8u8 {
             blind_write(
                 &db,
-                Key::new_kv(ns.clone(), &format!("crash_k{i}")),
+                Key::new_kv(ns.clone(), format!("crash_k{i}")),
                 Value::Bytes(vec![i ^ 0x55; 32]),
             );
         }
@@ -792,7 +792,7 @@ fn test_aes_gcm_wal_crash_recovery() {
     .expect("reopen after crash must succeed via WAL recovery");
 
     for i in 0..8u8 {
-        let key = Key::new_kv(ns.clone(), &format!("crash_k{i}"));
+        let key = Key::new_kv(ns.clone(), format!("crash_k{i}"));
         let got = db
             .storage()
             .get_versioned(&key, CommitVersion::MAX)
@@ -902,7 +902,7 @@ fn test_aes_gcm_wrong_key_classifies_as_codec_decode() {
         for i in 0..4u8 {
             blind_write(
                 &db,
-                Key::new_kv(ns.clone(), &format!("enc_k{i}")),
+                Key::new_kv(ns.clone(), format!("enc_k{i}")),
                 Value::Bytes(vec![i; 16]),
             );
         }
@@ -943,7 +943,7 @@ fn test_aes_gcm_wrong_key_classifies_as_codec_decode() {
         let got = db
             .storage()
             .get_versioned(
-                &Key::new_kv(ns.clone(), &format!("enc_k{i}")),
+                &Key::new_kv(ns.clone(), format!("enc_k{i}")),
                 CommitVersion::MAX,
             )
             .unwrap();
@@ -994,7 +994,7 @@ fn test_aes_gcm_partial_tail_truncates_cleanly() {
         for i in 0..record_count {
             blind_write(
                 &db,
-                Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                Key::new_kv(ns.clone(), format!("tail_k{i}")),
                 Value::Bytes(vec![i; 16]),
             );
         }
@@ -1035,7 +1035,7 @@ fn test_aes_gcm_partial_tail_truncates_cleanly() {
         let got = db
             .storage()
             .get_versioned(
-                &Key::new_kv(ns.clone(), &format!("tail_k{i}")),
+                &Key::new_kv(ns.clone(), format!("tail_k{i}")),
                 CommitVersion::MAX,
             )
             .unwrap();
@@ -1083,7 +1083,7 @@ fn test_aes_gcm_mid_segment_corruption_not_silently_truncated() {
         for i in 0..4u8 {
             blind_write(
                 &db,
-                Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                Key::new_kv(ns.clone(), format!("mid_k{i}")),
                 Value::Bytes(vec![i ^ 0x77; 32]),
             );
         }
@@ -1120,7 +1120,7 @@ fn test_aes_gcm_mid_segment_corruption_not_silently_truncated() {
                 let got = db
                     .storage()
                     .get_versioned(
-                        &Key::new_kv(ns.clone(), &format!("mid_k{i}")),
+                        &Key::new_kv(ns.clone(), format!("mid_k{i}")),
                         CommitVersion::MAX,
                     )
                     .unwrap();

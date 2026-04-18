@@ -250,6 +250,41 @@ fn materialize_skips_shadowed_by_closer_layer() {
 }
 
 #[test]
+fn materialize_manifest_publish_failure_restores_active_layer_status() {
+    crate::test_hooks::clear_manifest_publish_failure();
+
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    crate::test_hooks::inject_manifest_publish_failure(std::io::ErrorKind::Other);
+    let err = store.materialize_layer(&child_branch(), 0).unwrap_err();
+    assert!(matches!(err, crate::StorageError::ManifestPublish { .. }));
+
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.inherited_layers.len(), 1);
+    assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
+    assert!(store.publish_health().is_none());
+}
+
+#[test]
+fn materialize_dir_fsync_failure_is_forward_only_and_latches_health() {
+    crate::test_hooks::clear_manifest_dir_fsync_failure();
+
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1), ("b", 2, 2)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    crate::test_hooks::inject_manifest_dir_fsync_failure(std::io::ErrorKind::Other);
+    let result = store.materialize_layer(&child_branch(), 0).unwrap();
+    assert_eq!(result.entries_materialized, 2);
+    assert_eq!(store.inherited_layer_count(&child_branch()), 0);
+    assert!(store.publish_health().is_some());
+}
+
+#[test]
 fn materialize_deepest_first() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
@@ -456,7 +491,7 @@ fn materialize_crash_recovery_resets_status() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Second store: recover from manifest — Materializing should reset to Active
@@ -522,7 +557,7 @@ fn materialize_crash_recovery_with_partial_segment() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
 
         // "crash" — store drops
     }
@@ -609,7 +644,7 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Phase 2: Recover
@@ -658,8 +693,8 @@ fn recovery_surfaces_missing_source_branch() {
             .unwrap();
 
         // Write manifest for both branches
-        store.write_branch_manifest(&parent_branch());
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&parent_branch()).unwrap();
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Sabotage: delete the parent's branch directory (simulating missing source)

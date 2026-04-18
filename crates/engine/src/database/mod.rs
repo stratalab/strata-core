@@ -1314,6 +1314,15 @@ impl Database {
         }
     }
 
+    pub(crate) fn storage_publish_error(&self) -> Option<StrataError> {
+        self.storage.publish_health().map(|health| {
+            StrataError::storage(format!(
+                "storage publication durability is degraded: {}",
+                health.message
+            ))
+        })
+    }
+
     pub(crate) fn ensure_writer_healthy(&self) -> StrataResult<()> {
         if let Some(err) = self.writer_halted_error() {
             return Err(err);
@@ -1547,14 +1556,30 @@ impl Database {
         let mut subsystems = Vec::new();
 
         // 1. Storage
-        subsystems.push(SubsystemHealth {
-            name: "storage".into(),
-            status: SubsystemStatus::Healthy,
-            message: Some(format!(
-                "{} branches, {} entries",
-                m.storage.total_branches, m.storage.total_entries
-            )),
-        });
+        {
+            let (status, message) = if let Some(health) = self.storage.publish_health() {
+                (
+                    SubsystemStatus::Unhealthy,
+                    Some(format!(
+                        "{} branches, {} entries; publication durability degraded: {}",
+                        m.storage.total_branches, m.storage.total_entries, health.message
+                    )),
+                )
+            } else {
+                (
+                    SubsystemStatus::Healthy,
+                    Some(format!(
+                        "{} branches, {} entries",
+                        m.storage.total_branches, m.storage.total_entries
+                    )),
+                )
+            };
+            subsystems.push(SubsystemHealth {
+                name: "storage".into(),
+                status,
+                message,
+            });
+        }
 
         // 2. WAL
         {

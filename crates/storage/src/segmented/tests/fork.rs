@@ -238,6 +238,36 @@ fn inherited_layer_delete_shadows() {
 }
 
 #[test]
+fn fork_manifest_publish_failure_rolls_back_destination_branch() {
+    crate::test_hooks::clear_manifest_publish_failure();
+
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1)]);
+    crate::test_hooks::inject_manifest_publish_failure(std::io::ErrorKind::Other);
+    let err = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap_err();
+    assert!(matches!(err, crate::StorageError::ManifestPublish { .. }));
+    assert!(store.branches.get(&child_branch()).is_none());
+    assert!(store.publish_health().is_none());
+}
+
+#[test]
+fn fork_dir_fsync_failure_keeps_child_branch_and_latches_health() {
+    crate::test_hooks::clear_manifest_dir_fsync_failure();
+
+    let (_dir, store) = setup_parent_with_segments(&[("a", 1, 1)]);
+    crate::test_hooks::inject_manifest_dir_fsync_failure(std::io::ErrorKind::Other);
+    let (fork_version, segments_shared) = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    assert!(fork_version > CommitVersion::ZERO);
+    assert!(segments_shared > 0);
+    assert_eq!(store.inherited_layer_count(&child_branch()), 1);
+    assert!(store.publish_health().is_some());
+}
+
+#[test]
 fn inherited_layer_range_scan() {
     let (_dir, store) = setup_parent_with_segments(&[
         ("user:alice", 1, 1),

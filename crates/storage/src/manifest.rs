@@ -23,6 +23,8 @@ use std::path::Path;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 
+use crate::{StorageError, StorageResult};
+
 /// Magic bytes for segment manifest: "STRAMFST"
 const MANIFEST_MAGIC: [u8; 8] = *b"STRAMFST";
 
@@ -71,7 +73,7 @@ pub fn write_manifest(
     dir: &Path,
     entries: &[ManifestEntry],
     inherited_layers: &[ManifestInheritedLayer],
-) -> io::Result<()> {
+) -> StorageResult<()> {
     let mut buf = Vec::with_capacity(HEADER_SIZE + entries.len() * 20 + 4);
 
     // Header
@@ -115,11 +117,24 @@ pub fn write_manifest(
 
     std::fs::rename(&tmp_path, &final_path)?;
 
-    // Fsync the parent directory to make the rename durable.
-    // Failure here is non-fatal (rename already succeeded).
-    if let Ok(dir_fd) = std::fs::File::open(dir) {
-        let _ = dir_fd.sync_all();
+    // Fsync the parent directory to make the rename durable. Failure here
+    // means the rename may already be visible, but its durability is
+    // unconfirmed and must be surfaced distinctly.
+    if let Some(inner) = crate::test_hooks::maybe_inject_manifest_dir_fsync_failure() {
+        return Err(StorageError::DirFsync {
+            dir: dir.to_path_buf(),
+            inner,
+        });
     }
+
+    let dir_fd = std::fs::File::open(dir).map_err(|inner| StorageError::DirFsync {
+        dir: dir.to_path_buf(),
+        inner,
+    })?;
+    dir_fd.sync_all().map_err(|inner| StorageError::DirFsync {
+        dir: dir.to_path_buf(),
+        inner,
+    })?;
 
     Ok(())
 }

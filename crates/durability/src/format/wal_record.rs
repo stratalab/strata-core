@@ -34,18 +34,18 @@
 //! # Segment format versions
 //!
 //! * v1: original 32-byte header, no CRC. Read-only compatibility path
-//!       (pre-March 2026).
+//!   (pre-March 2026).
 //! * v2: 36-byte header with CRC32 over the first 32 bytes (March 2026,
-//!       commit 77e9f258 / issue #1577). Records within the segment
-//!       carry their own `LenCRC` for torn-write detection.
+//!   commit 77e9f258 / issue #1577). Records within the segment
+//!   carry their own `LenCRC` for torn-write detection.
 //! * v3: adds a per-record outer envelope `[u32 outer_len][u32 outer_len_crc]`
-//!       wrapping the codec-encoded inner record (T3-E12 Phase 2, this
-//!       build). The envelope is required so codec-encoded payloads
-//!       (AES-GCM, etc.) have discoverable record boundaries — without
-//!       it the reader cannot find the start of the next record on an
-//!       encrypted WAL. Pre-v3 segments are rejected with
-//!       [`SegmentHeaderError::LegacyFormat`]; clean break, no dual-path
-//!       parsing.
+//!   wrapping the codec-encoded inner record (T3-E12 Phase 2, this
+//!   build). The envelope is required so codec-encoded payloads
+//!   (AES-GCM, etc.) have discoverable record boundaries — without
+//!   it the reader cannot find the start of the next record on an
+//!   encrypted WAL. Pre-v3 segments are rejected with
+//!   [`SegmentHeaderError::LegacyFormat`]; clean break, no dual-path
+//!   parsing.
 
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};

@@ -270,7 +270,7 @@ impl SegmentedStore {
             Ok(meta) => meta,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e);
+                return Err(e.into());
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
@@ -317,7 +317,7 @@ impl SegmentedStore {
         // delete but before manifest write, recovery would reference missing
         // segments. Writing manifest first ensures crash recovery can always
         // find the new compacted segment.
-        self.write_branch_manifest(branch_id);
+        self.write_branch_manifest(branch_id)?;
 
         // Now safe to delete old segment files (refcount-guarded).
         for seg in &old_segments {
@@ -428,7 +428,7 @@ impl SegmentedStore {
             Ok(meta) => meta,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e);
+                return Err(e.into());
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
@@ -471,7 +471,7 @@ impl SegmentedStore {
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
-        self.write_branch_manifest(branch_id);
+        self.write_branch_manifest(branch_id)?;
 
         // Delete old segment files (refcount-guarded).
         for seg in &selected_segments {
@@ -634,7 +634,7 @@ impl SegmentedStore {
             Err(e) => {
                 let end_id = next_id.load(Ordering::Relaxed);
                 cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
-                return Err(e);
+                return Err(e.into());
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
@@ -693,7 +693,7 @@ impl SegmentedStore {
         }
 
         // Persist manifest BEFORE deleting old files (crash safety).
-        self.write_branch_manifest(branch_id);
+        self.write_branch_manifest(branch_id)?;
 
         // Now safe to delete old files (refcount-guarded).
         for seg in &l0_segs {
@@ -852,7 +852,7 @@ impl SegmentedStore {
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
             refresh_level_targets(&mut branch, self.level_base_bytes());
             drop(branch);
-            self.write_branch_manifest(branch_id);
+            self.write_branch_manifest(branch_id)?;
 
             return Ok(Some(CompactionResult {
                 segments_merged: 1,
@@ -947,7 +947,7 @@ impl SegmentedStore {
             Err(e) => {
                 let end_id = next_id.load(Ordering::Relaxed);
                 cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
-                return Err(e);
+                return Err(e.into());
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
@@ -1006,7 +1006,7 @@ impl SegmentedStore {
         // ── 5. Cleanup ─────────────────────────────────────────────────
 
         // Persist manifest BEFORE deleting old files (crash safety).
-        self.write_branch_manifest(branch_id);
+        self.write_branch_manifest(branch_id)?;
 
         // Delete old segment files (refcount-guarded).
         for seg in &input_segs {
