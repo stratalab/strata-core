@@ -42,10 +42,7 @@ pub(crate) fn inject_manifest_publish_failure(kind: io::ErrorKind) {
 ///
 /// `remaining_skips = 0` means "fail the next publish".
 #[cfg(test)]
-pub(crate) fn inject_manifest_publish_failure_after(
-    remaining_skips: usize,
-    kind: io::ErrorKind,
-) {
+pub(crate) fn inject_manifest_publish_failure_after(remaining_skips: usize, kind: io::ErrorKind) {
     MANIFEST_PUBLISH_FAILURE.with(|slot| {
         slot.set(Some(ArmedFailure {
             remaining_skips,

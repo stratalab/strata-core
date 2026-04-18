@@ -920,7 +920,10 @@ impl SegmentedStore {
         layer_segments: &Arc<SegmentVersion>,
         new_segments: &[Arc<KVSegment>],
     ) {
-        let new_ids: HashSet<u64> = new_segments.iter().map(|segment| segment.file_id()).collect();
+        let new_ids: HashSet<u64> = new_segments
+            .iter()
+            .map(|segment| segment.file_id())
+            .collect();
 
         if let Some(mut branch) = self.branches.get_mut(child_branch_id) {
             let cur_ver = branch.version.load();
@@ -1422,9 +1425,7 @@ impl SegmentedStore {
             let branch = match self.branches.get(child_branch_id) {
                 Some(b) => b,
                 None => {
-                    return Err(
-                        io::Error::new(io::ErrorKind::NotFound, "branch not found").into(),
-                    )
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found").into())
                 }
             };
             if layer_index >= branch.inherited_layers.len() {
@@ -1472,9 +1473,7 @@ impl SegmentedStore {
             let mut branch = match self.branches.get_mut(child_branch_id) {
                 Some(b) => b,
                 None => {
-                    return Err(
-                        io::Error::new(io::ErrorKind::NotFound, "branch not found").into(),
-                    )
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found").into())
                 }
             };
             if layer_index < branch.inherited_layers.len() {

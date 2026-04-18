@@ -96,9 +96,9 @@ pub type StorageResult<T> = Result<T, StorageError>;
 impl From<StorageError> for StrataError {
     fn from(e: StorageError) -> Self {
         match e {
-            StorageError::ManifestPublish { branch_id, inner } => StrataError::corruption(
-                format!("manifest publish failed for branch {branch_id}: {inner}"),
-            ),
+            StorageError::ManifestPublish { branch_id, inner } => StrataError::corruption(format!(
+                "manifest publish failed for branch {branch_id}: {inner}"
+            )),
             StorageError::DirFsync { dir, inner } => StrataError::storage_with_source(
                 format!("directory fsync failed for {}", dir.display()),
                 inner,

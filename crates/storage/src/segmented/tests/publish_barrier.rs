@@ -53,11 +53,7 @@ fn seed_two_segments(store: &SegmentedStore, b: &BranchId) {
 /// Assert that every file present before an operation is still present after,
 /// i.e. the operation did not delete any pre-existing `.sst` file. New files
 /// (e.g. an orphaned compaction output) are allowed.
-fn assert_no_files_deleted(
-    branch_dir: &std::path::Path,
-    before: &BTreeSet<String>,
-    context: &str,
-) {
+fn assert_no_files_deleted(branch_dir: &std::path::Path, before: &BTreeSet<String>, context: &str) {
     let after = sst_names(branch_dir);
     let deleted: Vec<_> = before.difference(&after).collect();
     assert!(
@@ -197,8 +193,16 @@ fn flush_oldest_frozen_publish_failure_rolls_back_state() {
         other => panic!("expected ManifestPublish, got {other:?}"),
     }
 
-    assert_eq!(store.branch_frozen_count(&b), 1, "frozen memtable must be restored");
-    assert_eq!(store.branch_segment_count(&b), 0, "failed publish must not leave installed segment");
+    assert_eq!(
+        store.branch_frozen_count(&b),
+        1,
+        "frozen memtable must be restored"
+    );
+    assert_eq!(
+        store.branch_segment_count(&b),
+        0,
+        "failed publish must not leave installed segment"
+    );
     assert_eq!(
         store.get_value_direct(&kv_key("k")).unwrap(),
         Some(Value::Int(1)),
@@ -249,8 +253,13 @@ fn fork_branch_dest_publish_failure_rolls_back_child_state() {
         "failed destination publish must not leave a child branch installed in memory"
     );
 
-    let retry = store.fork_branch(&parent_branch(), &child_branch()).unwrap();
-    assert!(retry.1 > 0, "retry should perform the storage fork normally");
+    let retry = store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    assert!(
+        retry.1 > 0,
+        "retry should perform the storage fork normally"
+    );
     assert_eq!(store.inherited_layer_count(&child_branch()), 1);
     assert_eq!(
         store.get_value_direct(&child_kv("k1")).unwrap(),
@@ -290,7 +299,9 @@ fn fork_branch_source_publish_failure_rolls_back_source_flush() {
         "failed source publish must restore the source branch state"
     );
 
-    store.fork_branch(&parent_branch(), &child_branch()).unwrap();
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
     assert_eq!(
         store.get_value_direct(&child_kv("k1")).unwrap(),
         Some(Value::Int(1)),

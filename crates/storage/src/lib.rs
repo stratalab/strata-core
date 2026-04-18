@@ -32,8 +32,8 @@ pub mod test_hooks;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
-pub use error::{StorageError, StorageResult};
 pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
+pub use error::{StorageError, StorageResult};
 pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
