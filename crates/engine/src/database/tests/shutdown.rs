@@ -697,8 +697,7 @@ fn test_background_sync_failure_halts_writer_and_rejects_manual_commit() {
         .expect_err("manual transaction should be rejected once the writer halts");
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted from manual commit, got: {:?}",
-        err
+        "expected WriterHalted from manual commit, got: {err:?}"
     );
 
     // Verify new transactions are rejected with WriterHalted error
@@ -711,8 +710,7 @@ fn test_background_sync_failure_halts_writer_and_rejects_manual_commit() {
 
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted error, got: {:?}",
-        err
+        "expected WriterHalted error, got: {err:?}"
     );
 
     // Clearing the fault should NOT auto-resume; the flush thread stays alive
@@ -885,8 +883,7 @@ fn test_begin_sync_failure_halts_writer_and_rejects_manual_commit() {
         .expect_err("manual transaction should be rejected once the writer halts");
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted from manual commit, got: {:?}",
-        err
+        "expected WriterHalted from manual commit, got: {err:?}"
     );
 
     // New transactions after halt must be rejected too.
@@ -898,8 +895,7 @@ fn test_begin_sync_failure_halts_writer_and_rejects_manual_commit() {
         .expect_err("transaction should be rejected when writer is halted");
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted error, got: {:?}",
-        err
+        "expected WriterHalted error, got: {err:?}"
     );
 
     // Clearing the injection must NOT auto-resume; only explicit resume does.
@@ -985,8 +981,7 @@ fn test_commit_sync_failure_halts_writer_and_rejects_manual_commit() {
         .expect_err("manual transaction should be rejected once the writer halts");
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted from manual commit, got: {:?}",
-        err
+        "expected WriterHalted from manual commit, got: {err:?}"
     );
 
     let err = db
@@ -997,8 +992,7 @@ fn test_commit_sync_failure_halts_writer_and_rejects_manual_commit() {
         .expect_err("transaction should be rejected when writer is halted");
     assert!(
         matches!(err, StrataError::WriterHalted { .. }),
-        "expected WriterHalted error, got: {:?}",
-        err
+        "expected WriterHalted error, got: {err:?}"
     );
 
     super::test_hooks::clear_commit_sync_failure(&db_path);
