@@ -734,15 +734,14 @@ impl Database {
     pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
-        _data_dir: &Path,
+        data_dir: &Path,
         shutdown: &Arc<AtomicBool>,
         accepting_transactions: &Arc<AtomicBool>,
         wal_writer_health: &Arc<ParkingMutex<WalWriterHealth>>,
     ) -> StrataResult<Option<std::thread::JoinHandle<()>>> {
         if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
             let wal = Arc::clone(wal);
-            #[cfg(test)]
-            let data_dir = _data_dir.to_path_buf();
+            let data_dir = data_dir.to_path_buf();
             let shutdown = Arc::clone(shutdown);
             let accepting = Arc::clone(accepting_transactions);
             let health = Arc::clone(wal_writer_health);
@@ -768,11 +767,51 @@ impl Database {
                         }
                         let sync_plan = {
                             let mut w = wal.lock();
-                            match w.begin_background_sync() {
+
+                            // In the real path, `begin_background_sync` can fail
+                            // before a handle is produced (e.g., `flush_to_os`).
+                            //
+                            // In the test-injected path, we only simulate a begin
+                            // failure when a real begin WOULD have produced a
+                            // handle (i.e., unsynced data + interval elapsed) —
+                            // otherwise the injection would fire on idle ticks
+                            // and race with the test's setup. We abort the
+                            // just-opened handle so `sync_in_flight` clears and
+                            // bg_error reflects the injected error.
+                            #[cfg(test)]
+                            let (begin_result, already_recorded) = match w.begin_background_sync() {
+                                Ok(Some(handle)) => {
+                                    match crate::database::test_hooks::maybe_inject_begin_sync_failure(&data_dir) {
+                                        Some(injected) => {
+                                            w.abort_background_sync(handle, injected);
+                                            (Err(std::io::Error::other("injected begin sync failure")), true)
+                                        }
+                                        None => (Ok(Some(handle)), false),
+                                    }
+                                }
+                                other => (other, false),
+                            };
+
+                            #[cfg(not(test))]
+                            let (begin_result, already_recorded) = (w.begin_background_sync(), false);
+
+                            match begin_result {
                                 Ok(Some(handle)) => Some((handle, w.snapshot_active_meta())),
                                 Ok(None) => None,
                                 Err(e) => {
                                     tracing::error!(target: "strata::wal", error = %e, "Background WAL flush failed");
+                                    if !already_recorded {
+                                        w.record_sync_failure(e);
+                                    }
+                                    let bg = w.bg_error();
+                                    Self::latch_bg_sync_halt(
+                                        &health,
+                                        &accepting,
+                                        bg,
+                                        "setup",
+                                        Some(data_dir.as_path()),
+                                    );
+                                    drop(w);
                                     None
                                 }
                             }
@@ -789,49 +828,62 @@ impl Database {
                             let committed = {
                                 let mut w = wal.lock();
                                 match sync_result {
-                                    Ok(()) => match w.commit_background_sync(handle) {
-                                        Ok(()) => true,
-                                        Err(e) => {
-                                            tracing::error!(target: "strata::wal", error = %e, "Background WAL sync bookkeeping failed");
-                                            false
+                                    Ok(()) => {
+                                        // In the real path, commit_background_sync
+                                        // consumes the handle and does not touch
+                                        // bg_error on failure — the halt arm below
+                                        // records the failure itself.
+                                        //
+                                        // In the test-injected path,
+                                        // abort_background_sync releases the handle
+                                        // and records the injected error, so the
+                                        // halt arm must NOT record a second time (that
+                                        // would overwrite the injected error message
+                                        // with a placeholder).
+                                        #[cfg(test)]
+                                        let (commit_result, already_recorded) = match crate::database::test_hooks::maybe_inject_commit_sync_failure(&data_dir) {
+                                            Some(injected) => {
+                                                w.abort_background_sync(handle, injected);
+                                                (Err(std::io::Error::other("injected commit failure")), true)
+                                            }
+                                            None => (w.commit_background_sync(handle), false),
+                                        };
+
+                                        #[cfg(not(test))]
+                                        let (commit_result, already_recorded) = (w.commit_background_sync(handle), false);
+
+                                        match commit_result {
+                                            Ok(()) => true,
+                                            Err(e) => {
+                                                tracing::error!(target: "strata::wal", error = %e, "Background WAL sync bookkeeping failed");
+                                                if !already_recorded {
+                                                    w.record_sync_failure(e);
+                                                }
+                                                let bg = w.bg_error();
+                                                Self::latch_bg_sync_halt(
+                                                    &health,
+                                                    &accepting,
+                                                    bg,
+                                                    "bookkeeping",
+                                                    Some(data_dir.as_path()),
+                                                );
+                                                drop(w);
+                                                false
+                                            }
                                         }
-                                    },
+                                    }
                                     Err(e) => {
                                         tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                                         w.abort_background_sync(handle, e);
-
-                                        // Update health state with error details from WAL writer
-                                        let mut h = health.lock();
-                                        if let Some(bg_error) = w.bg_error() {
-                                            let reason = bg_error.message().to_string();
-                                            let failed_sync_count = bg_error.failed_sync_count();
-                                            *h = Self::halted_health_from_bg_error(bg_error);
-                                            tracing::error!(
-                                                target: "strata::wal",
-                                                reason = %reason,
-                                                failed_sync_count,
-                                                "WAL writer halted due to sync failure"
-                                            );
-                                        } else {
-                                            // Defensive: bg_error should always be Some after
-                                            // abort_background_sync, but ensure consistent state
-                                            *h = WalWriterHealth::Halted {
-                                                reason: "sync failure (details unavailable)".to_string(),
-                                                first_observed_at: std::time::SystemTime::now(),
-                                                failed_sync_count: 1,
-                                            };
-                                            tracing::error!(
-                                                target: "strata::wal",
-                                                "WAL writer halted due to sync failure (bg_error unexpectedly None)"
-                                            );
-                                        }
-                                        drop(h);
-
-                                        // Publish the halt after health is updated so
-                                        // new callers observe WriterHalted, not a
-                                        // generic shutdown-style rejection.
-                                        accepting.store(false, Ordering::Release);
-
+                                        let bg = w.bg_error();
+                                        Self::latch_bg_sync_halt(
+                                            &health,
+                                            &accepting,
+                                            bg,
+                                            "sync",
+                                            Some(data_dir.as_path()),
+                                        );
+                                        drop(w);
                                         false
                                     }
                                 }
