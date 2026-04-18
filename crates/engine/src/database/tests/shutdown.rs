@@ -1030,6 +1030,83 @@ fn test_commit_sync_failure_halts_writer_and_rejects_manual_commit() {
     db.shutdown().unwrap();
 }
 
+/// D1 regression: resume must serialize with an in-flight halt publication so
+/// the flush thread cannot restore `accepting_transactions = false` after
+/// `resume_wal_writer()` has already published `Healthy`.
+#[test]
+#[serial]
+fn test_resume_waits_for_inflight_halt_publication_before_restoring_accepting() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("resume_vs_halt_publish_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 10,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let trigger_key = Key::new_kv(create_test_namespace(branch_id), "resume_halt_trigger");
+    let resumed_key = Key::new_kv(create_test_namespace(branch_id), "resume_after_halt");
+
+    super::test_hooks::clear_begin_sync_failure(&db_path);
+    super::test_hooks::clear_halt_publish_pause(&db_path);
+    super::test_hooks::install_halt_publish_pause(&db_path);
+    super::test_hooks::inject_begin_sync_failure(&db_path, std::io::ErrorKind::Other);
+
+    db.transaction(branch_id, |txn| {
+        txn.put(trigger_key.clone(), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+
+    assert!(
+        super::test_hooks::wait_for_halt_publish_pause(&db_path, Duration::from_secs(2)),
+        "flush thread should reach the halt-publication pause"
+    );
+    assert!(
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        ),
+        "writer health should already be halted while publication is paused"
+    );
+
+    let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+    let db_resume = Arc::clone(&db);
+    let resume_handle = std::thread::spawn(move || {
+        let result = db_resume.resume_wal_writer("test serialize with in-flight halt");
+        resume_tx.send(result).unwrap();
+    });
+
+    assert!(
+        resume_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+        "resume must block until the in-flight halt publication finishes"
+    );
+
+    super::test_hooks::release_halt_publish_pause(&db_path);
+    let resume_result = resume_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("resume should finish once the halt publication is released");
+    resume_handle.join().unwrap();
+    super::test_hooks::clear_halt_publish_pause(&db_path);
+    super::test_hooks::clear_begin_sync_failure(&db_path);
+
+    resume_result.unwrap();
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "writer should be healthy after a serialized resume"
+    );
+
+    db.transaction(branch_id, |txn| {
+        txn.put(resumed_key.clone(), Value::Int(2))?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.shutdown().unwrap();
+}
+
 /// T3-E2: Resume on ephemeral database returns error.
 #[test]
 fn test_resume_ephemeral_database_returns_error() {

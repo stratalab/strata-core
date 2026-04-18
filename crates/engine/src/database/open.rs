@@ -734,15 +734,14 @@ impl Database {
     pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
-        _data_dir: &Path,
+        data_dir: &Path,
         shutdown: &Arc<AtomicBool>,
         accepting_transactions: &Arc<AtomicBool>,
         wal_writer_health: &Arc<ParkingMutex<WalWriterHealth>>,
     ) -> StrataResult<Option<std::thread::JoinHandle<()>>> {
         if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
             let wal = Arc::clone(wal);
-            #[cfg(test)]
-            let data_dir = _data_dir.to_path_buf();
+            let data_dir = data_dir.to_path_buf();
             let shutdown = Arc::clone(shutdown);
             let accepting = Arc::clone(accepting_transactions);
             let health = Arc::clone(wal_writer_health);
@@ -805,8 +804,14 @@ impl Database {
                                         w.record_sync_failure(e);
                                     }
                                     let bg = w.bg_error();
+                                    Self::latch_bg_sync_halt(
+                                        &health,
+                                        &accepting,
+                                        bg,
+                                        "setup",
+                                        Some(data_dir.as_path()),
+                                    );
                                     drop(w);
-                                    Self::latch_bg_sync_halt(&health, &accepting, bg, "setup");
                                     None
                                 }
                             }
@@ -855,8 +860,14 @@ impl Database {
                                                     w.record_sync_failure(e);
                                                 }
                                                 let bg = w.bg_error();
+                                                Self::latch_bg_sync_halt(
+                                                    &health,
+                                                    &accepting,
+                                                    bg,
+                                                    "bookkeeping",
+                                                    Some(data_dir.as_path()),
+                                                );
                                                 drop(w);
-                                                Self::latch_bg_sync_halt(&health, &accepting, bg, "bookkeeping");
                                                 false
                                             }
                                         }
@@ -865,8 +876,14 @@ impl Database {
                                         tracing::error!(target: "strata::wal", error = %e, "Background WAL sync failed");
                                         w.abort_background_sync(handle, e);
                                         let bg = w.bg_error();
+                                        Self::latch_bg_sync_halt(
+                                            &health,
+                                            &accepting,
+                                            bg,
+                                            "sync",
+                                            Some(data_dir.as_path()),
+                                        );
                                         drop(w);
-                                        Self::latch_bg_sync_halt(&health, &accepting, bg, "sync");
                                         false
                                     }
                                 }

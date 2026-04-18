@@ -1346,18 +1346,18 @@ impl Database {
     /// Pre-conditions: the caller has already populated `WalWriter::bg_error`
     /// (via `abort_background_sync` when an in-flight handle exists, or via
     /// `record_sync_failure` otherwise) and snapshotted it into `bg_error`.
-    /// Callers may release the WAL writer lock before calling this helper —
-    /// the commit path's under-lock `bg_error` check at
-    /// `concurrency::manager::writer_halted_commit_error` already refuses new
-    /// appends once `bg_error` is set, so there is no window in which a
-    /// concurrent commit could slip past an unpublished halt.
-    /// The helper itself only touches `health` and `accepting`, so it can't
-    /// deadlock with the wal mutex.
+    ///
+    /// Callers should keep the WAL writer mutex held across this helper and
+    /// the preceding `bg_error` mutation. That serializes the authoritative
+    /// WAL-side failure record with the public `health` / `accepting`
+    /// publication so `resume_wal_writer()` cannot clear `bg_error` and
+    /// publish `Healthy` in the middle of a halt.
     pub(crate) fn latch_bg_sync_halt(
         health: &ParkingMutex<WalWriterHealth>,
         accepting: &AtomicBool,
         bg_error: Option<BackgroundSyncError>,
         phase: &'static str,
+        pause_path: Option<&Path>,
     ) {
         let mut h = health.lock();
         if let Some(bg_error) = bg_error {
@@ -1387,6 +1387,14 @@ impl Database {
             );
         }
         drop(h);
+
+        #[cfg(test)]
+        if let Some(path) = pause_path {
+            crate::database::test_hooks::maybe_pause_after_halt_health_publish(path);
+        }
+
+        #[cfg(not(test))]
+        let _ = pause_path;
 
         // Publish the halt after health is updated so new callers observe
         // WriterHalted, not a generic shutdown-style rejection.
@@ -1470,7 +1478,15 @@ impl Database {
             ));
         }
 
-        let was_halted = matches!(self.wal_writer_health(), WalWriterHealth::Halted { .. });
+        // Lock the WAL writer before observing / publishing health so resume
+        // serializes with the flush thread's halt path. That keeps
+        // `bg_error`, `wal_writer_health`, and `accepting_transactions`
+        // moving together instead of racing as separate publications.
+        let mut writer = wal.lock();
+        let was_halted = {
+            let health = self.wal_writer_health.lock();
+            matches!(*health, WalWriterHealth::Halted { .. })
+        };
         if !was_halted {
             if self.accepting_transactions.load(Ordering::Acquire) {
                 return Ok(());
@@ -1481,42 +1497,38 @@ impl Database {
         }
 
         // Attempt a sync to prove storage is healthy
-        {
-            let mut writer = wal.lock();
-            #[cfg(test)]
-            let flush_result =
-                crate::database::test_hooks::maybe_inject_sync_failure(&self.data_dir)
-                    .map_or_else(|| writer.flush(), Err);
+        #[cfg(test)]
+        let flush_result = crate::database::test_hooks::maybe_inject_sync_failure(&self.data_dir)
+            .map_or_else(|| writer.flush(), Err);
 
-            #[cfg(not(test))]
-            let flush_result = writer.flush();
+        #[cfg(not(test))]
+        let flush_result = writer.flush();
 
-            if let Err(e) = flush_result {
-                writer.record_sync_failure(e);
-                let bg_error = writer.bg_error().expect(
-                    "record_sync_failure must preserve a background error for halted writer",
-                );
-                let reason = bg_error.message().to_string();
-                let first_observed_at = bg_error.first_observed_at();
-                let mut health = self.wal_writer_health.lock();
-                *health = Self::halted_health_from_bg_error(bg_error);
-                return Err(StrataError::WriterHalted {
-                    reason,
-                    first_observed_at,
-                });
-            }
-
-            // Clear any recorded background error in the writer
-            writer.clear_bg_error();
+        if let Err(e) = flush_result {
+            writer.record_sync_failure(e);
+            let bg_error = writer
+                .bg_error()
+                .expect("record_sync_failure must preserve a background error for halted writer");
+            let reason = bg_error.message().to_string();
+            let first_observed_at = bg_error.first_observed_at();
+            let mut health = self.wal_writer_health.lock();
+            *health = Self::halted_health_from_bg_error(bg_error);
+            self.accepting_transactions.store(false, Ordering::Release);
+            return Err(StrataError::WriterHalted {
+                reason,
+                first_observed_at,
+            });
         }
+
+        // Clear any recorded background error in the writer
+        writer.clear_bg_error();
 
         // Sync succeeded — restore healthy state
         let mut health = self.wal_writer_health.lock();
         *health = WalWriterHealth::Healthy;
-        drop(health);
-
-        // Re-enable transactions
         self.accepting_transactions.store(true, Ordering::Release);
+        drop(health);
+        drop(writer);
 
         if was_halted {
             tracing::info!(
