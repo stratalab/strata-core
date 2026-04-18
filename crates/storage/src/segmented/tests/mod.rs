@@ -104,3 +104,4 @@ mod fork;
 mod leveled;
 mod lifecycle;
 mod materialize;
+mod publish_barrier;

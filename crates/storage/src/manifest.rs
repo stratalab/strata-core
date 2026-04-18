@@ -19,9 +19,12 @@
 
 use std::io;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
+
+use crate::error::{StorageError, StorageResult};
 
 /// Magic bytes for segment manifest: "STRAMFST"
 const MANIFEST_MAGIC: [u8; 8] = *b"STRAMFST";
@@ -34,6 +37,9 @@ const HEADER_SIZE: usize = 20;
 
 /// Manifest file name.
 const MANIFEST_FILENAME: &str = "segments.manifest";
+
+/// Monotonic counter for unique `write_manifest` temp-file names.
+static TMP_NONCE: AtomicU64 = AtomicU64::new(0);
 
 /// A single entry in the manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,12 +72,15 @@ pub struct SegmentManifest {
     pub inherited_layers: Vec<ManifestInheritedLayer>,
 }
 
-/// Write a manifest file to `dir/segments.manifest` atomically (temp + rename).
+/// Write a manifest file to `dir/segments.manifest` atomically (temp + rename + dir fsync).
+///
+/// Returns `Err(StorageError::DirFsync)` if the final parent-directory fsync fails.
+/// Other I/O failures (create/write/rename) are surfaced as `StorageError::Io`.
 pub fn write_manifest(
     dir: &Path,
     entries: &[ManifestEntry],
     inherited_layers: &[ManifestInheritedLayer],
-) -> io::Result<()> {
+) -> StorageResult<()> {
     let mut buf = Vec::with_capacity(HEADER_SIZE + entries.len() * 20 + 4);
 
     // Header
@@ -101,9 +110,22 @@ pub fn write_manifest(
     let crc = crc32fast::hash(&buf);
     buf.extend_from_slice(&crc.to_le_bytes());
 
-    // Atomic write: temp file + fsync + rename + dir fsync
+    // Atomic write: temp file + fsync + rename + dir fsync.
+    //
+    // The temp filename includes a per-call nonce (pid + monotonic counter)
+    // so two concurrent `write_manifest` calls on the same directory do not
+    // race on the same tmp path. Without this, one caller's `rename(tmp,
+    // final)` can observe ENOENT if the other caller's rename already moved
+    // the shared tmp away. The final path is still a single contended name,
+    // but `rename` is atomic per-call on POSIX so concurrent renames yield
+    // well-defined last-write-wins semantics.
     let final_path = dir.join(MANIFEST_FILENAME);
-    let tmp_path = dir.join(format!("{}.tmp", MANIFEST_FILENAME));
+    let tmp_path = dir.join(format!(
+        "{}.tmp.{}.{}",
+        MANIFEST_FILENAME,
+        std::process::id(),
+        TMP_NONCE.fetch_add(1, Ordering::Relaxed),
+    ));
 
     // Write and fsync the temp file before rename — ensures data is
     // durable on disk, not just in the page cache.
@@ -115,11 +137,26 @@ pub fn write_manifest(
 
     std::fs::rename(&tmp_path, &final_path)?;
 
-    // Fsync the parent directory to make the rename durable.
-    // Failure here is non-fatal (rename already succeeded).
-    if let Ok(dir_fd) = std::fs::File::open(dir) {
-        let _ = dir_fd.sync_all();
+    // Test-only fault injection — consumed once per armed failure.
+    if let Some(inner) = crate::test_hooks::maybe_inject_dir_fsync_failure() {
+        return Err(StorageError::DirFsync {
+            dir: dir.to_path_buf(),
+            inner,
+        });
     }
+
+    // Fsync the parent directory to make the rename durable. The rename has
+    // already landed in the page cache, but without this fsync the directory
+    // entry may not survive a crash — so a failure here is a durability
+    // failure surfaced to the caller rather than silently dropped.
+    let dir_fd = std::fs::File::open(dir).map_err(|inner| StorageError::DirFsync {
+        dir: dir.to_path_buf(),
+        inner,
+    })?;
+    dir_fd.sync_all().map_err(|inner| StorageError::DirFsync {
+        dir: dir.to_path_buf(),
+        inner,
+    })?;
 
     Ok(())
 }

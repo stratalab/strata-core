@@ -13,6 +13,7 @@
 pub mod block_cache;
 pub mod bloom;
 pub mod compaction;
+pub mod error;
 pub mod index;
 pub mod key_encoding;
 pub mod manifest;
@@ -26,9 +27,12 @@ pub mod segment;
 pub mod segment_builder;
 pub mod segmented;
 pub mod stored_value;
+#[doc(hidden)]
+pub mod test_hooks;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
+pub use error::{StorageError, StorageResult};
 pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
 pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};

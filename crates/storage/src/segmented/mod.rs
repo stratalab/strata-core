@@ -9,6 +9,7 @@
 //! The first match for a key at commit_id ≤ snapshot wins.
 
 use crate::compaction::CompactionIterator;
+use crate::error::{StorageError, StorageResult};
 use crate::key_encoding::{
     encode_typed_key, encode_typed_key_prefix, rewrite_branch_id_bytes, InternalKey,
     COMMIT_ID_SUFFIX_LEN,
@@ -1171,14 +1172,15 @@ impl SegmentedStore {
         &self,
         child_branch_id: &BranchId,
         layer_index: usize,
-    ) -> io::Result<MaterializeResult> {
+    ) -> StorageResult<MaterializeResult> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "materialize_layer requires a disk-backed store",
-                ))
+                )
+                .into())
             }
         };
 
@@ -1231,7 +1233,11 @@ impl SegmentedStore {
         let (layer_segments, source_branch_id, fork_version, own_version, closer_layers) = {
             let branch = match self.branches.get(child_branch_id) {
                 Some(b) => b,
-                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+                None => {
+                    return Err(
+                        io::Error::new(io::ErrorKind::NotFound, "branch not found").into(),
+                    )
+                }
             };
             if layer_index >= branch.inherited_layers.len() {
                 // Layer was already removed by a concurrent materialization that
@@ -1277,13 +1283,17 @@ impl SegmentedStore {
         {
             let mut branch = match self.branches.get_mut(child_branch_id) {
                 Some(b) => b,
-                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+                None => {
+                    return Err(
+                        io::Error::new(io::ErrorKind::NotFound, "branch not found").into(),
+                    )
+                }
             };
             if layer_index < branch.inherited_layers.len() {
                 branch.inherited_layers[layer_index].status = LayerStatus::Materializing;
             }
         }
-        self.write_branch_manifest(child_branch_id);
+        self.write_branch_manifest(child_branch_id)?;
 
         // 2c. Build materialized entries (no locks held — I/O heavy)
         let mut entries = Self::collect_unshadowed_entries(
@@ -1364,7 +1374,7 @@ impl SegmentedStore {
         }
 
         // 2f. Cleanup
-        self.write_branch_manifest(child_branch_id);
+        self.write_branch_manifest(child_branch_id)?;
 
         // Decrement refcounts for each segment in the removed layer.
         for level in &layer_segments.levels {
@@ -1539,12 +1549,12 @@ impl SegmentedStore {
         &self,
         source_id: &BranchId,
         dest_id: &BranchId,
-    ) -> io::Result<(CommitVersion, usize)> {
+    ) -> StorageResult<(CommitVersion, usize)> {
         if source_id == dest_id {
-            return Err(io::Error::new(
+            return Err(StorageError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fork_branch: source and destination must be different branches",
-            ));
+            )));
         }
 
         // 1. Flush bulk memtable data to segments (outside exclusive lock).
@@ -1570,7 +1580,8 @@ impl SegmentedStore {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "fork_branch: source branch no longer exists",
-                    ))
+                    )
+                    .into())
                 }
             };
 
@@ -1681,7 +1692,7 @@ impl SegmentedStore {
 
         // Persist source manifest if we inline-flushed segments.
         if source_manifest_dirty {
-            self.write_branch_manifest(source_id);
+            self.write_branch_manifest(source_id)?;
         }
 
         // 6. Attach to dest branch, rejecting if a concurrent fork already installed layers.
@@ -1699,10 +1710,10 @@ impl SegmentedStore {
                     }
                 }
             }
-            return Err(io::Error::new(
+            return Err(StorageError::Io(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "fork_branch: destination already has inherited layers (concurrent fork race)",
-            ));
+            )));
         }
         dest.inherited_layers = dest_layers;
         // Propagate fork_version so subsequent forks from this child
@@ -1712,7 +1723,7 @@ impl SegmentedStore {
         drop(dest);
 
         // 7. Write manifest
-        self.write_branch_manifest(dest_id);
+        self.write_branch_manifest(dest_id)?;
 
         Ok((fork_version, segments_shared))
     }
@@ -2641,7 +2652,7 @@ impl SegmentedStore {
     /// After this call, all data written during the bulk load is flushed to
     /// frozen memtables (and to disk segments if a directory is configured).
     /// Normal rotation behavior resumes.
-    pub fn end_bulk_load(&self, branch_id: &BranchId) -> io::Result<()> {
+    pub fn end_bulk_load(&self, branch_id: &BranchId) -> StorageResult<()> {
         self.bulk_load_branches.remove(branch_id);
 
         // Rotate the active memtable (unconditionally — it may be large)
@@ -2689,7 +2700,7 @@ impl SegmentedStore {
     /// The frozen memtable stays in the read path during I/O so concurrent
     /// readers never see a gap.  It is only removed when the segment is
     /// installed, in a single DashMap guard.
-    pub fn flush_oldest_frozen(&self, branch_id: &BranchId) -> io::Result<bool> {
+    pub fn flush_oldest_frozen(&self, branch_id: &BranchId) -> StorageResult<bool> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => return Ok(false),
@@ -2769,7 +2780,7 @@ impl SegmentedStore {
 
             // Persist level assignments
             drop(branch);
-            self.write_branch_manifest(branch_id);
+            self.write_branch_manifest(branch_id)?;
         } else {
             // Another thread already flushed this memtable; discard the
             // duplicate segment file we just built.
@@ -4200,29 +4211,42 @@ impl SegmentedStore {
 
     /// Write the manifest file for a branch, reflecting current level assignments
     /// and inherited layers.
-    fn write_branch_manifest(&self, branch_id: &BranchId) {
+    ///
+    /// Publication is a real barrier: a failure to create the branch
+    /// directory, write the manifest, or fsync the parent dir is surfaced
+    /// as a typed [`StorageError`]. Callers that gate old-input deletion on
+    /// a successful publish rely on this.
+    ///
+    /// Returns `Ok(())` unchanged when the store is ephemeral
+    /// (`segments_dir == None`) or the branch has been dropped between
+    /// call and manifest build — both are legitimate no-op cases.
+    fn write_branch_manifest(&self, branch_id: &BranchId) -> StorageResult<()> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
-            None => return,
+            None => return Ok(()),
         };
         let branch = match self.branches.get(branch_id) {
             Some(b) => b,
-            None => return,
+            None => return Ok(()),
         };
+
+        // Test-only fault injection — consumed once per armed failure.
+        if let Some(inner) = crate::test_hooks::maybe_inject_manifest_publish_failure() {
+            return Err(StorageError::ManifestPublish {
+                branch_id: *branch_id,
+                inner,
+            });
+        }
         let ver = branch.version.load();
         let branch_hex = hex_encode_branch(branch_id);
         let branch_dir = segments_dir.join(&branch_hex);
 
         // Ensure the branch directory exists (needed for COW forks with
         // no own segments but inherited layers that need a manifest).
-        if let Err(e) = std::fs::create_dir_all(&branch_dir) {
-            tracing::warn!(
-                branch = %branch_hex,
-                error = %e,
-                "failed to create branch directory for manifest"
-            );
-            return;
-        }
+        std::fs::create_dir_all(&branch_dir).map_err(|inner| StorageError::ManifestPublish {
+            branch_id: *branch_id,
+            inner,
+        })?;
 
         let mut entries = Vec::new();
         for (level_idx, level) in ver.levels.iter().enumerate() {
@@ -4274,13 +4298,18 @@ impl SegmentedStore {
             })
             .collect();
 
-        if let Err(e) = crate::manifest::write_manifest(&branch_dir, &entries, &inherited) {
-            tracing::warn!(
-                branch = %branch_hex,
-                error = %e,
-                "failed to write branch manifest"
-            );
-        }
+        crate::manifest::write_manifest(&branch_dir, &entries, &inherited).map_err(|e| match e {
+            // Wrap generic I/O failures (create/write/rename) in the
+            // branch-aware `ManifestPublish` variant so callers can
+            // distinguish "publish refused" from other storage errors.
+            StorageError::Io(inner) => StorageError::ManifestPublish {
+                branch_id: *branch_id,
+                inner,
+            },
+            // `DirFsync` already carries `dir: PathBuf` context; pass
+            // through unchanged.
+            other => other,
+        })
     }
 }
 

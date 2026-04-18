@@ -456,7 +456,7 @@ fn materialize_crash_recovery_resets_status() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Second store: recover from manifest — Materializing should reset to Active
@@ -522,7 +522,7 @@ fn materialize_crash_recovery_with_partial_segment() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
 
         // "crash" — store drops
     }
@@ -609,7 +609,7 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
             let mut child = store.branches.get_mut(&child_branch()).unwrap();
             child.inherited_layers[0].status = LayerStatus::Materializing;
         }
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Phase 2: Recover
@@ -658,8 +658,8 @@ fn recovery_surfaces_missing_source_branch() {
             .unwrap();
 
         // Write manifest for both branches
-        store.write_branch_manifest(&parent_branch());
-        store.write_branch_manifest(&child_branch());
+        store.write_branch_manifest(&parent_branch()).unwrap();
+        store.write_branch_manifest(&child_branch()).unwrap();
     }
 
     // Sabotage: delete the parent's branch directory (simulating missing source)

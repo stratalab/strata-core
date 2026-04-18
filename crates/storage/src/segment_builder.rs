@@ -463,9 +463,8 @@ impl SegmentBuilder {
 
         // 10. Fsync parent directory so the rename is durable on crash.
         if let Some(parent) = path.parent() {
-            if let Ok(dir_fd) = std::fs::File::open(parent) {
-                let _ = dir_fd.sync_all();
-            }
+            let dir_fd = std::fs::File::open(parent)?;
+            dir_fd.sync_all()?;
         }
 
         Ok(SegmentMeta {
