@@ -103,14 +103,10 @@ pub(crate) fn clear_apply_failure_injection() {
 #[cfg(any(test, feature = "fault-injection"))]
 fn maybe_take_apply_failure_injection() -> Option<String> {
     #[cfg(test)]
-    {
-        return APPLY_FAILURE_INJECTION.with(|slot| slot.borrow_mut().take());
-    }
-
+    let taken = APPLY_FAILURE_INJECTION.with(|slot| slot.borrow_mut().take());
     #[cfg(all(not(test), feature = "fault-injection"))]
-    {
-        apply_failure_injection_slot().lock().take()
-    }
+    let taken = apply_failure_injection_slot().lock().take();
+    taken
 }
 
 fn writer_halted_commit_error(wal: &WalWriter) -> Option<CommitError> {
