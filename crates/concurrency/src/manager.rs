@@ -35,8 +35,6 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(all(not(test), feature = "fault-injection"))]
-use std::sync::OnceLock;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
 use strata_core::traits::Storage;
@@ -63,50 +61,34 @@ use std::time::Instant;
 static COMMIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static COMMIT_PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
 
-#[cfg(test)]
+// Apply-failure injection is thread-local so parallel tests cannot drain
+// each other's armed injections. `cfg(test)` alone isn't enough: engine
+// tests enable `strata-concurrency/fault-injection` in dev-deps and run
+// strata-concurrency as a (non-test-built) dependency, so the `cfg(test)`
+// arm wouldn't compile there. Using `any(test, feature = "fault-injection")`
+// covers both.
+#[cfg(any(test, feature = "fault-injection"))]
 thread_local! {
     static APPLY_FAILURE_INJECTION: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-#[cfg(all(not(test), feature = "fault-injection"))]
-fn apply_failure_injection_slot() -> &'static Mutex<Option<String>> {
-    static APPLY_FAILURE_INJECTION: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-    APPLY_FAILURE_INJECTION.get_or_init(|| Mutex::new(None))
-}
-
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn inject_apply_failure_once(reason: impl Into<String>) {
-    #[cfg(test)]
     APPLY_FAILURE_INJECTION.with(|slot| {
         *slot.borrow_mut() = Some(reason.into());
     });
-
-    #[cfg(all(not(test), feature = "fault-injection"))]
-    {
-        *apply_failure_injection_slot().lock() = Some(reason.into());
-    }
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn clear_apply_failure_injection() {
-    #[cfg(test)]
     APPLY_FAILURE_INJECTION.with(|slot| {
         *slot.borrow_mut() = None;
     });
-
-    #[cfg(all(not(test), feature = "fault-injection"))]
-    {
-        *apply_failure_injection_slot().lock() = None;
-    }
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
 fn maybe_take_apply_failure_injection() -> Option<String> {
-    #[cfg(test)]
-    let taken = APPLY_FAILURE_INJECTION.with(|slot| slot.borrow_mut().take());
-    #[cfg(all(not(test), feature = "fault-injection"))]
-    let taken = apply_failure_injection_slot().lock().take();
-    taken
+    APPLY_FAILURE_INJECTION.with(|slot| slot.borrow_mut().take())
 }
 
 fn writer_halted_commit_error(wal: &WalWriter) -> Option<CommitError> {
