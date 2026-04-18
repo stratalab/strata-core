@@ -654,8 +654,32 @@ impl WalReader {
             let payload = &buffer[payload_start..payload_end];
 
             // Decode via installed codec or pass through for identity.
-            // Codec decode failures surface unconditionally (T3-E12 §D5).
-            let decoded = self.decode_payload(payload, offset as u64)?;
+            // Preserve the already-read prefix on codec-decode failure
+            // (D2 / DG-002) and surface the real failing offset through
+            // `ReadStopReason::CodecDecode` so the follower-refresh
+            // blocked-state is anchored on a real record rather than a
+            // synthetic `received_watermark + 1`.
+            let decoded = match self.decode_payload(payload, offset as u64) {
+                Ok(d) => d,
+                Err(WalReaderError::CodecDecode {
+                    offset: fail_offset,
+                    detail,
+                }) => {
+                    return Ok(WatermarkReadResult {
+                        records,
+                        blocked: Some(WatermarkBlockedRecord {
+                            txn_id: TxnId(next_expected),
+                            detail: format!("codec decode failed: {detail}"),
+                            skip_allowed: false,
+                            stop_reason: ReadStopReason::CodecDecode {
+                                offset: fail_offset as usize,
+                                detail,
+                            },
+                        }),
+                    });
+                }
+                Err(e) => return Err(e),
+            };
 
             match WalRecord::from_bytes(&decoded) {
                 Ok((record, _consumed)) => {

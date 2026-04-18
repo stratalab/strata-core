@@ -20,10 +20,10 @@
 //! - Only removes segments fully covered by snapshot
 //! - Requires a valid snapshot to exist
 
+use crate::codec::{clone_codec, StorageCodec};
 use crate::format::segment_meta::SegmentMeta;
-use crate::format::{
-    ManifestManager, SegmentHeader, WalRecord, WalRecordError, SEGMENT_HEADER_SIZE,
-};
+use crate::format::ManifestManager;
+use crate::wal::WalReader;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -37,12 +37,27 @@ use super::{CompactInfo, CompactMode, CompactionError};
 pub struct WalOnlyCompactor {
     wal_dir: PathBuf,
     manifest: Arc<Mutex<ManifestManager>>,
+    codec: Option<Box<dyn StorageCodec>>,
 }
 
 impl WalOnlyCompactor {
     /// Create a new WAL-only compactor
     pub fn new(wal_dir: PathBuf, manifest: Arc<Mutex<ManifestManager>>) -> Self {
-        WalOnlyCompactor { wal_dir, manifest }
+        WalOnlyCompactor {
+            wal_dir,
+            manifest,
+            codec: None,
+        }
+    }
+
+    /// Install a storage codec so the `.meta`-miss fallback reads records
+    /// through the same codec-aware `WalReader` the runtime uses (D2 /
+    /// DG-001). Without this, encrypted-WAL databases would fall back to
+    /// raw-byte parsing and retention decisions could diverge from the
+    /// shipped v3 envelope + codec format.
+    pub fn with_codec(mut self, codec: Box<dyn StorageCodec>) -> Self {
+        self.codec = Some(codec);
+        self
     }
 
     /// Perform WAL-only compaction
@@ -239,69 +254,40 @@ impl WalOnlyCompactor {
         self.segment_covered_by_watermark_full_scan(segment_number, watermark)
     }
 
-    /// Full-scan fallback: read all records to determine max txn_id.
+    /// Full-scan fallback: read all records via the codec-aware
+    /// [`WalReader`] to determine max txn_id.
+    ///
+    /// D2 / DG-001: the previous raw-byte scan called
+    /// `WalRecord::from_bytes` directly against segment bytes, bypassing
+    /// both the per-record outer envelope (v3 format) and the installed
+    /// [`StorageCodec`]. On encrypted WAL the raw scan could never decode
+    /// records and retention decisions silently diverged from the shipped
+    /// format. Routing through `WalReader` reuses the one canonical parse
+    /// path for the outer envelope + codec decode.
     fn segment_covered_by_watermark_full_scan(
         &self,
         segment_number: u64,
         watermark: u64,
     ) -> Result<bool, CompactionError> {
-        let segment_path = segment_path(&self.wal_dir, segment_number);
-        let file_data = std::fs::read(&segment_path)?;
-
-        // Validate segment header (need at least v1 header size)
-        if file_data.len() < SEGMENT_HEADER_SIZE {
-            return Err(CompactionError::internal(format!(
-                "Segment {} too small for header",
-                segment_number
-            )));
+        let mut reader = WalReader::new();
+        if let Some(codec) = self.codec.as_deref() {
+            reader = reader.with_codec(clone_codec(codec));
         }
-
-        let header =
-            SegmentHeader::from_bytes_slice(&file_data, Some(segment_number)).map_err(|e| {
-                CompactionError::internal(format!("Invalid segment {segment_number} header: {e}"))
+        let (records, _, _, _) = reader
+            .read_segment(&self.wal_dir, segment_number)
+            .map_err(|e| {
+                CompactionError::internal(format!(
+                    "Failed to read segment {segment_number} for coverage check: {e}"
+                ))
             })?;
-        // `from_bytes_slice` now enforces magic + segment-number match,
-        // so the earlier `is_valid` / segment-number re-check is folded
-        // into the typed-error path above.
-        debug_assert!(header.is_valid());
 
-        // Determine actual header size based on format version
-        let actual_header_size = if header.format_version >= 2 {
-            crate::format::SEGMENT_HEADER_SIZE_V2
-        } else {
-            SEGMENT_HEADER_SIZE
-        };
-
-        // Empty segment (just header) is considered covered
-        if file_data.len() <= actual_header_size {
-            return Ok(true);
-        }
-
-        // Find highest txn_id in segment
-        let mut cursor = actual_header_size;
-        let mut max_txn_id = 0u64;
-
-        while cursor < file_data.len() {
-            match WalRecord::from_bytes(&file_data[cursor..]) {
-                Ok((record, consumed)) => {
-                    max_txn_id = max_txn_id.max(record.txn_id.as_u64());
-                    cursor += consumed;
-                }
-                Err(WalRecordError::InsufficientData) => {
-                    break;
-                }
-                Err(WalRecordError::ChecksumMismatch { .. }) => {
-                    break;
-                }
-                Err(e) => {
-                    warn!(target: "strata::compaction", error = %e, cursor = cursor,
-                        "Unexpected WAL record error during compaction scan, stopping");
-                    break;
-                }
-            }
-        }
-
-        // Segment is covered if all records are at or below watermark
+        // Empty segment (no records after the header) is covered by any
+        // watermark — preserves the legacy empty-segment semantics.
+        let max_txn_id = records
+            .iter()
+            .map(|r| r.txn_id.as_u64())
+            .max()
+            .unwrap_or(0);
         Ok(max_txn_id <= watermark)
     }
 
@@ -345,7 +331,7 @@ fn segment_path(dir: &Path, segment_number: u64) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::WalSegment;
+    use crate::format::{WalRecord, WalSegment};
     use strata_core::id::{CommitVersion, TxnId};
     use tempfile::tempdir;
 
@@ -379,7 +365,21 @@ mod tests {
                 txn_id * 1000,
                 vec![txn_id as u8; 10],
             );
-            segment.write(&record.to_bytes())?;
+            // Wrap in the v3 per-record outer envelope so the codec-aware
+            // `WalReader` can parse it. The writer path uses the same
+            // `[u32 outer_len][u32 outer_len_crc][payload]` layout with
+            // identity-codec payload = `record.to_bytes()` (D2 / DG-001).
+            let encoded = record.to_bytes();
+            let outer_len: u32 = encoded.len() as u32;
+            let outer_len_bytes = outer_len.to_le_bytes();
+            let outer_len_crc = {
+                let mut h = crc32fast::Hasher::new();
+                h.update(&outer_len_bytes);
+                h.finalize()
+            };
+            segment.write(&outer_len_bytes)?;
+            segment.write(&outer_len_crc.to_le_bytes())?;
+            segment.write(&encoded)?;
         }
 
         segment.close()?;

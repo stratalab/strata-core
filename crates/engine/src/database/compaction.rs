@@ -197,8 +197,14 @@ impl Database {
             .map(|w| w.lock().current_segment())
             .unwrap_or(0);
 
-        // Create compactor and run with the writer's active segment override
-        let compactor = WalOnlyCompactor::new(wal_dir, manifest_arc);
+        // Create compactor and run with the writer's active segment override.
+        // D2 / DG-001: thread the cached `wal_codec` so the `.meta`-miss
+        // fallback parses records through the codec-aware reader rather
+        // than the raw-byte path that bypasses both the v3 envelope and
+        // the installed codec.
+        let compactor = WalOnlyCompactor::new(wal_dir, manifest_arc).with_codec(
+            strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
+        );
         let compact_info = compactor
             .compact_with_active_override(writer_active)
             .map_err(|e: CompactionError| match e {
