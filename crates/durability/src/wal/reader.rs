@@ -231,10 +231,7 @@ impl WalReader {
             // for identity). Codec errors surface as
             // `WalReaderError::CodecDecode` with NO demotion to
             // `PartialRecord` — even at the segment tail (T3-E12 §D5).
-            let decoded = match self.decode_payload(payload, offset as u64) {
-                Ok(d) => d,
-                Err(e) => return Err(e),
-            };
+            let decoded = self.decode_payload(payload, offset as u64)?;
             let raw_record_bytes: &[u8] = &decoded;
 
             match WalRecord::from_bytes(raw_record_bytes) {
@@ -620,7 +617,7 @@ impl WalReader {
                         self.scan_forward_to_valid_envelope(&buffer, offset + 1)
                     {
                         let candidate_txn = next_record.txn_id.as_u64();
-                        if candidate_txn < next_expected || candidate_txn == next_expected {
+                        if candidate_txn <= next_expected {
                             offset = scan_offset;
                             continue;
                         }
@@ -658,10 +655,7 @@ impl WalReader {
 
             // Decode via installed codec or pass through for identity.
             // Codec decode failures surface unconditionally (T3-E12 §D5).
-            let decoded = match self.decode_payload(payload, offset as u64) {
-                Ok(d) => d,
-                Err(e) => return Err(e),
-            };
+            let decoded = self.decode_payload(payload, offset as u64)?;
 
             match WalRecord::from_bytes(&decoded) {
                 Ok((record, _consumed)) => {
@@ -697,7 +691,7 @@ impl WalReader {
                         self.scan_forward_to_valid_envelope(&buffer, offset + 1)
                     {
                         let candidate_txn = next_record.txn_id.as_u64();
-                        if candidate_txn < next_expected || candidate_txn == next_expected {
+                        if candidate_txn <= next_expected {
                             offset = scan_offset;
                             continue;
                         }
@@ -2708,7 +2702,7 @@ mod tests {
         header[32..36].copy_from_slice(&crc.to_le_bytes());
 
         let seg_path = WalSegment::segment_path(&wal_dir, 1);
-        std::fs::write(&seg_path, &header).unwrap();
+        std::fs::write(&seg_path, header).unwrap();
 
         let reader = WalReader::new();
         match reader.read_segment(&wal_dir, 1) {
@@ -2761,7 +2755,7 @@ mod tests {
         header[32..36].copy_from_slice(&crc.to_le_bytes());
 
         let seg_path = WalSegment::segment_path(&wal_dir, 1);
-        std::fs::write(&seg_path, &header).unwrap();
+        std::fs::write(&seg_path, header).unwrap();
 
         match WalSegment::open_read(&wal_dir, 1) {
             Err(WalSegmentError::Header(SegmentHeaderError::LegacyFormat {

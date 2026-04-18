@@ -654,7 +654,7 @@ fn test_legacy_format_under_lossy_flag_still_hard_fails() {
     header[32..36].copy_from_slice(&header_crc.to_le_bytes());
 
     let segment_path = wal_dir.join("wal-000001.seg");
-    std::fs::write(&segment_path, &header).unwrap();
+    std::fs::write(&segment_path, header).unwrap();
 
     // Snapshot the on-disk bytes BEFORE the open attempt so we can
     // prove no wipe occurred.
