@@ -745,6 +745,7 @@ impl Database {
         if let Some(handle) = Self::spawn_wal_flush_thread(
             mode,
             wal,
+            &self.data_dir,
             &self.flush_shutdown,
             &self.accepting_transactions,
             &self.wal_writer_health,
@@ -1429,8 +1430,9 @@ impl Database {
         {
             let mut writer = wal.lock();
             #[cfg(test)]
-            let flush_result = crate::database::test_hooks::maybe_inject_sync_failure()
-                .map_or_else(|| writer.flush(), Err);
+            let flush_result =
+                crate::database::test_hooks::maybe_inject_sync_failure(&self.data_dir)
+                    .map_or_else(|| writer.flush(), Err);
 
             #[cfg(not(test))]
             let flush_result = writer.flush();

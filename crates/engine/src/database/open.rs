@@ -727,25 +727,29 @@ impl Database {
     /// # Arguments
     /// * `durability_mode` - The durability mode (only Standard spawns a thread)
     /// * `wal` - The WAL writer mutex
+    /// * `data_dir` - Canonical database path used to scope test fault injection
     /// * `shutdown` - Signal to stop the flush thread
     /// * `accepting_transactions` - Flag to disable when writer halts
     /// * `wal_writer_health` - Health state to update on sync failure
     pub(crate) fn spawn_wal_flush_thread(
         durability_mode: DurabilityMode,
         wal: &Arc<ParkingMutex<WalWriter>>,
+        _data_dir: &Path,
         shutdown: &Arc<AtomicBool>,
         accepting_transactions: &Arc<AtomicBool>,
         wal_writer_health: &Arc<ParkingMutex<WalWriterHealth>>,
     ) -> StrataResult<Option<std::thread::JoinHandle<()>>> {
         if let DurabilityMode::Standard { interval_ms, .. } = durability_mode {
             let wal = Arc::clone(wal);
+            #[cfg(test)]
+            let data_dir = _data_dir.to_path_buf();
             let shutdown = Arc::clone(shutdown);
             let accepting = Arc::clone(accepting_transactions);
             let health = Arc::clone(wal_writer_health);
             let interval = std::time::Duration::from_millis(interval_ms);
 
             #[cfg(test)]
-            if crate::database::test_hooks::take_flush_thread_spawn_failure() {
+            if crate::database::test_hooks::take_flush_thread_spawn_failure(&data_dir) {
                 return Err(StrataError::internal(
                     "injected flush thread spawn failure".to_string(),
                 ));
@@ -776,7 +780,7 @@ impl Database {
 
                         if let Some((handle, meta_snapshot)) = sync_plan {
                             #[cfg(test)]
-                            let sync_result = crate::database::test_hooks::maybe_inject_sync_failure()
+                            let sync_result = crate::database::test_hooks::maybe_inject_sync_failure(&data_dir)
                                 .map_or_else(|| handle.fd().sync_all(), Err);
 
                             #[cfg(not(test))]
@@ -1214,6 +1218,7 @@ impl Database {
         if let Some(handle) = Self::spawn_wal_flush_thread(
             durability_mode,
             &wal_arc,
+            &canonical_path,
             &flush_shutdown,
             &accepting_transactions,
             &wal_writer_health,

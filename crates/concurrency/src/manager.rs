@@ -35,8 +35,6 @@ use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-#[cfg(any(test, feature = "fault-injection"))]
-use std::sync::OnceLock;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
 use strata_core::traits::Storage;
@@ -63,25 +61,34 @@ use std::time::Instant;
 static COMMIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
 static COMMIT_PROFILE_CHECKED: AtomicBool = AtomicBool::new(false);
 
+// Apply-failure injection is thread-local so parallel tests cannot drain
+// each other's armed injections. `cfg(test)` alone isn't enough: engine
+// tests enable `strata-concurrency/fault-injection` in dev-deps and run
+// strata-concurrency as a (non-test-built) dependency, so the `cfg(test)`
+// arm wouldn't compile there. Using `any(test, feature = "fault-injection")`
+// covers both.
 #[cfg(any(test, feature = "fault-injection"))]
-fn apply_failure_injection_slot() -> &'static Mutex<Option<String>> {
-    static APPLY_FAILURE_INJECTION: OnceLock<Mutex<Option<String>>> = OnceLock::new();
-    APPLY_FAILURE_INJECTION.get_or_init(|| Mutex::new(None))
+thread_local! {
+    static APPLY_FAILURE_INJECTION: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn inject_apply_failure_once(reason: impl Into<String>) {
-    *apply_failure_injection_slot().lock() = Some(reason.into());
+    APPLY_FAILURE_INJECTION.with(|slot| {
+        *slot.borrow_mut() = Some(reason.into());
+    });
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
 pub(crate) fn clear_apply_failure_injection() {
-    *apply_failure_injection_slot().lock() = None;
+    APPLY_FAILURE_INJECTION.with(|slot| {
+        *slot.borrow_mut() = None;
+    });
 }
 
 #[cfg(any(test, feature = "fault-injection"))]
 fn maybe_take_apply_failure_injection() -> Option<String> {
-    apply_failure_injection_slot().lock().take()
+    APPLY_FAILURE_INJECTION.with(|slot| slot.borrow_mut().take())
 }
 
 fn writer_halted_commit_error(wal: &WalWriter) -> Option<CommitError> {
@@ -988,6 +995,29 @@ mod tests {
         assert!(manager.next_txn_id().is_ok());
         // Second call fails: counter is at u64::MAX, cannot increment
         assert!(manager.next_txn_id().is_err());
+    }
+
+    #[test]
+    fn test_apply_failure_injection_is_thread_local_under_tests() {
+        clear_apply_failure_injection();
+        inject_apply_failure_once("main-thread failure");
+
+        let other_thread = std::thread::spawn(maybe_take_apply_failure_injection)
+            .join()
+            .expect("other thread must join cleanly");
+        assert!(
+            other_thread.is_none(),
+            "other test threads must not observe this thread's injection"
+        );
+
+        assert_eq!(
+            maybe_take_apply_failure_injection().as_deref(),
+            Some("main-thread failure")
+        );
+        assert!(
+            maybe_take_apply_failure_injection().is_none(),
+            "injection must still be one-shot"
+        );
     }
 
     #[test]

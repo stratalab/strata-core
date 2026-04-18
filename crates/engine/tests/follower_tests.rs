@@ -4,6 +4,7 @@
 //! a primary, replay the WAL, read data, refresh to see new data, and that
 //! writes are rejected.
 
+use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strata_core::types::{BranchId, Key, Namespace};
@@ -1507,6 +1508,7 @@ fn test_follower_lossy_recovery_populates_report() {
 /// the way through. The review on PR 2427 flagged the absence of
 /// this test as the gap that let four codec-threading sites slip.
 #[test]
+#[serial(open_databases)]
 fn test_follower_refresh_with_non_identity_codec() {
     use strata_engine::StrataConfig;
 
@@ -1616,6 +1618,7 @@ fn test_follower_refresh_with_non_identity_codec() {
 /// aes-gcm-256 config. The open must succeed; WAL records must be
 /// readable through the config-derived codec fallback.
 #[test]
+#[serial(open_databases)]
 fn test_follower_without_manifest_uses_config_codec() {
     use strata_engine::StrataConfig;
 

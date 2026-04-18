@@ -1247,6 +1247,7 @@ static ENV_VAR_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
     once_cell::sync::Lazy::new(|| std::sync::Mutex::new(()));
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1380_codec_mismatch_rejected() {
     // A database created with "identity" must reject reopen with a different codec.
     // Use Cache mode to bypass the WAL-not-supported guard (encryption works in
@@ -1302,6 +1303,7 @@ fn test_issue_1380_codec_mismatch_rejected() {
 }
 
 #[test]
+#[serial(open_databases)]
 fn test_issue_1380_encryption_with_wal_succeeds_as_of_t3_e12() {
     // Pre-T3-E12 (issue #1380) this combination was rejected at open
     // time because the WAL reader did not decode codec-encoded
