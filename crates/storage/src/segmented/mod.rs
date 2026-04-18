@@ -846,6 +846,10 @@ impl SegmentedStore {
     }
 
     fn cleanup_created_segment_files(&self, paths: &[PathBuf]) {
+        // Best-effort: rollback paths only run after a refused publish, so any
+        // file left behind is already unreferenced by the durable manifest and
+        // will be reclaimed by orphan-GC (SE3). Propagating errors here would
+        // mask the original ManifestPublish error the caller must see.
         let mut parent_dirs = HashSet::new();
         for path in paths {
             if let Some(parent) = path.parent() {
@@ -884,6 +888,8 @@ impl SegmentedStore {
             }
         }
 
+        // Best-effort: the refused publish means this file is unreferenced
+        // by any durable manifest, so any leftover is SE3 orphan-GC territory.
         let _ = std::fs::remove_file(new_segment.file_path());
         if let Some(parent) = new_segment.file_path().parent() {
             let _ = std::fs::remove_dir(parent);
@@ -1929,11 +1935,14 @@ impl SegmentedStore {
 
         // 6. Attach to dest branch, rejecting if a concurrent fork already installed layers.
         let dest_layers_for_rollback = dest_layers.clone();
-        let dest_was_new = !self.branches.contains_key(dest_id);
-        let mut dest = self
-            .branches
-            .entry(*dest_id)
-            .or_insert_with(BranchState::new);
+        // Capture dest_was_new from inside the insert path so it reflects the
+        // atomic decision, not a prior contains_key probe that can race with a
+        // concurrent insert.
+        let mut dest_was_new = false;
+        let mut dest = self.branches.entry(*dest_id).or_insert_with(|| {
+            dest_was_new = true;
+            BranchState::new()
+        });
         if !dest.inherited_layers.is_empty() {
             drop(dest);
             // Undo refcount increments from step 2.

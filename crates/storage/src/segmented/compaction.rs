@@ -316,7 +316,11 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files — if we crash after
         // delete but before manifest write, recovery would reference missing
         // segments. A publish failure here short-circuits before the delete
-        // loop below, so old inputs survive an unobserved publish.
+        // loop below, so old inputs survive an unobserved publish. In-memory
+        // state is left ahead of the on-disk manifest by design: the next
+        // successful publish on this branch re-persists the full version; if
+        // we crash before then, recovery reloads the pre-compaction manifest
+        // and the new output segment is reclaimed by orphan-GC (SE3).
         self.write_branch_manifest(branch_id)?;
 
         // Now safe to delete old segment files (refcount-guarded).
@@ -472,7 +476,11 @@ impl SegmentedStore {
 
         // Persist manifest BEFORE deleting old files (crash safety). A
         // publish failure short-circuits before the delete loop, leaving
-        // old inputs intact.
+        // old inputs intact. In-memory state is left ahead of the on-disk
+        // manifest by design: a later successful publish re-persists the
+        // full version, and a pre-publish crash reloads the pre-compaction
+        // manifest with the new output treated as an orphan (reclaimed by
+        // SE3 orphan-GC).
         self.write_branch_manifest(branch_id)?;
 
         // Delete old segment files (refcount-guarded).
@@ -696,6 +704,10 @@ impl SegmentedStore {
 
         // Persist manifest BEFORE deleting old files (crash safety). A
         // publish failure short-circuits before the delete loops below.
+        // In-memory state is left ahead of the on-disk manifest by design:
+        // a later successful publish re-persists the full version, and a
+        // pre-publish crash reloads the pre-compaction manifest with the
+        // new L1 outputs treated as orphans (reclaimed by SE3 orphan-GC).
         self.write_branch_manifest(branch_id)?;
 
         // Now safe to delete old files (refcount-guarded).
