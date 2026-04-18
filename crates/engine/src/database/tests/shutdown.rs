@@ -598,8 +598,8 @@ fn test_set_durability_mode_spawn_failure_rolls_back_state() {
     let db_path = temp_dir.path().join("durability_spawn_failure_db");
     let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
 
-    super::test_hooks::clear_flush_thread_spawn_failure();
-    super::test_hooks::inject_flush_thread_spawn_failure();
+    super::test_hooks::clear_flush_thread_spawn_failure(&db_path);
+    super::test_hooks::inject_flush_thread_spawn_failure(&db_path);
 
     let err = db
         .set_durability_mode(DurabilityMode::Standard {
@@ -608,7 +608,7 @@ fn test_set_durability_mode_spawn_failure_rolls_back_state() {
         })
         .expect_err("injected spawn failure should bubble up");
 
-    super::test_hooks::clear_flush_thread_spawn_failure();
+    super::test_hooks::clear_flush_thread_spawn_failure(&db_path);
 
     assert!(
         matches!(err, StrataError::Internal { .. }),
@@ -659,12 +659,12 @@ fn test_background_sync_failure_halts_writer_and_rejects_manual_commit() {
     let trigger_key = Key::new_kv(create_test_namespace(branch_id), "bg_sync_key");
     let pending_key = Key::new_kv(create_test_namespace(branch_id), "pending_key");
 
-    super::test_hooks::clear_sync_failure();
+    super::test_hooks::clear_sync_failure(&db_path);
     let mut manual_txn = db.begin_transaction(branch_id).unwrap();
     manual_txn.put(pending_key.clone(), Value::Int(6)).unwrap();
 
     // Commit a separate transaction to create unsynced WAL data.
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
     db.transaction(branch_id, |txn| {
         txn.put(trigger_key.clone(), Value::Int(7))?;
         Ok(())
@@ -717,7 +717,7 @@ fn test_background_sync_failure_halts_writer_and_rejects_manual_commit() {
 
     // Clearing the fault should NOT auto-resume; the flush thread stays alive
     // but passive until explicit operator resume.
-    super::test_hooks::clear_sync_failure();
+    super::test_hooks::clear_sync_failure(&db_path);
     std::thread::sleep(Duration::from_millis(50));
     assert!(
         matches!(
@@ -762,7 +762,7 @@ fn test_resume_while_still_failing_increments_failed_sync_count() {
     let branch_id = BranchId::new();
     let key = Key::new_kv(create_test_namespace(branch_id), "repeat_fail_key");
 
-    super::test_hooks::clear_sync_failure();
+    super::test_hooks::clear_sync_failure(&db_path);
     db.transaction(branch_id, |txn| {
         txn.put(key.clone(), Value::Int(1))?;
         Ok(())
@@ -770,7 +770,7 @@ fn test_resume_while_still_failing_increments_failed_sync_count() {
     .unwrap();
 
     // Inject sync failure
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
 
     // Wait for writer to halt
     wait_until(Duration::from_secs(2), || {
@@ -792,7 +792,7 @@ fn test_resume_while_still_failing_increments_failed_sync_count() {
     };
     assert!(first_count >= 1, "expected at least 1 failed sync");
 
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
     let err = db
         .resume_wal_writer("fault still present")
         .expect_err("resume should fail while sync is still failing");
@@ -822,7 +822,7 @@ fn test_resume_while_still_failing_increments_failed_sync_count() {
         super::WalWriterHealth::Healthy => panic!("writer must remain halted"),
     }
 
-    super::test_hooks::clear_sync_failure();
+    super::test_hooks::clear_sync_failure(&db_path);
     db.shutdown().unwrap();
 }
 
@@ -901,7 +901,7 @@ fn test_resume_after_shutdown_returns_error_and_does_not_reopen() {
 /// T3-E2: Engine callers see DurableButNotVisible and the durable write becomes
 /// visible after reopen recovery.
 #[test]
-#[serial]
+#[serial(open_databases)]
 fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
     concurrency_test_hooks::clear_apply_failure_injection();
 
@@ -1666,7 +1666,7 @@ fn shutdown_timeout_leaves_database_usable_for_new_transactions() {
 }
 
 #[test]
-#[serial]
+#[serial(open_databases)]
 fn shutdown_timeout_preserves_writer_halt_signal() {
     // The WAL flush thread uses `accepting_transactions = false` as a
     // published signal that the writer has halted after a sync failure
@@ -1677,10 +1677,10 @@ fn shutdown_timeout_preserves_writer_halt_signal() {
     // past `check_accepting`, failing later at commit. The halt must keep
     // winning.
     OPEN_DATABASES.lock().clear();
-    super::test_hooks::clear_sync_failure();
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("shutdown_timeout_vs_halt");
+    super::test_hooks::clear_sync_failure(&db_path);
     let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
 
     let branch_id = BranchId::new();
@@ -1706,7 +1706,7 @@ fn shutdown_timeout_preserves_writer_halt_signal() {
 
     // Inject a sync failure and commit a txn that forces a background sync,
     // so the flush thread halts the writer while our blocker is still open.
-    super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+    super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
     db.transaction(branch_id, |txn| {
         txn.put(Key::new_kv(ns.clone(), "halt_trigger"), Value::Int(1))?;
         Ok(())
@@ -1749,7 +1749,7 @@ fn shutdown_timeout_preserves_writer_halt_signal() {
     // attempt a successful shutdown retry here because the WAL is halted
     // and that recovery path (`resume_wal_writer`) is out of scope for this
     // test — the Drop fallback will handle teardown.
-    super::test_hooks::clear_sync_failure();
+    super::test_hooks::clear_sync_failure(&db_path);
     release_tx.send(()).unwrap();
     handle.join().unwrap();
     drop(db);
@@ -1757,10 +1757,9 @@ fn shutdown_timeout_preserves_writer_halt_signal() {
 }
 
 #[test]
-// Serialize against BOTH the default-key `#[serial]` tests (which share the
-// global sync-failure injection hook) AND the `open_databases` tests (which
-// mutate the shared `OPEN_DATABASES` registry). Without both keys, those
-// groups race with this stress test and flake.
+// Serialize against the `open_databases` tests, which mutate the shared
+// `OPEN_DATABASES` registry. The sync-failure hook itself is path-scoped,
+// so it no longer requires global test serialization.
 #[serial(open_databases)]
 #[serial]
 fn shutdown_timeout_halt_interleaving_preserves_invariant() {
@@ -1788,10 +1787,10 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
 
     for i in 0..ITERATIONS {
         OPEN_DATABASES.lock().clear();
-        super::test_hooks::clear_sync_failure();
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join(format!("halt_race_{}", i));
+        super::test_hooks::clear_sync_failure(&db_path);
         let db =
             Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
         // Tight sync interval so the background flush thread has time to
@@ -1813,7 +1812,7 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
         // next flush-thread tick (every 5ms). By varying how long after
         // shutdown starts we set things up, the halt publishes at
         // different points relative to the timeout-cleanup window.
-        super::test_hooks::inject_sync_failure(std::io::ErrorKind::Other);
+        super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
         db.transaction(branch_id, |txn| {
             txn.put(trigger_key.clone(), Value::Int(i as i64))?;
             Ok(())
@@ -1879,7 +1878,7 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
         }
 
         // Clean up.
-        super::test_hooks::clear_sync_failure();
+        super::test_hooks::clear_sync_failure(&db_path);
         release_tx.send(()).unwrap();
         blocker_handle.join().unwrap();
         drop(db);

@@ -218,6 +218,7 @@ fn test_flush() {
     assert!(db.flush().is_ok());
 }
 #[test]
+#[serial(open_databases)]
 fn test_open_same_path_returns_same_instance() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("singleton_test");

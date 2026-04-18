@@ -537,6 +537,7 @@ fn test_follower_open_fails_hard_on_corrupt_manifest() {
 /// This exercises the Chunk 3 follower migration to the direct callback API
 /// plus snapshot install.
 #[test]
+#[serial(open_databases)]
 fn test_follower_open_installs_checkpoint_snapshot() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("db");

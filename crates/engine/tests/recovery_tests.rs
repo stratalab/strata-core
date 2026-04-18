@@ -6,6 +6,7 @@
 //! - Secondary indices: Replayed, not rebuilt
 //! - Derived keys (hashes): Stored, not recomputed
 
+use serial_test::serial;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -1572,6 +1573,7 @@ impl strata_engine::Subsystem for SlowRecoveryMarker {
 /// the `done` flag must be `true` — proving thread B saw the Arc only
 /// after recovery fully completed.
 #[test]
+#[serial(open_databases)]
 fn test_concurrent_open_blocks_until_recovery_completes() {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
@@ -1701,6 +1703,7 @@ impl strata_engine::Subsystem for AlwaysFailingSubsystem {
 /// test is wrapped in a joined thread with a hard deadline so a deadlock
 /// surfaces as a visible timeout rather than a hung test binary.
 #[test]
+#[serial(open_databases)]
 fn test_recovery_failure_does_not_deadlock() {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
@@ -1768,6 +1771,7 @@ fn test_recovery_failure_does_not_deadlock() {
 /// Like the Err-path test, this runs on a worker thread with a bounded
 /// deadline so a deadlock surfaces as a visible timeout.
 #[test]
+#[serial(open_databases)]
 fn test_recovery_panic_does_not_deadlock() {
     use std::sync::mpsc::{self, RecvTimeoutError};
     use std::time::Duration;
@@ -1890,6 +1894,7 @@ fn test_mixed_opener_rejects_subsystem_mismatch() {
 /// committed before shutdown must be readable after reopen, without relying
 /// on Drop for final flush/freeze.
 #[test]
+#[serial(open_databases)]
 fn shutdown_is_ordered_and_deterministic() {
     let (db, temp_dir, branch_id) = setup();
     let path = get_path(&temp_dir);
