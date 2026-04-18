@@ -79,6 +79,40 @@ fn flush_without_dir_is_noop() {
 }
 
 #[test]
+fn flush_manifest_publish_failure_rolls_back_and_keeps_frozen_memtable() {
+    crate::test_hooks::clear_manifest_publish_failure();
+    crate::test_hooks::inject_manifest_publish_failure(std::io::ErrorKind::Other);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+
+    let err = store.flush_oldest_frozen(&branch()).unwrap_err();
+    assert!(matches!(err, crate::StorageError::ManifestPublish { .. }));
+    assert_eq!(store.branch_frozen_count(&branch()), 1);
+    assert_eq!(store.branch_segment_count(&branch()), 0);
+    assert!(store.publish_health().is_none());
+}
+
+#[test]
+fn flush_dir_fsync_failure_keeps_installed_segment_and_latches_health() {
+    crate::test_hooks::clear_manifest_dir_fsync_failure();
+    crate::test_hooks::inject_manifest_dir_fsync_failure(std::io::ErrorKind::Other);
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("a"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+
+    let flushed = store.flush_oldest_frozen(&branch()).unwrap();
+    assert!(flushed);
+    assert_eq!(store.branch_frozen_count(&branch()), 0);
+    assert_eq!(store.branch_segment_count(&branch()), 1);
+    assert!(store.publish_health().is_some());
+}
+
+#[test]
 fn rotation_triggers_at_threshold() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 1);

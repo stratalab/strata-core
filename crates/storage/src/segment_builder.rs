@@ -19,6 +19,7 @@
 use crate::bloom::BloomFilter;
 use crate::key_encoding::{InternalKey, COMMIT_ID_SUFFIX_LEN};
 use crate::memtable::MemtableEntry;
+use crate::{StorageError, StorageResult};
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
 
@@ -164,7 +165,7 @@ impl SegmentBuilder {
     ///
     /// Writes to a temporary file then atomically renames to `path`.
     /// The iterator MUST yield entries in `InternalKey` order (ascending).
-    pub fn build_from_iter<I>(&self, iter: I, path: &Path) -> io::Result<SegmentMeta>
+    pub fn build_from_iter<I>(&self, iter: I, path: &Path) -> StorageResult<SegmentMeta>
     where
         I: Iterator<Item = (InternalKey, MemtableEntry)>,
     {
@@ -463,9 +464,14 @@ impl SegmentBuilder {
 
         // 10. Fsync parent directory so the rename is durable on crash.
         if let Some(parent) = path.parent() {
-            if let Ok(dir_fd) = std::fs::File::open(parent) {
-                let _ = dir_fd.sync_all();
-            }
+            let dir_fd = std::fs::File::open(parent).map_err(|inner| StorageError::DirFsync {
+                dir: parent.to_path_buf(),
+                inner,
+            })?;
+            dir_fd.sync_all().map_err(|inner| StorageError::DirFsync {
+                dir: parent.to_path_buf(),
+                inner,
+            })?;
         }
 
         Ok(SegmentMeta {
@@ -1479,7 +1485,7 @@ impl SplittingSegmentBuilder {
         &self,
         iter: I,
         path_fn: F,
-    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    ) -> StorageResult<Vec<(std::path::PathBuf, SegmentMeta)>>
     where
         I: Iterator<Item = (InternalKey, MemtableEntry)>,
         F: Fn(usize) -> std::path::PathBuf,
@@ -1502,7 +1508,7 @@ impl SplittingSegmentBuilder {
         iter: I,
         path_fn: F,
         mut should_split: P,
-    ) -> io::Result<Vec<(std::path::PathBuf, SegmentMeta)>>
+    ) -> StorageResult<Vec<(std::path::PathBuf, SegmentMeta)>>
     where
         I: Iterator<Item = (InternalKey, MemtableEntry)>,
         F: Fn(usize) -> std::path::PathBuf,

@@ -193,6 +193,10 @@ impl Database {
     /// - The database is shutting down (`InvalidInput`)
     /// - The WAL writer is halted due to sync failure (`WriterHalted`)
     fn check_accepting(&self) -> StrataResult<()> {
+        if let Some(err) = self.storage_publish_error() {
+            return Err(err);
+        }
+
         if !self.accepting_transactions.load(Ordering::Acquire) {
             // Check if writer is halted (more specific error)
             if let Some(err) = self.writer_halted_error() {
@@ -210,7 +214,7 @@ impl Database {
     /// Synchronous flush of all frozen memtables. Used only during write
     /// backpressure to ensure L0 count is accurate before stall decisions.
     /// Normal writes use the async path in `schedule_flush_if_needed`.
-    fn flush_frozen_sync(&self) {
+    fn flush_frozen_sync(&self) -> StrataResult<()> {
         let branches = self.storage.branches_needing_flush();
         for branch_id in &branches {
             loop {
@@ -220,18 +224,21 @@ impl Database {
                     }
                     Ok(false) => break,
                     Err(e) => {
+                        let message = format!("sync flush failed for branch {branch_id}: {e}");
+                        self.storage.latch_publish_health(message.clone());
                         tracing::warn!(
                             target: "strata::flush",
                             ?branch_id,
                             error = %e,
                             "sync flush failed"
                         );
-                        break;
+                        return Err(StrataError::storage_with_source(message, e));
                     }
                 }
             }
         }
         release_freed_memory();
+        Ok(())
     }
 
     /// Schedule flush and compaction on the background thread.
@@ -287,6 +294,9 @@ impl Database {
                                     }
                                     Ok(false) => break,
                                     Err(e) => {
+                                        storage.latch_publish_health(format!(
+                                            "background flush failed for branch {branch_id}: {e}"
+                                        ));
                                         tracing::warn!(
                                             target: "strata::flush",
                                             ?branch_id,
@@ -377,7 +387,7 @@ impl Database {
             // If frozen memtables are pending, drain them synchronously so
             // L0 count is accurate for backpressure.
             if self.storage.total_frozen_count() > 0 {
-                self.flush_frozen_sync();
+                self.flush_frozen_sync()?;
             }
             let l0_count = self.storage.max_l0_segment_count();
 

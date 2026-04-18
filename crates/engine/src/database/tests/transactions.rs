@@ -165,3 +165,30 @@ fn test_owned_transaction_commit_emits_one_commit_observer_event() {
         "successful manual commits should emit exactly one observer event"
     );
 }
+
+#[test]
+fn test_storage_publication_health_blocks_new_transactions() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+    db.storage()
+        .latch_publish_health("manifest rename may not be durable");
+
+    let err = match db.begin_transaction(BranchId::new()) {
+        Ok(_) => panic!("begin_transaction should fail when storage publish health is latched"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, StrataError::Storage { .. }));
+
+    let report = db.health();
+    let storage = report
+        .subsystems
+        .iter()
+        .find(|subsystem| subsystem.name == "storage")
+        .expect("storage subsystem present");
+    assert_eq!(storage.status, SubsystemStatus::Unhealthy);
+    assert!(storage
+        .message
+        .as_ref()
+        .is_some_and(|message| message.contains("publication durability degraded")));
+}

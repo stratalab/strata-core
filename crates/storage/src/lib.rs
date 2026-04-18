@@ -13,6 +13,8 @@
 pub mod block_cache;
 pub mod bloom;
 pub mod compaction;
+/// Storage-local error types used by publication barriers and manifest I/O.
+pub mod error;
 pub mod index;
 pub mod key_encoding;
 pub mod manifest;
@@ -26,10 +28,12 @@ pub mod segment;
 pub mod segment_builder;
 pub mod segmented;
 pub mod stored_value;
+mod test_hooks;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
 pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
+pub use error::{StorageError, StorageResult};
 pub use index::{BranchIndex, TypeIndex};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
@@ -38,6 +42,6 @@ pub use segment::{KVSegment, OwnedSegmentIter};
 pub use segment_builder::{CompressionCodec, SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
 pub use segmented::{
     CompactionResult, DecodedSnapshotEntry, DecodedSnapshotValue, MaterializeResult,
-    PickAndCompactResult, SegmentedStore, StorageIterator, VersionedEntry,
+    PickAndCompactResult, PublishHealth, SegmentedStore, StorageIterator, VersionedEntry,
 };
 pub use ttl::TTLIndex;

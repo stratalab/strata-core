@@ -20,15 +20,18 @@ use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::seekable::{self, SeekableIterator as _};
 use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
+use crate::{StorageError, StorageResult};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 // ── Read-path profiling (STRATA_PROFILE_READ=1) ────────────────────────────
 
@@ -754,6 +757,22 @@ pub struct SegmentedStore {
     data_block_size: AtomicUsize,
     /// Bloom filter bits per key (base value). Default: 10.
     bloom_bits_per_key: AtomicUsize,
+    /// Latched publication durability issue for this process.
+    publish_health: Mutex<Option<PublishHealth>>,
+}
+
+/// Latched storage publication durability issue for the current process.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PublishHealth {
+    /// First time the issue was observed in this process.
+    pub first_observed_at: SystemTime,
+    /// Human-readable detail for operator/debugging surfaces.
+    pub message: String,
+}
+
+enum PublishOutcome {
+    Durable,
+    NotDurable(StorageError),
 }
 
 impl SegmentedStore {
@@ -782,6 +801,7 @@ impl SegmentedStore {
             level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
+            publish_health: Mutex::new(None),
         }
     }
 
@@ -811,6 +831,7 @@ impl SegmentedStore {
             level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
+            publish_health: Mutex::new(None),
         }
     }
 
@@ -840,6 +861,7 @@ impl SegmentedStore {
             level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
+            publish_health: Mutex::new(None),
         }
     }
 
@@ -953,6 +975,268 @@ impl SegmentedStore {
             bloom_bits_per_key: self.bloom_bits_per_key(),
             ..SegmentBuilder::default()
         }
+    }
+
+    fn record_publish_health(&self, message: String) {
+        let mut slot = self.publish_health.lock();
+        if slot.is_none() {
+            *slot = Some(PublishHealth {
+                first_observed_at: SystemTime::now(),
+                message,
+            });
+        }
+    }
+
+    /// Latch a storage publication failure observed by an upper-layer
+    /// background path (for example, engine-driven flush) so new writers can
+    /// be rejected and health surfaces can report the failure.
+    pub fn latch_publish_health(&self, message: impl Into<String>) {
+        self.record_publish_health(message.into());
+    }
+
+    /// Returns the latched storage publication durability issue, if any.
+    pub fn publish_health(&self) -> Option<PublishHealth> {
+        self.publish_health.lock().clone()
+    }
+
+    fn manifest_payload_from_state(
+        ver: &SegmentVersion,
+        inherited_layers: &[InheritedLayer],
+    ) -> (
+        Vec<crate::manifest::ManifestEntry>,
+        Vec<crate::manifest::ManifestInheritedLayer>,
+    ) {
+        let mut entries = Vec::new();
+        for (level_idx, level) in ver.levels.iter().enumerate() {
+            for seg in level {
+                if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
+                    entries.push(crate::manifest::ManifestEntry {
+                        filename: name.to_string(),
+                        level: level_idx as u8,
+                    });
+                }
+            }
+        }
+
+        let inherited = inherited_layers
+            .iter()
+            .map(|layer| {
+                let layer_entries = layer
+                    .segments
+                    .levels
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(level_idx, level)| {
+                        level.iter().filter_map(move |seg| {
+                            seg.file_path()
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|name| crate::manifest::ManifestEntry {
+                                    filename: name.to_string(),
+                                    level: level_idx as u8,
+                                })
+                        })
+                    })
+                    .collect();
+
+                let status = match layer.status {
+                    LayerStatus::Active => 0,
+                    LayerStatus::Materializing => 1,
+                    LayerStatus::Materialized => 2,
+                };
+
+                crate::manifest::ManifestInheritedLayer {
+                    source_branch_id: layer.source_branch_id,
+                    fork_version: layer.fork_version,
+                    status,
+                    entries: layer_entries,
+                }
+            })
+            .collect();
+
+        (entries, inherited)
+    }
+
+    fn write_branch_manifest_from_state(
+        &self,
+        branch_id: &BranchId,
+        ver: &SegmentVersion,
+        inherited_layers: &[InheritedLayer],
+    ) -> StorageResult<()> {
+        let segments_dir = match &self.segments_dir {
+            Some(d) => d,
+            None => return Ok(()),
+        };
+
+        if let Some(inner) = crate::test_hooks::maybe_inject_manifest_publish_failure() {
+            return Err(StorageError::ManifestPublish {
+                branch_id: *branch_id,
+                inner,
+            });
+        }
+
+        let branch_hex = hex_encode_branch(branch_id);
+        let branch_dir = segments_dir.join(&branch_hex);
+        std::fs::create_dir_all(&branch_dir).map_err(|inner| StorageError::ManifestPublish {
+            branch_id: *branch_id,
+            inner,
+        })?;
+
+        let (entries, inherited) = Self::manifest_payload_from_state(ver, inherited_layers);
+        crate::manifest::write_manifest(&branch_dir, &entries, &inherited).map_err(|e| match e {
+            StorageError::Io(inner) => StorageError::ManifestPublish {
+                branch_id: *branch_id,
+                inner,
+            },
+            other => other,
+        })
+    }
+
+    fn publish_locked_branch_manifest(
+        &self,
+        branch_id: &BranchId,
+        branch: &BranchState,
+    ) -> Result<PublishOutcome, StorageError> {
+        let ver = branch.version.load();
+        match self.write_branch_manifest_from_state(branch_id, &ver, &branch.inherited_layers) {
+            Ok(()) => Ok(PublishOutcome::Durable),
+            Err(StorageError::DirFsync { dir, inner }) => {
+                let err = StorageError::DirFsync { dir, inner };
+                self.record_publish_health(format!("{}", err));
+                Ok(PublishOutcome::NotDurable(err))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn cleanup_created_segment_files(&self, paths: &[PathBuf]) {
+        let mut parent_dirs = HashSet::new();
+        for path in paths {
+            if let Some(parent) = path.parent() {
+                parent_dirs.insert(parent.to_path_buf());
+            }
+            let _ = std::fs::remove_file(path);
+        }
+        for dir in parent_dirs {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+
+    fn rollback_flush_publish_failure_locked(
+        &self,
+        branch: &mut BranchState,
+        frozen_mt: &Arc<Memtable>,
+        new_segment: &KVSegment,
+    ) {
+        crate::block_cache::global_cache().invalidate_file(new_segment.file_id());
+
+        let cur_ver = branch.version.load();
+        let mut new_levels = cur_ver.levels.clone();
+        let old_l0_len = new_levels[0].len();
+        new_levels[0].retain(|seg| seg.file_id() != new_segment.file_id());
+        if new_levels[0].len() != old_l0_len {
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+            refresh_level_targets(branch, self.level_base_bytes());
+        }
+
+        if !branch.frozen.iter().any(|mt| mt.id() == frozen_mt.id()) {
+            branch.frozen.push(Arc::clone(frozen_mt));
+            self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn rollback_materialize_status_locked(
+        branch: &mut BranchState,
+        source_branch_id: BranchId,
+        fork_version: CommitVersion,
+    ) {
+        if let Some(layer) = branch.inherited_layers.iter_mut().find(|layer| {
+            layer.source_branch_id == source_branch_id && layer.fork_version == fork_version
+        }) {
+            layer.status = LayerStatus::Active;
+        }
+    }
+
+    fn rollback_materialize_install_locked(
+        &self,
+        branch: &mut BranchState,
+        layer_index: usize,
+        source_branch_id: BranchId,
+        fork_version: CommitVersion,
+        layer_segments: &Arc<SegmentVersion>,
+        new_segments: &[Arc<KVSegment>],
+    ) {
+        let new_ids: HashSet<u64> = new_segments
+            .iter()
+            .map(|segment| segment.file_id())
+            .collect();
+
+        let cur_ver = branch.version.load();
+        let mut new_levels = cur_ver.levels.clone();
+        let old_l0_len = new_levels[0].len();
+        new_levels[0].retain(|seg| !new_ids.contains(&seg.file_id()));
+        if new_levels[0].len() != old_l0_len {
+            branch
+                .version
+                .store(Arc::new(SegmentVersion { levels: new_levels }));
+        }
+
+        if let Some(layer) = branch.inherited_layers.iter_mut().find(|layer| {
+            layer.source_branch_id == source_branch_id && layer.fork_version == fork_version
+        }) {
+            layer.status = LayerStatus::Active;
+        } else {
+            let restore_index = layer_index.min(branch.inherited_layers.len());
+            branch.inherited_layers.insert(
+                restore_index,
+                InheritedLayer {
+                    source_branch_id,
+                    fork_version,
+                    segments: Arc::clone(layer_segments),
+                    status: LayerStatus::Active,
+                },
+            );
+        }
+
+        refresh_level_targets(branch, self.level_base_bytes());
+    }
+
+    fn rollback_fork_source_publish_failure_locked(
+        &self,
+        source: &mut BranchState,
+        old_active: Arc<Memtable>,
+        old_frozen: Vec<Arc<Memtable>>,
+        old_version: Arc<SegmentVersion>,
+        old_level_targets: compaction::LevelTargets,
+    ) {
+        let current_frozen = source.frozen.len();
+        let restored_frozen = old_frozen.len();
+        if restored_frozen > current_frozen {
+            self.total_frozen_count
+                .fetch_add(restored_frozen - current_frozen, Ordering::Relaxed);
+        } else if current_frozen > restored_frozen {
+            self.total_frozen_count
+                .fetch_sub(current_frozen - restored_frozen, Ordering::Relaxed);
+        }
+
+        source.active = old_active;
+        source.frozen = old_frozen;
+        source.version.store(old_version);
+        source.level_targets = old_level_targets;
+    }
+
+    fn rollback_fork_dest_publish_failure_locked(
+        dest: &mut BranchState,
+        dest_was_new: bool,
+    ) -> bool {
+        dest.inherited_layers.clear();
+        dest.max_version.store(0, Ordering::Release);
+        dest_was_new
+            && dest.active.is_empty()
+            && dest.frozen.is_empty()
+            && dest.version.load().levels.iter().all(Vec::is_empty)
     }
 
     /// Iterate over all branch IDs that have data.
@@ -1171,14 +1455,15 @@ impl SegmentedStore {
         &self,
         child_branch_id: &BranchId,
         layer_index: usize,
-    ) -> io::Result<MaterializeResult> {
+    ) -> StorageResult<MaterializeResult> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::Unsupported,
                     "materialize_layer requires a disk-backed store",
-                ))
+                )
+                .into());
             }
         };
 
@@ -1231,7 +1516,9 @@ impl SegmentedStore {
         let (layer_segments, source_branch_id, fork_version, own_version, closer_layers) = {
             let branch = match self.branches.get(child_branch_id) {
                 Some(b) => b,
-                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+                None => {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found").into())
+                }
             };
             if layer_index >= branch.inherited_layers.len() {
                 // Layer was already removed by a concurrent materialization that
@@ -1273,17 +1560,32 @@ impl SegmentedStore {
             // DashMap guard drops here
         };
 
-        // 2b. Set status to Materializing
+        // 2b. Set status to Materializing and publish that state while the
+        // branch guard still excludes same-branch mutation.
+        let mut initial_not_durable = None;
         {
             let mut branch = match self.branches.get_mut(child_branch_id) {
                 Some(b) => b,
-                None => return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found")),
+                None => {
+                    return Err(io::Error::new(io::ErrorKind::NotFound, "branch not found").into())
+                }
             };
             if layer_index < branch.inherited_layers.len() {
                 branch.inherited_layers[layer_index].status = LayerStatus::Materializing;
             }
+            match self.publish_locked_branch_manifest(child_branch_id, &branch) {
+                Ok(PublishOutcome::Durable) => {}
+                Ok(PublishOutcome::NotDurable(err)) => initial_not_durable = Some(err),
+                Err(e) => {
+                    Self::rollback_materialize_status_locked(
+                        &mut branch,
+                        source_branch_id,
+                        fork_version,
+                    );
+                    return Err(e);
+                }
+            }
         }
-        self.write_branch_manifest(child_branch_id);
 
         // 2c. Build materialized entries (no locks held — I/O heavy)
         let mut entries = Self::collect_unshadowed_entries(
@@ -1304,7 +1606,7 @@ impl SegmentedStore {
         // 2d. Build segment file(s) (no locks held).
         // Use SplittingSegmentBuilder to avoid creating oversized L0 segments
         // from large inherited layers (#1671).
-        let new_segments: Vec<KVSegment> = if !entries.is_empty() {
+        let new_segments: Vec<Arc<KVSegment>> = if !entries.is_empty() {
             let branch_hex = hex_encode_branch(child_branch_id);
             let branch_dir = segments_dir.join(&branch_hex);
             std::fs::create_dir_all(&branch_dir)?;
@@ -1319,7 +1621,7 @@ impl SegmentedStore {
 
             let mut segments = Vec::with_capacity(built.len());
             for (path, _meta) in built {
-                let seg = KVSegment::open(&path)?;
+                let seg = Arc::new(KVSegment::open(&path)?);
                 segments.push(seg);
             }
             segments
@@ -1340,8 +1642,8 @@ impl SegmentedStore {
                 let old_ver = branch.version.load();
                 let mut new_l0 =
                     Vec::with_capacity(old_ver.l0_segments().len() + new_segments.len());
-                for seg in new_segments {
-                    new_l0.push(Arc::new(seg));
+                for seg in &new_segments {
+                    new_l0.push(Arc::clone(seg));
                 }
                 new_l0.extend(old_ver.l0_segments().iter().cloned());
                 let mut new_levels = old_ver.levels.clone();
@@ -1361,10 +1663,35 @@ impl SegmentedStore {
             }
 
             refresh_level_targets(&mut branch, self.level_base_bytes());
+            match self.publish_locked_branch_manifest(child_branch_id, &branch) {
+                Ok(PublishOutcome::Durable) => {}
+                Ok(PublishOutcome::NotDurable(err)) => {
+                    if initial_not_durable.is_none() {
+                        initial_not_durable = Some(err);
+                    }
+                }
+                Err(e) => {
+                    self.rollback_materialize_install_locked(
+                        &mut branch,
+                        layer_index,
+                        source_branch_id,
+                        fork_version,
+                        &layer_segments,
+                        &new_segments,
+                    );
+                    let created_paths: Vec<_> = new_segments
+                        .iter()
+                        .map(|segment| segment.file_path().to_path_buf())
+                        .collect();
+                    drop(branch);
+                    for segment in &new_segments {
+                        crate::block_cache::global_cache().invalidate_file(segment.file_id());
+                    }
+                    self.cleanup_created_segment_files(&created_paths);
+                    return Err(e);
+                }
+            }
         }
-
-        // 2f. Cleanup
-        self.write_branch_manifest(child_branch_id);
 
         // Decrement refcounts for each segment in the removed layer.
         for level in &layer_segments.levels {
@@ -1377,6 +1704,14 @@ impl SegmentedStore {
         // Refcount decrements above may have released the last reference to
         // segments whose parent already compacted them away.
         self.gc_orphan_segments();
+
+        if let Some(err) = initial_not_durable {
+            tracing::warn!(
+                branch = %hex_encode_branch(child_branch_id),
+                error = %err,
+                "materialize_layer completed with unconfirmed manifest durability"
+            );
+        }
 
         Ok(MaterializeResult {
             entries_materialized,
@@ -1539,12 +1874,12 @@ impl SegmentedStore {
         &self,
         source_id: &BranchId,
         dest_id: &BranchId,
-    ) -> io::Result<(CommitVersion, usize)> {
+    ) -> StorageResult<(CommitVersion, usize)> {
         if source_id == dest_id {
-            return Err(io::Error::new(
+            return Err(StorageError::Io(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "fork_branch: source and destination must be different branches",
-            ));
+            )));
         }
 
         // 1. Flush bulk memtable data to segments (outside exclusive lock).
@@ -1563,16 +1898,22 @@ impl SegmentedStore {
         //    CRITICAL: Increment refcounts BEFORE dropping the source guard.
         //    Without this, concurrent parent compaction can delete segments
         //    between the snapshot and the refcount increment (see #1662).
-        let (dest_layers, segments_shared, fork_version, source_manifest_dirty) = {
+        let (dest_layers, segments_shared, fork_version) = {
             let mut source = match self.branches.get_mut(source_id) {
                 Some(b) => b,
                 None => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
                         "fork_branch: source branch no longer exists",
-                    ))
+                    )
+                    .into())
                 }
             };
+            let source_old_active = Arc::clone(&source.active);
+            let source_old_frozen = source.frozen.clone();
+            let source_old_version = source.version.load_full();
+            let source_old_level_targets = source.level_targets.clone();
+            let mut source_flush_paths = Vec::new();
 
             // Inline-rotate: move straggler writes from active to frozen.
             if !source.active.is_empty() {
@@ -1598,6 +1939,7 @@ impl SegmentedStore {
                         .make_segment_builder()
                         .with_compression(crate::segment_builder::CompressionCodec::None);
                     builder.build_from_iter(mt.iter_all(), &seg_path)?;
+                    source_flush_paths.push(seg_path.clone());
                     let segment = KVSegment::open(&seg_path)?;
 
                     // Install segment into source's SegmentVersion.
@@ -1624,6 +1966,28 @@ impl SegmentedStore {
                 }
                 if source_manifest_dirty {
                     refresh_level_targets(&mut source, self.level_base_bytes());
+                    match self.publish_locked_branch_manifest(source_id, &source) {
+                        Ok(PublishOutcome::Durable) => {}
+                        Ok(PublishOutcome::NotDurable(err)) => {
+                            tracing::warn!(
+                                branch = %hex_encode_branch(source_id),
+                                error = %err,
+                                "fork source manifest rename landed but durability is unconfirmed"
+                            );
+                        }
+                        Err(e) => {
+                            self.rollback_fork_source_publish_failure_locked(
+                                &mut source,
+                                source_old_active,
+                                source_old_frozen,
+                                source_old_version,
+                                source_old_level_targets,
+                            );
+                            drop(source);
+                            self.cleanup_created_segment_files(&source_flush_paths);
+                            return Err(e);
+                        }
+                    }
                 }
             }
 
@@ -1675,20 +2039,16 @@ impl SegmentedStore {
                 }
             }
 
-            (layers, shared, fork_version, source_manifest_dirty)
+            (layers, shared, fork_version)
             // source DashMap guard drops here — segments are now protected
         };
 
-        // Persist source manifest if we inline-flushed segments.
-        if source_manifest_dirty {
-            self.write_branch_manifest(source_id);
-        }
-
         // 6. Attach to dest branch, rejecting if a concurrent fork already installed layers.
-        let mut dest = self
-            .branches
-            .entry(*dest_id)
-            .or_insert_with(BranchState::new);
+        let mut dest_was_new = false;
+        let mut dest = self.branches.entry(*dest_id).or_insert_with(|| {
+            dest_was_new = true;
+            BranchState::new()
+        });
         if !dest.inherited_layers.is_empty() {
             drop(dest);
             // Undo refcount increments from step 2.
@@ -1699,20 +2059,43 @@ impl SegmentedStore {
                     }
                 }
             }
-            return Err(io::Error::new(
+            return Err(StorageError::Io(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "fork_branch: destination already has inherited layers (concurrent fork race)",
-            ));
+            )));
         }
-        dest.inherited_layers = dest_layers;
+        dest.inherited_layers = dest_layers.clone();
         // Propagate fork_version so subsequent forks from this child
         // correctly report the inherited data's version range.
         dest.max_version
             .fetch_max(fork_version.as_u64(), Ordering::Release);
+        match self.publish_locked_branch_manifest(dest_id, &dest) {
+            Ok(PublishOutcome::Durable) => {}
+            Ok(PublishOutcome::NotDurable(err)) => {
+                tracing::warn!(
+                    branch = %hex_encode_branch(dest_id),
+                    error = %err,
+                    "fork destination manifest rename landed but durability is unconfirmed"
+                );
+            }
+            Err(e) => {
+                let remove_branch =
+                    Self::rollback_fork_dest_publish_failure_locked(&mut dest, dest_was_new);
+                drop(dest);
+                for layer in &dest_layers {
+                    for level in &layer.segments.levels {
+                        for seg in level {
+                            self.ref_registry.decrement(seg.file_id());
+                        }
+                    }
+                }
+                if remove_branch {
+                    self.branches.remove(dest_id);
+                }
+                return Err(e);
+            }
+        }
         drop(dest);
-
-        // 7. Write manifest
-        self.write_branch_manifest(dest_id);
 
         Ok((fork_version, segments_shared))
     }
@@ -2641,7 +3024,7 @@ impl SegmentedStore {
     /// After this call, all data written during the bulk load is flushed to
     /// frozen memtables (and to disk segments if a directory is configured).
     /// Normal rotation behavior resumes.
-    pub fn end_bulk_load(&self, branch_id: &BranchId) -> io::Result<()> {
+    pub fn end_bulk_load(&self, branch_id: &BranchId) -> StorageResult<()> {
         self.bulk_load_branches.remove(branch_id);
 
         // Rotate the active memtable (unconditionally — it may be large)
@@ -2689,7 +3072,7 @@ impl SegmentedStore {
     /// The frozen memtable stays in the read path during I/O so concurrent
     /// readers never see a gap.  It is only removed when the segment is
     /// installed, in a single DashMap guard.
-    pub fn flush_oldest_frozen(&self, branch_id: &BranchId) -> io::Result<bool> {
+    pub fn flush_oldest_frozen(&self, branch_id: &BranchId) -> StorageResult<bool> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => return Ok(false),
@@ -2720,7 +3103,7 @@ impl SegmentedStore {
             .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
-        let segment = KVSegment::open(&seg_path)?;
+        let segment = Arc::new(KVSegment::open(&seg_path)?);
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
@@ -2758,7 +3141,7 @@ impl SegmentedStore {
             // Build new version with the new segment prepended (newest first).
             let old_ver = branch.version.load();
             let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
-            new_l0.push(Arc::new(segment));
+            new_l0.push(Arc::clone(&segment));
             new_l0.extend(old_ver.l0_segments().iter().cloned());
             let mut new_levels = old_ver.levels.clone();
             new_levels[0] = new_l0;
@@ -2767,9 +3150,26 @@ impl SegmentedStore {
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
             refresh_level_targets(&mut branch, self.level_base_bytes());
 
-            // Persist level assignments
+            match self.publish_locked_branch_manifest(branch_id, &branch) {
+                Ok(PublishOutcome::Durable) => {}
+                Ok(PublishOutcome::NotDurable(err)) => {
+                    tracing::warn!(
+                        branch = %hex_encode_branch(branch_id),
+                        error = %err,
+                        "flush installed segment but manifest durability is unconfirmed"
+                    );
+                }
+                Err(e) => {
+                    self.rollback_flush_publish_failure_locked(&mut branch, &frozen_mt, &segment);
+                    drop(branch);
+                    let _ = std::fs::remove_file(segment.file_path());
+                    if let Some(parent) = segment.file_path().parent() {
+                        let _ = std::fs::remove_dir(parent);
+                    }
+                    return Err(e);
+                }
+            }
             drop(branch);
-            self.write_branch_manifest(branch_id);
         } else {
             // Another thread already flushed this memtable; discard the
             // duplicate segment file we just built.
@@ -4200,87 +4600,13 @@ impl SegmentedStore {
 
     /// Write the manifest file for a branch, reflecting current level assignments
     /// and inherited layers.
-    fn write_branch_manifest(&self, branch_id: &BranchId) {
-        let segments_dir = match &self.segments_dir {
-            Some(d) => d,
-            None => return,
-        };
+    fn write_branch_manifest(&self, branch_id: &BranchId) -> StorageResult<()> {
         let branch = match self.branches.get(branch_id) {
             Some(b) => b,
-            None => return,
+            None => return Ok(()),
         };
         let ver = branch.version.load();
-        let branch_hex = hex_encode_branch(branch_id);
-        let branch_dir = segments_dir.join(&branch_hex);
-
-        // Ensure the branch directory exists (needed for COW forks with
-        // no own segments but inherited layers that need a manifest).
-        if let Err(e) = std::fs::create_dir_all(&branch_dir) {
-            tracing::warn!(
-                branch = %branch_hex,
-                error = %e,
-                "failed to create branch directory for manifest"
-            );
-            return;
-        }
-
-        let mut entries = Vec::new();
-        for (level_idx, level) in ver.levels.iter().enumerate() {
-            for seg in level {
-                if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
-                    entries.push(crate::manifest::ManifestEntry {
-                        filename: name.to_string(),
-                        level: level_idx as u8,
-                    });
-                }
-            }
-        }
-
-        // Serialize inherited layers
-        let inherited: Vec<crate::manifest::ManifestInheritedLayer> = branch
-            .inherited_layers
-            .iter()
-            .map(|layer| {
-                let layer_entries: Vec<crate::manifest::ManifestEntry> = layer
-                    .segments
-                    .levels
-                    .iter()
-                    .enumerate()
-                    .flat_map(|(level_idx, level)| {
-                        level.iter().filter_map(move |seg| {
-                            seg.file_path()
-                                .file_name()
-                                .and_then(|n| n.to_str())
-                                .map(|name| crate::manifest::ManifestEntry {
-                                    filename: name.to_string(),
-                                    level: level_idx as u8,
-                                })
-                        })
-                    })
-                    .collect();
-
-                let status = match layer.status {
-                    LayerStatus::Active => 0,
-                    LayerStatus::Materializing => 1,
-                    LayerStatus::Materialized => 2,
-                };
-
-                crate::manifest::ManifestInheritedLayer {
-                    source_branch_id: layer.source_branch_id,
-                    fork_version: layer.fork_version,
-                    status,
-                    entries: layer_entries,
-                }
-            })
-            .collect();
-
-        if let Err(e) = crate::manifest::write_manifest(&branch_dir, &entries, &inherited) {
-            tracing::warn!(
-                branch = %branch_hex,
-                error = %e,
-                "failed to write branch manifest"
-            );
-        }
+        self.write_branch_manifest_from_state(branch_id, &ver, &branch.inherited_layers)
     }
 }
 
