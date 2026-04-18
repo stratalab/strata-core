@@ -826,6 +826,210 @@ fn test_resume_while_still_failing_increments_failed_sync_count() {
     db.shutdown().unwrap();
 }
 
+/// D1: A failure in `begin_background_sync` (flush-setup phase) latches
+/// `WalWriterHealth::Halted` and flips `accepting_transactions = false`,
+/// matching the existing `sync_all`-failure contract. Closes DG-003.
+#[test]
+#[serial]
+fn test_begin_sync_failure_halts_writer_and_rejects_manual_commit() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("begin_sync_halt_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 10,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let trigger_key = Key::new_kv(create_test_namespace(branch_id), "begin_sync_key");
+    let pending_key = Key::new_kv(create_test_namespace(branch_id), "pending_key");
+
+    super::test_hooks::clear_begin_sync_failure(&db_path);
+    let mut manual_txn = db.begin_transaction(branch_id).unwrap();
+    manual_txn.put(pending_key.clone(), Value::Int(6)).unwrap();
+
+    // Commit a separate transaction to create unsynced WAL data so the flush
+    // thread will actually call begin_background_sync (which requires
+    // has_unsynced_data == true).
+    super::test_hooks::inject_begin_sync_failure(&db_path, std::io::ErrorKind::Other);
+    db.transaction(branch_id, |txn| {
+        txn.put(trigger_key.clone(), Value::Int(7))?;
+        Ok(())
+    })
+    .unwrap();
+
+    // Wait for the flush thread to hit the injected begin failure and halt.
+    wait_until(Duration::from_secs(2), || {
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        )
+    });
+
+    let health = db.wal_writer_health();
+    match health {
+        super::WalWriterHealth::Halted {
+            failed_sync_count, ..
+        } => {
+            assert!(failed_sync_count >= 1, "expected at least one failed sync");
+        }
+        super::WalWriterHealth::Healthy => {
+            panic!("expected writer to be halted after begin-sync failure");
+        }
+    }
+
+    // Manual commit held open before the halt must now be rejected.
+    let err = manual_txn
+        .commit()
+        .expect_err("manual transaction should be rejected once the writer halts");
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted from manual commit, got: {:?}",
+        err
+    );
+
+    // New transactions after halt must be rejected too.
+    let err = db
+        .transaction(branch_id, |txn| {
+            txn.put(trigger_key.clone(), Value::Int(8))?;
+            Ok(())
+        })
+        .expect_err("transaction should be rejected when writer is halted");
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted error, got: {:?}",
+        err
+    );
+
+    // Clearing the injection must NOT auto-resume; only explicit resume does.
+    super::test_hooks::clear_begin_sync_failure(&db_path);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        ),
+        "writer must remain halted until explicit resume"
+    );
+
+    db.resume_wal_writer("test cleared injected begin failure")
+        .unwrap();
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to be healthy after resume"
+    );
+
+    // Post-resume transactions work again.
+    db.transaction(branch_id, |txn| {
+        txn.put(trigger_key.clone(), Value::Int(9))?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.shutdown().unwrap();
+}
+
+/// D1: A failure in `commit_background_sync` (bookkeeping phase — post-fsync,
+/// so data is durable on disk but the writer's in-memory counters have
+/// diverged) latches `WalWriterHealth::Halted` and flips
+/// `accepting_transactions = false`. Closes DG-004.
+#[test]
+#[serial]
+fn test_commit_sync_failure_halts_writer_and_rejects_manual_commit() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("commit_sync_halt_db");
+    let db = Database::open_with_durability(&db_path, DurabilityMode::standard_default()).unwrap();
+    db.set_durability_mode(DurabilityMode::Standard {
+        interval_ms: 10,
+        batch_size: 64,
+    })
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let trigger_key = Key::new_kv(create_test_namespace(branch_id), "commit_sync_key");
+    let pending_key = Key::new_kv(create_test_namespace(branch_id), "pending_key");
+
+    super::test_hooks::clear_commit_sync_failure(&db_path);
+    let mut manual_txn = db.begin_transaction(branch_id).unwrap();
+    manual_txn.put(pending_key.clone(), Value::Int(6)).unwrap();
+
+    super::test_hooks::inject_commit_sync_failure(&db_path, std::io::ErrorKind::Other);
+    db.transaction(branch_id, |txn| {
+        txn.put(trigger_key.clone(), Value::Int(7))?;
+        Ok(())
+    })
+    .unwrap();
+
+    wait_until(Duration::from_secs(2), || {
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        )
+    });
+
+    let health = db.wal_writer_health();
+    match health {
+        super::WalWriterHealth::Halted {
+            failed_sync_count, ..
+        } => {
+            assert!(failed_sync_count >= 1, "expected at least one failed sync");
+        }
+        super::WalWriterHealth::Healthy => {
+            panic!("expected writer to be halted after commit-sync failure");
+        }
+    }
+
+    let err = manual_txn
+        .commit()
+        .expect_err("manual transaction should be rejected once the writer halts");
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted from manual commit, got: {:?}",
+        err
+    );
+
+    let err = db
+        .transaction(branch_id, |txn| {
+            txn.put(trigger_key.clone(), Value::Int(8))?;
+            Ok(())
+        })
+        .expect_err("transaction should be rejected when writer is halted");
+    assert!(
+        matches!(err, StrataError::WriterHalted { .. }),
+        "expected WriterHalted error, got: {:?}",
+        err
+    );
+
+    super::test_hooks::clear_commit_sync_failure(&db_path);
+    std::thread::sleep(Duration::from_millis(50));
+    assert!(
+        matches!(
+            db.wal_writer_health(),
+            super::WalWriterHealth::Halted { .. }
+        ),
+        "writer must remain halted until explicit resume"
+    );
+
+    db.resume_wal_writer("test cleared injected commit failure")
+        .unwrap();
+    assert!(
+        matches!(db.wal_writer_health(), super::WalWriterHealth::Healthy),
+        "expected writer to be healthy after resume"
+    );
+
+    // Post-resume transactions work again. The fsync before the bookkeeping
+    // halt succeeded, so the pre-halt trigger_key is already durable; resume
+    // only clears the halt state.
+    db.transaction(branch_id, |txn| {
+        txn.put(trigger_key.clone(), Value::Int(9))?;
+        Ok(())
+    })
+    .unwrap();
+
+    db.shutdown().unwrap();
+}
+
 /// T3-E2: Resume on ephemeral database returns error.
 #[test]
 fn test_resume_ephemeral_database_returns_error() {

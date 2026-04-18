@@ -1339,6 +1339,60 @@ impl Database {
         }
     }
 
+    /// Latch `WalWriterHealth::Halted` and flip `accepting_transactions = false`
+    /// after a background-sync failure in phase `phase` (`"setup"`, `"sync"`,
+    /// or `"bookkeeping"`).
+    ///
+    /// Pre-conditions: the caller has already populated `WalWriter::bg_error`
+    /// (via `abort_background_sync` when an in-flight handle exists, or via
+    /// `record_sync_failure` otherwise) and snapshotted it into `bg_error`.
+    /// Callers may release the WAL writer lock before calling this helper —
+    /// the commit path's under-lock `bg_error` check at
+    /// `concurrency::manager::writer_halted_commit_error` already refuses new
+    /// appends once `bg_error` is set, so there is no window in which a
+    /// concurrent commit could slip past an unpublished halt.
+    /// The helper itself only touches `health` and `accepting`, so it can't
+    /// deadlock with the wal mutex.
+    pub(crate) fn latch_bg_sync_halt(
+        health: &ParkingMutex<WalWriterHealth>,
+        accepting: &AtomicBool,
+        bg_error: Option<BackgroundSyncError>,
+        phase: &'static str,
+    ) {
+        let mut h = health.lock();
+        if let Some(bg_error) = bg_error {
+            let reason = bg_error.message().to_string();
+            let failed_sync_count = bg_error.failed_sync_count();
+            *h = Self::halted_health_from_bg_error(bg_error);
+            tracing::error!(
+                target: "strata::wal",
+                phase,
+                reason = %reason,
+                failed_sync_count,
+                "WAL writer halted due to sync failure"
+            );
+        } else {
+            // Defensive: bg_error should always be Some after the caller's
+            // record_sync_failure / abort_background_sync, but ensure consistent
+            // state if it is not.
+            *h = WalWriterHealth::Halted {
+                reason: format!("sync failure in {phase} phase (details unavailable)"),
+                first_observed_at: std::time::SystemTime::now(),
+                failed_sync_count: 1,
+            };
+            tracing::error!(
+                target: "strata::wal",
+                phase,
+                "WAL writer halted due to sync failure (bg_error unexpectedly None)"
+            );
+        }
+        drop(h);
+
+        // Publish the halt after health is updated so new callers observe
+        // WriterHalted, not a generic shutdown-style rejection.
+        accepting.store(false, Ordering::Release);
+    }
+
     // ========================================================================
     // WAL Writer Health
     // ========================================================================
