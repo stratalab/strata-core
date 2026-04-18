@@ -178,6 +178,43 @@ fn flush_oldest_frozen_surfaces_publish_failure() {
 }
 
 #[test]
+fn flush_oldest_frozen_publish_failure_rolls_back_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&b);
+    assert_eq!(store.branch_frozen_count(&b), 1);
+    assert_eq!(store.branch_segment_count(&b), 0);
+
+    test_hooks::inject_manifest_publish_failure(io::ErrorKind::PermissionDenied);
+    let result = store.flush_oldest_frozen(&b);
+    test_hooks::clear_manifest_publish_failure();
+
+    match result {
+        Err(StorageError::ManifestPublish { .. }) => {}
+        other => panic!("expected ManifestPublish, got {other:?}"),
+    }
+
+    assert_eq!(store.branch_frozen_count(&b), 1, "frozen memtable must be restored");
+    assert_eq!(store.branch_segment_count(&b), 0, "failed publish must not leave installed segment");
+    assert_eq!(
+        store.get_value_direct(&kv_key("k")).unwrap(),
+        Some(Value::Int(1)),
+        "failed publish must preserve readable branch state for retry"
+    );
+
+    assert_eq!(
+        store.flush_oldest_frozen(&b).unwrap(),
+        true,
+        "retry after publish failure must succeed"
+    );
+    assert_eq!(store.branch_frozen_count(&b), 0);
+    assert_eq!(store.branch_segment_count(&b), 1);
+}
+
+#[test]
 fn fork_branch_surfaces_publish_failure() {
     // Seed a parent with flushed segments so that the fork dest publish is
     // the next `write_branch_manifest` that runs (source-side publish only
@@ -192,6 +229,73 @@ fn fork_branch_surfaces_publish_failure() {
         Err(StorageError::ManifestPublish { .. }) => {}
         other => panic!("expected ManifestPublish, got {other:?}"),
     }
+}
+
+#[test]
+fn fork_branch_dest_publish_failure_rolls_back_child_state() {
+    let (_tmp_dir, store) = setup_parent_with_segments(&[("k1", 1, 1)]);
+
+    test_hooks::inject_manifest_publish_failure(io::ErrorKind::PermissionDenied);
+    let result = store.fork_branch(&parent_branch(), &child_branch());
+    test_hooks::clear_manifest_publish_failure();
+
+    match result {
+        Err(StorageError::ManifestPublish { .. }) => {}
+        other => panic!("expected ManifestPublish, got {other:?}"),
+    }
+
+    assert!(
+        store.branches.get(&child_branch()).is_none(),
+        "failed destination publish must not leave a child branch installed in memory"
+    );
+
+    let retry = store.fork_branch(&parent_branch(), &child_branch()).unwrap();
+    assert!(retry.1 > 0, "retry should perform the storage fork normally");
+    assert_eq!(store.inherited_layer_count(&child_branch()), 1);
+    assert_eq!(
+        store.get_value_direct(&child_kv("k1")).unwrap(),
+        Some(Value::Int(1)),
+        "successful retry must expose inherited data"
+    );
+}
+
+#[test]
+fn fork_branch_source_publish_failure_rolls_back_source_flush() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("k1"), Value::Int(1), 1);
+    assert_eq!(
+        store.get_value_direct(&parent_kv("k1")).unwrap(),
+        Some(Value::Int(1)),
+        "source data must exist before fork"
+    );
+
+    test_hooks::inject_manifest_publish_failure(io::ErrorKind::PermissionDenied);
+    let result = store.fork_branch(&parent_branch(), &child_branch());
+    test_hooks::clear_manifest_publish_failure();
+
+    match result {
+        Err(StorageError::ManifestPublish { .. }) => {}
+        other => panic!("expected ManifestPublish, got {other:?}"),
+    }
+
+    assert!(
+        store.branches.get(&child_branch()).is_none(),
+        "failed source publish must not install a child branch"
+    );
+    assert_eq!(
+        store.get_value_direct(&parent_kv("k1")).unwrap(),
+        Some(Value::Int(1)),
+        "failed source publish must restore the source branch state"
+    );
+
+    store.fork_branch(&parent_branch(), &child_branch()).unwrap();
+    assert_eq!(
+        store.get_value_direct(&child_kv("k1")).unwrap(),
+        Some(Value::Int(1)),
+        "retry after source publish failure must succeed"
+    );
 }
 
 #[test]
@@ -210,6 +314,63 @@ fn materialize_layer_surfaces_publish_failure() {
         Err(StorageError::ManifestPublish { .. }) => {}
         other => panic!("expected ManifestPublish, got {other:?}"),
     }
+}
+
+#[test]
+fn materialize_layer_first_publish_failure_rolls_back_status() {
+    let (_tmp_dir, store) = setup_parent_with_segments(&[("k1", 1, 1), ("k2", 2, 2)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    test_hooks::inject_manifest_publish_failure(io::ErrorKind::PermissionDenied);
+    let result = store.materialize_layer(&child_branch(), 0);
+    test_hooks::clear_manifest_publish_failure();
+
+    match result {
+        Err(StorageError::ManifestPublish { .. }) => {}
+        other => panic!("expected ManifestPublish, got {other:?}"),
+    }
+
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.inherited_layers.len(), 1);
+    assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
+    drop(child);
+
+    let retry = store.materialize_layer(&child_branch(), 0).unwrap();
+    assert_eq!(retry.entries_materialized, 2);
+    assert_eq!(store.inherited_layer_count(&child_branch()), 0);
+}
+
+#[test]
+fn materialize_layer_second_publish_failure_rolls_back_install() {
+    let (_tmp_dir, store) = setup_parent_with_segments(&[("k1", 1, 1), ("k2", 2, 2)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    test_hooks::inject_manifest_publish_failure_after(1, io::ErrorKind::PermissionDenied);
+    let result = store.materialize_layer(&child_branch(), 0);
+    test_hooks::clear_manifest_publish_failure();
+
+    match result {
+        Err(StorageError::ManifestPublish { .. }) => {}
+        other => panic!("expected ManifestPublish, got {other:?}"),
+    }
+
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert_eq!(child.inherited_layers.len(), 1);
+    assert_eq!(child.inherited_layers[0].status, LayerStatus::Active);
+    assert_eq!(
+        child.version.load().total_segment_count(),
+        0,
+        "failed final publish must not leave materialized segments installed"
+    );
+    drop(child);
+
+    let retry = store.materialize_layer(&child_branch(), 0).unwrap();
+    assert_eq!(retry.entries_materialized, 2);
+    assert_eq!(store.inherited_layer_count(&child_branch()), 0);
 }
 
 // ── Dir fsync — write_manifest surfaces DirFsync (SG-003) ─────────────

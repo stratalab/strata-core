@@ -25,6 +25,7 @@ use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use std::cell::RefCell;
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -844,6 +845,187 @@ impl SegmentedStore {
         }
     }
 
+    fn cleanup_created_segment_files(&self, paths: &[PathBuf]) {
+        let mut parent_dirs = HashSet::new();
+        for path in paths {
+            if let Some(parent) = path.parent() {
+                parent_dirs.insert(parent.to_path_buf());
+            }
+            let _ = std::fs::remove_file(path);
+        }
+        for dir in parent_dirs {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
+
+    fn rollback_flush_publish_failure(
+        &self,
+        branch_id: &BranchId,
+        frozen_mt: &Arc<Memtable>,
+        new_segment: &KVSegment,
+    ) {
+        crate::block_cache::global_cache().invalidate_file(new_segment.file_id());
+
+        if let Some(mut branch) = self.branches.get_mut(branch_id) {
+            let cur_ver = branch.version.load();
+            let mut new_levels = cur_ver.levels.clone();
+            let old_l0_len = new_levels[0].len();
+            new_levels[0].retain(|seg| seg.file_id() != new_segment.file_id());
+            if new_levels[0].len() != old_l0_len {
+                branch
+                    .version
+                    .store(Arc::new(SegmentVersion { levels: new_levels }));
+                refresh_level_targets(&mut branch, self.level_base_bytes());
+            }
+
+            if !branch.frozen.iter().any(|mt| mt.id() == frozen_mt.id()) {
+                branch.frozen.push(Arc::clone(frozen_mt));
+                self.total_frozen_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let _ = std::fs::remove_file(new_segment.file_path());
+        if let Some(parent) = new_segment.file_path().parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+
+    fn rollback_materialize_status(
+        &self,
+        child_branch_id: &BranchId,
+        source_branch_id: BranchId,
+        fork_version: CommitVersion,
+    ) {
+        if let Some(mut branch) = self.branches.get_mut(child_branch_id) {
+            if let Some(layer) = branch.inherited_layers.iter_mut().find(|layer| {
+                layer.source_branch_id == source_branch_id && layer.fork_version == fork_version
+            }) {
+                layer.status = LayerStatus::Active;
+            }
+        }
+    }
+
+    fn rollback_materialize_install(
+        &self,
+        child_branch_id: &BranchId,
+        layer_index: usize,
+        source_branch_id: BranchId,
+        fork_version: CommitVersion,
+        layer_segments: &Arc<SegmentVersion>,
+        new_segments: &[Arc<KVSegment>],
+    ) {
+        let new_ids: HashSet<u64> = new_segments.iter().map(|segment| segment.file_id()).collect();
+
+        if let Some(mut branch) = self.branches.get_mut(child_branch_id) {
+            let cur_ver = branch.version.load();
+            let mut new_levels = cur_ver.levels.clone();
+            let old_l0_len = new_levels[0].len();
+            new_levels[0].retain(|seg| !new_ids.contains(&seg.file_id()));
+            if new_levels[0].len() != old_l0_len {
+                branch
+                    .version
+                    .store(Arc::new(SegmentVersion { levels: new_levels }));
+            }
+
+            if let Some(layer) = branch.inherited_layers.iter_mut().find(|layer| {
+                layer.source_branch_id == source_branch_id && layer.fork_version == fork_version
+            }) {
+                layer.status = LayerStatus::Active;
+            } else {
+                let restore_index = layer_index.min(branch.inherited_layers.len());
+                branch.inherited_layers.insert(
+                    restore_index,
+                    InheritedLayer {
+                        source_branch_id,
+                        fork_version,
+                        segments: Arc::clone(layer_segments),
+                        status: LayerStatus::Active,
+                    },
+                );
+            }
+
+            refresh_level_targets(&mut branch, self.level_base_bytes());
+        }
+
+        for segment in new_segments {
+            crate::block_cache::global_cache().invalidate_file(segment.file_id());
+        }
+        let created_paths: Vec<_> = new_segments
+            .iter()
+            .map(|segment| segment.file_path().to_path_buf())
+            .collect();
+        self.cleanup_created_segment_files(&created_paths);
+    }
+
+    fn rollback_fork_source_publish_failure(
+        &self,
+        source_id: &BranchId,
+        old_active: Arc<Memtable>,
+        old_frozen: Vec<Arc<Memtable>>,
+        old_version: Arc<SegmentVersion>,
+        old_level_targets: compaction::LevelTargets,
+        source_flush_paths: &[PathBuf],
+        dest_layers: &[InheritedLayer],
+    ) {
+        if let Some(mut source) = self.branches.get_mut(source_id) {
+            let current_frozen = source.frozen.len();
+            let restored_frozen = old_frozen.len();
+            if restored_frozen > current_frozen {
+                self.total_frozen_count
+                    .fetch_add(restored_frozen - current_frozen, Ordering::Relaxed);
+            } else if current_frozen > restored_frozen {
+                self.total_frozen_count
+                    .fetch_sub(current_frozen - restored_frozen, Ordering::Relaxed);
+            }
+
+            source.active = old_active;
+            source.frozen = old_frozen;
+            source.version.store(old_version);
+            source.level_targets = old_level_targets;
+        }
+
+        self.cleanup_created_segment_files(source_flush_paths);
+        for layer in dest_layers {
+            for level in &layer.segments.levels {
+                for seg in level {
+                    self.ref_registry.decrement(seg.file_id());
+                }
+            }
+        }
+    }
+
+    fn rollback_fork_dest_publish_failure(
+        &self,
+        dest_id: &BranchId,
+        dest_layers: &[InheritedLayer],
+        dest_was_new: bool,
+    ) {
+        for layer in dest_layers {
+            for level in &layer.segments.levels {
+                for seg in level {
+                    self.ref_registry.decrement(seg.file_id());
+                }
+            }
+        }
+
+        let mut remove_branch = false;
+        if let Some(mut dest) = self.branches.get_mut(dest_id) {
+            dest.inherited_layers.clear();
+            dest.max_version.store(0, Ordering::Release);
+            if dest_was_new
+                && dest.active.is_empty()
+                && dest.frozen.is_empty()
+                && dest.version.load().levels.iter().all(Vec::is_empty)
+            {
+                remove_branch = true;
+            }
+        }
+
+        if remove_branch {
+            self.branches.remove(dest_id);
+        }
+    }
+
     // ========================================================================
     // Inherent methods
     // ========================================================================
@@ -1293,7 +1475,10 @@ impl SegmentedStore {
                 branch.inherited_layers[layer_index].status = LayerStatus::Materializing;
             }
         }
-        self.write_branch_manifest(child_branch_id)?;
+        if let Err(e) = self.write_branch_manifest(child_branch_id) {
+            self.rollback_materialize_status(child_branch_id, source_branch_id, fork_version);
+            return Err(e);
+        }
 
         // 2c. Build materialized entries (no locks held — I/O heavy)
         let mut entries = Self::collect_unshadowed_entries(
@@ -1314,7 +1499,7 @@ impl SegmentedStore {
         // 2d. Build segment file(s) (no locks held).
         // Use SplittingSegmentBuilder to avoid creating oversized L0 segments
         // from large inherited layers (#1671).
-        let new_segments: Vec<KVSegment> = if !entries.is_empty() {
+        let new_segments: Vec<Arc<KVSegment>> = if !entries.is_empty() {
             let branch_hex = hex_encode_branch(child_branch_id);
             let branch_dir = segments_dir.join(&branch_hex);
             std::fs::create_dir_all(&branch_dir)?;
@@ -1329,7 +1514,7 @@ impl SegmentedStore {
 
             let mut segments = Vec::with_capacity(built.len());
             for (path, _meta) in built {
-                let seg = KVSegment::open(&path)?;
+                let seg = Arc::new(KVSegment::open(&path)?);
                 segments.push(seg);
             }
             segments
@@ -1350,8 +1535,8 @@ impl SegmentedStore {
                 let old_ver = branch.version.load();
                 let mut new_l0 =
                     Vec::with_capacity(old_ver.l0_segments().len() + new_segments.len());
-                for seg in new_segments {
-                    new_l0.push(Arc::new(seg));
+                for seg in &new_segments {
+                    new_l0.push(Arc::clone(seg));
                 }
                 new_l0.extend(old_ver.l0_segments().iter().cloned());
                 let mut new_levels = old_ver.levels.clone();
@@ -1374,7 +1559,17 @@ impl SegmentedStore {
         }
 
         // 2f. Cleanup
-        self.write_branch_manifest(child_branch_id)?;
+        if let Err(e) = self.write_branch_manifest(child_branch_id) {
+            self.rollback_materialize_install(
+                child_branch_id,
+                layer_index,
+                source_branch_id,
+                fork_version,
+                &layer_segments,
+                &new_segments,
+            );
+            return Err(e);
+        }
 
         // Decrement refcounts for each segment in the removed layer.
         for level in &layer_segments.levels {
@@ -1573,7 +1768,17 @@ impl SegmentedStore {
         //    CRITICAL: Increment refcounts BEFORE dropping the source guard.
         //    Without this, concurrent parent compaction can delete segments
         //    between the snapshot and the refcount increment (see #1662).
-        let (dest_layers, segments_shared, fork_version, source_manifest_dirty) = {
+        let (
+            dest_layers,
+            segments_shared,
+            fork_version,
+            source_manifest_dirty,
+            source_old_active,
+            source_old_frozen,
+            source_old_version,
+            source_old_level_targets,
+            source_flush_paths,
+        ) = {
             let mut source = match self.branches.get_mut(source_id) {
                 Some(b) => b,
                 None => {
@@ -1584,6 +1789,10 @@ impl SegmentedStore {
                     .into())
                 }
             };
+            let source_old_active = Arc::clone(&source.active);
+            let source_old_frozen = source.frozen.clone();
+            let source_old_version = source.version.load_full();
+            let source_old_level_targets = source.level_targets.clone();
 
             // Inline-rotate: move straggler writes from active to frozen.
             if !source.active.is_empty() {
@@ -1598,6 +1807,7 @@ impl SegmentedStore {
             // holding the exclusive guard.  Typically 0–1 tiny memtables
             // (only the stragglers from above), so I/O is bounded.
             let mut source_manifest_dirty = false;
+            let mut source_flush_paths = Vec::new();
             if let Some(segments_dir) = &self.segments_dir {
                 while let Some(mt) = source.frozen.last().cloned() {
                     let seg_id = self.next_segment_id.fetch_add(1, Ordering::Relaxed);
@@ -1609,6 +1819,7 @@ impl SegmentedStore {
                         .make_segment_builder()
                         .with_compression(crate::segment_builder::CompressionCodec::None);
                     builder.build_from_iter(mt.iter_all(), &seg_path)?;
+                    source_flush_paths.push(seg_path.clone());
                     let segment = KVSegment::open(&seg_path)?;
 
                     // Install segment into source's SegmentVersion.
@@ -1686,16 +1897,39 @@ impl SegmentedStore {
                 }
             }
 
-            (layers, shared, fork_version, source_manifest_dirty)
+            (
+                layers,
+                shared,
+                fork_version,
+                source_manifest_dirty,
+                source_old_active,
+                source_old_frozen,
+                source_old_version,
+                source_old_level_targets,
+                source_flush_paths,
+            )
             // source DashMap guard drops here — segments are now protected
         };
 
         // Persist source manifest if we inline-flushed segments.
         if source_manifest_dirty {
-            self.write_branch_manifest(source_id)?;
+            if let Err(e) = self.write_branch_manifest(source_id) {
+                self.rollback_fork_source_publish_failure(
+                    source_id,
+                    source_old_active,
+                    source_old_frozen,
+                    source_old_version,
+                    source_old_level_targets,
+                    &source_flush_paths,
+                    &dest_layers,
+                );
+                return Err(e);
+            }
         }
 
         // 6. Attach to dest branch, rejecting if a concurrent fork already installed layers.
+        let dest_layers_for_rollback = dest_layers.clone();
+        let dest_was_new = !self.branches.contains_key(dest_id);
         let mut dest = self
             .branches
             .entry(*dest_id)
@@ -1723,7 +1957,14 @@ impl SegmentedStore {
         drop(dest);
 
         // 7. Write manifest
-        self.write_branch_manifest(dest_id)?;
+        if let Err(e) = self.write_branch_manifest(dest_id) {
+            self.rollback_fork_dest_publish_failure(
+                dest_id,
+                &dest_layers_for_rollback,
+                dest_was_new,
+            );
+            return Err(e);
+        }
 
         Ok((fork_version, segments_shared))
     }
@@ -2731,7 +2972,7 @@ impl SegmentedStore {
             .with_compression(crate::segment_builder::CompressionCodec::None);
         builder.build_from_iter(frozen_mt.iter_all(), &seg_path)?;
 
-        let segment = KVSegment::open(&seg_path)?;
+        let segment = Arc::new(KVSegment::open(&seg_path)?);
 
         // Atomically: remove the frozen memtable we just flushed and install
         // the segment, under a single DashMap guard.
@@ -2769,7 +3010,7 @@ impl SegmentedStore {
             // Build new version with the new segment prepended (newest first).
             let old_ver = branch.version.load();
             let mut new_l0 = Vec::with_capacity(old_ver.l0_segments().len() + 1);
-            new_l0.push(Arc::new(segment));
+            new_l0.push(Arc::clone(&segment));
             new_l0.extend(old_ver.l0_segments().iter().cloned());
             let mut new_levels = old_ver.levels.clone();
             new_levels[0] = new_l0;
@@ -2780,7 +3021,10 @@ impl SegmentedStore {
 
             // Persist level assignments
             drop(branch);
-            self.write_branch_manifest(branch_id)?;
+            if let Err(e) = self.write_branch_manifest(branch_id) {
+                self.rollback_flush_publish_failure(branch_id, &frozen_mt, &segment);
+                return Err(e);
+            }
         } else {
             // Another thread already flushed this memtable; discard the
             // duplicate segment file we just built.

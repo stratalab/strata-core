@@ -18,37 +18,76 @@
 use std::cell::Cell;
 use std::io;
 
+#[derive(Clone, Copy)]
+struct ArmedFailure {
+    remaining_skips: usize,
+    kind: io::ErrorKind,
+}
+
 thread_local! {
-    static MANIFEST_PUBLISH_FAILURE: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
+    static MANIFEST_PUBLISH_FAILURE: Cell<Option<ArmedFailure>> = const { Cell::new(None) };
     static DIR_FSYNC_FAILURE: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
 }
 
 /// Arm one manifest-publish failure for the next call to
 /// `SegmentedStore::write_branch_manifest` on the current thread.
 /// Consumed exactly once.
+#[cfg(test)]
 pub(crate) fn inject_manifest_publish_failure(kind: io::ErrorKind) {
-    MANIFEST_PUBLISH_FAILURE.with(|slot| slot.set(Some(kind)));
+    inject_manifest_publish_failure_after(0, kind);
+}
+
+/// Arm one manifest-publish failure after `remaining_skips` successful
+/// `write_branch_manifest` calls on the current thread.
+///
+/// `remaining_skips = 0` means "fail the next publish".
+#[cfg(test)]
+pub(crate) fn inject_manifest_publish_failure_after(
+    remaining_skips: usize,
+    kind: io::ErrorKind,
+) {
+    MANIFEST_PUBLISH_FAILURE.with(|slot| {
+        slot.set(Some(ArmedFailure {
+            remaining_skips,
+            kind,
+        }))
+    });
 }
 
 /// Clear any pending manifest-publish failure on the current thread.
+#[cfg(test)]
 pub(crate) fn clear_manifest_publish_failure() {
     MANIFEST_PUBLISH_FAILURE.with(|slot| slot.set(None));
 }
 
 /// Consume an armed manifest-publish failure on the current thread, if any.
 pub(crate) fn maybe_inject_manifest_publish_failure() -> Option<io::Error> {
-    MANIFEST_PUBLISH_FAILURE
-        .with(|slot| slot.take())
-        .map(|kind| io::Error::new(kind, "injected manifest publish failure"))
+    MANIFEST_PUBLISH_FAILURE.with(|slot| match slot.get() {
+        Some(ArmedFailure {
+            remaining_skips: 0,
+            kind,
+        }) => {
+            slot.set(None);
+            Some(io::Error::new(kind, "injected manifest publish failure"))
+        }
+        Some(mut armed) => {
+            armed.remaining_skips -= 1;
+            slot.set(Some(armed));
+            None
+        }
+        None => None,
+    })
 }
 
 /// Arm one directory-fsync failure for the next call to
 /// `manifest::write_manifest` on the current thread. Consumed exactly once.
+#[cfg(test)]
 pub(crate) fn inject_dir_fsync_failure(kind: io::ErrorKind) {
     DIR_FSYNC_FAILURE.with(|slot| slot.set(Some(kind)));
 }
 
 /// Clear any pending dir-fsync failure on the current thread.
+#[cfg(test)]
 pub(crate) fn clear_dir_fsync_failure() {
     DIR_FSYNC_FAILURE.with(|slot| slot.set(None));
 }
