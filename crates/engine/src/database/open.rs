@@ -1580,7 +1580,9 @@ impl Database {
                 // On reuse, do NOT overwrite config — the existing DB's config is
                 // authoritative. Signature check ensures the caller's request is
                 // compatible with the running instance.
-                Self::wait_for_opened_db(db)
+                let db = Self::wait_for_opened_db(db)?;
+                Self::validate_control_artifact_reuse(&db, &config_path)?;
+                Ok(db)
             }
             AcquiredDatabase::New { db, canonical_path } => {
                 let effective_default_branch =
@@ -1881,6 +1883,42 @@ impl Database {
                 unreachable!("wait returned while still initializing")
             }
         }
+    }
+
+    fn validate_control_artifact_reuse(db: &Arc<Self>, config_path: &Path) -> StrataResult<()> {
+        if db.persistence_mode != PersistenceMode::Disk || db.data_dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let live_cfg = db.config.read();
+        if !config_path.exists() {
+            return Err(StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' is missing while a database instance for this path \
+                 is already open",
+                config_path.display()
+            )));
+        }
+
+        let mut on_disk_cfg = config::StrataConfig::from_file(config_path).map_err(|e| {
+            StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' is invalid while a database instance for this path \
+                 is already open: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
+        on_disk_cfg = sanitize_config(on_disk_cfg);
+        crate::database::profile::apply_hardware_profile_if_defaults(&mut on_disk_cfg);
+
+        if on_disk_cfg != *live_cfg {
+            return Err(StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' diverged from the running database configuration; \
+                 shut down and reopen the database to apply file edits",
+                config_path.display()
+            )));
+        }
+
+        Ok(())
     }
 
     fn finish_opened_db<F>(

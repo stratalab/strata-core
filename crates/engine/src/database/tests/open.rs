@@ -232,6 +232,37 @@ fn test_open_same_path_returns_same_instance() {
 }
 
 #[test]
+#[serial(open_databases)]
+fn test_open_rejects_registry_reuse_when_strata_toml_drifted() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("reuse_strata_toml_drift");
+
+    let db = Database::open(&db_path).unwrap();
+
+    let mut drifted = db.config();
+    drifted.snapshot_retention.retain_count = 1;
+    drifted.write_to_file(&db_path.join("strata.toml")).unwrap();
+
+    let err = match Database::open(&db_path) {
+        Ok(_) => panic!("stale on-disk strata.toml must not silently reuse the running database"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::IncompatibleReuse { .. }),
+        "expected IncompatibleReuse for strata.toml drift, got {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("strata.toml"),
+        "reuse rejection should name the control artifact, got: {}",
+        err
+    );
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
 fn test_open_different_paths_returns_different_instances() {
     let temp_dir = TempDir::new().unwrap();
     let path1 = temp_dir.path().join("db1");

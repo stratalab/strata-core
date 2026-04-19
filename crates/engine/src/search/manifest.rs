@@ -6,7 +6,7 @@
 //! - Global stats (total_docs, total_doc_len, next_segment_id)
 //! - Per-segment tombstone sets (deleted doc_ids)
 //!
-//! Written atomically via temp + rename (same as vector mmap pattern).
+//! Written atomically via temp + rename + parent-dir fsync.
 
 use super::types::EntityRef;
 use serde::{Deserialize, Serialize};
@@ -77,7 +77,7 @@ pub(crate) struct SegmentManifestEntry {
 // Read / Write
 // ============================================================================
 
-/// Write manifest data to a file atomically (temp + rename).
+/// Write manifest data to a file atomically (temp + rename + parent-dir fsync).
 pub(crate) fn write_manifest(path: &Path, data: &ManifestData) -> io::Result<()> {
     let dir = path.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
@@ -92,7 +92,9 @@ pub(crate) fn write_manifest(path: &Path, data: &ManifestData) -> io::Result<()>
     buf.extend_from_slice(&MANIFEST_VERSION.to_le_bytes());
     buf.extend_from_slice(&payload);
 
-    // Atomic write: temp + fsync + rename
+    // Atomic publish: temp + file fsync + rename + directory fsync.
+    // Because the manifest is written after any new `.sidx` files, the final
+    // directory fsync also makes those earlier rename operations durable.
     let tmp_path = path.with_extension("manifest.tmp");
     {
         use std::io::Write;
@@ -101,6 +103,7 @@ pub(crate) fn write_manifest(path: &Path, data: &ManifestData) -> io::Result<()>
         file.sync_all()?;
     }
     std::fs::rename(&tmp_path, path)?;
+    std::fs::File::open(dir)?.sync_all()?;
     Ok(())
 }
 

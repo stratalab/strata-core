@@ -699,6 +699,15 @@ impl WalWriter {
         self.sync_in_flight
     }
 
+    /// Refresh the Standard-mode inline-sync deadline without clearing dirty state.
+    ///
+    /// The engine uses this after unrelated durable control-artifact writes
+    /// (`strata.toml`, MANIFEST-like metadata) so their fsync cost does not
+    /// make `maybe_sync` treat the background WAL thread as overdue.
+    pub(crate) fn refresh_sync_deadline(&mut self) {
+        self.last_sync_time = Instant::now();
+    }
+
     /// Get the current durability mode.
     pub fn durability_mode(&self) -> DurabilityMode {
         self.durability

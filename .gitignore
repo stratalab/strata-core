@@ -35,3 +35,6 @@ all-MiniLM-L6-v2/
 
 # Website
 stratadb.org/
+
+.env
+/docs

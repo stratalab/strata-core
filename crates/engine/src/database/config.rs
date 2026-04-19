@@ -604,38 +604,51 @@ auto_embed = false
 }
 
 /// Crash-safe write of `strata.toml` content via temp-file + atomic rename
-/// (closes DG-018: atomicity).
+/// (closes DG-018: atomicity + durability).
 ///
 /// **Atomicity:** Reader of `strata.toml` never observes a partially-written
 /// file — the rename is atomic. Crash mid-write leaves either the previous
 /// content or the new content, never garbage. This matches the publish
 /// pattern used by MANIFEST and segment files
 /// (`crates/storage/src/manifest.rs`, `crates/storage/src/segment_builder.rs`).
-///
-/// **Durability gap (intentional):** This function deliberately does NOT
-/// `fsync` the file or the parent directory. `set_durability_mode` calls
-/// `write_to_file` while holding the config write lock, and the WAL flush
-/// thread's "inline sync fallback" in `WalWriter::maybe_sync` fires when
-/// `interval_ms` has elapsed since the last sync. Adding a multi-millisecond
-/// fsync here pushes the elapsed past tight test intervals (10ms in the
-/// shutdown halt-latch suite) and makes the inline fallback win the race
-/// against the background sync thread, which silently consumes injected
-/// commit-sync failures and breaks 6 timing-sensitive WAL halt tests
-/// (`database::tests::shutdown::test_*_sync_failure_halts_writer_*`).
-///
-/// Until the WAL halt tests are decoupled from the per-call cost of
-/// `set_durability_mode`, full fsync remains a planned follow-up. Page-cache
-/// data is still flushed by the kernel within ~5 seconds in normal operation.
 fn atomic_write_config(path: &Path, content: &[u8]) -> StrataResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to create config directory '{}': {}",
+                parent.display(),
+                e
+            ))
+        })?;
+    }
+
     let tmp_path = path.with_extension("toml.tmp");
 
-    std::fs::write(&tmp_path, content).map_err(|e| {
-        StrataError::internal(format!(
-            "Failed to write temp config file '{}': {}",
-            tmp_path.display(),
-            e
-        ))
-    })?;
+    {
+        use std::io::Write;
+
+        let mut file = std::fs::File::create(&tmp_path).map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to create temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+        file.write_all(content).map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to write temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+        file.sync_all().map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to fsync temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+    }
 
     std::fs::rename(&tmp_path, path).map_err(|e| {
         StrataError::internal(format!(
@@ -645,6 +658,17 @@ fn atomic_write_config(path: &Path, content: &[u8]) -> StrataResult<()> {
             e
         ))
     })?;
+
+    let dir_path = path.parent().unwrap_or(Path::new("."));
+    std::fs::File::open(dir_path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to fsync config directory '{}': {}",
+                dir_path.display(),
+                e
+            ))
+        })?;
 
     Ok(())
 }
