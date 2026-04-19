@@ -1929,7 +1929,7 @@ impl Database {
                 // The durable control-artifact write is unrelated to WAL
                 // backlog; do not let its fsync cost make Standard mode's
                 // inline fallback think the background sync thread is late.
-                wal.lock().refresh_sync_deadline();
+                wal.lock().refresh_inline_sync_deadline();
             }
         }
         // Apply storage/coordinator/cache parameters to the live database
@@ -2058,7 +2058,7 @@ impl Database {
             }
         }
         if wrote_config {
-            wal.lock().refresh_sync_deadline();
+            wal.lock().refresh_inline_sync_deadline();
         }
 
         Ok(())

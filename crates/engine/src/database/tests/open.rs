@@ -233,6 +233,37 @@ fn test_open_same_path_returns_same_instance() {
 
 #[test]
 #[serial(open_databases)]
+fn test_open_with_config_rejects_registry_reuse_when_requested_config_drifted() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("reuse_requested_config_drift");
+
+    let db = Database::open(&db_path).unwrap();
+
+    let mut drifted = StrataConfig::default();
+    drifted.snapshot_retention.retain_count = 1;
+
+    let err = match Database::open_with_config(&db_path, drifted) {
+        Ok(_) => panic!("drifted explicit config must not silently reuse the running database"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::IncompatibleReuse { .. }),
+        "expected IncompatibleReuse for explicit config drift, got {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("programmatic config")
+            || err.to_string().contains("explicit configuration"),
+        "reuse rejection should name the explicit-config surface, got: {}",
+        err
+    );
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+#[serial(open_databases)]
 fn test_open_rejects_registry_reuse_when_strata_toml_drifted() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("reuse_strata_toml_drift");
@@ -285,33 +316,34 @@ fn test_ephemeral_not_registered() {
     assert!(!Arc::ptr_eq(&db1, &db2));
 }
 
-/// Test that opening the same path twice returns the same Arc via registry.
-///
-/// NOTE: This test is temporarily ignored because the singleton registry has a
-/// race condition when the same path is opened concurrently. The registry lookup
-/// and insert are not atomic, so two threads can both pass the "not in registry"
-/// check and then both try to open the database, with one failing on the lock.
-/// Issue: stratalab/strata-core#TBD
 #[test]
-#[ignore = "singleton registry race condition - needs fix"]
-fn test_open_uses_registry() {
-    use std::time::{SystemTime, UNIX_EPOCH};
+#[serial(open_databases)]
+fn test_concurrent_open_same_path_returns_same_instance() {
+    use std::sync::{Arc, Barrier};
+    use std::thread;
+
     let temp_dir = TempDir::new().unwrap();
-    // Use a unique subdir name to avoid registry collisions in parallel tests
-    let unique_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let db_path = temp_dir
-        .path()
-        .join(format!("singleton_via_open_{}", unique_id));
+    let db_path = temp_dir.path().join("singleton_via_open_concurrent");
+    let barrier = Arc::new(Barrier::new(3));
 
-    // Open via Database::open twice
-    let db1 = Database::open(&db_path).unwrap();
-    let db2 = Database::open(&db_path).unwrap();
+    let spawn_open = |barrier: Arc<Barrier>, path: std::path::PathBuf| {
+        thread::spawn(move || {
+            barrier.wait();
+            Database::open(&path).unwrap()
+        })
+    };
 
-    // Should be same instance
+    let h1 = spawn_open(Arc::clone(&barrier), db_path.clone());
+    let h2 = spawn_open(Arc::clone(&barrier), db_path.clone());
+    barrier.wait();
+
+    let db1 = h1.join().expect("first opener thread panicked");
+    let db2 = h2.join().expect("second opener thread panicked");
+
     assert!(Arc::ptr_eq(&db1, &db2));
+
+    db1.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
 }
 
 #[test]

@@ -190,7 +190,7 @@ pub mod __internal {
         /// Returns whether a background sync is currently in flight.
         fn sync_in_flight(&self) -> bool;
         /// Refreshes the Standard-mode inline-sync deadline without clearing dirty state.
-        fn refresh_sync_deadline(&mut self);
+        fn refresh_inline_sync_deadline(&mut self);
     }
 
     impl BackgroundSyncError {
@@ -245,8 +245,8 @@ pub mod __internal {
             crate::wal::writer::WalWriter::sync_in_flight(self)
         }
 
-        fn refresh_sync_deadline(&mut self) {
-            crate::wal::writer::WalWriter::refresh_sync_deadline(self)
+        fn refresh_inline_sync_deadline(&mut self) {
+            crate::wal::writer::WalWriter::refresh_inline_sync_deadline(self)
         }
     }
 }

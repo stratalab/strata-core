@@ -1558,6 +1558,8 @@ impl Database {
         let background_threads = profiled_for_signature.storage.background_threads;
         let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
 
+        let requested_runtime_cfg = config.as_ref().map(|_| profiled_for_signature.clone());
+
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Primary,
@@ -1581,6 +1583,9 @@ impl Database {
                 // authoritative. Signature check ensures the caller's request is
                 // compatible with the running instance.
                 let db = Self::wait_for_opened_db(db)?;
+                if let Some(requested_cfg) = requested_runtime_cfg.as_ref() {
+                    Self::validate_requested_config_reuse(&db, requested_cfg)?;
+                }
                 Self::validate_control_artifact_reuse(&db, &config_path)?;
                 Ok(db)
             }
@@ -1918,6 +1923,21 @@ impl Database {
             )));
         }
 
+        Ok(())
+    }
+
+    fn validate_requested_config_reuse(
+        db: &Arc<Self>,
+        requested_cfg: &StrataConfig,
+    ) -> StrataResult<()> {
+        let live_cfg = db.config.read();
+        if *requested_cfg != *live_cfg {
+            return Err(StrataError::incompatible_reuse(
+                "requested explicit configuration diverged from the running database \
+                 configuration; shut down and reopen the database to apply programmatic \
+                 config changes",
+            ));
+        }
         Ok(())
     }
 
