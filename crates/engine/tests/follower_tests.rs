@@ -1988,10 +1988,7 @@ fn test_follower_rejects_tampered_blocked_state_on_reopen() {
     primary.flush().unwrap();
     match follower.refresh() {
         strata_engine::RefreshOutcome::Stuck { .. } => {}
-        other => panic!(
-            "expected blocked refresh to produce follower_state.json, got {:?}",
-            other
-        ),
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
     }
     drop(follower);
 
@@ -2047,10 +2044,7 @@ fn test_follower_rejects_tampered_hook_block_without_visibility_version() {
     primary.flush().unwrap();
     match follower.refresh() {
         strata_engine::RefreshOutcome::Stuck { .. } => {}
-        other => panic!(
-            "expected blocked refresh to produce follower_state.json, got {:?}",
-            other
-        ),
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
     }
     drop(follower);
 
@@ -2108,10 +2102,7 @@ fn test_follower_rejects_tampered_post_apply_block_with_skip_allowed() {
     primary.flush().unwrap();
     match follower.refresh() {
         strata_engine::RefreshOutcome::Stuck { .. } => {}
-        other => panic!(
-            "expected blocked refresh to produce follower_state.json, got {:?}",
-            other
-        ),
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
     }
     drop(follower);
 

@@ -493,18 +493,18 @@ pub(crate) enum BlockReasonIncoherence {
 impl fmt::Display for BlockedStateValidationError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            BlockedStateValidationError::AppliedExceedsReceived { applied, received } => write!(
-                f,
-                "applied_watermark {} exceeds received_watermark {}",
-                applied, received
-            ),
+            BlockedStateValidationError::AppliedExceedsReceived { applied, received } => {
+                write!(
+                    f,
+                    "applied_watermark {applied} exceeds received_watermark {received}"
+                )
+            }
             BlockedStateValidationError::ReceivedExceedsRecovered {
                 received,
                 recovered_max,
             } => write!(
                 f,
-                "received_watermark {} exceeds recovered max txn id {}",
-                received, recovered_max
+                "received_watermark {received} exceeds recovered max txn id {recovered_max}"
             ),
             BlockedStateValidationError::VisibleExceedsRecovered { visible, recovered } => write!(
                 f,
@@ -514,13 +514,11 @@ impl fmt::Display for BlockedStateValidationError {
             ),
             BlockedStateValidationError::BlockedNotAheadOfApplied { blocked, applied } => write!(
                 f,
-                "blocked txn {} is not ahead of applied_watermark {}",
-                blocked, applied
+                "blocked txn {blocked} is not ahead of applied_watermark {applied}"
             ),
             BlockedStateValidationError::BlockedBeyondReceived { blocked, received } => write!(
                 f,
-                "blocked txn {} exceeds received_watermark {}",
-                blocked, received
+                "blocked txn {blocked} exceeds received_watermark {received}"
             ),
             BlockedStateValidationError::VisibilityVersionExceedsRecovered {
                 visibility_version,
@@ -542,37 +540,33 @@ impl fmt::Display for BlockedStateValidationError {
                     visible_version,
                 } => write!(
                     f,
-                    "{} block reason has visibility_version {} which is not ahead of visible_version {}",
-                    reason,
+                    "{reason} block reason has visibility_version {} which is not ahead of visible_version {}",
                     visibility_version.as_u64(),
                     visible_version.as_u64()
                 ),
                 BlockReasonIncoherence::MissingVisibilityVersion { reason } => {
-                    write!(f, "{} block reason is missing visibility_version", reason)
+                    write!(f, "{reason} block reason is missing visibility_version")
                 }
                 BlockReasonIncoherence::ZeroVisibilityVersion { reason } => {
-                    write!(f, "{} block reason has zero visibility_version", reason)
+                    write!(f, "{reason} block reason has zero visibility_version")
                 }
                 BlockReasonIncoherence::UnexpectedVisibilityVersion { reason } => write!(
                     f,
-                    "{} block reason unexpectedly carries visibility_version",
-                    reason
+                    "{reason} block reason unexpectedly carries visibility_version"
                 ),
                 BlockReasonIncoherence::UnexpectedSkippableState { reason } => {
-                    write!(f, "{} block reason unexpectedly allows operator skip", reason)
+                    write!(f, "{reason} block reason unexpectedly allows operator skip")
                 }
                 BlockReasonIncoherence::UnexpectedNonSkippableState { reason } => write!(
                     f,
-                    "{} block reason unexpectedly rejects operator skip",
-                    reason
+                    "{reason} block reason unexpectedly rejects operator skip"
                 ),
                 BlockReasonIncoherence::EmptyCodecId => {
                     write!(f, "codec-mismatch block reason has empty codec id")
                 }
                 BlockReasonIncoherence::CodecExpectedEqualsActual { codec } => write!(
                     f,
-                    "codec-mismatch block reason has expected == actual = {}",
-                    codec
+                    "codec-mismatch block reason has expected == actual = {codec}"
                 ),
             },
         }
@@ -712,7 +706,9 @@ fn validate_block_reason(
     }
 
     let incoherence = match reason {
-        BlockReason::Decode { message } | BlockReason::StorageApply { message } => {
+        BlockReason::Decode { message }
+        | BlockReason::StorageApply { message }
+        | BlockReason::PostApplyInvariant { message } => {
             if message.is_empty() {
                 Some(BlockReasonIncoherence::EmptyMessage)
             } else {
@@ -723,13 +719,6 @@ fn validate_block_reason(
             if hook_name.is_empty() {
                 Some(BlockReasonIncoherence::EmptyHookName)
             } else if message.is_empty() {
-                Some(BlockReasonIncoherence::EmptyMessage)
-            } else {
-                None
-            }
-        }
-        BlockReason::PostApplyInvariant { message } => {
-            if message.is_empty() {
                 Some(BlockReasonIncoherence::EmptyMessage)
             } else {
                 None
