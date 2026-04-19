@@ -567,9 +567,16 @@ fn materialize_crash_recovery_with_partial_segment() {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
         assert!(info.branches_recovered >= 2, "both branches should recover");
+        let corrupt_segment_count = match &info.health {
+            super::RecoveryHealth::Degraded { faults, .. } => faults
+                .iter()
+                .filter(|f| matches!(f, super::RecoveryFault::CorruptSegment { .. }))
+                .count(),
+            super::RecoveryHealth::Healthy => 0,
+        };
         assert!(
-            info.errors_skipped >= 1,
-            "corrupt orphan .sst should be skipped"
+            corrupt_segment_count >= 1,
+            "corrupt orphan .sst should produce a CorruptSegment fault"
         );
 
         // Materializing status should be reset to Active
@@ -676,6 +683,7 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
 #[test]
 fn recovery_surfaces_missing_source_branch() {
     let dir = tempfile::tempdir().unwrap();
+    let expected_fork_version;
 
     // Phase 1: Create parent and fork child
     {
@@ -695,6 +703,18 @@ fn recovery_surfaces_missing_source_branch() {
         // Write manifest for both branches
         store.write_branch_manifest(&parent_branch()).unwrap();
         store.write_branch_manifest(&child_branch()).unwrap();
+
+        let child_hex = hex_encode_branch(&child_branch());
+        let child_dir = dir.path().join(&child_hex);
+        let child_manifest = crate::manifest::read_manifest(&child_dir)
+            .unwrap()
+            .expect("child manifest should exist after fork");
+        assert_eq!(
+            child_manifest.inherited_layers.len(),
+            1,
+            "test setup should create exactly one inherited layer"
+        );
+        expected_fork_version = child_manifest.inherited_layers[0].fork_version;
     }
 
     // Sabotage: delete the parent's branch directory (simulating missing source)
@@ -707,13 +727,35 @@ fn recovery_surfaces_missing_source_branch() {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
 
-        // layers_dropped should report the missing parent
-        assert!(
-            !info.layers_dropped.is_empty(),
-            "should report dropped inherited layer"
+        // An InheritedLayerLost fault should report the exact missing layer.
+        let faults = match &info.health {
+            super::RecoveryHealth::Degraded { faults, class } => {
+                assert_eq!(
+                    *class,
+                    super::DegradationClass::DataLoss,
+                    "inherited-layer loss classifies as DataLoss"
+                );
+                &faults[..]
+            }
+            super::RecoveryHealth::Healthy => &[],
+        };
+        let dropped = faults.iter().find_map(|f| match f {
+            super::RecoveryFault::InheritedLayerLost {
+                child,
+                source_branch,
+                fork_version,
+            } => Some((*child, *source_branch, *fork_version)),
+            _ => None,
+        });
+        assert_eq!(
+            dropped,
+            Some((child_branch(), parent_branch(), expected_fork_version)),
+            "should report the dropped inherited layer by source and fork version"
         );
-        assert_eq!(info.layers_dropped[0].0, child_branch());
-        assert_eq!(info.layers_dropped[0].1, parent_branch());
+        assert_eq!(
+            info.branches_recovered, 0,
+            "child with no own segments and no recoverable inherited entries must not be counted"
+        );
 
         // Child should still exist but with no inherited layers
         let child = store.branches.get(&child_branch()).unwrap();
@@ -722,6 +764,97 @@ fn recovery_surfaces_missing_source_branch() {
             "inherited layer should be dropped (source missing)"
         );
     }
+}
+
+/// SE2 follow-up: if an inherited layer partially loads, recovery must still
+/// surface `InheritedLayerLost` rather than silently accepting a truncated
+/// child view. The child may keep the surviving inherited entries, but the
+/// authoritative loss must be visible in the typed fault set.
+#[test]
+fn recovery_surfaces_partial_inherited_layer_loss() {
+    let dir = tempfile::tempdir().unwrap();
+    let expected_fork_version;
+
+    {
+        let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+        seed(&store, parent_kv("a"), Value::Int(1), 1);
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        seed(&store, parent_kv("b"), Value::Int(2), 2);
+        store.rotate_memtable(&parent_branch());
+        store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+        store
+            .branches
+            .entry(child_branch())
+            .or_insert_with(BranchState::new);
+        store
+            .fork_branch(&parent_branch(), &child_branch())
+            .unwrap();
+        store.write_branch_manifest(&parent_branch()).unwrap();
+        store.write_branch_manifest(&child_branch()).unwrap();
+
+        let child_hex = hex_encode_branch(&child_branch());
+        let child_dir = dir.path().join(&child_hex);
+        let child_manifest = crate::manifest::read_manifest(&child_dir)
+            .unwrap()
+            .expect("child manifest should exist after fork");
+        assert_eq!(
+            child_manifest.inherited_layers.len(),
+            1,
+            "test setup should create exactly one inherited layer"
+        );
+        expected_fork_version = child_manifest.inherited_layers[0].fork_version;
+    }
+
+    let parent_hex = hex_encode_branch(&parent_branch());
+    let parent_dir = dir.path().join(&parent_hex);
+    let mut sst_paths: Vec<_> = std::fs::read_dir(&parent_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("sst"))
+        .collect();
+    sst_paths.sort();
+    let removed = sst_paths
+        .pop()
+        .expect("expected parent .sst files to exist");
+    std::fs::remove_file(&removed).unwrap();
+
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let info = store.recover_segments().unwrap();
+
+    let faults = match &info.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(
+                *class,
+                super::DegradationClass::DataLoss,
+                "partial inherited-layer loss is authoritative data loss"
+            );
+            &faults[..]
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    };
+    assert!(
+        faults.iter().any(|f| matches!(
+            f,
+            super::RecoveryFault::InheritedLayerLost {
+                child,
+                source_branch,
+                fork_version,
+            } if *child == child_branch()
+                && *source_branch == parent_branch()
+                && *fork_version == expected_fork_version
+        )),
+        "partial inherited-layer loss must surface the exact inherited layer"
+    );
+
+    let child = store.branches.get(&child_branch()).unwrap();
+    assert!(
+        !child.inherited_layers.is_empty(),
+        "surviving inherited entries should still be installed for the child"
+    );
 }
 
 #[test]

@@ -233,6 +233,50 @@ fn test_open_same_path_returns_same_instance() {
 
 #[test]
 #[serial(open_databases)]
+fn test_open_rejects_missing_segments_root_after_manifest_exists() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("missing_segments_root");
+    let branch_id = BranchId::new();
+    let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
+
+    {
+        let db = Database::open(&db_path).unwrap();
+        db.transaction(branch_id, |txn| {
+            txn.put(
+                Key::new_kv(ns.clone(), "persistent"),
+                Value::Bytes(b"segment-backed".to_vec()),
+            )?;
+            Ok(())
+        })
+        .unwrap();
+        db.flush().unwrap();
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let segments_dir = db_path.join("segments");
+    assert!(
+        segments_dir.exists(),
+        "test setup must create the authoritative storage root before deleting it"
+    );
+    std::fs::remove_dir_all(&segments_dir).unwrap();
+
+    let err = match Database::open(&db_path) {
+        Ok(_) => panic!("strict reopen must refuse a database whose segments root vanished"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(err, StrataError::Corruption { .. }),
+        "missing authoritative segments root must surface as corruption, got {err:?}"
+    );
+    assert!(
+        err.to_string().contains("segments directory"),
+        "error should name the missing storage root, got: {err}"
+    );
+}
+
+#[test]
+#[serial(open_databases)]
 fn test_open_with_config_rejects_registry_reuse_when_requested_config_drifted() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("reuse_requested_config_drift");

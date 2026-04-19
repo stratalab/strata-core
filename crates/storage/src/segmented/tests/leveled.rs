@@ -965,9 +965,30 @@ fn recover_without_manifest_all_l0() {
         std::fs::remove_file(&manifest_path).unwrap();
     }
 
-    // Recover — all segments go to L0 (backward compat)
+    // Recover — backward-compat L0 promotion still happens, but SE2 now
+    // emits a `NoManifestFallbackUsed` fault classified as
+    // `PolicyDowngrade` so strict callers (D4) can refuse.
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    store2.recover_segments().unwrap();
+    let info = store2.recover_segments().unwrap();
+
+    match &info.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(
+                *class,
+                super::DegradationClass::PolicyDowngrade,
+                "no-manifest fallback must classify as PolicyDowngrade"
+            );
+            assert!(
+                faults.iter().any(|f| matches!(
+                    f,
+                    super::RecoveryFault::NoManifestFallbackUsed { segments_promoted, .. }
+                    if *segments_promoted == 2
+                )),
+                "should emit NoManifestFallbackUsed fault with 2 segments promoted"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
 
     assert_eq!(store2.l0_segment_count(&b), 2);
     assert_eq!(store2.l1_segment_count(&b), 0);
@@ -999,13 +1020,26 @@ fn recover_manifest_corrupt_returns_error() {
 
     // Recover — corrupt manifest must NOT silently load all as L0 (#1680).
     // The branch is skipped (own segments not loaded), but recovery itself
-    // succeeds so other branches are unaffected (#1691).
+    // succeeds so other branches are unaffected (#1691). Post-SE2 the
+    // defect surfaces as a `CorruptManifest` fault classified as `DataLoss`.
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store2.recover_segments().unwrap();
-    assert!(
-        info.corrupt_manifest_branches > 0,
-        "corrupt manifest branch must be reported"
-    );
+    match &info.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(
+                *class,
+                super::DegradationClass::DataLoss,
+                "corrupt manifest must classify as DataLoss"
+            );
+            assert!(
+                faults
+                    .iter()
+                    .any(|f| matches!(f, super::RecoveryFault::CorruptManifest { .. })),
+                "corrupt manifest branch must be reported as CorruptManifest fault"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
     // The corrupt branch's data must NOT be accessible.
     assert!(
         store2

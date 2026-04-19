@@ -443,7 +443,8 @@ impl Database {
         // follower to silently serve stale / empty state once pre-snapshot
         // WAL has been reclaimed. Only a genuinely absent MANIFEST (fresh
         // database) degrades to WAL-only recovery.
-        let (database_uuid, follower_codec) = if ManifestManager::exists(&manifest_path) {
+        let manifest_exists = ManifestManager::exists(&manifest_path);
+        let (database_uuid, follower_codec) = if manifest_exists {
             let m = ManifestManager::load(manifest_path.clone()).map_err(|err| match err {
                 legacy @ ManifestError::LegacyFormat { .. } => {
                     manifest_error_to_strata_error(legacy)
@@ -474,6 +475,20 @@ impl Database {
         } else {
             ([0u8; 16], None)
         };
+
+        if !manifest_exists {
+            match layout
+                .segments_dir()
+                .try_exists()
+                .map_err(StrataError::from)?
+            {
+                true => {}
+                false => {
+                    layout.create_segments_dir().map_err(StrataError::from)?;
+                    restrict_dir(layout.segments_dir());
+                }
+            }
+        }
 
         // T3-E12 §D7: follower-without-MANIFEST falls back to the
         // follower's own config codec so encrypted WAL-only recovery
@@ -675,7 +690,7 @@ impl Database {
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
+        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         // `database_uuid` was already resolved from the MANIFEST above (or
         // defaulted when absent) before recovery ran, so the snapshot-install
@@ -930,24 +945,47 @@ impl Database {
         }
     }
 
-    /// Recover on-disk segments and bump the coordinator's version floor.
-    fn recover_segments_and_bump(
+    /// Recover on-disk segments and apply the typed outcome to the coordinator.
+    ///
+    /// Storage returns a self-contained `RecoveredState` (SE2) carrying the
+    /// version floor, per-branch version map, and a classified
+    /// `RecoveryHealth`. This entry point:
+    ///
+    /// - Emits telemetry summarising the outcome.
+    /// - Forwards the outcome through `coordinator.apply_storage_recovery`
+    ///   (single entry point for floor adoption post-SE2).
+    /// - On `Err(StorageError)` (pre-walk I/O failure), preserves the
+    ///   existing `allow_lossy` split: lossy callers log and continue, strict
+    ///   callers convert to `StrataError::corruption`.
+    ///
+    /// Strict-vs-lossy policy on `outcome.health` (e.g. refusing on
+    /// `DegradationClass::DataLoss`) is intentionally NOT applied here —
+    /// that is D4's scope, implemented inside the unified
+    /// `Database::run_recovery` orchestrator that D3 introduces. SE2
+    /// produces the classified outcome; D4 decides what to do with it.
+    fn recover_segments_and_apply(
         storage: &Arc<SegmentedStore>,
         coordinator: &TransactionCoordinator,
         allow_lossy: bool,
     ) -> StrataResult<()> {
         match storage.recover_segments() {
-            Ok(seg_info) => {
-                if seg_info.segments_loaded > 0 {
+            Ok(outcome) => {
+                if outcome.segments_loaded > 0 {
                     info!(target: "strata::db",
-                        branches = seg_info.branches_recovered,
-                        segments = seg_info.segments_loaded,
-                        errors_skipped = seg_info.errors_skipped,
+                        branches = outcome.branches_recovered,
+                        segments = outcome.segments_loaded,
                         "Recovered segments from disk");
                 }
-                if seg_info.max_commit_id > CommitVersion::ZERO {
-                    coordinator.bump_version_floor(seg_info.max_commit_id);
+                if let strata_storage::RecoveryHealth::Degraded { faults, class } = &outcome.health
+                {
+                    warn!(
+                        target: "strata::recovery::health",
+                        class = ?class,
+                        fault_count = faults.len(),
+                        "storage recovered with degraded state"
+                    );
                 }
+                coordinator.apply_storage_recovery(&outcome);
             }
             Err(e) => {
                 warn!(target: "strata::db", error = %e, "Segment recovery failed");
@@ -987,14 +1025,18 @@ impl Database {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
 
-        // Create directories (WAL, segments, snapshots)
-        layout.create_dirs().map_err(StrataError::from)?;
+        // Create only the non-authoritative support directories up front.
+        // Recreating `segments/` here on reopen would mask authoritative
+        // flushed-state loss before storage recovery has a chance to classify it.
+        layout
+            .create_non_segment_dirs()
+            .map_err(StrataError::from)?;
         restrict_dir(layout.wal_dir());
-        restrict_dir(layout.segments_dir());
         restrict_dir(layout.snapshots_dir());
 
         let wal_dir = layout.wal_dir().to_path_buf();
         let manifest_path = layout.manifest_path().to_path_buf();
+        let manifest_exists = ManifestManager::exists(&manifest_path);
 
         // Load or create MANIFEST before recovery runs so the coordinator can
         // consult it for snapshot identity and codec validation. On first
@@ -1008,7 +1050,7 @@ impl Database {
         // otherwise a misconfigured reopen would silently discard the
         // database instead of alerting the operator. Keeping the check here
         // keeps it ahead of the lossy branch.
-        let database_uuid = if ManifestManager::exists(&manifest_path) {
+        let database_uuid = if manifest_exists {
             let m = ManifestManager::load(manifest_path.clone())
                 .map_err(manifest_error_to_strata_error)?;
             let stored_codec = &m.manifest().codec_id;
@@ -1023,11 +1065,17 @@ impl Database {
             }
             m.manifest().database_uuid
         } else {
+            layout.create_segments_dir().map_err(StrataError::from)?;
+            restrict_dir(layout.segments_dir());
             let uuid = *uuid::Uuid::new_v4().as_bytes();
             ManifestManager::create(manifest_path, uuid, cfg.storage.codec.clone())
                 .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
             uuid
         };
+
+        if matches!(layout.segments_dir().try_exists(), Ok(true)) {
+            restrict_dir(layout.segments_dir());
+        }
 
         // Instantiate the configured storage codec (identity or aes-gcm-256).
         // One instance is owned here for the WAL writer; a clone is handed to
@@ -1234,7 +1282,7 @@ impl Database {
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
+        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),

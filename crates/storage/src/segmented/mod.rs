@@ -26,7 +26,7 @@ use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use parking_lot::Mutex;
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -759,6 +759,15 @@ pub struct SegmentedStore {
     bloom_bits_per_key: AtomicUsize,
     /// Latched publication durability issue for this process.
     publish_health: Mutex<Option<PublishHealth>>,
+    /// Classified health from the most recent `recover_segments()` call.
+    /// Initialized to [`RecoveryHealth::Healthy`] — a fresh or ephemeral
+    /// store has nothing to have gone wrong. Read by SE3's GC refusal and
+    /// D4's engine-side health accessor; written only by `recover_segments`.
+    last_recovery_health: ArcSwap<RecoveryHealth>,
+    /// `recover_segments()` is a one-shot bootstrap primitive. Once it
+    /// successfully installs recovered state, calling it again on the same
+    /// store instance would duplicate recovered segments and refcounts.
+    recovery_applied: AtomicBool,
 }
 
 /// Latched storage publication durability issue for the current process.
@@ -773,6 +782,50 @@ pub struct PublishHealth {
 enum PublishOutcome {
     Durable,
     NotDurable(StorageError),
+}
+
+/// Internal stats produced by `resolve_inherited_layers` for its caller to
+/// fold into the final `RecoveredState`. Scope is intentionally narrow —
+/// only the fields `recover_segments` needs to aggregate.
+#[derive(Default)]
+struct InheritedResolveStats {
+    max_commit_id: CommitVersion,
+    segments_loaded: usize,
+}
+
+struct RecoveryInvocationGuard<'a> {
+    flag: &'a AtomicBool,
+    committed: bool,
+}
+
+impl<'a> RecoveryInvocationGuard<'a> {
+    fn begin(flag: &'a AtomicBool) -> StorageResult<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| StorageError::RecoveryAlreadyApplied)?;
+        Ok(Self {
+            flag,
+            committed: false,
+        })
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RecoveryInvocationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.flag.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn missing_segments_dir_error(path: &std::path::Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("segments directory {} is missing", path.display()),
+    )
 }
 
 impl SegmentedStore {
@@ -802,6 +855,8 @@ impl SegmentedStore {
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
+            last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -832,6 +887,8 @@ impl SegmentedStore {
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
+            last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -862,6 +919,8 @@ impl SegmentedStore {
             data_block_size: AtomicUsize::new(4096),
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
+            last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -879,6 +938,20 @@ impl SegmentedStore {
     #[inline]
     pub fn branch_count(&self) -> usize {
         self.branches.len()
+    }
+
+    /// Classified health of the most recent attempted `recover_segments()`
+    /// call.
+    ///
+    /// Returns [`RecoveryHealth::Healthy`] for stores that have never run
+    /// recovery. Hard pre-walk I/O failures also publish a degraded snapshot
+    /// here before `recover_segments()` returns `Err`. SE3 uses this to refuse
+    /// orphan GC under degraded recovery; D4 exposes it through the engine's
+    /// public `recovery_health()` accessor. The returned `Arc` is a snapshot
+    /// — subsequent recovery calls replace the stored value but do not
+    /// invalidate this handle.
+    pub fn last_recovery_health(&self) -> Arc<RecoveryHealth> {
+        self.last_recovery_health.load_full()
     }
 
     /// Increment version and return new value.
@@ -3261,31 +3334,100 @@ impl SegmentedStore {
         self.segments_dir.as_ref()
     }
 
-    /// Recover flushed segments from disk.
+    /// Recover flushed segments from disk into a fresh store.
     ///
     /// Scans `segments_dir` for branch subdirectories (hex-encoded BranchId),
-    /// opens `.sst` files within each, and installs them into the store.
+    /// opens `.sst` files within each, and installs them into the store. On
+    /// return or hard pre-walk failure, `last_recovery_health()` reflects the
+    /// most recent classified recovery attempt.
     ///
-    /// Returns `Ok(info)` with recovery statistics, or `Err` on fatal I/O errors.
-    /// Individual corrupt `.sst` files are skipped (counted in `errors_skipped`).
-    pub fn recover_segments(&self) -> io::Result<RecoverSegmentsInfo> {
+    /// Returns [`Ok(RecoveredState)`] for every outcome the walk can reach,
+    /// with defects captured inside `RecoveredState::health` as typed
+    /// [`RecoveryFault`]s. The `Err` arm is reserved for pre-walk I/O
+    /// failures — e.g. the top-level `read_dir(segments_dir)` itself
+    /// failing or the authoritative `segments_dir` being missing. Those hard
+    /// errors still publish a degraded `last_recovery_health()` snapshot
+    /// before returning. Per-branch failures classify into faults and
+    /// continue.
+    ///
+    /// This is a one-shot bootstrap primitive. A second successful call on
+    /// the same `SegmentedStore` instance would duplicate recovered state, so
+    /// repeated invocations return [`StorageError::RecoveryAlreadyApplied`].
+    ///
+    /// Callers should pass the returned outcome to
+    /// `TransactionCoordinator::apply_storage_recovery` rather than reading
+    /// individual fields: that entry point owns version-floor adoption and
+    /// future per-branch version wiring.
+    pub fn recover_segments(&self) -> StorageResult<RecoveredState> {
+        let mut invocation = RecoveryInvocationGuard::begin(&self.recovery_applied)?;
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
-            None => return Ok(RecoverSegmentsInfo::default()),
+            None => {
+                self.last_recovery_health
+                    .store(Arc::new(RecoveryHealth::Healthy));
+                invocation.commit();
+                return Ok(RecoveredState::empty());
+            }
         };
 
-        if !segments_dir.exists() {
-            return Ok(RecoverSegmentsInfo::default());
+        match std::fs::metadata(segments_dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(
+                    missing_segments_dir_error(segments_dir),
+                )]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(missing_segments_dir_error(segments_dir).into());
+            }
+            Err(e) => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to stat segments directory {}: {e}",
+                        segments_dir.display()
+                    ),
+                ))]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(e.into());
+            }
         }
 
-        let mut info = RecoverSegmentsInfo::default();
+        let mut faults: Vec<RecoveryFault> = Vec::new();
+        let mut branch_versions: HashMap<BranchId, CommitVersion> = HashMap::new();
+        let mut version_floor = CommitVersion::ZERO;
+        let mut segments_loaded: usize = 0;
+        let mut recovered_branches: HashSet<BranchId> = HashSet::new();
 
         // Collect inherited layer info for deferred resolution (second pass).
         let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
             Vec::new();
 
-        for entry in std::fs::read_dir(segments_dir)? {
-            let entry = entry?;
+        // Top-level read_dir failure is pre-walk: we cannot even enumerate
+        // branches, so surface it as a hard error. Still publish a degraded
+        // health snapshot so observers do not retain stale prior state.
+        let top_entries = match std::fs::read_dir(segments_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to enumerate segments directory {}: {e}",
+                        segments_dir.display()
+                    ),
+                ))]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(e.into());
+            }
+        };
+
+        for entry in top_entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    faults.push(RecoveryFault::Io(e));
+                    continue;
+                }
+            };
             let path = entry.path();
             if !path.is_dir() {
                 continue;
@@ -3302,12 +3444,32 @@ impl SegmentedStore {
             };
 
             let mut branch_segments: Vec<Arc<KVSegment>> = Vec::new();
+            let mut sst_names_on_disk: HashSet<String> = HashSet::new();
 
-            for seg_entry in std::fs::read_dir(&path)? {
-                let seg_entry = seg_entry?;
+            // Per-branch read_dir failure is a fault for this branch; other
+            // branches can still recover.
+            let seg_entries = match std::fs::read_dir(&path) {
+                Ok(it) => it,
+                Err(e) => {
+                    faults.push(RecoveryFault::Io(e));
+                    continue;
+                }
+            };
+
+            for seg_entry in seg_entries {
+                let seg_entry = match seg_entry {
+                    Ok(e) => e,
+                    Err(e) => {
+                        faults.push(RecoveryFault::Io(e));
+                        continue;
+                    }
+                };
                 let seg_path = seg_entry.path();
                 if seg_path.extension().and_then(|e| e.to_str()) != Some("sst") {
                     continue;
+                }
+                if let Some(name) = seg_path.file_name().and_then(|n| n.to_str()) {
+                    sst_names_on_disk.insert(name.to_string());
                 }
 
                 match KVSegment::open(&seg_path) {
@@ -3319,12 +3481,14 @@ impl SegmentedStore {
                                     .fetch_max(file_seg_id + 1, Ordering::Relaxed);
                             }
                         }
-                        // Track max commit_id for version counter restoration (#1726)
-                        info.max_commit_id = info.max_commit_id.max(seg.commit_range().1);
+                        version_floor = version_floor.max(seg.commit_range().1);
                         branch_segments.push(Arc::new(seg));
                     }
-                    Err(_) => {
-                        info.errors_skipped += 1;
+                    Err(e) => {
+                        faults.push(RecoveryFault::CorruptSegment {
+                            file: seg_path,
+                            inner: e,
+                        });
                     }
                 }
             }
@@ -3342,10 +3506,29 @@ impl SegmentedStore {
                         error = %e,
                         "corrupt manifest, skipping branch (own segments not loaded)"
                     );
-                    info.corrupt_manifest_branches += 1;
+                    faults.push(RecoveryFault::CorruptManifest {
+                        branch_id,
+                        inner: e,
+                    });
                     continue;
                 }
             };
+
+            // Validate manifest-listed filenames against what is actually on
+            // disk. Missing files are authoritative loss and must surface
+            // regardless of whether we proceed to install this branch (e.g.
+            // even if the branch appears "empty" because the sole listed file
+            // was deleted).
+            if let Some(ref manifest) = manifest {
+                for entry in &manifest.entries {
+                    if !sst_names_on_disk.contains(&entry.filename) {
+                        faults.push(RecoveryFault::MissingManifestListed {
+                            branch_id,
+                            file: entry.filename.clone(),
+                        });
+                    }
+                }
+            }
 
             // Skip branches with no segments and no inherited layers
             let has_inherited = manifest
@@ -3383,6 +3566,9 @@ impl SegmentedStore {
                     if let Some(seg) = seg_by_name.get(&entry.filename) {
                         level_segs[level].push(Arc::clone(seg));
                     } else {
+                        // Missing-file fault was already emitted by the
+                        // manifest-vs-disk validation pass above; no action
+                        // here beyond the structural tracing::warn.
                         tracing::warn!(
                             branch = %dir_name,
                             segment = %entry.filename,
@@ -3391,7 +3577,10 @@ impl SegmentedStore {
                     }
                 }
 
-                // Log orphan files (on disk but not in manifest — not loaded).
+                // Orphan files (on disk but not in manifest) stay informational
+                // only — they are the expected shape of shared segments that
+                // live on disk for COW children, and orphan GC (once SE3
+                // lands) reclaims them later. Not a fault.
                 for seg in branch_segments.iter() {
                     let filename = seg
                         .file_path()
@@ -3404,12 +3593,18 @@ impl SegmentedStore {
                             segment = %filename,
                             "orphan segment on disk (not in manifest), skipping"
                         );
-                        info.orphans_skipped += 1;
                     }
                 }
             } else {
-                // No manifest → all segments go to L0 (backward compat)
+                // No manifest → all segments go to L0 (backward compat).
+                // Classified as PolicyDowngrade so strict callers can refuse
+                // while lossy callers with explicit opt-in continue.
+                let promoted = branch_segments.len();
                 level_segs[0] = branch_segments.clone();
+                faults.push(RecoveryFault::NoManifestFallbackUsed {
+                    branch_id,
+                    segments_promoted: promoted,
+                });
             }
 
             // L0: sorted by commit_max descending (newest first)
@@ -3424,7 +3619,25 @@ impl SegmentedStore {
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
 
-            info.segments_loaded += level_segs.iter().map(|l| l.len()).sum::<usize>();
+            let own_segments_loaded = level_segs.iter().map(|l| l.len()).sum::<usize>();
+            segments_loaded += own_segments_loaded;
+            if own_segments_loaded > 0 {
+                recovered_branches.insert(branch_id);
+            }
+
+            // Rebuild branch.max_version from the loaded segments before we
+            // install the version. Mirrors the snapshot-install pattern: post
+            // -restart fork_branch reads this atomic to pick the fork source
+            // version. Pre-SE2 the recovery walk skipped this and left it at
+            // the constructor default (0).
+            let mut branch_max = CommitVersion::ZERO;
+            for level in &level_segs {
+                for seg in level {
+                    let v = seg.commit_range().1;
+                    branch.track_version(v);
+                    branch_max = branch_max.max(v);
+                }
+            }
 
             // Build new version: merge existing segments with recovered ones
             let old_ver = branch.version.load();
@@ -3447,30 +3660,66 @@ impl SegmentedStore {
                 .store(Arc::new(SegmentVersion { levels: new_levels }));
             refresh_level_targets(&mut branch, self.level_base_bytes());
 
+            if branch_max > CommitVersion::ZERO {
+                let entry = branch_versions
+                    .entry(branch_id)
+                    .or_insert(CommitVersion::ZERO);
+                *entry = (*entry).max(branch_max);
+            }
+
             // Collect inherited layer info for second pass (deferred resolution).
             if let Some(manifest) = manifest {
                 if !manifest.inherited_layers.is_empty() {
                     deferred_inherited.push((branch_id, manifest.inherited_layers));
                 }
             }
-
-            info.branches_recovered += 1;
         }
 
-        // Second pass + refcount rebuild
-        self.resolve_inherited_layers(segments_dir, deferred_inherited, &mut info);
+        // Second pass + refcount rebuild. Inherited layers contribute their
+        // own segment commit_max to version_floor and to the child branch's
+        // branch_versions entry, and per-layer failures append faults.
+        let inherited_stats = self.resolve_inherited_layers(
+            segments_dir,
+            deferred_inherited,
+            &mut branch_versions,
+            &mut recovered_branches,
+            &mut faults,
+        );
+        version_floor = version_floor.max(inherited_stats.max_commit_id);
+        segments_loaded += inherited_stats.segments_loaded;
+        let branches_recovered = recovered_branches.len();
 
-        Ok(info)
+        let health = RecoveryHealth::from_faults(faults);
+        self.last_recovery_health.store(Arc::new(health.clone()));
+        invocation.commit();
+
+        Ok(RecoveredState {
+            version_floor,
+            branch_versions,
+            segments_loaded,
+            branches_recovered,
+            health,
+        })
     }
 
     /// Second pass of recovery: resolve inherited layers from manifests and
     /// rebuild segment refcounts.
+    ///
+    /// Folds each inherited layer segment's `commit_range().1` into both the
+    /// child branch's entry in `branch_versions` and the returned
+    /// `max_commit_id`, so the caller's `version_floor` accounts for versions
+    /// visible only via inheritance. Layers whose entire source is
+    /// unreachable produce a [`RecoveryFault::InheritedLayerLost`] in
+    /// `faults`.
     fn resolve_inherited_layers(
         &self,
         segments_dir: &std::path::Path,
         deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)>,
-        info: &mut RecoverSegmentsInfo,
-    ) {
+        branch_versions: &mut HashMap<BranchId, CommitVersion>,
+        recovered_branches: &mut HashSet<BranchId>,
+        faults: &mut Vec<RecoveryFault>,
+    ) -> InheritedResolveStats {
+        let mut stats = InheritedResolveStats::default();
         for (child_id, manifest_layers) in deferred_inherited {
             let mut inherited_layers = Vec::new();
 
@@ -3478,6 +3727,8 @@ impl SegmentedStore {
                 let source_dir = segments_dir.join(hex_encode_branch(&ml.source_branch_id));
                 let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
                 let mut any_found = false;
+                let mut missing_entries = false;
+                let mut layer_max = CommitVersion::ZERO;
 
                 for entry in &ml.entries {
                     let level = (entry.level as usize).min(NUM_LEVELS - 1);
@@ -3490,11 +3741,15 @@ impl SegmentedStore {
                                         .fetch_max(file_seg_id + 1, Ordering::Relaxed);
                                 }
                             }
-                            info.max_commit_id = info.max_commit_id.max(seg.commit_range().1);
+                            let seg_max = seg.commit_range().1;
+                            stats.max_commit_id = stats.max_commit_id.max(seg_max);
+                            layer_max = layer_max.max(seg_max);
+                            stats.segments_loaded += 1;
                             layer_levels[level].push(Arc::new(seg));
                             any_found = true;
                         }
                         Err(e) => {
+                            missing_entries = true;
                             tracing::warn!(
                                 child = %hex_encode_branch(&child_id),
                                 source = %hex_encode_branch(&ml.source_branch_id),
@@ -3507,8 +3762,27 @@ impl SegmentedStore {
                 }
 
                 if !any_found {
-                    info.layers_dropped.push((child_id, ml.source_branch_id));
+                    faults.push(RecoveryFault::InheritedLayerLost {
+                        child: child_id,
+                        source_branch: ml.source_branch_id,
+                        fork_version: ml.fork_version,
+                    });
                     continue;
+                }
+
+                if missing_entries {
+                    faults.push(RecoveryFault::InheritedLayerLost {
+                        child: child_id,
+                        source_branch: ml.source_branch_id,
+                        fork_version: ml.fork_version,
+                    });
+                }
+
+                if layer_max > CommitVersion::ZERO {
+                    let child_entry = branch_versions
+                        .entry(child_id)
+                        .or_insert(CommitVersion::ZERO);
+                    *child_entry = (*child_entry).max(layer_max);
                 }
 
                 layer_levels[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
@@ -3532,10 +3806,17 @@ impl SegmentedStore {
                     }),
                     status,
                 });
+                recovered_branches.insert(child_id);
             }
 
             if !inherited_layers.is_empty() {
                 if let Some(mut branch) = self.branches.get_mut(&child_id) {
+                    // Fold inherited-layer max versions into the child's
+                    // own max_version so post-restart fork_branch on the
+                    // child picks up inherited data (#SG-008 broadening).
+                    if let Some(v) = branch_versions.get(&child_id) {
+                        branch.track_version(*v);
+                    }
                     branch.inherited_layers = inherited_layers;
                 }
             }
@@ -3549,6 +3830,8 @@ impl SegmentedStore {
                 }
             }
         }
+
+        stats
     }
 
     /// Check whether the active memtable should be rotated and do so inline.
@@ -4610,34 +4893,6 @@ impl SegmentedStore {
     }
 }
 
-/// Statistics returned by [`SegmentedStore::recover_segments`].
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RecoverSegmentsInfo {
-    /// Number of branch subdirectories successfully loaded.
-    pub branches_recovered: usize,
-    /// Total number of `.sst` segments loaded across all branches.
-    pub segments_loaded: usize,
-    /// Number of `.sst` files that failed to open (corrupt/invalid).
-    pub errors_skipped: usize,
-    /// Inherited layers that were dropped because their source branch
-    /// was missing. Each entry is `(child_branch_id, source_branch_id)`.
-    /// Non-empty means the child branch may be missing data that was
-    /// visible before the crash.
-    pub layers_dropped: Vec<(BranchId, BranchId)>,
-    /// Number of orphan `.sst` files on disk that were not in the manifest.
-    /// These are skipped during recovery to prevent stale data from shadowing
-    /// compacted data (#1701).
-    pub orphans_skipped: usize,
-    /// Number of branches skipped because their manifest was corrupt (#1691).
-    /// Own segments for these branches are not loaded, but their segment
-    /// files remain on disk for children to open directly.
-    pub corrupt_manifest_branches: usize,
-    /// Maximum commit_id seen across all loaded segments (#1726).
-    /// Used to bump the version counter so new transactions don't collide
-    /// with data already persisted in segments.
-    pub max_commit_id: CommitVersion,
-}
-
 impl Default for SegmentedStore {
     fn default() -> Self {
         Self::new()
@@ -5125,7 +5380,10 @@ fn check_corruption(flags: &[Arc<AtomicBool>]) -> StrataResult<()> {
 }
 
 mod compaction;
+mod recovery;
 mod ref_registry;
+
+pub use recovery::{DegradationClass, RecoveredState, RecoveryFault, RecoveryHealth};
 
 #[cfg(test)]
 mod tests;
