@@ -23,7 +23,9 @@ use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::format::{snapshot_path, SegmentMeta, WalRecord, WalSegment};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::{WalReader, WalReaderError};
-use strata_durability::{LoadedSnapshot, ManifestManager, SnapshotReader};
+use strata_durability::{
+    LoadedSnapshot, ManifestError, ManifestManager, SnapshotReadError, SnapshotReader,
+};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
@@ -217,7 +219,7 @@ impl RecoveryCoordinator {
             return Ok(RecoveryPlan::fresh());
         }
         let mgr = ManifestManager::load(manifest_path.to_path_buf())
-            .map_err(|e| StrataError::corruption(format!("failed to load MANIFEST: {}", e)))?;
+            .map_err(manifest_error_to_strata_error)?;
         let m = mgr.manifest();
         if m.codec_id != expected_codec_id {
             return Err(StrataError::corruption(format!(
@@ -265,14 +267,7 @@ impl RecoveryCoordinator {
             )));
         }
         let reader = SnapshotReader::new(clone_codec(codec));
-        let snapshot = reader.load(&path).map_err(|e| {
-            StrataError::corruption(format!(
-                "failed to load snapshot {} at {}: {}",
-                snapshot_id,
-                path.display(),
-                e
-            ))
-        })?;
+        let snapshot = reader.load(&path).map_err(snapshot_read_error_to_strata_error)?;
         info!(
             target: "strata::recovery",
             snapshot_id,
@@ -568,6 +563,41 @@ fn wal_read_error_to_strata_error(err: WalReaderError) -> StrataError {
             hint,
         } => StrataError::legacy_format(found_version, hint),
         other => StrataError::storage(format!("WAL read failed: {}", other)),
+    }
+}
+
+/// Map a `ManifestError` into a typed `StrataError`, passing `LegacyFormat`
+/// through so the engine's open path can `matches!(err, StrataError::LegacyFormat { .. })`
+/// to skip the lossy wipe. Everything else collapses to
+/// `StrataError::corruption` — the same generic surface callers had before.
+pub fn manifest_error_to_strata_error(err: ManifestError) -> StrataError {
+    match err {
+        ManifestError::LegacyFormat {
+            detected_version,
+            supported_range,
+            remediation,
+        } => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        other => StrataError::corruption(format!("failed to load MANIFEST: {other}")),
+    }
+}
+
+/// Map a `SnapshotReadError` into a typed `StrataError`, passing `LegacyFormat`
+/// through so the engine's open path can hard-fail the lossy branch on a
+/// pre-v2 snapshot. Everything else collapses to `StrataError::corruption`.
+pub(crate) fn snapshot_read_error_to_strata_error(err: SnapshotReadError) -> StrataError {
+    match err {
+        SnapshotReadError::LegacyFormat {
+            detected_version,
+            supported_range,
+            remediation,
+        } => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        other => StrataError::corruption(format!("failed to load snapshot: {other}")),
     }
 }
 

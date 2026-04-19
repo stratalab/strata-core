@@ -716,3 +716,74 @@ fn test_legacy_format_under_lossy_flag_still_hard_fails() {
         "second open must reproduce the same typed LegacyFormat error",
     );
 }
+
+/// D5: a pre-v2 MANIFEST file surfaces `StrataError::LegacyFormat` even
+/// under `allow_lossy_recovery=true`. Parity with the WAL legacy-format
+/// hard-fail contract — otherwise the lossy branch would swallow a
+/// legacy MANIFEST and silently reconstruct invalid metadata.
+#[test]
+fn test_legacy_manifest_under_lossy_flag_still_hard_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    std::fs::create_dir_all(&db_path).unwrap();
+
+    // Craft a v1 MANIFEST: magic + version=1 + uuid + codec + wal_seg +
+    // watermark + snap_id + crc. No `flushed_through_commit_id` field
+    // — that was added in v2. The D5 cutover rejects this at the parser.
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"STRM"); // MANIFEST_MAGIC
+    bytes.extend_from_slice(&1u32.to_le_bytes()); // format_version = 1 (legacy)
+    bytes.extend_from_slice(&[0xAAu8; 16]); // database_uuid
+    let codec = b"identity";
+    bytes.extend_from_slice(&(codec.len() as u32).to_le_bytes());
+    bytes.extend_from_slice(codec);
+    bytes.extend_from_slice(&1u64.to_le_bytes()); // active_wal_segment
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_watermark
+    bytes.extend_from_slice(&0u64.to_le_bytes()); // snapshot_id
+    let crc = crc32fast::hash(&bytes);
+    bytes.extend_from_slice(&crc.to_le_bytes());
+
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::write(&manifest_path, &bytes).unwrap();
+
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result = Database::open_with_config(&db_path, cfg);
+
+    match result {
+        Err(StrataError::LegacyFormat {
+            found_version,
+            hint,
+        }) => {
+            assert_eq!(found_version, 1);
+            assert!(
+                hint.contains("MANIFEST"),
+                "hint must name the MANIFEST surface, got: {hint}"
+            );
+            assert!(
+                hint.contains("requires"),
+                "hint must describe the required floor, got: {hint}"
+            );
+        }
+        Ok(_) => panic!(
+            "legacy MANIFEST open must hard-fail even under allow_lossy_recovery=true; \
+             got Ok(Database)",
+        ),
+        Err(other) => panic!(
+            "legacy MANIFEST open must produce StrataError::LegacyFormat, got: {other:?}",
+        ),
+    }
+
+    // Reproducible: a second open attempt returns the same typed error.
+    let cfg2 = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result2 = Database::open_with_config(&db_path, cfg2);
+    assert!(
+        matches!(result2, Err(StrataError::LegacyFormat { .. })),
+        "second open must reproduce the same typed LegacyFormat error",
+    );
+}

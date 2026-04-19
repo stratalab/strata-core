@@ -10,7 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use strata_concurrency::{apply_wal_record_to_memory_storage, RecoveryCoordinator, RecoveryStats};
+use strata_concurrency::{
+    apply_wal_record_to_memory_storage, manifest_error_to_strata_error, RecoveryCoordinator,
+    RecoveryStats,
+};
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::codec::clone_codec;
 use strata_durability::layout::DatabaseLayout;
@@ -439,13 +442,8 @@ impl Database {
         // WAL has been reclaimed. Only a genuinely absent MANIFEST (fresh
         // database) degrades to WAL-only recovery.
         let (database_uuid, follower_codec) = if ManifestManager::exists(&manifest_path) {
-            let m = ManifestManager::load(manifest_path.clone()).map_err(|e| {
-                StrataError::corruption(format!(
-                    "follower could not load MANIFEST at {}: {}",
-                    manifest_path.display(),
-                    e
-                ))
-            })?;
+            let m = ManifestManager::load(manifest_path.clone())
+                .map_err(manifest_error_to_strata_error)?;
             let manifest = m.manifest();
             if manifest.codec_id != cfg.storage.codec {
                 return Err(StrataError::incompatible_reuse(format!(
@@ -993,7 +991,7 @@ impl Database {
         // keeps it ahead of the lossy branch.
         let database_uuid = if ManifestManager::exists(&manifest_path) {
             let m = ManifestManager::load(manifest_path.clone())
-                .map_err(|e| StrataError::internal(format!("failed to load MANIFEST: {}", e)))?;
+                .map_err(manifest_error_to_strata_error)?;
             let stored_codec = &m.manifest().codec_id;
             if stored_codec != &cfg.storage.codec {
                 return Err(StrataError::incompatible_reuse(format!(

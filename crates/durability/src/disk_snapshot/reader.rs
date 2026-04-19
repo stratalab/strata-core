@@ -9,7 +9,8 @@ use std::path::Path;
 use crate::codec::{CodecError, StorageCodec};
 use crate::format::primitive_tags;
 use crate::format::snapshot::{
-    SectionHeader, SnapshotHeader, SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
+    SectionHeader, SnapshotHeader, MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION,
+    SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
 };
 
 /// Snapshot reader for recovery
@@ -54,10 +55,30 @@ impl SnapshotReader {
             });
         }
 
-        // Validate header
+        // Legacy-format detection runs before the generic header validation
+        // so a pre-v2 snapshot produces the typed `LegacyFormat` diagnostic
+        // the operator can act on, rather than collapsing into a generic
+        // `HeaderValidation` string (parity with WAL).
+        if header.format_version < MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION {
+            return Err(SnapshotReadError::LegacyFormat {
+                detected_version: header.format_version,
+                supported_range: format!(
+                    "this build requires snapshot format version {MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION}"
+                ),
+                remediation: "delete the offending `snap-*.chk` file and reopen \
+                              — the database will replay from the next snapshot \
+                              or the WAL tail."
+                    .to_string(),
+            });
+        }
+
+        // Validate header (future versions surface as `HeaderValidation`).
         header
             .validate()
             .map_err(|e| SnapshotReadError::HeaderValidation(e.to_string()))?;
+        // Belt-and-suspenders: the only path that leaves format_version
+        // untouched is equality with the current one.
+        debug_assert_eq!(header.format_version, SNAPSHOT_FORMAT_VERSION);
 
         // Read codec ID
         let codec_id_len = header.codec_id_len as usize;
@@ -261,6 +282,26 @@ pub enum SnapshotReadError {
     /// Header validation failed
     #[error("Header validation failed: {0}")]
     HeaderValidation(String),
+    /// Legacy snapshot format — rejected hard, even under lossy recovery.
+    ///
+    /// Produced when the snapshot's `format_version` is older than
+    /// [`crate::format::snapshot::MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION`].
+    /// Surfaces unconditionally (strict and lossy open alike); the engine's
+    /// open path re-raises as
+    /// [`strata_core::StrataError::LegacyFormat`] and the operator must
+    /// delete the file manually before reopening. Mirrors the WAL
+    /// `SegmentHeaderError::LegacyFormat` contract.
+    #[error(
+        "legacy snapshot format: found version {detected_version}. {supported_range}. {remediation}"
+    )]
+    LegacyFormat {
+        /// Format version read from disk.
+        detected_version: u32,
+        /// Operator-facing description of the range this build accepts.
+        supported_range: String,
+        /// Operator remediation hint — filesystem action only.
+        remediation: String,
+    },
     /// Invalid codec ID
     #[error("Invalid codec ID (not valid UTF-8)")]
     InvalidCodecId,
@@ -537,6 +578,53 @@ mod tests {
             result,
             Err(SnapshotReadError::FileTooSmall { .. })
         ));
+    }
+
+    #[test]
+    fn test_snapshot_v1_rejected_as_legacy() {
+        // Craft a 64-byte v1 header (magic + format_version=1 + enough
+        // trailing body to clear the FileTooSmall guard). Parity with
+        // the WAL legacy-format contract: pre-v2 snapshots surface as
+        // `LegacyFormat`, not a generic `HeaderValidation`.
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("snap-000001.chk");
+
+        let mut header = [0u8; SNAPSHOT_HEADER_SIZE];
+        header[0..4].copy_from_slice(&SNAPSHOT_MAGIC);
+        header[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1
+        header[8..16].copy_from_slice(&1u64.to_le_bytes()); // snapshot_id
+        header[16..24].copy_from_slice(&100u64.to_le_bytes()); // watermark_txn
+        header[24..32].copy_from_slice(&0u64.to_le_bytes()); // created_at
+        header[32..48].copy_from_slice(&test_uuid()); // database_uuid
+        header[48] = 0; // codec_id_len = 0 (empty codec id)
+
+        // Pad body so the reader clears its minimum-size guard. The
+        // contents after the header never get parsed because LegacyFormat
+        // short-circuits — the filler bytes are arbitrary.
+        let mut bytes = header.to_vec();
+        bytes.extend_from_slice(&[0u8; 8]); // filler
+
+        std::fs::write(&path, &bytes).unwrap();
+
+        let reader = SnapshotReader::new(Box::new(IdentityCodec));
+        match reader.load(&path) {
+            Err(SnapshotReadError::LegacyFormat {
+                detected_version,
+                supported_range,
+                remediation,
+            }) => {
+                assert_eq!(detected_version, 1);
+                assert!(
+                    supported_range.contains(&MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION.to_string()),
+                    "supported_range must name the required version, got: {supported_range}"
+                );
+                assert!(
+                    remediation.contains("snap-"),
+                    "remediation must name the snapshot file shape, got: {remediation}"
+                );
+            }
+            other => panic!("expected LegacyFormat, got: {:?}", other),
+        }
     }
 
     #[test]

@@ -31,6 +31,16 @@ pub const MANIFEST_MAGIC: [u8; 4] = *b"STRM";
 /// Current MANIFEST format version
 pub const MANIFEST_FORMAT_VERSION: u32 = 2;
 
+/// Oldest MANIFEST format version this build can read. Files with a
+/// `format_version` below this value are rejected with
+/// [`ManifestError::LegacyFormat`] — mirroring the WAL clean-break contract
+/// at [`crate::format::wal_record::MIN_SUPPORTED_SEGMENT_FORMAT_VERSION`].
+/// Operators wipe the `manifest` file and reopen.
+///
+/// v2 added `flushed_through_commit_id` (required for delta-only WAL replay);
+/// no shipped build since that bump persists v1.
+pub const MIN_SUPPORTED_MANIFEST_FORMAT_VERSION: u32 = 2;
+
 /// MANIFEST file structure
 ///
 /// Contains physical storage metadata for database recovery:
@@ -112,14 +122,41 @@ impl Manifest {
 
     /// Deserialize MANIFEST from bytes
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, ManifestError> {
-        // Minimum size: magic(4) + version(4) + uuid(16) + codec_len(4) + wal_seg(8) + watermark(8) + snap_id(8) + crc(4) = 56 (with empty codec)
-        if bytes.len() < 56 {
+        // Minimum size (v2, empty codec): magic(4) + version(4) + uuid(16) +
+        // codec_len(4) + wal_seg(8) + watermark(8) + snap_id(8) +
+        // flushed_through_commit_id(8) + crc(4) = 64.
+        if bytes.len() < 64 {
             return Err(ManifestError::TooShort);
         }
 
         // Check magic
         if bytes[0..4] != MANIFEST_MAGIC {
             return Err(ManifestError::InvalidMagic);
+        }
+
+        // Version check runs before CRC so a legacy-format MANIFEST produces
+        // the typed `LegacyFormat` diagnostic the operator can act on,
+        // rather than a generic `ChecksumMismatch` when the v1 layout CRC
+        // disagrees with newer assumptions. Parity with WAL
+        // `SegmentHeader::from_bytes_slice` (version before CRC).
+        let format_version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if format_version < MIN_SUPPORTED_MANIFEST_FORMAT_VERSION {
+            return Err(ManifestError::LegacyFormat {
+                detected_version: format_version,
+                supported_range: format!(
+                    "this build requires MANIFEST format version {MIN_SUPPORTED_MANIFEST_FORMAT_VERSION}"
+                ),
+                remediation: "delete the `MANIFEST` file and reopen \
+                              — the database will rebuild its metadata \
+                              from the `wal/` and `segments/` directories."
+                    .to_string(),
+            });
+        }
+        if format_version > MANIFEST_FORMAT_VERSION {
+            return Err(ManifestError::UnsupportedVersion {
+                version: format_version,
+                max_supported: MANIFEST_FORMAT_VERSION,
+            });
         }
 
         // Verify CRC (last 4 bytes)
@@ -133,17 +170,7 @@ impl Manifest {
             });
         }
 
-        let mut cursor = 4;
-
-        // Format version
-        let format_version = u32::from_le_bytes(bytes[cursor..cursor + 4].try_into().unwrap());
-        if format_version > MANIFEST_FORMAT_VERSION {
-            return Err(ManifestError::UnsupportedVersion {
-                version: format_version,
-                max_supported: MANIFEST_FORMAT_VERSION,
-            });
-        }
-        cursor += 4;
+        let mut cursor = 8;
 
         // Database UUID
         let database_uuid: [u8; 16] = bytes[cursor..cursor + 16].try_into().unwrap();
@@ -180,14 +207,13 @@ impl Manifest {
             None
         };
 
-        // Flushed-through commit ID — v2+ only
-        let flushed_through_commit_id = if format_version >= 2 && cursor + 8 <= bytes.len() - 4 {
-            let val = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
-            if val > 0 {
-                Some(val)
-            } else {
-                None
-            }
+        // Flushed-through commit ID
+        if cursor + 8 > bytes.len() - 4 {
+            return Err(ManifestError::TooShort);
+        }
+        let flushed_val = u64::from_le_bytes(bytes[cursor..cursor + 8].try_into().unwrap());
+        let flushed_through_commit_id = if flushed_val > 0 {
+            Some(flushed_val)
         } else {
             None
         };
@@ -339,6 +365,26 @@ pub enum ManifestError {
         version: u32,
         /// Maximum version this build can read
         max_supported: u32,
+    },
+
+    /// Legacy MANIFEST format — rejected hard, even under lossy recovery.
+    ///
+    /// Produced when a file's `format_version` is older than
+    /// [`MIN_SUPPORTED_MANIFEST_FORMAT_VERSION`]. Surfaces unconditionally
+    /// (strict and lossy open alike); the engine's open path re-raises as
+    /// [`strata_core::StrataError::LegacyFormat`] and the operator must
+    /// delete the file manually before reopening. Mirrors the WAL
+    /// `SegmentHeaderError::LegacyFormat` contract.
+    #[error(
+        "legacy MANIFEST format: found version {detected_version}. {supported_range}. {remediation}"
+    )]
+    LegacyFormat {
+        /// Format version read from disk.
+        detected_version: u32,
+        /// Operator-facing description of the range this build accepts.
+        supported_range: String,
+        /// Operator remediation hint — filesystem action only.
+        remediation: String,
     },
 
     /// Invalid codec ID (not valid UTF-8)
@@ -588,8 +634,10 @@ mod tests {
     }
 
     #[test]
-    fn test_manifest_v1_loads_with_default_flush_watermark() {
-        // Build a v1-format manifest (no flush watermark field)
+    fn test_manifest_v1_rejected_as_legacy() {
+        // Build a v1-format manifest (no flush watermark field). Under the
+        // D5 cutover this is rejected with `LegacyFormat` rather than
+        // silently read as v1 with a defaulted flush watermark.
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MANIFEST_MAGIC);
         bytes.extend_from_slice(&1u32.to_le_bytes()); // format_version = 1
@@ -603,9 +651,47 @@ mod tests {
         let crc = crc32fast::hash(&bytes);
         bytes.extend_from_slice(&crc.to_le_bytes());
 
-        let parsed = Manifest::from_bytes(&bytes).unwrap();
-        assert_eq!(parsed.format_version, 1);
-        assert_eq!(parsed.flushed_through_commit_id, None);
+        match Manifest::from_bytes(&bytes) {
+            Err(ManifestError::LegacyFormat {
+                detected_version,
+                supported_range,
+                remediation,
+            }) => {
+                assert_eq!(detected_version, 1);
+                assert!(
+                    supported_range.contains(&MIN_SUPPORTED_MANIFEST_FORMAT_VERSION.to_string()),
+                    "supported_range must name the required version, got: {supported_range}"
+                );
+                assert!(
+                    remediation.contains("MANIFEST"),
+                    "remediation must name the MANIFEST file, got: {remediation}"
+                );
+            }
+            other => panic!("expected LegacyFormat, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_manifest_legacy_detected_before_crc() {
+        // Craft v1 bytes with a deliberately bad CRC. The version check
+        // runs first, so the caller sees `LegacyFormat` — not the generic
+        // `ChecksumMismatch` a naive ordering would produce.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&MANIFEST_MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&test_uuid());
+        let codec = b"identity";
+        bytes.extend_from_slice(&(codec.len() as u32).to_le_bytes());
+        bytes.extend_from_slice(codec);
+        bytes.extend_from_slice(&1u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0u64.to_le_bytes());
+        bytes.extend_from_slice(&0xDEADBEEFu32.to_le_bytes()); // bogus CRC
+
+        assert!(matches!(
+            Manifest::from_bytes(&bytes),
+            Err(ManifestError::LegacyFormat { detected_version: 1, .. })
+        ));
     }
 
     #[test]
