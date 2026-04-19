@@ -2077,6 +2077,66 @@ fn test_follower_rejects_tampered_hook_block_without_visibility_version() {
     );
 }
 
+/// D6 follow-up: post-apply invariant failures are intentionally
+/// non-skippable. If a persisted blocked state is tampered from a hook
+/// failure into `PostApplyInvariant` while leaving `skip_allowed=true`,
+/// follower reopen must reject it rather than restore an invalid operator
+/// bypass.
+#[test]
+fn test_follower_rejects_tampered_post_apply_block_with_skip_allowed() {
+    use serde_json::json;
+    use serde_json::Value as JsonValue;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "next", "v2");
+    primary.flush().unwrap();
+    match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { .. } => {}
+        other => panic!(
+            "expected blocked refresh to produce follower_state.json, got {:?}",
+            other
+        ),
+    }
+    drop(follower);
+
+    let state_path = dir.path().join("follower_state.json");
+    let bytes = std::fs::read(&state_path).expect("state file should exist after blocked refresh");
+    let mut v: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    v["blocked"]["blocked"]["reason"] = json!({
+        "PostApplyInvariant": {
+            "message": "tampered post-apply invariant"
+        }
+    });
+    v["blocked"]["skip_allowed"] = JsonValue::from(true);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    let reopened = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(
+        FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(false))),
+    ))
+    .expect("follower must reopen even with a tampered state file");
+    let status = reopened.follower_status();
+    assert!(
+        !status.is_blocked(),
+        "post-apply block with skip_allowed=true must be rejected on reopen"
+    );
+}
+
 /// DG-010: follower shutdown must run installed subsystem freeze hooks.
 #[test]
 fn test_follower_shutdown_runs_freeze_hooks() {
