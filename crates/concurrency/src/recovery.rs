@@ -267,7 +267,16 @@ impl RecoveryCoordinator {
             )));
         }
         let reader = SnapshotReader::new(clone_codec(codec));
-        let snapshot = reader.load(&path).map_err(snapshot_read_error_to_strata_error)?;
+        let snapshot = reader.load(&path).map_err(|err| {
+            map_snapshot_read_error_to_strata_error(err, |other| {
+                StrataError::corruption(format!(
+                    "failed to load snapshot {} at {}: {}",
+                    snapshot_id,
+                    path.display(),
+                    other
+                ))
+            })
+        })?;
         info!(
             target: "strata::recovery",
             snapshot_id,
@@ -584,10 +593,10 @@ pub fn manifest_error_to_strata_error(err: ManifestError) -> StrataError {
     }
 }
 
-/// Map a `SnapshotReadError` into a typed `StrataError`, passing `LegacyFormat`
-/// through so the engine's open path can hard-fail the lossy branch on a
-/// pre-v2 snapshot. Everything else collapses to `StrataError::corruption`.
-pub(crate) fn snapshot_read_error_to_strata_error(err: SnapshotReadError) -> StrataError {
+fn map_snapshot_read_error_to_strata_error<F>(err: SnapshotReadError, non_legacy: F) -> StrataError
+where
+    F: FnOnce(SnapshotReadError) -> StrataError,
+{
     match err {
         SnapshotReadError::LegacyFormat {
             detected_version,
@@ -597,7 +606,7 @@ pub(crate) fn snapshot_read_error_to_strata_error(err: SnapshotReadError) -> Str
             detected_version,
             format!("{supported_range}. {remediation}"),
         ),
-        other => StrataError::corruption(format!("failed to load snapshot: {other}")),
+        other => non_legacy(other),
     }
 }
 
@@ -1921,6 +1930,34 @@ mod tests {
             message.to_lowercase().contains("manifest"),
             "error should mention MANIFEST, got: {}",
             message
+        );
+    }
+
+    /// Snapshot load failures must keep the snapshot id and on-disk path in the
+    /// surfaced corruption message so operators can delete the exact artifact.
+    #[test]
+    fn test_recover_reports_snapshot_id_and_path_on_snapshot_load_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 9, 100);
+
+        let snap = strata_durability::format::snapshot_path(layout.snapshots_dir(), 9);
+        std::fs::write(&snap, b"bad").unwrap();
+
+        let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
+        let err = coord
+            .recover(|_| Ok(()), |_| Ok(()))
+            .expect_err("corrupt snapshot must surface as corruption");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to load snapshot 9"),
+            "error should name the snapshot id, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains(&snap.display().to_string()),
+            "error should name the snapshot path, got: {}",
+            msg
         );
     }
 

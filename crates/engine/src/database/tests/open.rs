@@ -771,12 +771,122 @@ fn test_legacy_manifest_under_lossy_flag_still_hard_fails() {
             "legacy MANIFEST open must hard-fail even under allow_lossy_recovery=true; \
              got Ok(Database)",
         ),
-        Err(other) => panic!(
-            "legacy MANIFEST open must produce StrataError::LegacyFormat, got: {other:?}",
-        ),
+        Err(other) => {
+            panic!("legacy MANIFEST open must produce StrataError::LegacyFormat, got: {other:?}",)
+        }
     }
 
     // Reproducible: a second open attempt returns the same typed error.
+    let cfg2 = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result2 = Database::open_with_config(&db_path, cfg2);
+    assert!(
+        matches!(result2, Err(StrataError::LegacyFormat { .. })),
+        "second open must reproduce the same typed LegacyFormat error",
+    );
+}
+
+/// Follower MANIFEST failures must preserve the on-disk path in the surfaced
+/// diagnostic so operators can identify which database root is broken.
+#[test]
+fn test_open_follower_corrupt_manifest_names_manifest_path() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    std::fs::create_dir_all(&db_path).unwrap();
+
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::write(&manifest_path, b"not-a-manifest").unwrap();
+
+    let err = match Database::open_follower(&db_path) {
+        Err(err) => err,
+        Ok(_) => panic!("corrupt MANIFEST must fail follower"),
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("follower could not load MANIFEST"),
+        "error should name the follower MANIFEST load, got: {}",
+        msg
+    );
+    assert!(
+        msg.contains(&manifest_path.display().to_string()),
+        "error should include the MANIFEST path, got: {}",
+        msg
+    );
+}
+
+/// D5: a pre-v2 snapshot file surfaces `StrataError::LegacyFormat` even under
+/// `allow_lossy_recovery=true`. Parity with WAL and MANIFEST: the lossy branch
+/// must not wipe around a legacy snapshot artifact it cannot heal.
+#[test]
+fn test_legacy_snapshot_under_lossy_flag_still_hard_fails() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let snapshots_dir = db_path.join("snapshots");
+    std::fs::create_dir_all(&snapshots_dir).unwrap();
+
+    let mut mgr = strata_durability::ManifestManager::create(
+        db_path.join("MANIFEST"),
+        [0xAAu8; 16],
+        "identity".to_string(),
+    )
+    .unwrap();
+    mgr.set_snapshot_watermark(1, TxnId(100)).unwrap();
+
+    let snapshot_path = strata_durability::format::snapshot_path(&snapshots_dir, 1);
+    let mut header = [0u8; strata_durability::SNAPSHOT_HEADER_SIZE];
+    header[0..4].copy_from_slice(&strata_durability::SNAPSHOT_MAGIC);
+    header[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1 (legacy)
+    header[8..16].copy_from_slice(&1u64.to_le_bytes()); // snapshot_id
+    header[16..24].copy_from_slice(&100u64.to_le_bytes()); // watermark_txn
+    header[24..32].copy_from_slice(&0u64.to_le_bytes()); // created_at
+    header[32..48].copy_from_slice(&[0xAAu8; 16]); // database_uuid
+    header[48] = 0; // codec_id_len = 0
+
+    // Pad beyond the reader's minimum-size guard. LegacyFormat short-circuits
+    // before codec/body parsing, so the filler bytes are arbitrary.
+    let mut bytes = header.to_vec();
+    bytes.extend_from_slice(&[0u8; 8]);
+    std::fs::write(&snapshot_path, &bytes).unwrap();
+    let bytes_before = std::fs::read(&snapshot_path).unwrap();
+
+    let cfg = StrataConfig {
+        allow_lossy_recovery: true,
+        ..StrataConfig::default()
+    };
+    let result = Database::open_with_config(&db_path, cfg);
+
+    match result {
+        Err(StrataError::LegacyFormat {
+            found_version,
+            hint,
+        }) => {
+            assert_eq!(found_version, 1);
+            assert!(
+                hint.contains("snapshot format version"),
+                "hint must name the required snapshot floor, got: {hint}"
+            );
+            assert!(
+                hint.contains("snap-"),
+                "hint must name the snapshot file shape, got: {hint}"
+            );
+        }
+        Ok(_) => panic!(
+            "legacy snapshot open must hard-fail even under allow_lossy_recovery=true; \
+             got Ok(Database)",
+        ),
+        Err(other) => {
+            panic!("legacy snapshot open must produce StrataError::LegacyFormat, got: {other:?}",)
+        }
+    }
+
+    let bytes_after = std::fs::read(&snapshot_path).unwrap();
+    assert_eq!(
+        bytes_before, bytes_after,
+        "legacy snapshot open must NOT mutate the pre-v2 snapshot file",
+    );
+
     let cfg2 = StrataConfig {
         allow_lossy_recovery: true,
         ..StrataConfig::default()

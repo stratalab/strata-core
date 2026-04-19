@@ -690,7 +690,10 @@ mod tests {
 
         assert!(matches!(
             Manifest::from_bytes(&bytes),
-            Err(ManifestError::LegacyFormat { detected_version: 1, .. })
+            Err(ManifestError::LegacyFormat {
+                detected_version: 1,
+                ..
+            })
         ));
     }
 
