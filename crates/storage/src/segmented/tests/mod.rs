@@ -101,6 +101,7 @@ mod compact;
 mod concurrency;
 mod flush;
 mod fork;
+mod gc_under_degradation;
 mod leveled;
 mod lifecycle;
 mod materialize;

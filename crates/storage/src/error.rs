@@ -5,7 +5,7 @@ use strata_core::types::BranchId;
 use strata_core::StrataError;
 use thiserror::Error;
 
-use crate::segmented::RecoveryFault;
+use crate::segmented::{DegradationClass, RecoveryFault};
 
 /// Result alias for storage-local operations that can raise [`StorageError`].
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -53,6 +53,19 @@ pub enum StorageError {
     /// [`RecoveredState`]: crate::segmented::RecoveredState
     #[error(transparent)]
     RecoveryFault(#[from] RecoveryFault),
+
+    /// Orphan-segment GC refused to run because the most recent recovery
+    /// produced a degradation class that could make deletion unsafe
+    /// (`DataLoss` or `PolicyDowngrade`). Callers log this as a
+    /// retention-debt signal and continue; GC resumes after an explicit
+    /// `SegmentedStore::reset_recovery_health()` admin action.
+    #[error("gc refused: last recovery degradation class {class:?} is not safe for deletion")]
+    GcRefusedDegradedRecovery {
+        /// Classified severity of the most recent recovery. Any class other
+        /// than `Telemetry` blocks deletion; `DataLoss` and `PolicyDowngrade`
+        /// both route here.
+        class: DegradationClass,
+    },
 }
 
 impl StorageError {
@@ -64,10 +77,11 @@ impl StorageError {
     pub fn kind(&self) -> io::ErrorKind {
         match self {
             StorageError::Io(inner) => inner.kind(),
-            StorageError::RecoveryAlreadyApplied => io::ErrorKind::Other,
             StorageError::ManifestPublish { inner, .. } => inner.kind(),
             StorageError::DirFsync { inner, .. } => inner.kind(),
             StorageError::RecoveryFault(fault) => recovery_fault_kind(fault),
+            StorageError::RecoveryAlreadyApplied
+            | StorageError::GcRefusedDegradedRecovery { .. } => io::ErrorKind::Other,
         }
     }
 }
@@ -104,6 +118,9 @@ impl From<StorageError> for StrataError {
             StorageError::RecoveryFault(fault) => {
                 StrataError::storage_with_source("recovery fault", fault)
             }
+            StorageError::GcRefusedDegradedRecovery { class } => StrataError::storage(format!(
+                "gc refused under degraded recovery ({class:?})"
+            )),
         }
     }
 }
