@@ -443,7 +443,8 @@ impl Database {
         // follower to silently serve stale / empty state once pre-snapshot
         // WAL has been reclaimed. Only a genuinely absent MANIFEST (fresh
         // database) degrades to WAL-only recovery.
-        let (database_uuid, follower_codec) = if ManifestManager::exists(&manifest_path) {
+        let manifest_exists = ManifestManager::exists(&manifest_path);
+        let (database_uuid, follower_codec) = if manifest_exists {
             let m = ManifestManager::load(manifest_path.clone()).map_err(|err| match err {
                 legacy @ ManifestError::LegacyFormat { .. } => {
                     manifest_error_to_strata_error(legacy)
@@ -474,6 +475,20 @@ impl Database {
         } else {
             ([0u8; 16], None)
         };
+
+        if !manifest_exists {
+            match layout
+                .segments_dir()
+                .try_exists()
+                .map_err(StrataError::from)?
+            {
+                true => {}
+                false => {
+                    layout.create_segments_dir().map_err(StrataError::from)?;
+                    restrict_dir(layout.segments_dir());
+                }
+            }
+        }
 
         // T3-E12 §D7: follower-without-MANIFEST falls back to the
         // follower's own config codec so encrypted WAL-only recovery
@@ -1010,14 +1025,18 @@ impl Database {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
 
-        // Create directories (WAL, segments, snapshots)
-        layout.create_dirs().map_err(StrataError::from)?;
+        // Create only the non-authoritative support directories up front.
+        // Recreating `segments/` here on reopen would mask authoritative
+        // flushed-state loss before storage recovery has a chance to classify it.
+        layout
+            .create_non_segment_dirs()
+            .map_err(StrataError::from)?;
         restrict_dir(layout.wal_dir());
-        restrict_dir(layout.segments_dir());
         restrict_dir(layout.snapshots_dir());
 
         let wal_dir = layout.wal_dir().to_path_buf();
         let manifest_path = layout.manifest_path().to_path_buf();
+        let manifest_exists = ManifestManager::exists(&manifest_path);
 
         // Load or create MANIFEST before recovery runs so the coordinator can
         // consult it for snapshot identity and codec validation. On first
@@ -1031,7 +1050,7 @@ impl Database {
         // otherwise a misconfigured reopen would silently discard the
         // database instead of alerting the operator. Keeping the check here
         // keeps it ahead of the lossy branch.
-        let database_uuid = if ManifestManager::exists(&manifest_path) {
+        let database_uuid = if manifest_exists {
             let m = ManifestManager::load(manifest_path.clone())
                 .map_err(manifest_error_to_strata_error)?;
             let stored_codec = &m.manifest().codec_id;
@@ -1046,11 +1065,17 @@ impl Database {
             }
             m.manifest().database_uuid
         } else {
+            layout.create_segments_dir().map_err(StrataError::from)?;
+            restrict_dir(layout.segments_dir());
             let uuid = *uuid::Uuid::new_v4().as_bytes();
             ManifestManager::create(manifest_path, uuid, cfg.storage.codec.clone())
                 .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
             uuid
         };
+
+        if matches!(layout.segments_dir().try_exists(), Ok(true)) {
+            restrict_dir(layout.segments_dir());
+        }
 
         // Instantiate the configured storage codec (identity or aes-gcm-256).
         // One instance is owned here for the WAL writer; a clone is handed to

@@ -18,6 +18,10 @@ pub enum StorageError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
+    /// `recover_segments()` was invoked more than once on the same store.
+    #[error("recover_segments() can only run once per SegmentedStore instance")]
+    RecoveryAlreadyApplied,
+
     /// Publishing a branch manifest failed before the atomic rename completed.
     #[error("failed to publish segment manifest for branch {branch_id}: {inner}")]
     ManifestPublish {
@@ -60,6 +64,7 @@ impl StorageError {
     pub fn kind(&self) -> io::ErrorKind {
         match self {
             StorageError::Io(inner) => inner.kind(),
+            StorageError::RecoveryAlreadyApplied => io::ErrorKind::Other,
             StorageError::ManifestPublish { inner, .. } => inner.kind(),
             StorageError::DirFsync { inner, .. } => inner.kind(),
             StorageError::RecoveryFault(fault) => recovery_fault_kind(fault),
@@ -82,6 +87,9 @@ impl From<StorageError> for StrataError {
     fn from(value: StorageError) -> Self {
         match value {
             StorageError::Io(inner) => StrataError::storage_with_source("storage I/O error", inner),
+            StorageError::RecoveryAlreadyApplied => {
+                StrataError::storage("segment recovery already applied on this store instance")
+            }
             StorageError::ManifestPublish { branch_id, inner } => StrataError::storage_with_source(
                 format!("failed to publish segment manifest for branch {branch_id}"),
                 inner,

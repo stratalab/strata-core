@@ -528,6 +528,57 @@ fn recover_segments_no_dir_is_noop() {
 }
 
 #[test]
+fn recover_segments_missing_dir_is_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("segments-missing");
+    let store = SegmentedStore::with_dir(missing.clone(), 0);
+
+    let err = store
+        .recover_segments()
+        .expect_err("missing authoritative segments dir must hard-fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+
+    match &*store.last_recovery_health() {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(
+                *class,
+                super::DegradationClass::DataLoss,
+                "missing storage root is authoritative loss"
+            );
+            let io_fault = faults
+                .iter()
+                .find_map(|fault| match fault {
+                    super::RecoveryFault::Io(inner) => Some(inner),
+                    _ => None,
+                })
+                .expect("missing-dir hard failure must be reflected in recovery health");
+            assert_eq!(io_fault.kind(), std::io::ErrorKind::NotFound);
+            assert!(
+                io_fault
+                    .to_string()
+                    .contains(missing.to_string_lossy().as_ref()),
+                "stored recovery health should name the missing storage root"
+            );
+        }
+        other => panic!("expected degraded recovery health, got {other:?}"),
+    }
+}
+
+#[test]
+fn recover_segments_rejects_second_call_on_same_store() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    let first = store.recover_segments().unwrap();
+    assert!(matches!(first.health, super::RecoveryHealth::Healthy));
+
+    let err = store
+        .recover_segments()
+        .expect_err("recovery bootstrap must be single-shot per store instance");
+    assert!(matches!(err, crate::StorageError::RecoveryAlreadyApplied));
+}
+
+#[test]
 fn recover_segments_ordering() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);

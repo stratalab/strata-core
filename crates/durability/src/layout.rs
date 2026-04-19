@@ -129,10 +129,25 @@ impl DatabaseLayout {
     ///
     /// Returns an IO error if directory creation fails.
     pub fn create_dirs(&self) -> std::io::Result<()> {
+        self.create_non_segment_dirs()?;
+        self.create_segments_dir()?;
+        Ok(())
+    }
+
+    /// Ensure the non-authoritative support directories exist.
+    ///
+    /// Creates `wal/` and `snapshots/` if needed, but intentionally leaves
+    /// `segments/` alone so reopen flows can distinguish a missing storage
+    /// root from a fresh database with no flushed state yet.
+    pub fn create_non_segment_dirs(&self) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.wal_dir)?;
-        std::fs::create_dir_all(&self.segments_dir)?;
         std::fs::create_dir_all(&self.snapshots_dir)?;
         Ok(())
+    }
+
+    /// Ensure the storage root exists.
+    pub fn create_segments_dir(&self) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.segments_dir)
     }
 
     /// Check if the WAL directory exists.
@@ -195,6 +210,21 @@ mod tests {
 
         // MANIFEST is not created by create_dirs
         assert!(!layout.manifest_exists());
+    }
+
+    #[test]
+    fn test_create_non_segment_dirs_skips_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let layout = DatabaseLayout::from_root(dir.path());
+
+        layout.create_non_segment_dirs().unwrap();
+
+        assert!(layout.wal_dir().exists());
+        assert!(layout.snapshots_dir().exists());
+        assert!(
+            !layout.segments_dir().exists(),
+            "support-dir creation must not recreate the authoritative storage root"
+        );
     }
 
     #[test]

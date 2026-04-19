@@ -1756,6 +1756,47 @@ fn test_follower_without_manifest_uses_config_codec() {
     follower.shutdown().unwrap();
 }
 
+/// SE2 follow-up: a MANIFEST-absent follower open is a WAL-only bootstrap
+/// case, so it must not fail just because `segments/` is absent.
+#[test]
+#[serial(open_databases)]
+fn test_follower_without_manifest_tolerates_missing_segments_root() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    {
+        let primary =
+            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+                .unwrap();
+        primary_put(&primary, branch, "k", "v-from-primary");
+        primary.shutdown().unwrap();
+    }
+
+    let manifest_path = dir.path().join("MANIFEST");
+    if manifest_path.exists() {
+        std::fs::remove_file(&manifest_path).unwrap();
+    }
+    let segments_dir = dir.path().join("segments");
+    if segments_dir.exists() {
+        std::fs::remove_dir_all(&segments_dir).unwrap();
+    }
+
+    let follower =
+        Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(SearchSubsystem))
+            .expect(
+                "MANIFEST-absent follower open must stay WAL-only even when the \
+         segments root is absent",
+            );
+
+    assert_eq!(
+        read_kv(&follower, branch, "k").as_deref(),
+        Some("v-from-primary"),
+        "follower should recover from WAL without requiring a preexisting segments root",
+    );
+
+    follower.shutdown().unwrap();
+}
+
 /// T3-E11 / DR-011 regression guard for the follower open/refresh policy matrix.
 ///
 /// The mixed policy is documented in

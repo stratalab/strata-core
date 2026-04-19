@@ -764,6 +764,10 @@ pub struct SegmentedStore {
     /// store has nothing to have gone wrong. Read by SE3's GC refusal and
     /// D4's engine-side health accessor; written only by `recover_segments`.
     last_recovery_health: ArcSwap<RecoveryHealth>,
+    /// `recover_segments()` is a one-shot bootstrap primitive. Once it
+    /// successfully installs recovered state, calling it again on the same
+    /// store instance would duplicate recovered segments and refcounts.
+    recovery_applied: AtomicBool,
 }
 
 /// Latched storage publication durability issue for the current process.
@@ -787,6 +791,41 @@ enum PublishOutcome {
 struct InheritedResolveStats {
     max_commit_id: CommitVersion,
     segments_loaded: usize,
+}
+
+struct RecoveryInvocationGuard<'a> {
+    flag: &'a AtomicBool,
+    committed: bool,
+}
+
+impl<'a> RecoveryInvocationGuard<'a> {
+    fn begin(flag: &'a AtomicBool) -> StorageResult<Self> {
+        flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| StorageError::RecoveryAlreadyApplied)?;
+        Ok(Self {
+            flag,
+            committed: false,
+        })
+    }
+
+    fn commit(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for RecoveryInvocationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.committed {
+            self.flag.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn missing_segments_dir_error(path: &std::path::Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NotFound,
+        format!("segments directory {} is missing", path.display()),
+    )
 }
 
 impl SegmentedStore {
@@ -817,6 +856,7 @@ impl SegmentedStore {
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -848,6 +888,7 @@ impl SegmentedStore {
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -879,6 +920,7 @@ impl SegmentedStore {
             bloom_bits_per_key: AtomicUsize::new(10),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
+            recovery_applied: AtomicBool::new(false),
         }
     }
 
@@ -3292,7 +3334,7 @@ impl SegmentedStore {
         self.segments_dir.as_ref()
     }
 
-    /// Recover flushed segments from disk.
+    /// Recover flushed segments from disk into a fresh store.
     ///
     /// Scans `segments_dir` for branch subdirectories (hex-encoded BranchId),
     /// opens `.sst` files within each, and installs them into the store. On
@@ -3303,28 +3345,51 @@ impl SegmentedStore {
     /// with defects captured inside `RecoveredState::health` as typed
     /// [`RecoveryFault`]s. The `Err` arm is reserved for pre-walk I/O
     /// failures — e.g. the top-level `read_dir(segments_dir)` itself
-    /// failing. Those hard errors still publish a degraded
-    /// `last_recovery_health()` snapshot before returning. Per-branch failures
-    /// classify into faults and continue.
+    /// failing or the authoritative `segments_dir` being missing. Those hard
+    /// errors still publish a degraded `last_recovery_health()` snapshot
+    /// before returning. Per-branch failures classify into faults and
+    /// continue.
+    ///
+    /// This is a one-shot bootstrap primitive. A second successful call on
+    /// the same `SegmentedStore` instance would duplicate recovered state, so
+    /// repeated invocations return [`StorageError::RecoveryAlreadyApplied`].
     ///
     /// Callers should pass the returned outcome to
     /// `TransactionCoordinator::apply_storage_recovery` rather than reading
     /// individual fields: that entry point owns version-floor adoption and
     /// future per-branch version wiring.
     pub fn recover_segments(&self) -> StorageResult<RecoveredState> {
+        let mut invocation = RecoveryInvocationGuard::begin(&self.recovery_applied)?;
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => {
                 self.last_recovery_health
                     .store(Arc::new(RecoveryHealth::Healthy));
+                invocation.commit();
                 return Ok(RecoveredState::empty());
             }
         };
 
-        if !segments_dir.exists() {
-            self.last_recovery_health
-                .store(Arc::new(RecoveryHealth::Healthy));
-            return Ok(RecoveredState::empty());
+        match std::fs::metadata(segments_dir) {
+            Ok(_) => {}
+            Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(
+                    missing_segments_dir_error(segments_dir),
+                )]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(missing_segments_dir_error(segments_dir).into());
+            }
+            Err(e) => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to stat segments directory {}: {e}",
+                        segments_dir.display()
+                    ),
+                ))]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(e.into());
+            }
         }
 
         let mut faults: Vec<RecoveryFault> = Vec::new();
@@ -3626,6 +3691,7 @@ impl SegmentedStore {
 
         let health = RecoveryHealth::from_faults(faults);
         self.last_recovery_health.store(Arc::new(health.clone()));
+        invocation.commit();
 
         Ok(RecoveredState {
             version_floor,
