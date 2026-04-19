@@ -656,11 +656,16 @@ fn recover_corrupt_segment_produces_fault() {
     match &outcome.health {
         super::RecoveryHealth::Degraded { faults, class } => {
             assert_eq!(*class, super::DegradationClass::DataLoss);
-            let corrupt = faults.iter().find(|f| matches!(
-                f,
-                super::RecoveryFault::CorruptSegment { file, .. } if file == &corrupt_path
-            ));
-            assert!(corrupt.is_some(), "expected CorruptSegment for {corrupt_path:?}");
+            let corrupt = faults.iter().find(|f| {
+                matches!(
+                    f,
+                    super::RecoveryFault::CorruptSegment { file, .. } if file == &corrupt_path
+                )
+            });
+            assert!(
+                corrupt.is_some(),
+                "expected CorruptSegment for {corrupt_path:?}"
+            );
         }
         other => panic!("expected Degraded, got {other:?}"),
     }
@@ -705,10 +710,12 @@ fn recover_missing_manifest_listed_produces_fault() {
     match &outcome.health {
         super::RecoveryHealth::Degraded { faults, class } => {
             assert_eq!(*class, super::DegradationClass::DataLoss);
-            let missing = faults.iter().find(|f| matches!(
-                f,
-                super::RecoveryFault::MissingManifestListed { file, .. } if file == &sst_name
-            ));
+            let missing = faults.iter().find(|f| {
+                matches!(
+                    f,
+                    super::RecoveryFault::MissingManifestListed { file, .. } if file == &sst_name
+                )
+            });
             assert!(
                 missing.is_some(),
                 "expected MissingManifestListed fault for {sst_name}"
@@ -716,6 +723,57 @@ fn recover_missing_manifest_listed_produces_fault() {
         }
         other => panic!("expected Degraded, got {other:?}"),
     }
+}
+
+#[test]
+fn recover_corrupt_manifest_listed_segment_is_not_reported_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+    drop(store);
+
+    let branch_hex = super::hex_encode_branch(&branch());
+    let branch_dir = dir.path().join(&branch_hex);
+    let listed_sst = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .expect("expected one manifest-listed .sst")
+        .path();
+    std::fs::write(&listed_sst, b"not a valid segment anymore").unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = store2.recover_segments().unwrap();
+
+    match &outcome.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(*class, super::DegradationClass::DataLoss);
+            let corrupt_count = faults
+                .iter()
+                .filter(|f| matches!(f, super::RecoveryFault::CorruptSegment { .. }))
+                .count();
+            let missing_count = faults
+                .iter()
+                .filter(|f| matches!(f, super::RecoveryFault::MissingManifestListed { .. }))
+                .count();
+            assert_eq!(
+                corrupt_count, 1,
+                "listed corrupt segment should surface exactly one CorruptSegment fault"
+            );
+            assert_eq!(
+                missing_count, 0,
+                "listed corrupt segment exists on disk and must not be misreported as missing"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+    assert_eq!(
+        outcome.branches_recovered, 0,
+        "branch with no loadable own or inherited segments must not be counted as recovered"
+    );
 }
 
 #[test]
@@ -781,13 +839,39 @@ fn last_recovery_health_tracks_classification_across_calls() {
         &*store2.last_recovery_health(),
         super::RecoveryHealth::Healthy
     ));
-    store2.recover_segments().unwrap();
+    let outcome = store2.recover_segments().unwrap();
     // Post-recovery: accessor reflects the classified outcome.
-    match &*store2.last_recovery_health() {
-        super::RecoveryHealth::Degraded { class, .. } => {
-            assert_eq!(*class, super::DegradationClass::DataLoss);
+    match (&outcome.health, &*store2.last_recovery_health()) {
+        (
+            super::RecoveryHealth::Degraded {
+                faults: outcome_faults,
+                class: outcome_class,
+            },
+            super::RecoveryHealth::Degraded {
+                faults: stored_faults,
+                class: stored_class,
+            },
+        ) => {
+            assert_eq!(*outcome_class, super::DegradationClass::DataLoss);
+            assert_eq!(*stored_class, super::DegradationClass::DataLoss);
+            assert_eq!(
+                outcome_faults.len(),
+                stored_faults.len(),
+                "stored recovery health must preserve the same fault count as the returned outcome"
+            );
+            assert_eq!(
+                *outcome_class, *stored_class,
+                "stored recovery health must preserve the same degradation class"
+            );
+            assert!(
+                stored_faults.iter().any(|f| matches!(
+                    f,
+                    super::RecoveryFault::CorruptSegment { file, .. } if file == &corrupt_path
+                )),
+                "stored recovery health must preserve the original CorruptSegment fault"
+            );
         }
-        other => panic!("expected Degraded, got {other:?}"),
+        other => panic!("expected matching Degraded outcomes, got {other:?}"),
     }
 
     // A fresh store pointed at a clean directory must reset the accessor to

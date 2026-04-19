@@ -961,8 +961,7 @@ impl Database {
                         segments = outcome.segments_loaded,
                         "Recovered segments from disk");
                 }
-                if let strata_storage::RecoveryHealth::Degraded { faults, class } =
-                    &outcome.health
+                if let strata_storage::RecoveryHealth::Degraded { faults, class } = &outcome.health
                 {
                     warn!(
                         target: "strata::recovery::health",

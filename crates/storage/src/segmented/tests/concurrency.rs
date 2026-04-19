@@ -211,7 +211,7 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store2.recover_segments().unwrap();
     let faults = match &info.health {
-        crate::segmented::RecoveryHealth::Degraded { faults, .. } => faults.as_slice(),
+        crate::segmented::RecoveryHealth::Degraded { faults, .. } => &faults[..],
         crate::segmented::RecoveryHealth::Healthy => &[],
     };
     assert!(

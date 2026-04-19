@@ -3325,7 +3325,7 @@ impl SegmentedStore {
         let mut branch_versions: HashMap<BranchId, CommitVersion> = HashMap::new();
         let mut version_floor = CommitVersion::ZERO;
         let mut segments_loaded: usize = 0;
-        let mut branches_recovered: usize = 0;
+        let mut recovered_branches: HashSet<BranchId> = HashSet::new();
 
         // Collect inherited layer info for deferred resolution (second pass).
         let mut deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)> =
@@ -3359,6 +3359,7 @@ impl SegmentedStore {
             };
 
             let mut branch_segments: Vec<Arc<KVSegment>> = Vec::new();
+            let mut sst_names_on_disk: HashSet<String> = HashSet::new();
 
             // Per-branch read_dir failure is a fault for this branch; other
             // branches can still recover.
@@ -3381,6 +3382,9 @@ impl SegmentedStore {
                 let seg_path = seg_entry.path();
                 if seg_path.extension().and_then(|e| e.to_str()) != Some("sst") {
                     continue;
+                }
+                if let Some(name) = seg_path.file_name().and_then(|n| n.to_str()) {
+                    sst_names_on_disk.insert(name.to_string());
                 }
 
                 match KVSegment::open(&seg_path) {
@@ -3431,17 +3435,8 @@ impl SegmentedStore {
             // even if the branch appears "empty" because the sole listed file
             // was deleted).
             if let Some(ref manifest) = manifest {
-                let on_disk_names: std::collections::HashSet<String> = branch_segments
-                    .iter()
-                    .filter_map(|seg| {
-                        seg.file_path()
-                            .file_name()
-                            .and_then(|n| n.to_str())
-                            .map(|n| n.to_string())
-                    })
-                    .collect();
                 for entry in &manifest.entries {
-                    if !on_disk_names.contains(&entry.filename) {
+                    if !sst_names_on_disk.contains(&entry.filename) {
                         faults.push(RecoveryFault::MissingManifestListed {
                             branch_id,
                             file: entry.filename.clone(),
@@ -3539,7 +3534,11 @@ impl SegmentedStore {
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
 
-            segments_loaded += level_segs.iter().map(|l| l.len()).sum::<usize>();
+            let own_segments_loaded = level_segs.iter().map(|l| l.len()).sum::<usize>();
+            segments_loaded += own_segments_loaded;
+            if own_segments_loaded > 0 {
+                recovered_branches.insert(branch_id);
+            }
 
             // Rebuild branch.max_version from the loaded segments before we
             // install the version. Mirrors the snapshot-install pattern: post
@@ -3577,7 +3576,9 @@ impl SegmentedStore {
             refresh_level_targets(&mut branch, self.level_base_bytes());
 
             if branch_max > CommitVersion::ZERO {
-                let entry = branch_versions.entry(branch_id).or_insert(CommitVersion::ZERO);
+                let entry = branch_versions
+                    .entry(branch_id)
+                    .or_insert(CommitVersion::ZERO);
                 *entry = (*entry).max(branch_max);
             }
 
@@ -3587,8 +3588,6 @@ impl SegmentedStore {
                     deferred_inherited.push((branch_id, manifest.inherited_layers));
                 }
             }
-
-            branches_recovered += 1;
         }
 
         // Second pass + refcount rebuild. Inherited layers contribute their
@@ -3598,24 +3597,15 @@ impl SegmentedStore {
             segments_dir,
             deferred_inherited,
             &mut branch_versions,
+            &mut recovered_branches,
             &mut faults,
         );
         version_floor = version_floor.max(inherited_stats.max_commit_id);
         segments_loaded += inherited_stats.segments_loaded;
+        let branches_recovered = recovered_branches.len();
 
         let health = RecoveryHealth::from_faults(faults);
-        self.last_recovery_health.store(Arc::new(match &health {
-            RecoveryHealth::Healthy => RecoveryHealth::Healthy,
-            RecoveryHealth::Degraded { class, .. } => RecoveryHealth::Degraded {
-                faults: Vec::new(),
-                class: *class,
-            },
-        }));
-        // The stored handle carries classification only — faults are not
-        // cloneable (io::Error). The RecoveredState returned to the caller
-        // carries the full fault list. Callers who need specific faults
-        // consume the outcome directly; the stored handle is for health-only
-        // queries (SE3 GC refusal, D4 recovery_health accessor).
+        self.last_recovery_health.store(Arc::new(health.clone()));
 
         Ok(RecoveredState {
             version_floor,
@@ -3640,6 +3630,7 @@ impl SegmentedStore {
         segments_dir: &std::path::Path,
         deferred_inherited: Vec<(BranchId, Vec<crate::manifest::ManifestInheritedLayer>)>,
         branch_versions: &mut HashMap<BranchId, CommitVersion>,
+        recovered_branches: &mut HashSet<BranchId>,
         faults: &mut Vec<RecoveryFault>,
     ) -> InheritedResolveStats {
         let mut stats = InheritedResolveStats::default();
@@ -3650,6 +3641,7 @@ impl SegmentedStore {
                 let source_dir = segments_dir.join(hex_encode_branch(&ml.source_branch_id));
                 let mut layer_levels: Vec<Vec<Arc<KVSegment>>> = vec![Vec::new(); NUM_LEVELS];
                 let mut any_found = false;
+                let mut missing_entries = false;
                 let mut layer_max = CommitVersion::ZERO;
 
                 for entry in &ml.entries {
@@ -3671,6 +3663,7 @@ impl SegmentedStore {
                             any_found = true;
                         }
                         Err(e) => {
+                            missing_entries = true;
                             tracing::warn!(
                                 child = %hex_encode_branch(&child_id),
                                 source = %hex_encode_branch(&ml.source_branch_id),
@@ -3690,9 +3683,17 @@ impl SegmentedStore {
                     continue;
                 }
 
+                if missing_entries {
+                    faults.push(RecoveryFault::InheritedLayerLost {
+                        child: child_id,
+                        source_branch: ml.source_branch_id,
+                    });
+                }
+
                 if layer_max > CommitVersion::ZERO {
-                    let child_entry =
-                        branch_versions.entry(child_id).or_insert(CommitVersion::ZERO);
+                    let child_entry = branch_versions
+                        .entry(child_id)
+                        .or_insert(CommitVersion::ZERO);
                     *child_entry = (*child_entry).max(layer_max);
                 }
 
@@ -3717,6 +3718,7 @@ impl SegmentedStore {
                     }),
                     status,
                 });
+                recovered_branches.insert(child_id);
             }
 
             if !inherited_layers.is_empty() {

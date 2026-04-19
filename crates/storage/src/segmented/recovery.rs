@@ -24,6 +24,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
@@ -77,7 +78,7 @@ impl RecoveredState {
 /// Callers match on the variant (and, for `Degraded`, on
 /// [`DegradationClass`]) to decide strict-vs-lossy policy. They do not
 /// iterate `faults` to reconstruct what storage already knows.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub enum RecoveryHealth {
     /// Recovery completed with no observed faults.
@@ -85,7 +86,7 @@ pub enum RecoveryHealth {
     /// Recovery completed but observed one or more faults.
     Degraded {
         /// Ordered list of faults observed during the walk.
-        faults: Vec<RecoveryFault>,
+        faults: Arc<[RecoveryFault]>,
         /// Severity-dominant classification across `faults`.
         class: DegradationClass,
     },
@@ -172,9 +173,10 @@ pub enum RecoveryFault {
         /// Filename recorded in the manifest but not found on disk.
         file: String,
     },
-    /// A child branch's inherited layer could not be resolved because no
-    /// segment of the source branch was loadable. The child loses visibility
-    /// into data that was visible before the crash.
+    /// A child branch's inherited layer lost one or more required segment
+    /// entries during recovery. The child loses visibility into data that was
+    /// visible before the crash, even if some entries from the same layer
+    /// were still loadable.
     #[error("inherited layer lost for branch {child} (source {source_branch})")]
     InheritedLayerLost {
         /// Child branch whose layer was dropped.
@@ -223,7 +225,10 @@ impl RecoveryHealth {
             RecoveryHealth::Healthy
         } else {
             let class = DegradationClass::worst(&faults);
-            RecoveryHealth::Degraded { faults, class }
+            RecoveryHealth::Degraded {
+                faults: faults.into(),
+                class,
+            }
         }
     }
 }
