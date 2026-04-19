@@ -1,7 +1,7 @@
 //! Database opening and initialization.
 
 use super::config::StorageConfig;
-use super::refresh::load_persisted_follower_state;
+use super::refresh::{load_persisted_follower_state, validate_blocked_state};
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -615,25 +615,27 @@ impl Database {
         };
 
         let persisted_follower_state = match load_persisted_follower_state(&canonical_path) {
-            Ok(Some(state))
-                if state.applied_watermark.as_u64() <= state.received_watermark.as_u64()
-                    && state.received_watermark.as_u64() <= result.stats.max_txn_id.as_u64()
-                    && state.visible_version.as_u64() <= result.stats.final_version.as_u64() =>
-            {
-                Some(state)
-            }
-            Ok(Some(state)) => {
-                warn!(
-                    target: "strata::db",
-                    received = state.received_watermark.as_u64(),
-                    applied = state.applied_watermark.as_u64(),
-                    visible_version = state.visible_version.as_u64(),
-                    recovered_txn = result.stats.max_txn_id.as_u64(),
-                    recovered_version = result.stats.final_version.as_u64(),
-                    "Ignoring inconsistent persisted follower state"
-                );
-                None
-            }
+            Ok(Some(state)) => match validate_blocked_state(
+                &state,
+                result.stats.max_txn_id,
+                result.stats.final_version,
+            ) {
+                Ok(()) => Some(state),
+                Err(reason) => {
+                    warn!(
+                        target: "strata::db",
+                        received = state.received_watermark.as_u64(),
+                        applied = state.applied_watermark.as_u64(),
+                        visible_version = state.visible_version.as_u64(),
+                        blocked_txn = state.blocked.blocked.txn_id.as_u64(),
+                        recovered_txn = result.stats.max_txn_id.as_u64(),
+                        recovered_version = result.stats.final_version.as_u64(),
+                        reason = %reason,
+                        "Ignoring inconsistent persisted follower state"
+                    );
+                    None
+                }
+            },
             Ok(None) => None,
             Err(e) => {
                 warn!(

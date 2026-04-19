@@ -404,6 +404,224 @@ pub(crate) struct PersistedFollowerState {
     pub blocked: BlockedTxnState,
 }
 
+/// Typed rejection reason when a persisted `PersistedFollowerState` fails
+/// the semantic coherence check run at follower open.
+///
+/// A rejection never fails the open — the follower falls back to a fresh
+/// watermark at the recovered max txn id — but the reason is surfaced via
+/// tracing so an operator can diagnose whether the file was hand-edited,
+/// truncated across a restart, or left behind by a previous binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub(crate) enum BlockedStateValidationError {
+    /// `applied_watermark > received_watermark` — watermark pair is inverted.
+    AppliedExceedsReceived { applied: TxnId, received: TxnId },
+    /// `received_watermark` is beyond what recovery could reconstruct from
+    /// on-disk WAL + snapshot.
+    ReceivedExceedsRecovered {
+        received: TxnId,
+        recovered_max: TxnId,
+    },
+    /// Persisted visible version is beyond what recovery reconstructed.
+    VisibleExceedsRecovered {
+        visible: CommitVersion,
+        recovered: CommitVersion,
+    },
+    /// `blocked.txn_id <= applied_watermark` — a blocked record must be
+    /// strictly ahead of the last applied record; otherwise refresh has
+    /// no resume point.
+    BlockedNotAheadOfApplied { blocked: TxnId, applied: TxnId },
+    /// `blocked.txn_id > received_watermark` — block references a record
+    /// the follower never received from the WAL.
+    BlockedBeyondReceived { blocked: TxnId, received: TxnId },
+    /// `visibility_version` is `Some(v)` with `v > recovered_final_version`.
+    /// When refresh fails mid-record after storage apply, the blocked state
+    /// captures the commit version that `admin_skip_blocked_record` will
+    /// advance visibility to; that version cannot exceed what recovery
+    /// reconstructed, or a later skip would advance visibility past
+    /// storage's actual high water mark.
+    VisibilityVersionExceedsRecovered {
+        visibility_version: CommitVersion,
+        recovered: CommitVersion,
+    },
+    /// `BlockReason` fields are internally inconsistent.
+    IncoherentBlockReason(BlockReasonIncoherence),
+}
+
+/// Sub-classification of incoherent `BlockReason` fields.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub(crate) enum BlockReasonIncoherence {
+    /// `Decode { message }` / `StorageApply { message }` with empty message.
+    EmptyMessage,
+    /// `SecondaryIndex { hook_name, .. }` with empty hook name.
+    EmptyHookName,
+    /// `Codec { expected, actual }` with either side empty.
+    EmptyCodecId,
+    /// `Codec { expected, actual }` where both are the same non-empty id —
+    /// a "mismatch" can never have `expected == actual`.
+    CodecExpectedEqualsActual { codec: String },
+}
+
+impl fmt::Display for BlockedStateValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BlockedStateValidationError::AppliedExceedsReceived { applied, received } => write!(
+                f,
+                "applied_watermark {} exceeds received_watermark {}",
+                applied, received
+            ),
+            BlockedStateValidationError::ReceivedExceedsRecovered {
+                received,
+                recovered_max,
+            } => write!(
+                f,
+                "received_watermark {} exceeds recovered max txn id {}",
+                received, recovered_max
+            ),
+            BlockedStateValidationError::VisibleExceedsRecovered { visible, recovered } => write!(
+                f,
+                "visible_version {} exceeds recovered final version {}",
+                visible.as_u64(),
+                recovered.as_u64()
+            ),
+            BlockedStateValidationError::BlockedNotAheadOfApplied { blocked, applied } => write!(
+                f,
+                "blocked txn {} is not ahead of applied_watermark {}",
+                blocked, applied
+            ),
+            BlockedStateValidationError::BlockedBeyondReceived { blocked, received } => write!(
+                f,
+                "blocked txn {} exceeds received_watermark {}",
+                blocked, received
+            ),
+            BlockedStateValidationError::VisibilityVersionExceedsRecovered {
+                visibility_version,
+                recovered,
+            } => write!(
+                f,
+                "blocked visibility_version {} exceeds recovered final version {}",
+                visibility_version.as_u64(),
+                recovered.as_u64()
+            ),
+            BlockedStateValidationError::IncoherentBlockReason(inc) => match inc {
+                BlockReasonIncoherence::EmptyMessage => write!(f, "block reason has empty message"),
+                BlockReasonIncoherence::EmptyHookName => {
+                    write!(f, "secondary-index block reason has empty hook name")
+                }
+                BlockReasonIncoherence::EmptyCodecId => {
+                    write!(f, "codec-mismatch block reason has empty codec id")
+                }
+                BlockReasonIncoherence::CodecExpectedEqualsActual { codec } => write!(
+                    f,
+                    "codec-mismatch block reason has expected == actual = {}",
+                    codec
+                ),
+            },
+        }
+    }
+}
+
+/// Validate a persisted `PersistedFollowerState` against the watermarks
+/// recovery just reconstructed.
+///
+/// This enforces the watermark pair invariants and the `BlockedTxnState`
+/// semantic invariants that the on-disk file format by itself cannot pin:
+/// serde round-trips any numerically-typed field without complaint, so
+/// `blocked.txn_id == 0` on a follower that applied 100 records would
+/// survive deserialization. Without this helper the first `refresh()`
+/// after restart would return `RefreshOutcome::NoProgress { blocked_at: 0 }`
+/// and silently pin the follower behind a record it already applied.
+///
+/// On rejection the caller is expected to fall back to a fresh watermark
+/// at the recovered max txn id and warn with the typed reason.
+pub(crate) fn validate_blocked_state(
+    state: &PersistedFollowerState,
+    recovered_max_txn_id: TxnId,
+    recovered_final_version: CommitVersion,
+) -> Result<(), BlockedStateValidationError> {
+    if state.applied_watermark > state.received_watermark {
+        return Err(BlockedStateValidationError::AppliedExceedsReceived {
+            applied: state.applied_watermark,
+            received: state.received_watermark,
+        });
+    }
+    if state.received_watermark > recovered_max_txn_id {
+        return Err(BlockedStateValidationError::ReceivedExceedsRecovered {
+            received: state.received_watermark,
+            recovered_max: recovered_max_txn_id,
+        });
+    }
+    if state.visible_version > recovered_final_version {
+        return Err(BlockedStateValidationError::VisibleExceedsRecovered {
+            visible: state.visible_version,
+            recovered: recovered_final_version,
+        });
+    }
+
+    let blocked_txn = state.blocked.blocked.txn_id;
+    if blocked_txn <= state.applied_watermark {
+        return Err(BlockedStateValidationError::BlockedNotAheadOfApplied {
+            blocked: blocked_txn,
+            applied: state.applied_watermark,
+        });
+    }
+    if blocked_txn > state.received_watermark {
+        return Err(BlockedStateValidationError::BlockedBeyondReceived {
+            blocked: blocked_txn,
+            received: state.received_watermark,
+        });
+    }
+    if let Some(v) = state.blocked.visibility_version {
+        if v > recovered_final_version {
+            return Err(
+                BlockedStateValidationError::VisibilityVersionExceedsRecovered {
+                    visibility_version: v,
+                    recovered: recovered_final_version,
+                },
+            );
+        }
+    }
+    validate_block_reason(&state.blocked.blocked.reason)?;
+    Ok(())
+}
+
+fn validate_block_reason(reason: &BlockReason) -> Result<(), BlockedStateValidationError> {
+    let incoherence = match reason {
+        BlockReason::Decode { message } | BlockReason::StorageApply { message } => {
+            if message.is_empty() {
+                Some(BlockReasonIncoherence::EmptyMessage)
+            } else {
+                None
+            }
+        }
+        BlockReason::SecondaryIndex { hook_name, message } => {
+            if hook_name.is_empty() {
+                Some(BlockReasonIncoherence::EmptyHookName)
+            } else if message.is_empty() {
+                Some(BlockReasonIncoherence::EmptyMessage)
+            } else {
+                None
+            }
+        }
+        BlockReason::Codec { expected, actual } => {
+            if expected.is_empty() || actual.is_empty() {
+                Some(BlockReasonIncoherence::EmptyCodecId)
+            } else if expected == actual {
+                Some(BlockReasonIncoherence::CodecExpectedEqualsActual {
+                    codec: expected.clone(),
+                })
+            } else {
+                None
+            }
+        }
+    };
+    match incoherence {
+        Some(inc) => Err(BlockedStateValidationError::IncoherentBlockReason(inc)),
+        None => Ok(()),
+    }
+}
+
 pub(crate) const FOLLOWER_STATE_FILE: &str = "follower_state.json";
 
 pub(crate) fn follower_state_path(data_dir: &Path) -> Option<PathBuf> {
@@ -914,5 +1132,237 @@ mod watermark_contiguity_tests {
         wm.unblock_exact(TxnId(101)).unwrap();
         assert_eq!(wm.applied(), TxnId(101));
         assert_eq!(wm.try_advance(TxnId(102)), Ok(()));
+    }
+}
+
+#[cfg(test)]
+mod persisted_state_validation_tests {
+    use super::*;
+
+    fn persisted(
+        received: u64,
+        applied: u64,
+        visible: u64,
+        blocked_txn: u64,
+        reason: BlockReason,
+    ) -> PersistedFollowerState {
+        PersistedFollowerState {
+            received_watermark: TxnId(received),
+            applied_watermark: TxnId(applied),
+            visible_version: CommitVersion(visible),
+            blocked: BlockedTxnState {
+                blocked: BlockedTxn {
+                    txn_id: TxnId(blocked_txn),
+                    reason,
+                },
+                visibility_version: None,
+                skip_allowed: true,
+            },
+        }
+    }
+
+    fn ok_decode() -> BlockReason {
+        BlockReason::Decode {
+            message: "x".into(),
+        }
+    }
+
+    #[test]
+    fn accepts_coherent_persisted_state() {
+        let s = persisted(10, 5, 5, 6, ok_decode());
+        assert_eq!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_applied_exceeds_received() {
+        let s = persisted(5, 10, 5, 11, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(20), CommitVersion(10)),
+            Err(BlockedStateValidationError::AppliedExceedsReceived {
+                applied: TxnId(10),
+                received: TxnId(5),
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_received_exceeds_recovered() {
+        let s = persisted(100, 5, 5, 6, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(50), CommitVersion(50)),
+            Err(BlockedStateValidationError::ReceivedExceedsRecovered {
+                received: TxnId(100),
+                recovered_max: TxnId(50),
+            })
+        ));
+    }
+
+    #[test]
+    fn rejects_visible_exceeds_recovered() {
+        let s = persisted(10, 5, 100, 6, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::VisibleExceedsRecovered { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_blocked_not_ahead_of_applied() {
+        // blocked.txn_id == applied_watermark → must be rejected.
+        let s = persisted(10, 5, 5, 5, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::BlockedNotAheadOfApplied {
+                blocked: TxnId(5),
+                applied: TxnId(5),
+            })
+        ));
+
+        // blocked.txn_id < applied_watermark → must be rejected.
+        let s = persisted(10, 5, 5, 3, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::BlockedNotAheadOfApplied { .. })
+        ));
+    }
+
+    #[test]
+    fn rejects_blocked_beyond_received() {
+        let s = persisted(10, 5, 5, 11, ok_decode());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(20), CommitVersion(10)),
+            Err(BlockedStateValidationError::BlockedBeyondReceived {
+                blocked: TxnId(11),
+                received: TxnId(10),
+            })
+        ));
+    }
+
+    #[test]
+    fn accepts_visibility_version_within_recovered() {
+        // Hook-after-storage-apply block: visibility_version carries the
+        // commit version admin_skip will bump visibility to. Any value
+        // up to the recovered final version is legitimate.
+        let mut s = persisted(10, 5, 5, 6, ok_decode());
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert_eq!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_visibility_version_beyond_recovered() {
+        let mut s = persisted(10, 5, 5, 6, ok_decode());
+        s.blocked.visibility_version = Some(CommitVersion(42));
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(
+                BlockedStateValidationError::VisibilityVersionExceedsRecovered {
+                    visibility_version: CommitVersion(42),
+                    recovered: CommitVersion(5),
+                }
+            )
+        ));
+    }
+
+    #[test]
+    fn rejects_codec_expected_equals_actual() {
+        let s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::Codec {
+                expected: "v3".into(),
+                actual: "v3".into(),
+            },
+        );
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::CodecExpectedEqualsActual { .. }
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_codec_empty_id() {
+        let s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::Codec {
+                expected: String::new(),
+                actual: "v3".into(),
+            },
+        );
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::EmptyCodecId
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_secondary_index_empty_hook_name() {
+        let s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::SecondaryIndex {
+                hook_name: String::new(),
+                message: "x".into(),
+            },
+        );
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::EmptyHookName
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_empty_decode_message() {
+        let s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::Decode {
+                message: String::new(),
+            },
+        );
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::EmptyMessage
+            ))
+        ));
+    }
+
+    #[test]
+    fn accepts_coherent_codec_mismatch() {
+        let s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::Codec {
+                expected: "v3".into(),
+                actual: "v2".into(),
+            },
+        );
+        assert_eq!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Ok(())
+        );
     }
 }
