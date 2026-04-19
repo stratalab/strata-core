@@ -1,7 +1,9 @@
 //! Database opening and initialization.
 
 use super::config::StorageConfig;
-use super::refresh::{load_persisted_follower_state, validate_blocked_state};
+use super::refresh::{
+    clear_persisted_follower_state, load_persisted_follower_state, validate_blocked_state,
+};
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -633,6 +635,13 @@ impl Database {
                         reason = %reason,
                         "Ignoring inconsistent persisted follower state"
                     );
+                    if let Err(error) = clear_persisted_follower_state(&canonical_path) {
+                        warn!(
+                            target: "strata::db",
+                            error = %error,
+                            "Failed to clear inconsistent persisted follower state"
+                        );
+                    }
                     None
                 }
             },

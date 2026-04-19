@@ -2012,6 +2012,10 @@ fn test_follower_rejects_tampered_blocked_state_on_reopen() {
         !status.is_blocked(),
         "tampered state must be rejected; reopen must not carry the bogus blocked txn"
     );
+    assert!(
+        !state_path.exists(),
+        "reopen should clear the rejected follower_state.json instead of leaving stale state behind"
+    );
 }
 
 /// D6: a persisted hook-failure blocked state must keep the post-apply
