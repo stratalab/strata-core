@@ -884,3 +884,50 @@ fn last_recovery_health_tracks_classification_across_calls() {
         super::RecoveryHealth::Healthy
     ));
 }
+
+#[test]
+fn last_recovery_health_updates_on_prewalk_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("segments-file");
+    std::fs::write(&not_a_dir, b"not a directory").unwrap();
+
+    let store = SegmentedStore::with_dir(not_a_dir.clone(), 0);
+    assert!(matches!(
+        &*store.last_recovery_health(),
+        super::RecoveryHealth::Healthy
+    ));
+
+    let err = store
+        .recover_segments()
+        .expect_err("top-level read_dir failure should still return Err");
+    let returned_kind = err.kind();
+
+    match &*store.last_recovery_health() {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(
+                *class,
+                super::DegradationClass::DataLoss,
+                "pre-walk I/O failures should publish degraded recovery health"
+            );
+            let io_fault = faults
+                .iter()
+                .find_map(|fault| match fault {
+                    super::RecoveryFault::Io(inner) => Some(inner),
+                    _ => None,
+                })
+                .expect("stored recovery health should preserve the pre-walk I/O failure");
+            assert_eq!(
+                io_fault.kind(),
+                returned_kind,
+                "stored recovery health should preserve the returned error kind"
+            );
+            assert!(
+                io_fault
+                    .to_string()
+                    .contains(not_a_dir.to_string_lossy().as_ref()),
+                "stored recovery health should identify the segments path that failed"
+            );
+        }
+        other => panic!("expected degraded health after pre-walk error, got {other:?}"),
+    }
+}

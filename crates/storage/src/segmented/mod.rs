@@ -898,13 +898,16 @@ impl SegmentedStore {
         self.branches.len()
     }
 
-    /// Classified health of the most recent `recover_segments()` call.
+    /// Classified health of the most recent attempted `recover_segments()`
+    /// call.
     ///
     /// Returns [`RecoveryHealth::Healthy`] for stores that have never run
-    /// recovery. SE3 uses this to refuse orphan GC under degraded recovery;
-    /// D4 exposes it through the engine's public `recovery_health()`
-    /// accessor. The returned `Arc` is a snapshot — subsequent recovery
-    /// calls replace the stored value but do not invalidate this handle.
+    /// recovery. Hard pre-walk I/O failures also publish a degraded snapshot
+    /// here before `recover_segments()` returns `Err`. SE3 uses this to refuse
+    /// orphan GC under degraded recovery; D4 exposes it through the engine's
+    /// public `recovery_health()` accessor. The returned `Arc` is a snapshot
+    /// — subsequent recovery calls replace the stored value but do not
+    /// invalidate this handle.
     pub fn last_recovery_health(&self) -> Arc<RecoveryHealth> {
         self.last_recovery_health.load_full()
     }
@@ -3293,13 +3296,16 @@ impl SegmentedStore {
     ///
     /// Scans `segments_dir` for branch subdirectories (hex-encoded BranchId),
     /// opens `.sst` files within each, and installs them into the store. On
-    /// return, `last_recovery_health()` reflects the classified outcome.
+    /// return or hard pre-walk failure, `last_recovery_health()` reflects the
+    /// most recent classified recovery attempt.
     ///
     /// Returns [`Ok(RecoveredState)`] for every outcome the walk can reach,
     /// with defects captured inside `RecoveredState::health` as typed
     /// [`RecoveryFault`]s. The `Err` arm is reserved for pre-walk I/O
     /// failures — e.g. the top-level `read_dir(segments_dir)` itself
-    /// failing. Per-branch failures classify into faults and continue.
+    /// failing. Those hard errors still publish a degraded
+    /// `last_recovery_health()` snapshot before returning. Per-branch failures
+    /// classify into faults and continue.
     ///
     /// Callers should pass the returned outcome to
     /// `TransactionCoordinator::apply_storage_recovery` rather than reading
@@ -3332,8 +3338,22 @@ impl SegmentedStore {
             Vec::new();
 
         // Top-level read_dir failure is pre-walk: we cannot even enumerate
-        // branches, so surface it as a hard error.
-        let top_entries = std::fs::read_dir(segments_dir)?;
+        // branches, so surface it as a hard error. Still publish a degraded
+        // health snapshot so observers do not retain stale prior state.
+        let top_entries = match std::fs::read_dir(segments_dir) {
+            Ok(entries) => entries,
+            Err(e) => {
+                let health = RecoveryHealth::from_faults(vec![RecoveryFault::Io(io::Error::new(
+                    e.kind(),
+                    format!(
+                        "failed to enumerate segments directory {}: {e}",
+                        segments_dir.display()
+                    ),
+                ))]);
+                self.last_recovery_health.store(Arc::new(health));
+                return Err(e.into());
+            }
+        };
 
         for entry in top_entries {
             let entry = match entry {
@@ -3679,6 +3699,7 @@ impl SegmentedStore {
                     faults.push(RecoveryFault::InheritedLayerLost {
                         child: child_id,
                         source_branch: ml.source_branch_id,
+                        fork_version: ml.fork_version,
                     });
                     continue;
                 }
@@ -3687,6 +3708,7 @@ impl SegmentedStore {
                     faults.push(RecoveryFault::InheritedLayerLost {
                         child: child_id,
                         source_branch: ml.source_branch_id,
+                        fork_version: ml.fork_version,
                     });
                 }
 

@@ -177,7 +177,9 @@ pub enum RecoveryFault {
     /// entries during recovery. The child loses visibility into data that was
     /// visible before the crash, even if some entries from the same layer
     /// were still loadable.
-    #[error("inherited layer lost for branch {child} (source {source_branch})")]
+    #[error(
+        "inherited layer lost for branch {child} (source {source_branch}, fork_version {fork_version})"
+    )]
     InheritedLayerLost {
         /// Child branch whose layer was dropped.
         child: BranchId,
@@ -185,6 +187,9 @@ pub enum RecoveryFault {
         /// rather than `source` to avoid collision with thiserror's magic
         /// `#[source]` field detection.
         source_branch: BranchId,
+        /// Fork version that, together with `source_branch`, identifies the
+        /// inherited layer whose visibility was degraded.
+        fork_version: CommitVersion,
     },
     /// A branch had no manifest on disk; recovery promoted every discovered
     /// `.sst` to L0 for backward compatibility. Strict callers refuse; lossy

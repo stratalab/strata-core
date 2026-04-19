@@ -683,6 +683,7 @@ fn materialize_crash_recovery_with_valid_orphan_segment() {
 #[test]
 fn recovery_surfaces_missing_source_branch() {
     let dir = tempfile::tempdir().unwrap();
+    let expected_fork_version;
 
     // Phase 1: Create parent and fork child
     {
@@ -702,6 +703,18 @@ fn recovery_surfaces_missing_source_branch() {
         // Write manifest for both branches
         store.write_branch_manifest(&parent_branch()).unwrap();
         store.write_branch_manifest(&child_branch()).unwrap();
+
+        let child_hex = hex_encode_branch(&child_branch());
+        let child_dir = dir.path().join(&child_hex);
+        let child_manifest = crate::manifest::read_manifest(&child_dir)
+            .unwrap()
+            .expect("child manifest should exist after fork");
+        assert_eq!(
+            child_manifest.inherited_layers.len(),
+            1,
+            "test setup should create exactly one inherited layer"
+        );
+        expected_fork_version = child_manifest.inherited_layers[0].fork_version;
     }
 
     // Sabotage: delete the parent's branch directory (simulating missing source)
@@ -714,7 +727,7 @@ fn recovery_surfaces_missing_source_branch() {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
 
-        // An InheritedLayerLost fault should report the missing parent.
+        // An InheritedLayerLost fault should report the exact missing layer.
         let faults = match &info.health {
             super::RecoveryHealth::Degraded { faults, class } => {
                 assert_eq!(
@@ -730,13 +743,14 @@ fn recovery_surfaces_missing_source_branch() {
             super::RecoveryFault::InheritedLayerLost {
                 child,
                 source_branch,
-            } => Some((*child, *source_branch)),
+                fork_version,
+            } => Some((*child, *source_branch, *fork_version)),
             _ => None,
         });
         assert_eq!(
             dropped,
-            Some((child_branch(), parent_branch())),
-            "should report dropped inherited layer"
+            Some((child_branch(), parent_branch(), expected_fork_version)),
+            "should report the dropped inherited layer by source and fork version"
         );
         assert_eq!(
             info.branches_recovered, 0,
@@ -759,6 +773,7 @@ fn recovery_surfaces_missing_source_branch() {
 #[test]
 fn recovery_surfaces_partial_inherited_layer_loss() {
     let dir = tempfile::tempdir().unwrap();
+    let expected_fork_version;
 
     {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
@@ -779,6 +794,18 @@ fn recovery_surfaces_partial_inherited_layer_loss() {
             .unwrap();
         store.write_branch_manifest(&parent_branch()).unwrap();
         store.write_branch_manifest(&child_branch()).unwrap();
+
+        let child_hex = hex_encode_branch(&child_branch());
+        let child_dir = dir.path().join(&child_hex);
+        let child_manifest = crate::manifest::read_manifest(&child_dir)
+            .unwrap()
+            .expect("child manifest should exist after fork");
+        assert_eq!(
+            child_manifest.inherited_layers.len(),
+            1,
+            "test setup should create exactly one inherited layer"
+        );
+        expected_fork_version = child_manifest.inherited_layers[0].fork_version;
     }
 
     let parent_hex = hex_encode_branch(&parent_branch());
@@ -815,9 +842,12 @@ fn recovery_surfaces_partial_inherited_layer_loss() {
             super::RecoveryFault::InheritedLayerLost {
                 child,
                 source_branch,
-            } if *child == child_branch() && *source_branch == parent_branch()
+                fork_version,
+            } if *child == child_branch()
+                && *source_branch == parent_branch()
+                && *fork_version == expected_fork_version
         )),
-        "partial inherited-layer loss must surface InheritedLayerLost"
+        "partial inherited-layer loss must surface the exact inherited layer"
     );
 
     let child = store.branches.get(&child_branch()).unwrap();
