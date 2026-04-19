@@ -315,6 +315,18 @@ impl Database {
         // Acquire single-flight gate FIRST to prevent TOCTOU races on blocked state.
         let _guard = RefreshGuard::new(&self.refresh_gate);
 
+        // Re-check shutdown_complete under the gate. D6 runs freeze hooks on
+        // follower shutdown under the same gate; if this refresh was waiting
+        // at the gate while shutdown ran its freeze + set shutdown_complete,
+        // we must NOT proceed to mutate search/vector state that freeze has
+        // already serialized to disk.
+        if self.shutdown_complete.load(Ordering::Acquire) {
+            return RefreshOutcome::CaughtUp {
+                applied: 0,
+                applied_through: self.watermark.applied(),
+            };
+        }
+
         // Now check if blocked (safe under gate protection)
         if let Some(blocked) = self.watermark.blocked() {
             return RefreshOutcome::NoProgress {
@@ -508,7 +520,7 @@ impl Database {
             if let Err(e) = self.watermark.try_advance(txn_id) {
                 let blocked = make_blocked_state(
                     txn_id,
-                    BlockReason::Decode {
+                    BlockReason::PostApplyInvariant {
                         message: format!("watermark advancement failed: {}", e),
                     },
                     Some(CommitVersion(payload.version)),
@@ -683,16 +695,6 @@ impl Database {
         self.shutdown_started.store(true, Ordering::Release);
         self.accepting_transactions.store(false, Ordering::Release);
 
-        // Followers have no background flush thread, WAL writer, or freeze
-        // targets. They also don't own a registry slot (see
-        // `Database::open_runtime_follower` — followers are not deduplicated
-        // via `OPEN_DATABASES`), so we must not call `release_registry_slot`
-        // here: doing so would evict a primary that happens to share the path.
-        if self.follower {
-            self.shutdown_complete.store(true, Ordering::Release);
-            return Ok(());
-        }
-
         // Drain background scheduler before the idle wait so its tasks don't
         // spawn new transactions after `accepting_transactions = false` (they
         // run via internal paths that bypass that gate).
@@ -726,6 +728,29 @@ impl Database {
             }
             drop(health);
             return Err(StrataError::ShutdownTimeout { active_txn_count });
+        }
+
+        // Followers have no background flush thread, no WAL writer, don't
+        // own the MANIFEST, hold no registry slot (they skip `OPEN_DATABASES`
+        // — see `Database::open_runtime_follower`), and hold no exclusive
+        // file lock. They DO install subsystems (search, vector, etc.), so
+        // their freeze hooks must run on close — bypassing them was DG-010.
+        //
+        // Acquire `RefreshGuard` before running freeze hooks so an in-flight
+        // `refresh()` finishes first and no new refresh begins until we
+        // release. Refresh re-checks `shutdown_complete` under the gate, so
+        // the moment we set that flag below any queued refresh sees the
+        // closed state and short-circuits. Without this, freeze and refresh
+        // would both mutate search/vector state concurrently.
+        //
+        // Freeze failure is not treated as successful shutdown: leave
+        // `shutdown_complete` unset so Drop's fallback runs and a retry
+        // re-enters the freeze step.
+        if self.follower {
+            let _refresh_guard = super::refresh::RefreshGuard::new(&self.refresh_gate);
+            self.run_freeze_hooks()?;
+            self.shutdown_complete.store(true, Ordering::Release);
+            return Ok(());
         }
 
         // Flush thread performs a final sync on exit (E-5).

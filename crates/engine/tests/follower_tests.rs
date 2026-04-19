@@ -1906,3 +1906,377 @@ fn follower_lossy_open_and_strict_refresh_coexist() {
         );
     }
 }
+
+// ============================================================================
+// D6 — Follower Completion (DG-009, DG-010)
+// ============================================================================
+
+use std::sync::atomic::AtomicUsize;
+
+/// Counting subsystem that records how many times `freeze()` runs. Used to
+/// prove that follower shutdown and Drop fallback both invoke freeze hooks
+/// (DG-010), and that retry-after-failure works.
+struct FollowerFreezeCountingSubsystem {
+    freeze_calls: Arc<AtomicUsize>,
+    fail_first: Arc<AtomicBool>,
+}
+
+impl FollowerFreezeCountingSubsystem {
+    fn new() -> (Self, Arc<AtomicUsize>) {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let sub = Self {
+            freeze_calls: counter.clone(),
+            fail_first: Arc::new(AtomicBool::new(false)),
+        };
+        (sub, counter)
+    }
+
+    fn with_first_freeze_failure(self) -> Self {
+        self.fail_first.store(true, Ordering::SeqCst);
+        self
+    }
+}
+
+impl Subsystem for FollowerFreezeCountingSubsystem {
+    fn name(&self) -> &'static str {
+        "follower-freeze-counter"
+    }
+
+    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        Ok(())
+    }
+
+    fn freeze(&self, _db: &Database) -> strata_core::StrataResult<()> {
+        self.freeze_calls.fetch_add(1, Ordering::SeqCst);
+        if self.fail_first.swap(false, Ordering::SeqCst) {
+            Err(strata_core::StrataError::internal(
+                "injected follower freeze failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// DG-009: a tampered `follower_state.json` whose persisted `BlockedTxnState`
+/// violates a semantic invariant must be rejected on reopen. The follower
+/// falls back to a fresh watermark at the recovered max txn id, does not
+/// crash, and does not pin itself behind a record it already applied.
+#[test]
+fn test_follower_rejects_tampered_blocked_state_on_reopen() {
+    use serde_json::Value as JsonValue;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    // Natural flow: create a valid follower_state.json with a blocked txn.
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "next", "v2");
+    primary.flush().unwrap();
+    match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { .. } => {}
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
+    }
+    drop(follower);
+
+    // Tamper: set `blocked.txn_id = applied_watermark`, which violates
+    // BlockedNotAheadOfApplied. Persisted state still parses as valid JSON,
+    // but the helper must reject it.
+    let state_path = dir.path().join("follower_state.json");
+    let bytes = std::fs::read(&state_path).expect("state file should exist after blocked refresh");
+    let mut v: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    let applied = v["applied_watermark"].as_u64().expect("applied field");
+    v["blocked"]["blocked"]["txn_id"] = JsonValue::from(applied);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    // Reopen: must succeed. Follower must NOT be blocked (state was rejected).
+    let reopened = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(
+        FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(false))),
+    ))
+    .expect("follower must reopen even with a tampered state file");
+    let status = reopened.follower_status();
+    assert!(
+        !status.is_blocked(),
+        "tampered state must be rejected; reopen must not carry the bogus blocked txn"
+    );
+}
+
+/// D6: a persisted hook-failure blocked state must keep the post-apply
+/// visibility floor it needs for truthful operator recovery. Removing that
+/// floor from `follower_state.json` must cause reopen to drop the state
+/// rather than restore a stale `SecondaryIndex` block that can no longer
+/// repair visibility on admin skip.
+#[test]
+fn test_follower_rejects_tampered_hook_block_without_visibility_version() {
+    use serde_json::Value as JsonValue;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "next", "v2");
+    primary.flush().unwrap();
+    match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { .. } => {}
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
+    }
+    drop(follower);
+
+    let state_path = dir.path().join("follower_state.json");
+    let bytes = std::fs::read(&state_path).expect("state file should exist after blocked refresh");
+    let mut v: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        v["blocked"]["blocked"]["reason"]["SecondaryIndex"]["hook_name"]
+            .as_str()
+            .expect("secondary-index hook name"),
+        "test-fail-once"
+    );
+    v["blocked"]["visibility_version"] = JsonValue::Null;
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    let reopened = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(
+        FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(false))),
+    ))
+    .expect("follower must reopen even with a tampered state file");
+    let status = reopened.follower_status();
+    assert!(
+        !status.is_blocked(),
+        "hook block missing visibility_version must be rejected on reopen"
+    );
+}
+
+/// D6 follow-up: post-apply invariant failures are intentionally
+/// non-skippable. If a persisted blocked state is tampered from a hook
+/// failure into `PostApplyInvariant` while leaving `skip_allowed=true`,
+/// follower reopen must reject it rather than restore an invalid operator
+/// bypass.
+#[test]
+fn test_follower_rejects_tampered_post_apply_block_with_skip_allowed() {
+    use serde_json::json;
+    use serde_json::Value as JsonValue;
+
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+    let fail_once = Arc::new(AtomicBool::new(true));
+
+    let primary = Database::open_runtime(
+        OpenSpec::primary(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "base", "v1");
+    primary.flush().unwrap();
+
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
+    )
+    .unwrap();
+    primary_put(&primary, branch, "next", "v2");
+    primary.flush().unwrap();
+    match follower.refresh() {
+        strata_engine::RefreshOutcome::Stuck { .. } => {}
+        other => panic!("expected blocked refresh to produce follower_state.json, got {other:?}"),
+    }
+    drop(follower);
+
+    let state_path = dir.path().join("follower_state.json");
+    let bytes = std::fs::read(&state_path).expect("state file should exist after blocked refresh");
+    let mut v: JsonValue = serde_json::from_slice(&bytes).unwrap();
+    v["blocked"]["blocked"]["reason"] = json!({
+        "PostApplyInvariant": {
+            "message": "tampered post-apply invariant"
+        }
+    });
+    v["blocked"]["skip_allowed"] = JsonValue::from(true);
+    std::fs::write(&state_path, serde_json::to_vec_pretty(&v).unwrap()).unwrap();
+
+    let reopened = Database::open_runtime(OpenSpec::follower(dir.path()).with_subsystem(
+        FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(false))),
+    ))
+    .expect("follower must reopen even with a tampered state file");
+    let status = reopened.follower_status();
+    assert!(
+        !status.is_blocked(),
+        "post-apply block with skip_allowed=true must be rejected on reopen"
+    );
+}
+
+/// DG-010: follower shutdown must run installed subsystem freeze hooks.
+#[test]
+fn test_follower_shutdown_runs_freeze_hooks() {
+    let dir = tempdir().unwrap();
+
+    let _primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    let (freeze_sub, freeze_count) = FollowerFreezeCountingSubsystem::new();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(freeze_sub),
+    )
+    .unwrap();
+
+    assert_eq!(freeze_count.load(Ordering::SeqCst), 0);
+    follower.shutdown().expect("follower shutdown must succeed");
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        1,
+        "follower shutdown must invoke freeze() exactly once"
+    );
+}
+
+/// DG-010: a follower shutdown whose freeze hook errors leaves the database
+/// retriable — `shutdown_complete` stays unset, a subsequent `shutdown()`
+/// re-runs freeze, and on success sets `shutdown_complete`.
+#[test]
+fn test_follower_shutdown_freeze_failure_is_retriable() {
+    let dir = tempdir().unwrap();
+
+    let _primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    let (freeze_sub, freeze_count) = FollowerFreezeCountingSubsystem::new();
+    let freeze_sub = freeze_sub.with_first_freeze_failure();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(freeze_sub),
+    )
+    .unwrap();
+
+    assert!(
+        follower.shutdown().is_err(),
+        "first shutdown must bubble freeze failure"
+    );
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        1,
+        "freeze ran exactly once on the failing call"
+    );
+
+    follower
+        .shutdown()
+        .expect("retry must succeed once freeze stops failing");
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        2,
+        "retry must invoke freeze a second time"
+    );
+}
+
+/// DG-010: Drop fallback must run freeze hooks when `shutdown()` is skipped
+/// on a follower. Prior to D6 the Drop path gated freeze on `!self.follower`,
+/// so a follower that was dropped without explicit shutdown lost its
+/// search/vector in-memory state.
+#[test]
+fn test_follower_drop_runs_freeze_when_shutdown_skipped() {
+    let dir = tempdir().unwrap();
+
+    let _primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+
+    let (freeze_sub, freeze_count) = FollowerFreezeCountingSubsystem::new();
+    {
+        let follower = Database::open_runtime(
+            OpenSpec::follower(dir.path())
+                .with_subsystem(SearchSubsystem)
+                .with_subsystem(freeze_sub),
+        )
+        .unwrap();
+        // Intentionally no shutdown — rely on Drop fallback.
+        drop(follower);
+    }
+
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        1,
+        "Drop fallback must run freeze hooks on a follower whose shutdown() was skipped"
+    );
+}
+
+/// DG-010: concurrent `refresh()` must not race with follower shutdown's
+/// freeze hooks. D6 acquires `RefreshGuard` in the shutdown path so an
+/// in-flight refresh finishes first; the re-check of `shutdown_complete`
+/// under the gate short-circuits any refresh queued behind shutdown.
+/// Without these, freeze and refresh would mutate search/vector state
+/// concurrently.
+#[test]
+fn test_follower_shutdown_serializes_with_concurrent_refresh() {
+    let dir = tempdir().unwrap();
+    let branch = BranchId::default();
+
+    let primary =
+        Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
+            .unwrap();
+    primary_put(&primary, branch, "k1", "v1");
+    primary.flush().unwrap();
+
+    let (freeze_sub, freeze_count) = FollowerFreezeCountingSubsystem::new();
+    let follower = Database::open_runtime(
+        OpenSpec::follower(dir.path())
+            .with_subsystem(SearchSubsystem)
+            .with_subsystem(freeze_sub),
+    )
+    .unwrap();
+
+    // Fire refresh() repeatedly from a background thread while the main
+    // thread calls shutdown(). Any refresh that started before shutdown
+    // must finish cleanly; any refresh that queues behind shutdown's gate
+    // must see shutdown_complete under the gate and short-circuit. Freeze
+    // must have been observed exactly once, no panic, no deadlock.
+    let refresh_handle = {
+        let follower = Arc::clone(&follower);
+        std::thread::spawn(move || {
+            for _ in 0..50 {
+                let _ = follower.refresh();
+            }
+        })
+    };
+
+    follower.shutdown().expect("follower shutdown must succeed");
+    refresh_handle
+        .join()
+        .expect("refresh thread must not panic");
+
+    assert_eq!(
+        freeze_count.load(Ordering::SeqCst),
+        1,
+        "freeze must have run exactly once despite concurrent refresh"
+    );
+
+    // Post-shutdown refresh is a stable no-op.
+    let outcome = follower.refresh();
+    assert!(outcome.is_caught_up());
+    assert_eq!(outcome.applied_count(), 0);
+}

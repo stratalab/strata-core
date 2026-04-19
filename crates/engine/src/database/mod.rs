@@ -2118,17 +2118,26 @@ impl Drop for Database {
         self.stop_flush_thread();
 
         // Skip flush/freeze if shutdown() already completed them.
-        if !self.shutdown_complete.load(Ordering::Acquire) && !self.follower {
+        if !self.shutdown_complete.load(Ordering::Acquire) {
             // Final flush to persist any remaining data. Use the unguarded
             // internal body because the public `flush()` rejects once
             // `shutdown_started = true`, and Drop must still do its
             // best-effort work if shutdown started and errored mid-flight.
-            if let Err(e) = self.flush_internal() {
-                tracing::error!(target: "strata::db", error = %e,
-                    "Final flush on drop failed — data may not be durable");
+            //
+            // Followers have no WAL writer, so `flush_internal` is a no-op
+            // for them — we skip the call only to keep the log clean; a
+            // follower calling flush_internal returns Ok without touching
+            // disk, but avoiding the call keeps the no-op out of the path.
+            if !self.follower {
+                if let Err(e) = self.flush_internal() {
+                    tracing::error!(target: "strata::db", error = %e,
+                        "Final flush on drop failed — data may not be durable");
+                }
             }
 
-            // Freeze all registered subsystems
+            // Freeze all registered subsystems. Followers DO install
+            // subsystems (search, vector), so their freeze hooks must run
+            // on drop if shutdown() was skipped — DG-010.
             if let Err(e) = self.run_freeze_hooks() {
                 tracing::warn!(target: "strata::db", error = %e, "Subsystem freeze failed in drop");
             }
