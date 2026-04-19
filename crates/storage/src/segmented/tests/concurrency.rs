@@ -210,8 +210,14 @@ fn test_issue_1680_corrupt_manifest_rejects_orphan_loading() {
     // so other branches remain functional (#1691).
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store2.recover_segments().unwrap();
+    let faults = match &info.health {
+        crate::segmented::RecoveryHealth::Degraded { faults, .. } => faults.as_slice(),
+        crate::segmented::RecoveryHealth::Healthy => &[],
+    };
     assert!(
-        info.corrupt_manifest_branches > 0,
+        faults
+            .iter()
+            .any(|f| matches!(f, crate::segmented::RecoveryFault::CorruptManifest { .. })),
         "corrupt manifest must be reported, not silently load as L0"
     );
     // The orphan SST must NOT be accessible (no L0 fallback).

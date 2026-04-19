@@ -21,7 +21,7 @@ use strata_core::types::BranchId;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_durability::wal::WalWriter;
-use strata_storage::SegmentedStore;
+use strata_storage::{RecoveredState, SegmentedStore};
 use tracing::{debug, info, warn};
 
 /// Transaction coordinator for the database
@@ -405,6 +405,27 @@ impl TransactionCoordinator {
         self.manager.bump_version_floor(floor);
     }
 
+    /// Apply a completed storage recovery to the coordinator.
+    ///
+    /// This is the single entry point through which storage hands its
+    /// self-contained recovery outcome to the engine. It adopts the
+    /// version floor carried by the outcome; per-branch `max_version` state
+    /// and classified recovery health are already installed storage-side
+    /// (storage calls `BranchState::track_version` during the walk and
+    /// stores the classified health on the `SegmentedStore` itself, so
+    /// there is nothing to mirror here).
+    ///
+    /// Callers should invoke this exactly once per recovery, immediately
+    /// after `storage.recover_segments()` returns `Ok`. Strict-vs-lossy
+    /// policy on `outcome.health` is the engine's concern (D4); this entry
+    /// point does not refuse, log, or interpret the health — it only wires
+    /// the version floor.
+    pub fn apply_storage_recovery(&self, outcome: &RecoveredState) {
+        if outcome.version_floor > CommitVersion::ZERO {
+            self.manager.bump_version_floor(outcome.version_floor);
+        }
+    }
+
     /// Get the current version after draining all in-flight commits (#1710).
     pub fn quiesced_version(&self) -> u64 {
         self.manager.quiesced_version()
@@ -728,10 +749,10 @@ mod tests {
 
         let seg_info = result.storage.recover_segments().unwrap();
         assert_eq!(seg_info.segments_loaded, 1);
-        assert_eq!(seg_info.max_commit_id, CommitVersion(100));
+        assert_eq!(seg_info.version_floor, CommitVersion(100));
 
         let coordinator = TransactionCoordinator::from_recovery_with_limits(&result, 0);
-        coordinator.bump_version_floor(seg_info.max_commit_id);
+        coordinator.apply_storage_recovery(&seg_info);
         assert_eq!(coordinator.current_version(), CommitVersion(100));
     }
 

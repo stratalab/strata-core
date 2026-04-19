@@ -675,7 +675,7 @@ impl Database {
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
+        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         // `database_uuid` was already resolved from the MANIFEST above (or
         // defaulted when absent) before recovery ran, so the snapshot-install
@@ -930,24 +930,48 @@ impl Database {
         }
     }
 
-    /// Recover on-disk segments and bump the coordinator's version floor.
-    fn recover_segments_and_bump(
+    /// Recover on-disk segments and apply the typed outcome to the coordinator.
+    ///
+    /// Storage returns a self-contained `RecoveredState` (SE2) carrying the
+    /// version floor, per-branch version map, and a classified
+    /// `RecoveryHealth`. This entry point:
+    ///
+    /// - Emits telemetry summarising the outcome.
+    /// - Forwards the outcome through `coordinator.apply_storage_recovery`
+    ///   (single entry point for floor adoption post-SE2).
+    /// - On `Err(StorageError)` (pre-walk I/O failure), preserves the
+    ///   existing `allow_lossy` split: lossy callers log and continue, strict
+    ///   callers convert to `StrataError::corruption`.
+    ///
+    /// Strict-vs-lossy policy on `outcome.health` (e.g. refusing on
+    /// `DegradationClass::DataLoss`) is intentionally NOT applied here —
+    /// that is D4's scope, implemented inside the unified
+    /// `Database::run_recovery` orchestrator that D3 introduces. SE2
+    /// produces the classified outcome; D4 decides what to do with it.
+    fn recover_segments_and_apply(
         storage: &Arc<SegmentedStore>,
         coordinator: &TransactionCoordinator,
         allow_lossy: bool,
     ) -> StrataResult<()> {
         match storage.recover_segments() {
-            Ok(seg_info) => {
-                if seg_info.segments_loaded > 0 {
+            Ok(outcome) => {
+                if outcome.segments_loaded > 0 {
                     info!(target: "strata::db",
-                        branches = seg_info.branches_recovered,
-                        segments = seg_info.segments_loaded,
-                        errors_skipped = seg_info.errors_skipped,
+                        branches = outcome.branches_recovered,
+                        segments = outcome.segments_loaded,
                         "Recovered segments from disk");
                 }
-                if seg_info.max_commit_id > CommitVersion::ZERO {
-                    coordinator.bump_version_floor(seg_info.max_commit_id);
+                if let strata_storage::RecoveryHealth::Degraded { faults, class } =
+                    &outcome.health
+                {
+                    warn!(
+                        target: "strata::recovery::health",
+                        class = ?class,
+                        fault_count = faults.len(),
+                        "storage recovered with degraded state"
+                    );
                 }
+                coordinator.apply_storage_recovery(&outcome);
             }
             Err(e) => {
                 warn!(target: "strata::db", error = %e, "Segment recovery failed");
@@ -1234,7 +1258,7 @@ impl Database {
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        Self::recover_segments_and_bump(&storage, &coordinator, cfg.allow_lossy_recovery)?;
+        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),

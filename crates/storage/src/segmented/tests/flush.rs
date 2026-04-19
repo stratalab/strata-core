@@ -412,7 +412,7 @@ fn recover_segments_loads_flushed_data() {
     let info = store2.recover_segments().unwrap();
     assert_eq!(info.branches_recovered, 1);
     assert_eq!(info.segments_loaded, 1);
-    assert_eq!(info.errors_skipped, 0);
+    assert!(matches!(info.health, super::RecoveryHealth::Healthy));
 
     for i in 1..=50u64 {
         let result = store2
@@ -496,7 +496,14 @@ fn recover_segments_skips_corrupt_files() {
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store2.recover_segments().unwrap();
     assert_eq!(info.segments_loaded, 1);
-    assert_eq!(info.errors_skipped, 1);
+    let corrupt_count = match &info.health {
+        super::RecoveryHealth::Degraded { faults, .. } => faults
+            .iter()
+            .filter(|f| matches!(f, super::RecoveryFault::CorruptSegment { .. }))
+            .count(),
+        super::RecoveryHealth::Healthy => 0,
+    };
+    assert_eq!(corrupt_count, 1);
     assert!(store2
         .get_versioned(&kv_key("k"), CommitVersion::MAX)
         .unwrap()
@@ -508,7 +515,9 @@ fn recover_segments_empty_dir_is_noop() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let info = store.recover_segments().unwrap();
-    assert_eq!(info, super::RecoverSegmentsInfo::default());
+    assert_eq!(info.branches_recovered, 0);
+    assert_eq!(info.segments_loaded, 0);
+    assert!(matches!(info.health, super::RecoveryHealth::Healthy));
 }
 
 #[test]
@@ -622,4 +631,172 @@ fn frozen_memtable_reads_correct_order() {
             .value,
         Value::Int(1),
     );
+}
+
+// ===== SE2 recovery-fault regression tests =====
+
+#[test]
+fn recover_corrupt_segment_produces_fault() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Seed one good segment
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Drop a garbage "segment" file next to the real one
+    let branch_hex = super::hex_encode_branch(&branch());
+    let corrupt_path = dir.path().join(&branch_hex).join("99999.sst");
+    std::fs::write(&corrupt_path, b"not a valid segment").unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = store2.recover_segments().unwrap();
+
+    match &outcome.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(*class, super::DegradationClass::DataLoss);
+            let corrupt = faults.iter().find(|f| matches!(
+                f,
+                super::RecoveryFault::CorruptSegment { file, .. } if file == &corrupt_path
+            ));
+            assert!(corrupt.is_some(), "expected CorruptSegment for {corrupt_path:?}");
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+
+    // Good segment still loads.
+    assert!(store2
+        .get_versioned(&kv_key("k"), CommitVersion::MAX)
+        .unwrap()
+        .is_some());
+}
+
+#[test]
+fn recover_missing_manifest_listed_produces_fault() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Capture the on-disk segment filename before dropping the store.
+    let branch_hex = super::hex_encode_branch(&branch());
+    let branch_dir = dir.path().join(&branch_hex);
+    let sst_name = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sst"))
+        .expect("expected exactly one .sst file")
+        .file_name()
+        .to_str()
+        .unwrap()
+        .to_string();
+
+    drop(store);
+
+    // Delete the real .sst but leave the manifest (which still references it).
+    std::fs::remove_file(branch_dir.join(&sst_name)).unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = store2.recover_segments().unwrap();
+
+    match &outcome.health {
+        super::RecoveryHealth::Degraded { faults, class } => {
+            assert_eq!(*class, super::DegradationClass::DataLoss);
+            let missing = faults.iter().find(|f| matches!(
+                f,
+                super::RecoveryFault::MissingManifestListed { file, .. } if file == &sst_name
+            ));
+            assert!(
+                missing.is_some(),
+                "expected MissingManifestListed fault for {sst_name}"
+            );
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+}
+
+#[test]
+fn recover_rebuilds_branch_max_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    // Seed segments whose commit versions span [1, 50].
+    for i in 1..=50u64 {
+        seed(
+            &store,
+            kv_key(&format!("k{:04}", i)),
+            Value::Int(i as i64),
+            i,
+        );
+    }
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = store2.recover_segments().unwrap();
+
+    // Version floor must reflect the highest commit id in the segments.
+    assert_eq!(outcome.version_floor, CommitVersion(50));
+    // Per-branch version map must carry the same for this branch.
+    assert_eq!(
+        outcome.branch_versions.get(&branch()).copied(),
+        Some(CommitVersion(50))
+    );
+    // Critically: the `BranchState::max_version` atomic must have been
+    // rebuilt. Pre-SE2 this stayed at the constructor default (0),
+    // causing post-restart `fork_branch` to under-claim the fork source
+    // version (SG-008). A weaker "segments have the right commit range"
+    // check would not catch a regression where the atomic is left at 0.
+    let b = store2.branches.get(&branch()).unwrap();
+    assert_eq!(
+        b.max_version.load(std::sync::atomic::Ordering::Acquire),
+        50,
+        "branch.max_version must be rebuilt from loaded segment commit ids"
+    );
+    assert!(matches!(outcome.health, super::RecoveryHealth::Healthy));
+}
+
+#[test]
+fn last_recovery_health_tracks_classification_across_calls() {
+    // Degraded recovery first: last_recovery_health() must classify as
+    // DataLoss (corrupt segment). Then a clean recovery on an empty dir
+    // must reset last_recovery_health() to Healthy.
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    // Drop a garbage .sst to trigger a CorruptSegment fault on next recovery.
+    let branch_hex = super::hex_encode_branch(&branch());
+    let corrupt_path = dir.path().join(&branch_hex).join("77777.sst");
+    std::fs::write(&corrupt_path, b"garbage").unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    // Pre-recovery: accessor must return Healthy (nothing has run yet).
+    assert!(matches!(
+        &*store2.last_recovery_health(),
+        super::RecoveryHealth::Healthy
+    ));
+    store2.recover_segments().unwrap();
+    // Post-recovery: accessor reflects the classified outcome.
+    match &*store2.last_recovery_health() {
+        super::RecoveryHealth::Degraded { class, .. } => {
+            assert_eq!(*class, super::DegradationClass::DataLoss);
+        }
+        other => panic!("expected Degraded, got {other:?}"),
+    }
+
+    // A fresh store pointed at a clean directory must reset the accessor to
+    // Healthy after a successful recovery — the field is rewritten per call.
+    let clean = tempfile::tempdir().unwrap();
+    let store3 = SegmentedStore::with_dir(clean.path().to_path_buf(), 0);
+    store3.recover_segments().unwrap();
+    assert!(matches!(
+        &*store3.last_recovery_health(),
+        super::RecoveryHealth::Healthy
+    ));
 }

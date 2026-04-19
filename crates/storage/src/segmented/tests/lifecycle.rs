@@ -569,10 +569,12 @@ fn recovery_skips_orphan_sst_not_in_manifest() {
     // Drop store and recover
     drop(store);
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
-    let info = store2.recover_segments().unwrap();
+    let _info = store2.recover_segments().unwrap();
 
-    // The orphan should be skipped (not loaded as L0)
-    assert!(info.orphans_skipped >= 1, "expected orphan to be counted");
+    // The orphan should be skipped (not loaded as L0). Orphan-file telemetry
+    // lives internally to `recover_segments` (it is neither a fault nor a
+    // field on `RecoveredState`); the structural assertion below is what
+    // verifies the contract.
     let parent_state = store2.branches.get(&parent_branch()).unwrap();
     // Should have exactly 1 segment (the real one), not 2
     assert_eq!(
@@ -763,8 +765,15 @@ fn test_issue_1691_inherited_layer_recovery_independent_of_source() {
     // 7. The parent branch should NOT have been loaded with its own
     //    segments (corrupt manifest → skipped).  The parent's segment
     //    files still exist on disk, so the child's direct opens worked.
+    let parent_corrupt_reported = matches!(
+        &info.health,
+        super::RecoveryHealth::Degraded { faults, .. }
+            if faults
+                .iter()
+                .any(|f| matches!(f, super::RecoveryFault::CorruptManifest { .. }))
+    );
     assert!(
-        info.corrupt_manifest_branches > 0,
+        parent_corrupt_reported,
         "should report parent's corrupt manifest"
     );
     // Parent branch must not have its own segments loaded.

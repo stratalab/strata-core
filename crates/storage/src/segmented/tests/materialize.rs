@@ -567,9 +567,16 @@ fn materialize_crash_recovery_with_partial_segment() {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
         assert!(info.branches_recovered >= 2, "both branches should recover");
+        let corrupt_segment_count = match &info.health {
+            super::RecoveryHealth::Degraded { faults, .. } => faults
+                .iter()
+                .filter(|f| matches!(f, super::RecoveryFault::CorruptSegment { .. }))
+                .count(),
+            super::RecoveryHealth::Healthy => 0,
+        };
         assert!(
-            info.errors_skipped >= 1,
-            "corrupt orphan .sst should be skipped"
+            corrupt_segment_count >= 1,
+            "corrupt orphan .sst should produce a CorruptSegment fault"
         );
 
         // Materializing status should be reset to Active
@@ -707,13 +714,30 @@ fn recovery_surfaces_missing_source_branch() {
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let info = store.recover_segments().unwrap();
 
-        // layers_dropped should report the missing parent
-        assert!(
-            !info.layers_dropped.is_empty(),
+        // An InheritedLayerLost fault should report the missing parent.
+        let faults = match &info.health {
+            super::RecoveryHealth::Degraded { faults, class } => {
+                assert_eq!(
+                    *class,
+                    super::DegradationClass::DataLoss,
+                    "inherited-layer loss classifies as DataLoss"
+                );
+                faults.as_slice()
+            }
+            super::RecoveryHealth::Healthy => &[],
+        };
+        let dropped = faults.iter().find_map(|f| match f {
+            super::RecoveryFault::InheritedLayerLost {
+                child,
+                source_branch,
+            } => Some((*child, *source_branch)),
+            _ => None,
+        });
+        assert_eq!(
+            dropped,
+            Some((child_branch(), parent_branch())),
             "should report dropped inherited layer"
         );
-        assert_eq!(info.layers_dropped[0].0, child_branch());
-        assert_eq!(info.layers_dropped[0].1, parent_branch());
 
         // Child should still exist but with no inherited layers
         let child = store.branches.get(&child_branch()).unwrap();
