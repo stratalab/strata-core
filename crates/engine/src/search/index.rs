@@ -1322,6 +1322,34 @@ impl InvertedIndex {
         n
     }
 
+    /// Remove every indexed document whose `EntityRef` lives in `branch_id`,
+    /// regardless of space. Returns the number of refs removed.
+    ///
+    /// Same lock discipline as `remove_documents_in_space` (snapshot under
+    /// read lock, drop, then per-doc removal under write locks).
+    ///
+    /// Used by `SearchSubsystem::cleanup_deleted_branch` after a branch
+    /// delete to purge persisted document metadata so the next freeze writes
+    /// a manifest with the deleted branch's docs gone (closes DG-017).
+    pub fn remove_documents_in_branch(&self, branch_id: BranchId) -> usize {
+        if !self.is_enabled() {
+            return 0;
+        }
+        let to_remove: Vec<EntityRef> = {
+            let guard = self.doc_id_map.id_to_ref.read().unwrap();
+            guard
+                .iter()
+                .filter(|r| r.branch_id() == branch_id)
+                .cloned()
+                .collect()
+        };
+        let n = to_remove.len();
+        for r in &to_remove {
+            self.remove_document(r);
+        }
+        n
+    }
+
     // ========================================================================
     // Seal & Persistence
     // ========================================================================
@@ -1875,6 +1903,52 @@ mod tests {
         assert_eq!(index.doc_freq("hello"), 0); // old term gone
         assert_eq!(index.doc_freq("planet"), 1); // new term present
         assert_eq!(index.doc_freq("world"), 1); // shared term still 1
+    }
+
+    /// DG-017: `remove_documents_in_branch` purges every doc owned by a
+    /// branch and leaves docs in other branches untouched. Asserts on the
+    /// per-doc presence (`has_document`) and live count (`total_docs`); raw
+    /// `doc_freq` is unaffected for tombstoned sealed-segment terms by
+    /// design and so is not used here.
+    #[test]
+    fn test_remove_documents_in_branch() {
+        let index = InvertedIndex::new();
+        index.enable();
+
+        let branch_a = BranchId::new();
+        let branch_b = BranchId::new();
+
+        let make_ref = |branch_id, key: &str| EntityRef::Kv {
+            branch_id,
+            space: "default".to_string(),
+            key: key.to_string(),
+        };
+
+        let a1 = make_ref(branch_a, "a1");
+        let a2 = make_ref(branch_a, "a2");
+        let b1 = make_ref(branch_b, "b1");
+
+        index.index_document(&a1, "alpha doc one", None);
+        index.index_document(&a2, "alpha doc two", None);
+        index.index_document(&b1, "beta doc only", None);
+        assert_eq!(index.total_docs(), 3);
+
+        let removed = index.remove_documents_in_branch(branch_a);
+        assert_eq!(removed, 2);
+        assert_eq!(index.total_docs(), 1);
+
+        assert!(!index.has_document(&a1));
+        assert!(!index.has_document(&a2));
+        assert!(index.has_document(&b1));
+
+        // Calling again on the now-empty branch is idempotent w.r.t. state
+        // (total_docs unchanged, has_document still false). Mirrors
+        // `remove_documents_in_space`: the count returned reflects matching
+        // doc_id_map entries (not actual removals), and the underlying
+        // `remove_document` is a noop for already-removed docs.
+        let _ = index.remove_documents_in_branch(branch_a);
+        assert_eq!(index.total_docs(), 1);
+        assert!(!index.has_document(&a1));
     }
 
     // ====================================================================

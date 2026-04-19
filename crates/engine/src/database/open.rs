@@ -1,7 +1,9 @@
 //! Database opening and initialization.
 
 use super::config::StorageConfig;
-use super::refresh::{load_persisted_follower_state, validate_blocked_state};
+use super::refresh::{
+    clear_persisted_follower_state, load_persisted_follower_state, validate_blocked_state,
+};
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -633,6 +635,13 @@ impl Database {
                         reason = %reason,
                         "Ignoring inconsistent persisted follower state"
                     );
+                    if let Err(error) = clear_persisted_follower_state(&canonical_path) {
+                        warn!(
+                            target: "strata::db",
+                            error = %error,
+                            "Failed to clear inconsistent persisted follower state"
+                        );
+                    }
                     None
                 }
             },
@@ -1558,6 +1567,8 @@ impl Database {
         let background_threads = profiled_for_signature.storage.background_threads;
         let allow_lossy_recovery = profiled_for_signature.allow_lossy_recovery;
 
+        let requested_runtime_cfg = config.as_ref().map(|_| profiled_for_signature.clone());
+
         let subsystem_names: Vec<&'static str> = subsystems.iter().map(|s| s.name()).collect();
         let requested_signature = CompatibilitySignature::from_spec(
             super::spec::DatabaseMode::Primary,
@@ -1580,7 +1591,12 @@ impl Database {
                 // On reuse, do NOT overwrite config — the existing DB's config is
                 // authoritative. Signature check ensures the caller's request is
                 // compatible with the running instance.
-                Self::wait_for_opened_db(db)
+                let db = Self::wait_for_opened_db(db)?;
+                if let Some(requested_cfg) = requested_runtime_cfg.as_ref() {
+                    Self::validate_requested_config_reuse(&db, requested_cfg)?;
+                }
+                Self::validate_control_artifact_reuse(&db, &config_path)?;
+                Ok(db)
             }
             AcquiredDatabase::New { db, canonical_path } => {
                 let effective_default_branch =
@@ -1881,6 +1897,57 @@ impl Database {
                 unreachable!("wait returned while still initializing")
             }
         }
+    }
+
+    fn validate_control_artifact_reuse(db: &Arc<Self>, config_path: &Path) -> StrataResult<()> {
+        if db.persistence_mode != PersistenceMode::Disk || db.data_dir.as_os_str().is_empty() {
+            return Ok(());
+        }
+
+        let live_cfg = db.config.read();
+        if !config_path.exists() {
+            return Err(StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' is missing while a database instance for this path \
+                 is already open",
+                config_path.display()
+            )));
+        }
+
+        let mut on_disk_cfg = config::StrataConfig::from_file(config_path).map_err(|e| {
+            StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' is invalid while a database instance for this path \
+                 is already open: {}",
+                config_path.display(),
+                e
+            ))
+        })?;
+        on_disk_cfg = sanitize_config(on_disk_cfg);
+        crate::database::profile::apply_hardware_profile_if_defaults(&mut on_disk_cfg);
+
+        if on_disk_cfg != *live_cfg {
+            return Err(StrataError::incompatible_reuse(format!(
+                "on-disk strata.toml '{}' diverged from the running database configuration; \
+                 shut down and reopen the database to apply file edits",
+                config_path.display()
+            )));
+        }
+
+        Ok(())
+    }
+
+    fn validate_requested_config_reuse(
+        db: &Arc<Self>,
+        requested_cfg: &StrataConfig,
+    ) -> StrataResult<()> {
+        let live_cfg = db.config.read();
+        if *requested_cfg != *live_cfg {
+            return Err(StrataError::incompatible_reuse(
+                "requested explicit configuration diverged from the running database \
+                 configuration; shut down and reopen the database to apply programmatic \
+                 config changes",
+            ));
+        }
+        Ok(())
     }
 
     fn finish_opened_db<F>(

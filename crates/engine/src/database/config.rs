@@ -263,6 +263,32 @@ impl Default for StorageConfig {
     }
 }
 
+/// Snapshot retention policy.
+///
+/// Controls how many on-disk checkpoint snapshots (`snap-NNNNNN.chk`) are kept
+/// after each successful checkpoint. The snapshot referenced by the live
+/// MANIFEST is always retained regardless of `retain_count` so recovery is
+/// never broken by pruning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapshotRetentionPolicy {
+    /// Maximum number of snapshot files to keep. Must be `>= 1`.
+    /// Default: 10.
+    #[serde(default = "default_snapshot_retain_count")]
+    pub retain_count: usize,
+}
+
+fn default_snapshot_retain_count() -> usize {
+    10
+}
+
+impl Default for SnapshotRetentionPolicy {
+    fn default() -> Self {
+        Self {
+            retain_count: default_snapshot_retain_count(),
+        }
+    }
+}
+
 /// Database configuration loaded from `strata.toml`.
 ///
 /// # Example
@@ -338,6 +364,11 @@ pub struct StrataConfig {
     /// Individual collections can override via VectorConfig.
     #[serde(default = "default_vector_dtype")]
     pub default_vector_dtype: String,
+    /// Snapshot retention policy. Controls how many `snap-NNNNNN.chk` files
+    /// are kept on disk after each successful checkpoint. The live MANIFEST
+    /// snapshot is always retained.
+    #[serde(default)]
+    pub snapshot_retention: SnapshotRetentionPolicy,
 }
 
 fn default_durability_str() -> String {
@@ -377,6 +408,7 @@ impl Default for StrataConfig {
             allow_lossy_recovery: false,
             telemetry: false,
             default_vector_dtype: default_vector_dtype(),
+            snapshot_retention: SnapshotRetentionPolicy::default(),
         }
     }
 }
@@ -497,6 +529,12 @@ auto_embed = false
 # data_block_size = 4096        # 4 KiB; segment data block size
 # bloom_bits_per_key = 10       # bloom filter bits per key
 # compaction_rate_limit = 0     # 0 = unlimited; bytes/sec cap for compaction I/O
+
+# Snapshot retention. After each successful checkpoint, snapshot files older
+# than the retain window are pruned. The snapshot referenced by the live
+# MANIFEST is always retained.
+# [snapshot_retention]
+# retain_count = 10             # keep last N snap-NNNNNN.chk files
 "#
     }
 
@@ -550,13 +588,7 @@ auto_embed = false
     /// Returns `Ok(())` whether the file was created or already existed.
     pub fn write_default_if_missing(path: &Path) -> StrataResult<()> {
         if !path.exists() {
-            std::fs::write(path, Self::default_toml()).map_err(|e| {
-                StrataError::internal(format!(
-                    "Failed to write default config file '{}': {}",
-                    path.display(),
-                    e
-                ))
-            })?;
+            atomic_write_config(path, Self::default_toml().as_bytes())?;
             restrict_config_permissions(path)?;
         }
         Ok(())
@@ -566,15 +598,79 @@ auto_embed = false
     pub fn write_to_file(&self, path: &Path) -> StrataResult<()> {
         let content = toml::to_string_pretty(self)
             .map_err(|e| StrataError::internal(format!("Failed to serialize config: {}", e)))?;
-        std::fs::write(path, content).map_err(|e| {
+        atomic_write_config(path, content.as_bytes())?;
+        restrict_config_permissions(path)
+    }
+}
+
+/// Crash-safe write of `strata.toml` content via temp-file + atomic rename
+/// (closes DG-018: atomicity + durability).
+///
+/// **Atomicity:** Reader of `strata.toml` never observes a partially-written
+/// file — the rename is atomic. Crash mid-write leaves either the previous
+/// content or the new content, never garbage. This matches the publish
+/// pattern used by MANIFEST and segment files
+/// (`crates/storage/src/manifest.rs`, `crates/storage/src/segment_builder.rs`).
+fn atomic_write_config(path: &Path, content: &[u8]) -> StrataResult<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| {
             StrataError::internal(format!(
-                "Failed to write config file '{}': {}",
-                path.display(),
+                "Failed to create config directory '{}': {}",
+                parent.display(),
                 e
             ))
         })?;
-        restrict_config_permissions(path)
     }
+
+    let tmp_path = path.with_extension("toml.tmp");
+
+    {
+        use std::io::Write;
+
+        let mut file = std::fs::File::create(&tmp_path).map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to create temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+        file.write_all(content).map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to write temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+        file.sync_all().map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to fsync temp config file '{}': {}",
+                tmp_path.display(),
+                e
+            ))
+        })?;
+    }
+
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        StrataError::internal(format!(
+            "Failed to rename temp config '{}' to '{}': {}",
+            tmp_path.display(),
+            path.display(),
+            e
+        ))
+    })?;
+
+    let dir_path = path.parent().unwrap_or(Path::new("."));
+    std::fs::File::open(dir_path)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| {
+            StrataError::internal(format!(
+                "Failed to fsync config directory '{}': {}",
+                dir_path.display(),
+                e
+            ))
+        })?;
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -643,6 +739,40 @@ mod tests {
 
         let config = StrataConfig::from_file(&path).unwrap();
         assert_eq!(config.durability, "always");
+    }
+
+    /// DG-018: atomic write must not leave a `*.toml.tmp` artifact behind.
+    #[test]
+    fn write_to_file_leaves_no_tmp_artifact() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+
+        let cfg = StrataConfig::default();
+        cfg.write_to_file(&path).unwrap();
+        assert!(path.exists(), "config file must be present");
+
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists(), "atomic write must rename away the .tmp file");
+
+        // Re-write with mutated content; same invariant.
+        let mut cfg2 = StrataConfig::default();
+        cfg2.snapshot_retention.retain_count = 42;
+        cfg2.write_to_file(&path).unwrap();
+        assert!(!tmp.exists());
+        let reloaded = StrataConfig::from_file(&path).unwrap();
+        assert_eq!(reloaded.snapshot_retention.retain_count, 42);
+    }
+
+    /// DG-018: `write_default_if_missing` also takes the atomic path.
+    #[test]
+    fn write_default_leaves_no_tmp_artifact() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(CONFIG_FILE_NAME);
+
+        StrataConfig::write_default_if_missing(&path).unwrap();
+        assert!(path.exists());
+        let tmp = path.with_extension("toml.tmp");
+        assert!(!tmp.exists());
     }
 
     #[test]

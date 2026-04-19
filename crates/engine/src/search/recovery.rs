@@ -560,6 +560,68 @@ impl crate::recovery::Subsystem for SearchSubsystem {
     fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
         db.freeze_search_index()
     }
+
+    /// Production owner for search-cache deletion on branch drop (closes
+    /// DG-017). Two-phase, best-effort:
+    ///
+    ///   1. In-memory: remove all documents in the deleted branch from the
+    ///      shared `InvertedIndex` so subsequent searches don't return stale
+    ///      hits.
+    ///   2. On-disk: re-freeze the index so the persisted `search.manifest`
+    ///      no longer references the deleted branch's `doc_id_map` entries.
+    ///      Without this, a restart would resurrect the stale documents.
+    ///
+    /// Search uses a single global manifest (not per-branch directories),
+    /// so the cleanup is surgical rather than directory-wipe (contrast with
+    /// `VectorSubsystem::cleanup_deleted_branch`). Sealed `.sidx` segment
+    /// files retain tombstones for the removed docs and self-clean on the
+    /// next seal/compaction cycle — DG-017 only requires the deletion to
+    /// have an owner, not a stronger physical compaction.
+    ///
+    /// Errors are logged at `warn!` and swallowed: the branch deletion is
+    /// already committed when this hook runs, per the trait contract at
+    /// `crates/engine/src/recovery/subsystem.rs`.
+    ///
+    /// **Concurrency note:** `freeze_search_index` writes the global
+    /// `search.manifest` via a fixed `search.manifest.tmp` path with no
+    /// inter-call serialization. Two concurrent branch deletes (or a
+    /// concurrent freeze on shutdown) can race on that temp file. The race
+    /// is pre-existing — `InvertedIndex::freeze_to_disk` is documented as a
+    /// single-writer operation and is not introduced by this hook. If the
+    /// race surfaces in practice, an internal mutex inside `freeze_to_disk`
+    /// is the right place to fix it.
+    fn cleanup_deleted_branch(
+        &self,
+        db: &std::sync::Arc<crate::database::Database>,
+        branch_id: &strata_core::types::BranchId,
+        branch_name: &str,
+    ) -> strata_core::StrataResult<()> {
+        let Ok(index) = db.extension::<InvertedIndex>() else {
+            return Ok(());
+        };
+
+        let removed = index.remove_documents_in_branch(*branch_id);
+
+        if removed > 0 {
+            if let Err(e) = db.freeze_search_index() {
+                tracing::warn!(
+                    target: "strata::search",
+                    branch = branch_name,
+                    error = %e,
+                    "Failed to persist search index after branch cleanup"
+                );
+            } else {
+                tracing::info!(
+                    target: "strata::search",
+                    branch = branch_name,
+                    removed,
+                    "Search index purged for deleted branch"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }
 
 // =============================================================================

@@ -1915,14 +1915,25 @@ impl Database {
         }
 
         *guard = candidate;
-
-        // Persist to strata.toml for disk-backed databases
-        if self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty() {
+        let applied_cfg = guard.clone();
+        let wrote_config =
+            self.persistence_mode == PersistenceMode::Disk && !self.data_dir.as_os_str().is_empty();
+        if wrote_config {
             let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
-            guard.write_to_file(&config_path)?;
+            applied_cfg.write_to_file(&config_path)?;
+        }
+        drop(guard);
+
+        if wrote_config {
+            if let Some(wal) = &self.wal_writer {
+                // The durable control-artifact write is unrelated to WAL
+                // backlog; do not let its fsync cost make Standard mode's
+                // inline fallback think the background sync thread is late.
+                wal.lock().refresh_inline_sync_deadline();
+            }
         }
         // Apply storage/coordinator/cache parameters to the live database
-        self.apply_storage_config_inner(&guard);
+        self.apply_storage_config_inner(&applied_cfg);
         Ok(())
     }
 
@@ -2034,6 +2045,7 @@ impl Database {
             DurabilityMode::Standard { .. } => "standard",
             DurabilityMode::Cache => unreachable!("Cache transitions rejected above"),
         };
+        let mut wrote_config = false;
         {
             let mut cfg = self.config.write();
             cfg.durability = mode_str.to_string();
@@ -2042,7 +2054,11 @@ impl Database {
             {
                 let config_path = self.data_dir.join(config::CONFIG_FILE_NAME);
                 cfg.write_to_file(&config_path)?;
+                wrote_config = true;
             }
+        }
+        if wrote_config {
+            wal.lock().refresh_inline_sync_deadline();
         }
 
         Ok(())

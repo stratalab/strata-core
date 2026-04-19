@@ -55,6 +55,7 @@ The classification is load-bearing in three places:
 | `allow_lossy_recovery` | open-time-only | yes (`CompatibilitySignature.allow_lossy_recovery`; also hashed into `open_config_fingerprint`) | rejected at runtime via `OPEN_TIME_ONLY_KEYS`. When `true`, any recovery error triggers a whole-database wipe-and-reopen; the fallback is observable via `Database::last_lossy_recovery_report()` (`Option<LossyRecoveryReport>`) and tracing target `strata::recovery::lossy` (see DR-011 and D-DR-9 in `durability-recovery-scope.md`). |
 | `telemetry` | non-durability | no | — |
 | `default_vector_dtype` | non-durability | no | — |
+| `snapshot_retention` | live-safe | no | `Database::prune_snapshots_once` (pub(crate)); invoked automatically post-checkpoint. Knob: `snapshot_retention.retain_count` (defaults to 10). The live MANIFEST snapshot is always preserved regardless of retain_count. Closes DG-015. |
 
 ## `StorageConfig` — nested under `storage`
 

@@ -153,6 +153,14 @@ pub struct WalWriter {
     /// Last fsync time (for Standard mode)
     last_sync_time: Instant,
 
+    /// Last timestamp used by the inline sync safety net.
+    ///
+    /// This normally tracks `last_sync_time`, but the engine may refresh it
+    /// after unrelated durable control-artifact writes so `maybe_sync` does
+    /// not misinterpret that latency as a stalled background WAL thread.
+    /// The real background sync deadline still uses `last_sync_time`.
+    last_inline_sync_time: Instant,
+
     /// Current segment number
     current_segment_number: u64,
 
@@ -210,6 +218,7 @@ impl WalWriter {
                 bytes_since_sync: 0,
                 writes_since_sync: 0,
                 last_sync_time: Instant::now(),
+                last_inline_sync_time: Instant::now(),
                 current_segment_number: 0,
                 current_segment_meta: None,
                 has_unsynced_data: false,
@@ -275,6 +284,7 @@ impl WalWriter {
             bytes_since_sync: 0,
             writes_since_sync: 0,
             last_sync_time: Instant::now(),
+            last_inline_sync_time: Instant::now(),
             current_segment_number: segment_number,
             current_segment_meta,
             has_unsynced_data: false,
@@ -461,7 +471,7 @@ impl WalWriter {
                 if self.sync_in_flight {
                     return Ok(());
                 }
-                let elapsed_ms = self.last_sync_time.elapsed().as_millis() as u64;
+                let elapsed_ms = self.last_inline_sync_time.elapsed().as_millis() as u64;
                 if self.has_unsynced_data && elapsed_ms >= interval_ms {
                     debug!(target: "strata::wal",
                         elapsed_ms,
@@ -500,6 +510,7 @@ impl WalWriter {
         self.bytes_since_sync = 0;
         self.writes_since_sync = 0;
         self.last_sync_time = Instant::now();
+        self.last_inline_sync_time = self.last_sync_time;
         self.has_unsynced_data = false;
         self.bg_error = None;
     }
@@ -635,6 +646,7 @@ impl WalWriter {
         self.bytes_since_sync -= snapshot.bytes_since_sync;
         self.writes_since_sync -= snapshot.writes_since_sync;
         self.last_sync_time = Instant::now().max(snapshot.last_sync_time);
+        self.last_inline_sync_time = self.last_sync_time;
         self.has_unsynced_data = self.bytes_since_sync > 0 || self.writes_since_sync > 0;
         self.bg_error = None;
 
@@ -697,6 +709,19 @@ impl WalWriter {
     /// Returns whether a background sync is currently in flight.
     pub(crate) fn sync_in_flight(&self) -> bool {
         self.sync_in_flight
+    }
+
+    /// Refresh the Standard-mode inline-sync deadline without clearing dirty state.
+    ///
+    /// The engine uses this after unrelated durable control-artifact writes
+    /// (`strata.toml`, MANIFEST-like metadata) so their fsync cost does not
+    /// make `maybe_sync` treat the background WAL thread as overdue.
+    ///
+    /// This intentionally does NOT move `last_sync_time`: the background
+    /// flush thread and `sync_if_overdue()` must still observe the real WAL
+    /// fsync deadline for already-dirty data.
+    pub(crate) fn refresh_inline_sync_deadline(&mut self) {
+        self.last_inline_sync_time = Instant::now();
     }
 
     /// Get the current durability mode.
@@ -1521,6 +1546,7 @@ mod tests {
         // the preconditions rather than relying on timing.
         writer.has_unsynced_data = true;
         writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(100);
+        writer.last_inline_sync_time = writer.last_sync_time;
 
         let sync_calls_before = writer.total_sync_calls;
         writer.maybe_sync().unwrap();
@@ -1587,6 +1613,7 @@ mod tests {
 
         // Force last_sync_time into the past so deadline is exceeded
         writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(100);
+        writer.last_inline_sync_time = writer.last_sync_time;
 
         let sync_calls_before = writer.total_sync_calls;
         writer.maybe_sync().unwrap();
@@ -1618,6 +1645,7 @@ mod tests {
         // Set last_sync_time to just past interval_ms ago (but well under 3×interval_ms)
         writer.has_unsynced_data = true;
         writer.last_sync_time = Instant::now() - std::time::Duration::from_millis(interval_ms + 10);
+        writer.last_inline_sync_time = writer.last_sync_time;
 
         let sync_calls_before = writer.total_sync_calls;
         writer.maybe_sync().unwrap();
@@ -2037,6 +2065,39 @@ mod tests {
         assert_eq!(writer.bytes_since_sync, bytes_before);
         assert_eq!(writer.writes_since_sync, writes_before);
 
+        writer.abort_background_sync(handle, io::Error::other("test cleanup"));
+    }
+
+    #[test]
+    fn test_refresh_inline_sync_deadline_does_not_delay_background_sync() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let mut writer = make_writer(
+            &wal_dir,
+            DurabilityMode::Standard {
+                interval_ms: 60_000,
+                batch_size: 1_000,
+            },
+        );
+
+        writer.append(&make_record(1)).unwrap();
+        let overdue = Instant::now() - std::time::Duration::from_secs(3600);
+        writer.last_sync_time = overdue;
+        writer.last_inline_sync_time = overdue;
+
+        writer.refresh_inline_sync_deadline();
+
+        let sync_calls_before = writer.total_sync_calls;
+        writer.maybe_sync().unwrap();
+        assert_eq!(
+            writer.total_sync_calls, sync_calls_before,
+            "inline fallback should be suppressed by the control-artifact write"
+        );
+
+        let handle = writer
+            .begin_background_sync()
+            .unwrap()
+            .expect("background sync should still see the real overdue WAL deadline");
         writer.abort_background_sync(handle, io::Error::other("test cleanup"));
     }
 

@@ -6,6 +6,7 @@ use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult};
+use strata_durability::{ManifestError, ManifestManager};
 use tracing::{info, warn};
 
 use super::refresh::{
@@ -114,6 +115,114 @@ impl Database {
             .storage
             .expire_ttl_keys(strata_core::Timestamp::now().as_micros());
         (safe_point, pruned, expired)
+    }
+
+    /// Prune old checkpoint snapshot files according to the configured
+    /// `snapshot_retention.retain_count` (DG-015).
+    ///
+    /// Always retains:
+    ///   - the `retain_count` newest snapshots, and
+    ///   - the snapshot referenced by the live MANIFEST (recovery-critical).
+    ///
+    /// Best-effort: per-file delete failures are logged but do not abort the
+    /// loop. The snapshots directory is fsynced once at the end if any file
+    /// was actually removed. Returns the number of files deleted.
+    ///
+    /// Skipped (returns `Ok(0)`) for ephemeral mode, follower mode, and
+    /// while shutdown is in progress.
+    ///
+    /// Called from `Database::checkpoint` after the new snapshot is durable.
+    /// A future executor / CLI surface will expose this as an admin entry
+    /// point — see `docs/design/durability/durability-storage-closure-epics.md`
+    /// "What Comes After" section.
+    pub(crate) fn prune_snapshots_once(&self) -> StrataResult<usize> {
+        if self.check_not_shutting_down().is_err() {
+            return Ok(0);
+        }
+        if self.persistence_mode == PersistenceMode::Ephemeral || self.follower {
+            return Ok(0);
+        }
+
+        let snapshots_dir = self.data_dir.join("snapshots");
+        if !snapshots_dir.exists() {
+            return Ok(0);
+        }
+
+        let retain_count = self.config.read().snapshot_retention.retain_count.max(1);
+
+        let manifest_path = self.data_dir.join("MANIFEST");
+        let live_snapshot_id = if ManifestManager::exists(&manifest_path) {
+            ManifestManager::load(manifest_path)
+                .map_err(|e: ManifestError| {
+                    StrataError::internal(format!(
+                        "prune_snapshots: failed to load MANIFEST: {}",
+                        e
+                    ))
+                })?
+                .manifest()
+                .snapshot_id
+        } else {
+            None
+        };
+
+        let snapshots = strata_durability::list_snapshots(&snapshots_dir).map_err(|e| {
+            StrataError::internal(format!(
+                "prune_snapshots: failed to list snapshots in {}: {}",
+                snapshots_dir.display(),
+                e
+            ))
+        })?;
+
+        if snapshots.len() <= retain_count {
+            return Ok(0);
+        }
+
+        let keep_from = snapshots.len().saturating_sub(retain_count);
+        let mut deleted = 0usize;
+
+        for (i, (id, path)) in snapshots.iter().enumerate() {
+            if i >= keep_from {
+                break;
+            }
+            if Some(*id) == live_snapshot_id {
+                continue;
+            }
+            match std::fs::remove_file(path) {
+                Ok(_) => deleted += 1,
+                Err(e) => {
+                    warn!(
+                        target: "strata::durability",
+                        snapshot_id = id,
+                        path = ?path,
+                        error = %e,
+                        "Failed to delete pruned snapshot file"
+                    );
+                }
+            }
+        }
+
+        if deleted > 0 {
+            let dir_fd = std::fs::File::open(&snapshots_dir).map_err(|e| {
+                StrataError::internal(format!(
+                    "prune_snapshots: failed to open snapshots dir for fsync: {}",
+                    e
+                ))
+            })?;
+            dir_fd.sync_all().map_err(|e| {
+                StrataError::internal(format!(
+                    "prune_snapshots: failed to fsync snapshots dir: {}",
+                    e
+                ))
+            })?;
+            info!(
+                target: "strata::durability",
+                deleted,
+                retained = retain_count,
+                "Snapshot pruning complete"
+            );
+        }
+
+        Ok(deleted)
     }
 
     /// Remove the per-branch commit lock after a branch is deleted.

@@ -32,6 +32,7 @@ const STRATA_CONFIG_FIELDS: &[&str] = &[
     "allow_lossy_recovery",
     "telemetry",
     "default_vector_dtype",
+    "snapshot_retention",
 ];
 
 /// Every public field on `StorageConfig` (nested under `storage`).

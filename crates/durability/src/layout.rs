@@ -90,7 +90,7 @@ impl DatabaseLayout {
 
     /// Returns the snapshots directory path.
     ///
-    /// Checkpoint files are stored as `snapshot-NNNNNNNNNN.chk` files.
+    /// Checkpoint files are stored as `snap-NNNNNN.chk` files.
     #[inline]
     pub fn snapshots_dir(&self) -> &Path {
         &self.snapshots_dir
