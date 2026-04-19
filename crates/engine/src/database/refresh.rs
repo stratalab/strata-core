@@ -88,6 +88,12 @@ pub enum BlockReason {
         /// Human-readable hook failure detail.
         message: String,
     },
+    /// Storage and hook staging succeeded, but the follower could not advance
+    /// its own internal invariants to match the applied record.
+    PostApplyInvariant {
+        /// Human-readable post-apply failure detail.
+        message: String,
+    },
 }
 
 impl fmt::Display for BlockReason {
@@ -100,6 +106,9 @@ impl fmt::Display for BlockReason {
             BlockReason::StorageApply { message } => write!(f, "storage apply error: {}", message),
             BlockReason::SecondaryIndex { hook_name, message } => {
                 write!(f, "{} hook failed: {}", hook_name, message)
+            }
+            BlockReason::PostApplyInvariant { message } => {
+                write!(f, "post-apply invariant failure: {}", message)
             }
         }
     }
@@ -456,6 +465,13 @@ pub(crate) enum BlockReasonIncoherence {
     EmptyMessage,
     /// `SecondaryIndex { hook_name, .. }` with empty hook name.
     EmptyHookName,
+    /// A block reason that requires a post-apply visibility floor omitted it.
+    MissingVisibilityVersion { reason: &'static str },
+    /// A block reason that requires a post-apply visibility floor used zero.
+    ZeroVisibilityVersion { reason: &'static str },
+    /// A pre-apply block reason carried a visibility floor even though no
+    /// committed storage state should be made visible on skip.
+    UnexpectedVisibilityVersion { reason: &'static str },
     /// `Codec { expected, actual }` with either side empty.
     EmptyCodecId,
     /// `Codec { expected, actual }` where both are the same non-empty id —
@@ -509,6 +525,17 @@ impl fmt::Display for BlockedStateValidationError {
                 BlockReasonIncoherence::EmptyHookName => {
                     write!(f, "secondary-index block reason has empty hook name")
                 }
+                BlockReasonIncoherence::MissingVisibilityVersion { reason } => {
+                    write!(f, "{} block reason is missing visibility_version", reason)
+                }
+                BlockReasonIncoherence::ZeroVisibilityVersion { reason } => {
+                    write!(f, "{} block reason has zero visibility_version", reason)
+                }
+                BlockReasonIncoherence::UnexpectedVisibilityVersion { reason } => write!(
+                    f,
+                    "{} block reason unexpectedly carries visibility_version",
+                    reason
+                ),
                 BlockReasonIncoherence::EmptyCodecId => {
                     write!(f, "codec-mismatch block reason has empty codec id")
                 }
@@ -582,11 +609,51 @@ pub(crate) fn validate_blocked_state(
             );
         }
     }
-    validate_block_reason(&state.blocked.blocked.reason)?;
+    validate_block_reason(
+        &state.blocked.blocked.reason,
+        state.blocked.visibility_version,
+    )?;
     Ok(())
 }
 
-fn validate_block_reason(reason: &BlockReason) -> Result<(), BlockedStateValidationError> {
+fn block_reason_label(reason: &BlockReason) -> &'static str {
+    match reason {
+        BlockReason::Decode { .. } => "decode",
+        BlockReason::Codec { .. } => "codec",
+        BlockReason::StorageApply { .. } => "storage-apply",
+        BlockReason::SecondaryIndex { .. } => "secondary-index",
+        BlockReason::PostApplyInvariant { .. } => "post-apply",
+    }
+}
+
+fn validate_block_reason(
+    reason: &BlockReason,
+    visibility_version: Option<CommitVersion>,
+) -> Result<(), BlockedStateValidationError> {
+    let visibility_incoherence = match reason {
+        BlockReason::SecondaryIndex { .. } | BlockReason::PostApplyInvariant { .. } => {
+            match visibility_version {
+                None => Some(BlockReasonIncoherence::MissingVisibilityVersion {
+                    reason: block_reason_label(reason),
+                }),
+                Some(CommitVersion::ZERO) => Some(BlockReasonIncoherence::ZeroVisibilityVersion {
+                    reason: block_reason_label(reason),
+                }),
+                Some(_) => None,
+            }
+        }
+        BlockReason::Decode { .. }
+        | BlockReason::Codec { .. }
+        | BlockReason::StorageApply { .. } => {
+            visibility_version.map(|_| BlockReasonIncoherence::UnexpectedVisibilityVersion {
+                reason: block_reason_label(reason),
+            })
+        }
+    };
+    if let Some(inc) = visibility_incoherence {
+        return Err(BlockedStateValidationError::IncoherentBlockReason(inc));
+    }
+
     let incoherence = match reason {
         BlockReason::Decode { message } | BlockReason::StorageApply { message } => {
             if message.is_empty() {
@@ -599,6 +666,13 @@ fn validate_block_reason(reason: &BlockReason) -> Result<(), BlockedStateValidat
             if hook_name.is_empty() {
                 Some(BlockReasonIncoherence::EmptyHookName)
             } else if message.is_empty() {
+                Some(BlockReasonIncoherence::EmptyMessage)
+            } else {
+                None
+            }
+        }
+        BlockReason::PostApplyInvariant { message } => {
+            if message.is_empty() {
                 Some(BlockReasonIncoherence::EmptyMessage)
             } else {
                 None
@@ -1167,6 +1241,19 @@ mod persisted_state_validation_tests {
         }
     }
 
+    fn ok_secondary_index() -> BlockReason {
+        BlockReason::SecondaryIndex {
+            hook_name: "search".into(),
+            message: "x".into(),
+        }
+    }
+
+    fn ok_post_apply() -> BlockReason {
+        BlockReason::PostApplyInvariant {
+            message: "x".into(),
+        }
+    }
+
     #[test]
     fn accepts_coherent_persisted_state() {
         let s = persisted(10, 5, 5, 6, ok_decode());
@@ -1242,11 +1329,8 @@ mod persisted_state_validation_tests {
     }
 
     #[test]
-    fn accepts_visibility_version_within_recovered() {
-        // Hook-after-storage-apply block: visibility_version carries the
-        // commit version admin_skip will bump visibility to. Any value
-        // up to the recovered final version is legitimate.
-        let mut s = persisted(10, 5, 5, 6, ok_decode());
+    fn accepts_secondary_index_visibility_version_within_recovered() {
+        let mut s = persisted(10, 5, 5, 6, ok_secondary_index());
         s.blocked.visibility_version = Some(CommitVersion(5));
         assert_eq!(
             validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
@@ -1256,7 +1340,7 @@ mod persisted_state_validation_tests {
 
     #[test]
     fn rejects_visibility_version_beyond_recovered() {
-        let mut s = persisted(10, 5, 5, 6, ok_decode());
+        let mut s = persisted(10, 5, 5, 6, ok_secondary_index());
         s.blocked.visibility_version = Some(CommitVersion(42));
         assert!(matches!(
             validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
@@ -1266,6 +1350,76 @@ mod persisted_state_validation_tests {
                     recovered: CommitVersion(5),
                 }
             )
+        ));
+    }
+
+    #[test]
+    fn rejects_secondary_index_without_visibility_version() {
+        let s = persisted(10, 5, 5, 6, ok_secondary_index());
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::MissingVisibilityVersion {
+                    reason: "secondary-index",
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_secondary_index_zero_visibility_version() {
+        let mut s = persisted(10, 5, 5, 6, ok_secondary_index());
+        s.blocked.visibility_version = Some(CommitVersion::ZERO);
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::ZeroVisibilityVersion {
+                    reason: "secondary-index",
+                }
+            ))
+        ));
+    }
+
+    #[test]
+    fn accepts_post_apply_visibility_version_within_recovered() {
+        let mut s = persisted(10, 5, 5, 6, ok_post_apply());
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert_eq!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn rejects_decode_with_visibility_version() {
+        let mut s = persisted(10, 5, 5, 6, ok_decode());
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::UnexpectedVisibilityVersion { reason: "decode" }
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_codec_with_visibility_version() {
+        let mut s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::Codec {
+                expected: "v3".into(),
+                actual: "v2".into(),
+            },
+        );
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::UnexpectedVisibilityVersion { reason: "codec" }
+            ))
         ));
     }
 
@@ -1311,7 +1465,9 @@ mod persisted_state_validation_tests {
 
     #[test]
     fn rejects_secondary_index_empty_hook_name() {
-        let s = persisted(
+        // Provide a coherent visibility_version so the stricter visibility
+        // check passes and the empty-hook-name check is actually reached.
+        let mut s = persisted(
             10,
             5,
             5,
@@ -1321,6 +1477,7 @@ mod persisted_state_validation_tests {
                 message: "x".into(),
             },
         );
+        s.blocked.visibility_version = Some(CommitVersion(5));
         assert!(matches!(
             validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
             Err(BlockedStateValidationError::IncoherentBlockReason(
@@ -1364,5 +1521,49 @@ mod persisted_state_validation_tests {
             validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn rejects_post_apply_empty_message() {
+        // Coherent visibility_version so we reach the empty-message check.
+        let mut s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::PostApplyInvariant {
+                message: String::new(),
+            },
+        );
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::EmptyMessage
+            ))
+        ));
+    }
+
+    #[test]
+    fn rejects_secondary_index_empty_message() {
+        // Coherent visibility_version + non-empty hook_name so we reach
+        // the empty-message branch.
+        let mut s = persisted(
+            10,
+            5,
+            5,
+            6,
+            BlockReason::SecondaryIndex {
+                hook_name: "search".into(),
+                message: String::new(),
+            },
+        );
+        s.blocked.visibility_version = Some(CommitVersion(5));
+        assert!(matches!(
+            validate_blocked_state(&s, TxnId(10), CommitVersion(5)),
+            Err(BlockedStateValidationError::IncoherentBlockReason(
+                BlockReasonIncoherence::EmptyMessage
+            ))
+        ));
     }
 }

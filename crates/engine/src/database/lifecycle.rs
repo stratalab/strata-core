@@ -520,7 +520,7 @@ impl Database {
             if let Err(e) = self.watermark.try_advance(txn_id) {
                 let blocked = make_blocked_state(
                     txn_id,
-                    BlockReason::Decode {
+                    BlockReason::PostApplyInvariant {
                         message: format!("watermark advancement failed: {}", e),
                     },
                     Some(CommitVersion(payload.version)),
