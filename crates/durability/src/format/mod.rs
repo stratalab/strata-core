@@ -22,8 +22,8 @@ pub mod writeset;
 
 pub use snapshot::{
     find_latest_snapshot, list_snapshots, parse_snapshot_id, snapshot_path, SectionHeader,
-    SnapshotHeader, SnapshotHeaderError, SNAPSHOT_FORMAT_VERSION, SNAPSHOT_HEADER_SIZE,
-    SNAPSHOT_MAGIC,
+    SnapshotHeader, SnapshotHeaderError, MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION,
+    SNAPSHOT_FORMAT_VERSION, SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
 };
 pub use wal_record::{
     SegmentHeader, SegmentHeaderError, WalRecord, WalRecordError, WalSegment, WalSegmentError,
@@ -34,6 +34,7 @@ pub use writeset::{Mutation, Writeset, WritesetError};
 
 pub use manifest::{
     Manifest, ManifestError, ManifestManager, MANIFEST_FORMAT_VERSION, MANIFEST_MAGIC,
+    MIN_SUPPORTED_MANIFEST_FORMAT_VERSION,
 };
 pub use primitives::{
     BranchSnapshotEntry, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry,

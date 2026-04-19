@@ -36,6 +36,15 @@ pub const SNAPSHOT_MAGIC: [u8; 4] = *b"SNAP";
 /// any live database can be re-checkpointed after upgrade.
 pub const SNAPSHOT_FORMAT_VERSION: u32 = 2;
 
+/// Oldest snapshot format version this build can read. Files with a
+/// `format_version` below this value are rejected with
+/// [`crate::disk_snapshot::SnapshotReadError::LegacyFormat`] — mirroring the
+/// WAL clean-break contract at
+/// [`crate::format::wal_record::MIN_SUPPORTED_SEGMENT_FORMAT_VERSION`].
+/// Operators wipe the affected `snap-*.chk` file and reopen; the database
+/// will replay from the next snapshot or the WAL tail.
+pub const MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION: u32 = 2;
+
 /// Snapshot header size in bytes
 pub const SNAPSHOT_HEADER_SIZE: usize = 64;
 

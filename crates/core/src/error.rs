@@ -862,21 +862,22 @@ pub enum StrataError {
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
 
-    /// Legacy WAL segment format
+    /// Legacy on-disk format
     ///
-    /// A WAL segment on disk has a `SEGMENT_FORMAT_VERSION` older than
-    /// this build supports. Hard fail — not a lossy-recoverable error.
-    /// The operator must delete the `wal/` subdirectory under the
-    /// database path and reopen with a fresh state.
+    /// A durability artifact on disk — WAL segment, MANIFEST, or snapshot
+    /// — has a `format_version` older than this build supports. Hard fail
+    /// — not a lossy-recoverable error. The operator must delete the
+    /// offending artifact (`wal/` subdirectory, `MANIFEST` file, or
+    /// `snap-*.chk` file) under the database path and reopen.
     ///
-    /// **Staging note (T3-E12 Phase 1):** the variant is declared
-    /// here; Phase 2's segment-header reader is the first producer.
-    /// The `hint` string carries the full operator-facing message
-    /// (typical content: *"this build requires segment format
-    /// version 3. Delete the `wal/` subdirectory and reopen."*)
-    /// so the error's `Display` rendering stays stable across
-    /// future `SEGMENT_FORMAT_VERSION` bumps without needing a
-    /// dedicated `required_version` struct field.
+    /// The `hint` string carries the full operator-facing message,
+    /// including the artifact kind and the required version (typical
+    /// content: *"this build requires segment format version 3. Delete
+    /// the `wal/` subdirectory and reopen."*). Keeping the artifact kind
+    /// inside the hint means the `Display` prefix stays stable across
+    /// future format bumps without needing a separate `artifact` struct
+    /// field. D5 extended the producer set from WAL only to WAL +
+    /// MANIFEST + snapshot.
     ///
     /// Wire code: `StorageError`
     ///
@@ -885,17 +886,19 @@ pub enum StrataError {
     /// # use strata_core::StrataError;
     /// StrataError::LegacyFormat {
     ///     found_version: 2,
-    ///     hint: "this build requires version 3. Delete the `wal/` subdirectory and reopen.".to_string(),
+    ///     hint: "this build requires segment format version 3. \
+    ///            Delete the `wal/` subdirectory and reopen.".to_string(),
     /// };
     /// ```
-    #[error("legacy WAL segment format: found version {found_version}. {hint}")]
+    #[error("legacy on-disk format: found version {found_version}. {hint}")]
     LegacyFormat {
-        /// Segment format version read from disk.
+        /// Format version read from disk.
         found_version: u32,
         /// Operator remediation hint — filesystem action only (no CLI
-        /// tool is promised by this error variant). The hint is
-        /// expected to include the required version number so the
-        /// rendered diagnostic is self-contained.
+        /// tool is promised by this error variant). The hint is expected
+        /// to name the affected artifact kind (WAL, MANIFEST, snapshot)
+        /// and the required version number so the rendered diagnostic
+        /// is self-contained.
         hint: String,
     },
 
