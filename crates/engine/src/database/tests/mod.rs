@@ -40,7 +40,9 @@ mod codec;
 mod contention;
 mod open;
 mod regressions;
+mod search_branch_cleanup;
 mod shutdown;
+mod snapshot_retention;
 mod transactions;
 
 // ========================================================================

@@ -166,6 +166,14 @@ impl Database {
             "Checkpoint created"
         );
 
+        if let Err(e) = self.prune_snapshots_once() {
+            tracing::warn!(
+                target: "strata::durability",
+                error = %e,
+                "Snapshot pruning failed after checkpoint (non-fatal)"
+            );
+        }
+
         Ok(())
     }
 
