@@ -416,8 +416,13 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "anthropic")]
     fn create_cloud_engine_compatible_with_with_engine() {
-        // Verify the with_engine helper works with non-cached entries
+        // Verify the with_engine helper works with non-cached entries.
+        // Gated on `anthropic`: without it, `GenerationEngine::cloud(Anthropic, ...)`
+        // returns `NotSupported` and `CachedEngine.inner` carries that error, so
+        // `with_engine` cannot produce Ok. The assertion here is checking the
+        // happy path (engine constructed), which only holds with the feature on.
         let entry = GenerateModelState::create_cloud_engine(
             ProviderKind::Anthropic,
             "sk-test".into(),
@@ -425,8 +430,6 @@ mod tests {
         )
         .unwrap();
 
-        // Should be able to call with_engine — the engine is valid (Anthropic
-        // provider constructed successfully), so the closure runs
         let result = with_engine(&entry, |engine| engine.provider());
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), ProviderKind::Anthropic);
