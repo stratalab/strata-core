@@ -966,19 +966,48 @@ impl SegmentedStore {
         self.last_recovery_health.load_full()
     }
 
-    /// Reset recovery health back to [`RecoveryHealth::Healthy`], lifting the
-    /// orphan-segment GC refusal that SE3 installs after a degraded recovery.
+    /// Reset recovery health back to [`RecoveryHealth::Healthy`] when an
+    /// in-place reset is actually safe.
     ///
     /// **Destructive admin.** S4 per the durability-storage-closure plan.
-    /// Callers are expected to have reconciled the retention debt before
-    /// invoking this (either by restoring the degraded branches or by
-    /// confirming they are intentionally absent). Calling without that
-    /// reconciliation risks `.sst` deletions that remove the last surviving
-    /// copy of authoritative state. The engine-level wrapper on `Database`
-    /// is owned by D4.
-    pub fn reset_recovery_health(&self) {
-        self.last_recovery_health
-            .store(Arc::new(RecoveryHealth::Healthy));
+    /// The reset is intentionally narrower than "clear whatever happened":
+    ///
+    /// - `recover_segments()` must have successfully installed this store's
+    ///   branch/refcount view. Hard pre-walk failures never reached an
+    ///   authoritative in-memory snapshot, so GC cannot be re-enabled on the
+    ///   same instance.
+    /// - `DataLoss` degradations require a fresh reopen after reconciliation.
+    ///   This store's recovery view is one-shot; if an operator restores a
+    ///   manifest or `.sst` after reopen, the same instance cannot reload it,
+    ///   and clearing the health bit would let GC delete the restored file.
+    ///
+    /// `PolicyDowngrade` can be cleared in-place after a successful recovery
+    /// because the store already loaded every discovered `.sst` into its live
+    /// graph. `Telemetry` does not block GC in the first place.
+    pub fn reset_recovery_health(&self) -> StorageResult<()> {
+        let health = self.last_recovery_health.load_full();
+        match &*health {
+            RecoveryHealth::Healthy => Ok(()),
+            RecoveryHealth::Degraded {
+                class: DegradationClass::PolicyDowngrade,
+                ..
+            } => {
+                if !self.recovery_applied.load(Ordering::Acquire) {
+                    return Err(StorageError::RecoveryHealthResetRequiresSuccessfulRecovery);
+                }
+
+                self.last_recovery_health
+                    .store(Arc::new(RecoveryHealth::Healthy));
+                Ok(())
+            }
+            RecoveryHealth::Degraded { class, .. } => {
+                if !self.recovery_applied.load(Ordering::Acquire) {
+                    return Err(StorageError::RecoveryHealthResetRequiresSuccessfulRecovery);
+                }
+
+                Err(StorageError::RecoveryHealthResetRequiresReopen { class: *class })
+            }
+        }
     }
 
     /// Test-only hook: install an arbitrary [`RecoveryHealth`] value so tests
@@ -1416,7 +1445,7 @@ impl SegmentedStore {
             // any .sst on disk not referenced by a live branch or the refcount
             // registry. A degraded recovery (SE3) makes GC refuse; branch
             // clearing still succeeds, but the retention debt accumulates
-            // until an operator calls `reset_recovery_health()`.
+            // until a safe reset or fresh reopen re-establishes GC trust.
             if let Err(e) = self.gc_orphan_segments() {
                 tracing::warn!(
                     target: "strata::storage::gc",
@@ -1468,9 +1497,10 @@ impl SegmentedStore {
     /// branch set may not reflect every branch that still has authoritative
     /// on-disk state, so "not in `live_ids`" is not a safe deletion proof.
     /// [`DegradationClass::Telemetry`] is not a refusal cause — rebuildable
-    /// caches do not compromise deletion safety. The refusal is lifted by
-    /// [`SegmentedStore::reset_recovery_health`] after an operator has
-    /// reconciled the retention debt.
+    /// caches do not compromise deletion safety. `PolicyDowngrade` can be
+    /// cleared in-place via [`SegmentedStore::reset_recovery_health`] after a
+    /// successful recovery; `DataLoss` requires a fresh reopen because the
+    /// current store instance cannot reload later-restored files.
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
         match &**self.last_recovery_health.load() {
             RecoveryHealth::Healthy => {}

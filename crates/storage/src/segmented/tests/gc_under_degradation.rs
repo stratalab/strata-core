@@ -2,8 +2,10 @@
 //!
 //! Pins the SG-009 contract: after a recovery that produced `DataLoss` or
 //! `PolicyDowngrade` health, orphan-segment GC refuses to run. `Telemetry`
-//! degradation does not block GC. The refusal is lifted by
-//! `reset_recovery_health()`.
+//! degradation does not block GC. `reset_recovery_health()` only clears
+//! `PolicyDowngrade` after a successful recovery install; `DataLoss`
+//! requires a fresh reopen and hard pre-walk recovery failures cannot be
+//! cleared on the same instance.
 
 use super::*;
 use crate::segmented::{
@@ -79,10 +81,11 @@ fn gc_refuses_after_corrupt_manifest_recovery() {
     }
 }
 
-/// After `reset_recovery_health()`, GC unblocks — the admin path lifts the
-/// refusal that SE3 installs.
+/// `DataLoss` recovery cannot be reset in-place: the store's in-memory
+/// recovery graph is a one-shot snapshot, so a fresh reopen is required
+/// before GC can trust restored files.
 #[test]
-fn gc_runs_after_reset_recovery_health() {
+fn reset_recovery_health_refuses_after_data_loss_recovery() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
@@ -101,14 +104,26 @@ fn gc_runs_after_reset_recovery_health() {
     let _ = store2.recover_segments().unwrap();
     assert!(store2.gc_orphan_segments().is_err(), "GC must refuse first");
 
-    store2.reset_recovery_health();
+    let err = store2
+        .reset_recovery_health()
+        .expect_err("DataLoss reset must require a fresh reopen");
+    match err {
+        StorageError::RecoveryHealthResetRequiresReopen { class } => {
+            assert_eq!(class, DegradationClass::DataLoss);
+        }
+        other => panic!("expected RecoveryHealthResetRequiresReopen; got {other:?}"),
+    }
     assert!(matches!(
         &*store2.last_recovery_health(),
-        RecoveryHealth::Healthy
+        RecoveryHealth::Degraded {
+            class: DegradationClass::DataLoss,
+            ..
+        }
     ));
-    store2
-        .gc_orphan_segments()
-        .expect("GC must succeed after reset_recovery_health");
+    assert!(
+        store2.gc_orphan_segments().is_err(),
+        "failed reset must leave GC refusal in place"
+    );
 }
 
 /// A clean recovery leaves the store in `Healthy`; GC runs and returns a
@@ -162,6 +177,45 @@ fn gc_refuses_under_policy_downgrade_degradation() {
     }
 }
 
+/// After a successful `PolicyDowngrade` recovery install, the operator can
+/// explicitly clear the GC refusal in-place.
+#[test]
+fn gc_runs_after_reset_recovery_health_under_policy_downgrade() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, kv_key("real"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let branch_hex = super::hex_encode_branch(&branch());
+    std::fs::remove_file(dir.path().join(&branch_hex).join("segments.manifest")).unwrap();
+
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = store2.recover_segments().unwrap();
+    assert!(matches!(
+        outcome.health,
+        RecoveryHealth::Degraded {
+            class: DegradationClass::PolicyDowngrade,
+            ..
+        }
+    ));
+    assert!(store2.gc_orphan_segments().is_err(), "GC must refuse first");
+
+    store2
+        .reset_recovery_health()
+        .expect("PolicyDowngrade reset should succeed after successful recovery");
+    assert!(matches!(
+        &*store2.last_recovery_health(),
+        RecoveryHealth::Healthy
+    ));
+
+    let report = store2
+        .gc_orphan_segments()
+        .expect("GC must succeed after reset_recovery_health");
+    assert_eq!(report.files_deleted, 0);
+}
+
 /// `Telemetry`-class degradation does not compromise deletion safety —
 /// rebuildable-cache errors must not block GC.
 #[test]
@@ -178,6 +232,36 @@ fn gc_runs_under_telemetry_only_degradation() {
     store
         .gc_orphan_segments()
         .expect("Telemetry-class degradation must not block GC");
+}
+
+/// Hard pre-walk recovery failures publish degraded health but never install
+/// an authoritative branch/refcount snapshot, so the reset must refuse on
+/// the same store instance.
+#[test]
+fn reset_recovery_health_refuses_after_prewalk_hard_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let not_a_dir = dir.path().join("segments-file");
+    std::fs::write(&not_a_dir, b"not a directory").unwrap();
+
+    let store = SegmentedStore::with_dir(not_a_dir, 0);
+    store
+        .recover_segments()
+        .expect_err("top-level read_dir failure should still return Err");
+
+    let err = store
+        .reset_recovery_health()
+        .expect_err("hard pre-walk failure never installed recovery state");
+    assert!(matches!(
+        err,
+        StorageError::RecoveryHealthResetRequiresSuccessfulRecovery
+    ));
+    assert!(matches!(
+        &*store.last_recovery_health(),
+        RecoveryHealth::Degraded {
+            class: DegradationClass::DataLoss,
+            ..
+        }
+    ));
 }
 
 /// `clear_branch` must succeed even when GC refuses: the primary task
