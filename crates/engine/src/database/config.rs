@@ -355,6 +355,15 @@ pub struct StrataConfig {
     /// Class: open-time-only. See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default)]
     pub allow_lossy_recovery: bool,
+    /// If true, open is permitted when storage recovery only observed
+    /// `DegradationClass::PolicyDowngrade` (currently emitted by the
+    /// no-`segments.manifest` legacy-L0-promotion fallback). `DataLoss`
+    /// is still refused unless `allow_lossy_recovery` is also set.
+    /// Default: false.
+    ///
+    /// Class: open-time-only.
+    #[serde(default)]
+    pub allow_missing_manifest: bool,
     /// Whether the user opted in to anonymous usage telemetry.
     /// Default: false (opt-in, never on by default).
     #[serde(default)]
@@ -406,6 +415,7 @@ impl Default for StrataConfig {
             google_api_key: None,
             storage: StorageConfig::default(),
             allow_lossy_recovery: false,
+            allow_missing_manifest: false,
             telemetry: false,
             default_vector_dtype: default_vector_dtype(),
             snapshot_retention: SnapshotRetentionPolicy::default(),

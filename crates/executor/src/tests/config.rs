@@ -1311,7 +1311,7 @@ fn unknown_key_error_lists_all_new_keys() {
     }
     // Keys beyond the 10-candidate display cap are summarised as "and N more"
     assert!(
-        msg.contains("and 18 more"),
+        msg.contains("and 19 more"),
         "Error should indicate truncated keys: {}",
         msg
     );

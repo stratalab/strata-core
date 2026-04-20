@@ -42,7 +42,7 @@ use strata_core::StrataError;
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::ManifestManager;
-use strata_storage::{RecoveryHealth, SegmentedStore};
+use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore};
 use tracing::{info, warn};
 
 use super::config::StrataConfig;
@@ -248,7 +248,19 @@ impl Database {
                 "storage recovered with degraded state"
             );
         }
-        // ─── D4 inserts health-policy branch here ──────────────────
+        // D4 health-policy branch. Strict mode refuses authoritative
+        // loss; the no-manifest legacy fallback is opt-in; rebuildable
+        // caches are always accepted. Lossy recovery (`allow_lossy_recovery`)
+        // is the blanket escape hatch and permits every class — it leaves
+        // `LossyRecoveryReport` untouched because no WAL wipe occurred;
+        // operators read the classification via `Database::recovery_health()`.
+        if let RecoveryHealth::Degraded { class, .. } = &seg_outcome.health {
+            let permitted = cfg.allow_lossy_recovery
+                || !policy_refuses(*class, cfg.allow_missing_manifest);
+            if !permitted {
+                return Err(RecoveryError::StorageDegraded(seg_outcome.health.clone()));
+            }
+        }
         coordinator.apply_storage_recovery(&seg_outcome);
 
         // 10. Follower state restore.
@@ -280,6 +292,31 @@ impl Database {
             lossy_report,
             persisted_follower_state,
         })
+    }
+}
+
+/// D4 strict-mode policy. `true` = refuse to open on this class; `false`
+/// = accept. The caller combines this with `allow_lossy_recovery` so
+/// that lossy mode is a blanket override regardless of class.
+///
+/// - `DataLoss` — authoritative storage lost (corrupt segment/manifest,
+///   manifest-listed-but-missing segment, dropped inherited layer). Always
+///   refused; only `allow_lossy_recovery` permits it.
+/// - `PolicyDowngrade` — legacy-compatible fallback engaged (e.g.
+///   no-manifest L0 promotion). Refused unless `allow_missing_manifest`
+///   is set so operators consent explicitly to reading an unmanifested
+///   database.
+/// - `Telemetry` — rebuildable-cache failure. Never refused.
+/// - Unknown future variants default to refusal (conservative for
+///   `#[non_exhaustive]` evolution).
+fn policy_refuses(class: DegradationClass, allow_missing_manifest: bool) -> bool {
+    match class {
+        DegradationClass::PolicyDowngrade => !allow_missing_manifest,
+        DegradationClass::Telemetry => false,
+        // `DegradationClass::DataLoss` and any future #[non_exhaustive]
+        // variant: refuse. Only `allow_lossy_recovery` overrides refusal
+        // (applied by the caller).
+        _ => true,
     }
 }
 
