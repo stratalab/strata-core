@@ -2082,19 +2082,14 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
         let blocker_key = Key::new_kv(ns.clone(), "blocker");
         let trigger_key = Key::new_kv(ns.clone(), "halt_trigger");
 
-        // Stage the sync failure BEFORE shutdown. The trigger commit
-        // queues dirty WAL bytes, but the actual `sync_all` happens on the
-        // next flush-thread tick (every 5ms). By varying how long after
-        // shutdown starts we set things up, the halt publishes at
-        // different points relative to the timeout-cleanup window.
-        super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
-        db.transaction(branch_id, |txn| {
-            txn.put(trigger_key.clone(), Value::Int(i as i64))?;
-            Ok(())
-        })
-        .unwrap();
-
         // Blocker txn — keeps `wait_for_idle` busy so shutdown must time out.
+        // Spawn and await its `begin_transaction` *before* staging the sync
+        // failure: the flush thread's 5ms tick could otherwise observe the
+        // trigger's dirty WAL bytes and halt the writer before the blocker
+        // enters the open-txn state, rejecting it with `WriterHalted` (which
+        // the test doesn't model). Under `perf-trace` instrumentation the
+        // trigger-commit → blocker-begin window stretched past 5ms on busy
+        // CI runners and flaked deterministically.
         let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let db_blocker = Arc::clone(&db);
@@ -2109,6 +2104,18 @@ fn shutdown_timeout_halt_interleaving_preserves_invariant() {
             db_blocker.end_transaction(txn);
         });
         started_rx.recv().unwrap();
+
+        // Stage the sync failure. The trigger commit queues dirty WAL bytes,
+        // but the actual `sync_all` happens on the next flush-thread tick
+        // (every 5ms). By varying how long after shutdown starts we set
+        // things up, the halt publishes at different points relative to the
+        // timeout-cleanup window.
+        super::test_hooks::inject_sync_failure(&db_path, std::io::ErrorKind::Other);
+        db.transaction(branch_id, |txn| {
+            txn.put(trigger_key.clone(), Value::Int(i as i64))?;
+            Ok(())
+        })
+        .unwrap();
 
         // Per-iteration jitter before shutdown positions the halt so it
         // has to publish *during* or *just after* the timeout-cleanup
