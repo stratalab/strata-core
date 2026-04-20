@@ -828,6 +828,18 @@ fn missing_segments_dir_error(path: &std::path::Path) -> io::Error {
     )
 }
 
+/// Outcome of [`SegmentedStore::gc_orphan_segments`].
+///
+/// A successful call reports how many orphan `.sst` files were actually
+/// reaped. A refusal surfaces as [`StorageError::GcRefusedDegradedRecovery`]
+/// on the `Err` arm and does not produce a [`GcReport`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct GcReport {
+    /// Number of orphan segment files removed from disk in this call.
+    pub files_deleted: usize,
+}
+
 impl SegmentedStore {
     /// Create a new ephemeral segmented store (no disk segments).
     ///
@@ -952,6 +964,58 @@ impl SegmentedStore {
     /// invalidate this handle.
     pub fn last_recovery_health(&self) -> Arc<RecoveryHealth> {
         self.last_recovery_health.load_full()
+    }
+
+    /// Reset recovery health back to [`RecoveryHealth::Healthy`] when an
+    /// in-place reset is actually safe.
+    ///
+    /// **Destructive admin.** S4 per the durability-storage-closure plan.
+    /// The reset is intentionally narrower than "clear whatever happened":
+    ///
+    /// - `recover_segments()` must have successfully installed this store's
+    ///   branch/refcount view. Hard pre-walk failures never reached an
+    ///   authoritative in-memory snapshot, so GC cannot be re-enabled on the
+    ///   same instance.
+    /// - `DataLoss` degradations require a fresh reopen after reconciliation.
+    ///   This store's recovery view is one-shot; if an operator restores a
+    ///   manifest or `.sst` after reopen, the same instance cannot reload it,
+    ///   and clearing the health bit would let GC delete the restored file.
+    ///
+    /// `PolicyDowngrade` can be cleared in-place after a successful recovery
+    /// because the store already loaded every discovered `.sst` into its live
+    /// graph. `Telemetry` does not block GC in the first place.
+    pub fn reset_recovery_health(&self) -> StorageResult<()> {
+        let health = self.last_recovery_health.load_full();
+        match &*health {
+            RecoveryHealth::Healthy => Ok(()),
+            RecoveryHealth::Degraded {
+                class: DegradationClass::PolicyDowngrade,
+                ..
+            } => {
+                if !self.recovery_applied.load(Ordering::Acquire) {
+                    return Err(StorageError::RecoveryHealthResetRequiresSuccessfulRecovery);
+                }
+
+                self.last_recovery_health
+                    .store(Arc::new(RecoveryHealth::Healthy));
+                Ok(())
+            }
+            RecoveryHealth::Degraded { class, .. } => {
+                if !self.recovery_applied.load(Ordering::Acquire) {
+                    return Err(StorageError::RecoveryHealthResetRequiresSuccessfulRecovery);
+                }
+
+                Err(StorageError::RecoveryHealthResetRequiresReopen { class: *class })
+            }
+        }
+    }
+
+    /// Test-only hook: install an arbitrary [`RecoveryHealth`] value so tests
+    /// can exercise the GC refusal and telemetry-passthrough paths without
+    /// driving a full recovery.
+    #[cfg(test)]
+    pub(crate) fn set_recovery_health_for_test(&self, health: RecoveryHealth) {
+        self.last_recovery_health.store(Arc::new(health));
     }
 
     /// Increment version and return new value.
@@ -1379,8 +1443,18 @@ impl SegmentedStore {
             // Refcount decrements above may have released the last reference to
             // segments whose parent already compacted them away. GC deletes
             // any .sst on disk not referenced by a live branch or the refcount
-            // registry.
-            self.gc_orphan_segments();
+            // registry. A degraded recovery (SE3) makes GC refuse; branch
+            // clearing still succeeds, but the retention debt accumulates
+            // until a safe reset or fresh reopen re-establishes GC trust.
+            if let Err(e) = self.gc_orphan_segments() {
+                tracing::warn!(
+                    target: "strata::storage::gc",
+                    branch_id = %hex_encode_branch(branch_id),
+                    op = "clear_branch",
+                    error = %e,
+                    "gc_orphan_segments refused; retention debt accumulated",
+                );
+            }
 
             // 5. Retry directory removal after gc — gc may have deleted
             // .sst files from in-flight compaction that landed between
@@ -1415,11 +1489,34 @@ impl SegmentedStore {
     /// to 0) without being able to delete the file (the parent might still
     /// own it at that time).
     ///
-    /// Returns the number of files deleted.
-    pub fn gc_orphan_segments(&self) -> usize {
-        let segments_dir = match &self.segments_dir {
-            Some(d) => d,
-            None => return 0,
+    /// # Refusal under degraded recovery (SE3 / SG-009)
+    ///
+    /// GC refuses when [`SegmentedStore::last_recovery_health`] is
+    /// `Degraded` with class [`DegradationClass::DataLoss`] or
+    /// [`DegradationClass::PolicyDowngrade`]: in either case the in-memory
+    /// branch set may not reflect every branch that still has authoritative
+    /// on-disk state, so "not in `live_ids`" is not a safe deletion proof.
+    /// [`DegradationClass::Telemetry`] is not a refusal cause — rebuildable
+    /// caches do not compromise deletion safety. `PolicyDowngrade` can be
+    /// cleared in-place via [`SegmentedStore::reset_recovery_health`] after a
+    /// successful recovery; `DataLoss` requires a fresh reopen because the
+    /// current store instance cannot reload later-restored files.
+    pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
+        match &**self.last_recovery_health.load() {
+            // Healthy and Telemetry-only degradation (rebuildable-cache errors)
+            // do not compromise deletion safety, so GC proceeds normally.
+            RecoveryHealth::Healthy
+            | RecoveryHealth::Degraded {
+                class: DegradationClass::Telemetry,
+                ..
+            } => {}
+            RecoveryHealth::Degraded { class, .. } => {
+                return Err(StorageError::GcRefusedDegradedRecovery { class: *class });
+            }
+        }
+
+        let Some(segments_dir) = &self.segments_dir else {
+            return Ok(GcReport { files_deleted: 0 });
         };
 
         // Build the set of all segment file_id values currently live in any
@@ -1444,9 +1541,8 @@ impl SegmentedStore {
         let mut deleted = 0usize;
 
         // Scan all branch directories.
-        let entries = match std::fs::read_dir(segments_dir) {
-            Ok(e) => e,
-            Err(_) => return 0,
+        let Ok(entries) = std::fs::read_dir(segments_dir) else {
+            return Ok(GcReport { files_deleted: 0 });
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1476,7 +1572,9 @@ impl SegmentedStore {
             }
         }
 
-        deleted
+        Ok(GcReport {
+            files_deleted: deleted,
+        })
     }
 
     /// Number of inherited layers for a branch.
@@ -1775,8 +1873,18 @@ impl SegmentedStore {
 
         // Garbage-collect orphan segment files (#1705).
         // Refcount decrements above may have released the last reference to
-        // segments whose parent already compacted them away.
-        self.gc_orphan_segments();
+        // segments whose parent already compacted them away. A degraded
+        // recovery (SE3) makes GC refuse; materialize still succeeds and
+        // the retention debt is logged.
+        if let Err(e) = self.gc_orphan_segments() {
+            tracing::warn!(
+                target: "strata::storage::gc",
+                branch_id = %hex_encode_branch(child_branch_id),
+                op = "materialize_layer",
+                error = %e,
+                "gc_orphan_segments refused; retention debt accumulated",
+            );
+        }
 
         if let Some(err) = initial_not_durable {
             tracing::warn!(

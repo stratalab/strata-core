@@ -1004,8 +1004,13 @@ fn gc_orphan_segments_cleans_leaked_files() {
     }
 
     // Calling GC again should find nothing to delete.
-    let deleted = store.gc_orphan_segments();
-    assert_eq!(deleted, 0, "no orphans should remain after clear_branch GC");
+    let report = store
+        .gc_orphan_segments()
+        .expect("clean recovery; gc must succeed");
+    assert_eq!(
+        report.files_deleted, 0,
+        "no orphans should remain after clear_branch GC"
+    );
 }
 
 /// #1705: materialize_layer must GC orphaned segments after decrementing refcounts.
@@ -1094,9 +1099,11 @@ fn test_issue_1705_materialize_layer_gc_orphan_segments() {
     }
 
     // Calling GC again should find nothing to delete.
-    let deleted = store.gc_orphan_segments();
+    let report = store
+        .gc_orphan_segments()
+        .expect("clean recovery; gc must succeed");
     assert_eq!(
-        deleted, 0,
+        report.files_deleted, 0,
         "no orphans should remain after materialize_layer GC"
     );
 

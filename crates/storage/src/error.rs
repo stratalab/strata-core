@@ -5,7 +5,7 @@ use strata_core::types::BranchId;
 use strata_core::StrataError;
 use thiserror::Error;
 
-use crate::segmented::RecoveryFault;
+use crate::segmented::{DegradationClass, RecoveryFault};
 
 /// Result alias for storage-local operations that can raise [`StorageError`].
 pub type StorageResult<T> = Result<T, StorageError>;
@@ -21,6 +21,14 @@ pub enum StorageError {
     /// `recover_segments()` was invoked more than once on the same store.
     #[error("recover_segments() can only run once per SegmentedStore instance")]
     RecoveryAlreadyApplied,
+
+    /// `reset_recovery_health()` can only clear the GC refusal after this
+    /// store instance successfully completed `recover_segments()` and
+    /// installed the recovered branch/refcount view. Hard pre-walk recovery
+    /// failures never reach that point, so clearing the health bit on the
+    /// same instance would let GC treat every on-disk `.sst` as unseen.
+    #[error("reset_recovery_health() requires a successfully applied recover_segments() on this store instance")]
+    RecoveryHealthResetRequiresSuccessfulRecovery,
 
     /// Publishing a branch manifest failed before the atomic rename completed.
     #[error("failed to publish segment manifest for branch {branch_id}: {inner}")]
@@ -53,6 +61,36 @@ pub enum StorageError {
     /// [`RecoveredState`]: crate::segmented::RecoveredState
     #[error(transparent)]
     RecoveryFault(#[from] RecoveryFault),
+
+    /// Orphan-segment GC refused to run because the most recent recovery
+    /// produced a degradation class that could make deletion unsafe
+    /// (`DataLoss` or `PolicyDowngrade`). Callers log this as a
+    /// retention-debt signal and continue; `PolicyDowngrade` can be cleared
+    /// in-place via `SegmentedStore::reset_recovery_health()`, while
+    /// `DataLoss` requires a fresh reopen.
+    #[error("gc refused: last recovery degradation class {class:?} is not safe for deletion")]
+    GcRefusedDegradedRecovery {
+        /// Classified severity of the most recent recovery. Any class other
+        /// than `Telemetry` blocks deletion; `DataLoss` and `PolicyDowngrade`
+        /// both route here.
+        class: DegradationClass,
+    },
+
+    /// `reset_recovery_health()` cannot clear this degraded recovery on the
+    /// same store instance. After authoritative loss, operators may restore
+    /// manifests or `.sst`s on disk, but this store's in-memory
+    /// `self.branches` / refcount view is a one-shot snapshot from the
+    /// original reopen. Re-enabling GC without a fresh reopen would let it
+    /// delete restored files that recovery never reloaded. Any future
+    /// degradation class that is not explicitly allowlisted also routes here.
+    #[error("reset_recovery_health() requires a fresh reopen after degraded recovery ({class:?})")]
+    RecoveryHealthResetRequiresReopen {
+        /// Classified severity that blocks an in-place reset. `PolicyDowngrade`
+        /// is the only allowlisted degraded class for in-place reset;
+        /// `Telemetry` never refuses GC, and any other current or future class
+        /// requires a fresh reopen.
+        class: DegradationClass,
+    },
 }
 
 impl StorageError {
@@ -64,10 +102,13 @@ impl StorageError {
     pub fn kind(&self) -> io::ErrorKind {
         match self {
             StorageError::Io(inner) => inner.kind(),
-            StorageError::RecoveryAlreadyApplied => io::ErrorKind::Other,
             StorageError::ManifestPublish { inner, .. } => inner.kind(),
             StorageError::DirFsync { inner, .. } => inner.kind(),
             StorageError::RecoveryFault(fault) => recovery_fault_kind(fault),
+            StorageError::RecoveryAlreadyApplied
+            | StorageError::RecoveryHealthResetRequiresSuccessfulRecovery
+            | StorageError::GcRefusedDegradedRecovery { .. }
+            | StorageError::RecoveryHealthResetRequiresReopen { .. } => io::ErrorKind::Other,
         }
     }
 }
@@ -90,6 +131,9 @@ impl From<StorageError> for StrataError {
             StorageError::RecoveryAlreadyApplied => {
                 StrataError::storage("segment recovery already applied on this store instance")
             }
+            StorageError::RecoveryHealthResetRequiresSuccessfulRecovery => StrataError::storage(
+                "reset_recovery_health() requires a successfully applied recovery on this store instance",
+            ),
             StorageError::ManifestPublish { branch_id, inner } => StrataError::storage_with_source(
                 format!("failed to publish segment manifest for branch {branch_id}"),
                 inner,
@@ -103,6 +147,14 @@ impl From<StorageError> for StrataError {
             ),
             StorageError::RecoveryFault(fault) => {
                 StrataError::storage_with_source("recovery fault", fault)
+            }
+            StorageError::GcRefusedDegradedRecovery { class } => StrataError::storage(format!(
+                "gc refused under degraded recovery ({class:?})"
+            )),
+            StorageError::RecoveryHealthResetRequiresReopen { class } => {
+                StrataError::storage(format!(
+                    "reset_recovery_health() requires a fresh reopen after degraded recovery ({class:?})"
+                ))
             }
         }
     }
