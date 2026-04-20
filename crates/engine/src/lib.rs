@@ -43,9 +43,9 @@ pub use database::profile::{
     Profile,
 };
 pub use database::{
-    CacheMetrics, Database, DatabaseDiskUsage, HealthReport, LossyErrorKind, LossyRecoveryReport,
-    ModelConfig, StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth,
-    SubsystemStatus, SystemMetrics, WalWriterHealth,
+    CacheMetrics, Database, DatabaseDiskUsage, ErrorRole, HealthReport, LossyErrorKind,
+    LossyRecoveryReport, ModelConfig, RecoveryError, StorageConfig, StorageMetricsSummary,
+    StrataConfig, SubsystemHealth, SubsystemStatus, SystemMetrics, WalWriterHealth,
 };
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;

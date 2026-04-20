@@ -15,6 +15,8 @@
 //! 5. Apply records via `on_record`; truncate partial WAL tail on the active segment.
 //! 6. Return `RecoveryStats`; caller owns storage and txn-manager construction.
 
+use std::path::PathBuf;
+
 use crate::payload::TransactionPayload;
 use crate::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
@@ -114,6 +116,110 @@ pub struct RecoveryCoordinator {
     codec: Option<Box<dyn StorageCodec>>,
 }
 
+/// Typed recovery failures produced by [`RecoveryCoordinator::recover_typed`].
+///
+/// `recover()` remains the legacy `StrataResult` wrapper for the wider
+/// workspace; engine recovery uses this typed form so D3 can preserve
+/// snapshot/WAL taxonomy past the coordinator boundary.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CoordinatorRecoveryError {
+    /// `plan_recovery()` failed while resolving snapshot state.
+    #[error(transparent)]
+    Plan(StrataError),
+
+    /// MANIFEST references a snapshot file that does not exist.
+    #[error("MANIFEST references snapshot {snapshot_id} but {path} is missing")]
+    SnapshotMissing {
+        /// Snapshot id recorded in the MANIFEST.
+        snapshot_id: u64,
+        /// Expected snapshot file path.
+        path: PathBuf,
+    },
+
+    /// Snapshot load failed after the MANIFEST pointed at the file.
+    #[error("failed to load snapshot {snapshot_id} at {path}: {source}")]
+    SnapshotRead {
+        /// Snapshot id recorded in the MANIFEST.
+        snapshot_id: u64,
+        /// Snapshot file path.
+        path: PathBuf,
+        /// Underlying typed snapshot read error.
+        #[source]
+        source: SnapshotReadError,
+    },
+
+    /// WAL reader failed while scanning committed records.
+    #[error("WAL read failed: {0}")]
+    WalRead(#[source] WalReaderError),
+
+    /// Transaction payload bytes inside a WAL record were invalid.
+    #[error("Failed to decode transaction payload for txn {txn_id}: {detail}")]
+    PayloadDecode {
+        /// Transaction id of the record whose payload could not be decoded.
+        txn_id: TxnId,
+        /// Decoder error detail.
+        detail: String,
+    },
+
+    /// Caller-supplied snapshot or record callback returned an error.
+    #[error(transparent)]
+    Callback(StrataError),
+}
+
+impl CoordinatorRecoveryError {
+    /// Returns `true` when the error is a hard legacy-format rejection that
+    /// must bypass lossy recovery.
+    pub fn is_legacy_format(&self) -> bool {
+        matches!(
+            self,
+            CoordinatorRecoveryError::SnapshotRead {
+                source: SnapshotReadError::LegacyFormat { .. },
+                ..
+            } | CoordinatorRecoveryError::WalRead(WalReaderError::LegacyFormat { .. })
+        )
+    }
+
+    /// Returns `true` when the engine must bypass its lossy WAL fallback.
+    ///
+    /// Coordinator `Plan(...)` failures come from the MANIFEST /
+    /// snapshot-planning step rather than WAL bytes, so recreating the
+    /// in-memory store cannot heal them.
+    pub fn should_bypass_lossy(&self) -> bool {
+        matches!(self, CoordinatorRecoveryError::Plan(_)) || self.is_legacy_format()
+    }
+}
+
+impl From<CoordinatorRecoveryError> for StrataError {
+    fn from(value: CoordinatorRecoveryError) -> Self {
+        match value {
+            CoordinatorRecoveryError::Plan(inner) | CoordinatorRecoveryError::Callback(inner) => {
+                inner
+            }
+            CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path } => {
+                StrataError::corruption(format!(
+                    "MANIFEST references snapshot {snapshot_id} but {} is missing",
+                    path.display()
+                ))
+            }
+            CoordinatorRecoveryError::SnapshotRead {
+                snapshot_id,
+                path,
+                source,
+            } => map_snapshot_read_error_to_strata_error(source, |other| {
+                StrataError::corruption(format!(
+                    "failed to load snapshot {snapshot_id} at {}: {other}",
+                    path.display(),
+                ))
+            }),
+            CoordinatorRecoveryError::WalRead(inner) => wal_read_error_to_strata_error(inner),
+            CoordinatorRecoveryError::PayloadDecode { txn_id, detail } => StrataError::storage(
+                format!("Failed to decode transaction payload for txn {txn_id}: {detail}"),
+            ),
+        }
+    }
+}
+
 impl RecoveryCoordinator {
     /// Create a recovery coordinator from a canonical database layout.
     ///
@@ -208,11 +314,13 @@ impl RecoveryCoordinator {
     ///
     /// # Errors
     ///
-    /// - `StrataError::corruption` if the MANIFEST cannot be parsed.
-    /// - `StrataError::corruption` if the MANIFEST codec does not match
-    ///   `expected_codec_id`. Returning the corruption variant keeps the
-    ///   error visible to operators without widening `StrataError` in this
-    ///   change class; the error text is structured for the taxonomy pass.
+    /// - `StrataError::corruption` (or `StrataError::LegacyFormat` for pre-v2
+    ///   MANIFESTs) if the MANIFEST cannot be parsed.
+    /// - `StrataError::IncompatibleReuse` if the MANIFEST codec does not match
+    ///   `expected_codec_id`. Codec mismatch is a configuration error, not
+    ///   data corruption — the engine open paths at `database/open.rs` surface
+    ///   the same variant so the coordinator-only codepath agrees (Epic D3
+    ///   recovery-parity requirement).
     pub fn plan_recovery(&self, expected_codec_id: &str) -> StrataResult<RecoveryPlan> {
         let manifest_path = self.layout.manifest_path();
         if !ManifestManager::exists(manifest_path) {
@@ -222,7 +330,7 @@ impl RecoveryCoordinator {
             .map_err(manifest_error_to_strata_error)?;
         let m = mgr.manifest();
         if m.codec_id != expected_codec_id {
-            return Err(StrataError::corruption(format!(
+            return Err(StrataError::incompatible_reuse(format!(
                 "codec mismatch: database was created with '{}' but config specifies '{}'. \
                  A database cannot be reopened with a different codec.",
                 m.codec_id, expected_codec_id
@@ -252,31 +360,27 @@ impl RecoveryCoordinator {
     fn load_snapshot_if_present(
         &self,
         codec: &dyn StorageCodec,
-    ) -> StrataResult<Option<LoadedSnapshot>> {
-        let plan = self.plan_recovery(codec.codec_id())?;
+    ) -> Result<Option<LoadedSnapshot>, CoordinatorRecoveryError> {
+        let plan = self
+            .plan_recovery(codec.codec_id())
+            .map_err(CoordinatorRecoveryError::Plan)?;
         let snapshot_id = match plan.snapshot_id {
             Some(id) => id,
             None => return Ok(None),
         };
         let path = snapshot_path(self.layout.snapshots_dir(), snapshot_id);
         if !path.exists() {
-            return Err(StrataError::corruption(format!(
-                "MANIFEST references snapshot {} but {} is missing",
-                snapshot_id,
-                path.display()
-            )));
+            return Err(CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path });
         }
         let reader = SnapshotReader::new(clone_codec(codec));
-        let snapshot = reader.load(&path).map_err(|err| {
-            map_snapshot_read_error_to_strata_error(err, |other| {
-                StrataError::corruption(format!(
-                    "failed to load snapshot {} at {}: {}",
+        let snapshot =
+            reader
+                .load(&path)
+                .map_err(|source| CoordinatorRecoveryError::SnapshotRead {
                     snapshot_id,
-                    path.display(),
-                    other
-                ))
-            })
-        })?;
+                    path: path.clone(),
+                    source,
+                })?;
         info!(
             target: "strata::recovery",
             snapshot_id,
@@ -306,12 +410,17 @@ impl RecoveryCoordinator {
     /// callers that need the decoded payload perform their own decode
     /// inside `on_record` to preserve the inline-decode invariant.
     ///
-    /// # Errors
+    /// Typed recovery driver used by the engine's D3 recovery
+    /// orchestration.
     ///
-    /// Propagates errors from `on_snapshot`, `on_record`, and WAL reading.
-    /// A hard error from `on_record` halts replay immediately — the caller
-    /// is expected to surface it.
-    pub fn recover<FS, FR>(self, on_snapshot: FS, mut on_record: FR) -> StrataResult<RecoveryStats>
+    /// The legacy [`recover`](Self::recover) API is a thin wrapper over this
+    /// method that maps the typed error back to the historical
+    /// `StrataError` surface for existing callers.
+    pub fn recover_typed<FS, FR>(
+        self,
+        on_snapshot: FS,
+        mut on_record: FR,
+    ) -> Result<RecoveryStats, CoordinatorRecoveryError>
     where
         FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
         FR: FnMut(&WalRecord) -> StrataResult<()>,
@@ -346,7 +455,7 @@ impl RecoveryCoordinator {
                 stats.from_checkpoint = true;
                 snapshot_watermark_txn = snapshot.watermark_txn();
                 max_txn_id = max_txn_id.max(snapshot_watermark_txn);
-                on_snapshot(snapshot)?;
+                on_snapshot(snapshot).map_err(CoordinatorRecoveryError::Callback)?;
             }
         }
 
@@ -373,10 +482,10 @@ impl RecoveryCoordinator {
         }
         let records_iter = reader
             .iter_all(self.layout.wal_dir())
-            .map_err(wal_read_error_to_strata_error)?;
+            .map_err(CoordinatorRecoveryError::WalRead)?;
 
         for record_result in records_iter {
-            let record = record_result.map_err(wal_read_error_to_strata_error)?;
+            let record = record_result.map_err(CoordinatorRecoveryError::WalRead)?;
 
             // Delta-WAL replay: records at or below the snapshot watermark
             // are already reflected in the installed snapshot. Skip them to
@@ -394,16 +503,16 @@ impl RecoveryCoordinator {
             }
 
             let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
-                StrataError::storage(format!(
-                    "Failed to decode transaction payload for txn {}: {}",
-                    record.txn_id, e
-                ))
+                CoordinatorRecoveryError::PayloadDecode {
+                    txn_id: record.txn_id,
+                    detail: e.to_string(),
+                }
             })?;
 
             // Invoke the caller before bumping stats so a failing callback
             // never leaves behind inflated counts claiming work that was
             // never applied.
-            on_record(&record)?;
+            on_record(&record).map_err(CoordinatorRecoveryError::Callback)?;
 
             max_txn_id = max_txn_id.max(record.txn_id.as_u64());
             max_version = max_version.max(payload.version);
@@ -426,6 +535,23 @@ impl RecoveryCoordinator {
         stats.max_txn_id = TxnId(max_txn_id);
 
         Ok(stats)
+    }
+
+    /// Drive recovery through caller-supplied callbacks and map the typed
+    /// coordinator error back to the historical `StrataError` surface.
+    ///
+    /// # Errors
+    ///
+    /// Propagates errors from `on_snapshot`, `on_record`, and WAL reading.
+    /// A hard error from `on_record` halts replay immediately — the caller
+    /// is expected to surface it.
+    pub fn recover<FS, FR>(self, on_snapshot: FS, on_record: FR) -> StrataResult<RecoveryStats>
+    where
+        FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
+        FR: FnMut(&WalRecord) -> StrataResult<()>,
+    {
+        self.recover_typed(on_snapshot, on_record)
+            .map_err(StrataError::from)
     }
 
     /// Best-effort sidecar rebuild for closed WAL segments whose `.meta`

@@ -1,9 +1,6 @@
 //! Database opening and initialization.
 
 use super::config::StorageConfig;
-use super::refresh::{
-    clear_persisted_follower_state, load_persisted_follower_state, validate_blocked_state,
-};
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use dashmap::DashMap;
@@ -12,23 +9,20 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use strata_concurrency::{
-    apply_wal_record_to_memory_storage, manifest_error_to_strata_error, RecoveryCoordinator,
-    RecoveryStats,
-};
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::codec::clone_codec;
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
-use strata_durability::{ManifestError, ManifestManager};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
 /// Apply all storage configuration settings to a SegmentedStore.
 ///
 /// Centralizes the 7 storage-config setters so every open path
-/// (primary, follower, cache) applies the same set of knobs.
-fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
+/// (primary, follower, cache) applies the same set of knobs. Visible to
+/// `super::recovery` so the unified `run_recovery` entry point can apply
+/// the same knobs after it finishes MANIFEST + WAL + segment recovery.
+pub(crate) fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
     storage.set_max_branches(cfg.max_branches);
     storage.set_max_versions_per_key(cfg.max_versions_per_key);
     storage.set_max_immutable_memtables(cfg.effective_max_immutable_memtables());
@@ -47,7 +41,7 @@ use strata_core::{StrataError, StrataResult};
 /// Restrict a directory to owner-only access (rwx------).
 /// Best-effort: logs a warning on failure but does not block database open.
 #[cfg(unix)]
-fn restrict_dir(path: &Path) {
+pub(crate) fn restrict_dir(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     if let Err(e) = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)) {
         warn!(target: "strata::db", path = %path.display(), error = %e,
@@ -56,7 +50,7 @@ fn restrict_dir(path: &Path) {
 }
 
 #[cfg(not(unix))]
-fn restrict_dir(_path: &Path) {}
+pub(crate) fn restrict_dir(_path: &Path) {}
 
 /// Sanitize config for runtime consistency across all modes.
 ///
@@ -89,7 +83,7 @@ fn restrict_file(_path: &Path) {}
 
 use super::config::{self, StrataConfig};
 use super::registry::OPEN_DATABASES;
-use super::{Database, LossyErrorKind, LossyRecoveryReport, PersistenceMode, WalWriterHealth};
+use super::{Database, PersistenceMode, WalWriterHealth};
 
 enum AcquiredDatabase {
     Existing(Arc<Database>),
@@ -432,283 +426,36 @@ impl Database {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
         let wal_dir = layout.wal_dir().to_path_buf();
-        let manifest_path = layout.manifest_path().to_path_buf();
 
-        // Read-only MANIFEST inspection: the follower derives its codec from
-        // whatever the database was created with. Failures here match the
-        // primary's error handling — a MANIFEST that exists but cannot be
-        // parsed is corruption, and a codec id the local build cannot
-        // initialize is a configuration mismatch. Both produce hard errors
-        // so a snapshot-aware compact on the primary does not cause the
-        // follower to silently serve stale / empty state once pre-snapshot
-        // WAL has been reclaimed. Only a genuinely absent MANIFEST (fresh
-        // database) degrades to WAL-only recovery.
-        let manifest_exists = ManifestManager::exists(&manifest_path);
-        let (database_uuid, follower_codec) = if manifest_exists {
-            let m = ManifestManager::load(manifest_path.clone()).map_err(|err| match err {
-                legacy @ ManifestError::LegacyFormat { .. } => {
-                    manifest_error_to_strata_error(legacy)
-                }
-                other => StrataError::corruption(format!(
-                    "follower could not load MANIFEST at {}: {}",
-                    manifest_path.display(),
-                    other
-                )),
-            })?;
-            let manifest = m.manifest();
-            if manifest.codec_id != cfg.storage.codec {
-                return Err(StrataError::incompatible_reuse(format!(
-                    "codec mismatch: follower target at {} was created with '{}' but config specifies '{}'. \
-                     A follower must be configured with the same codec as the primary database.",
-                    canonical_path.display(),
-                    manifest.codec_id,
-                    cfg.storage.codec
-                )));
-            }
-            let codec = strata_durability::get_codec(&manifest.codec_id).map_err(|e| {
-                StrataError::internal(format!(
-                    "follower could not initialize MANIFEST codec '{}': {}",
-                    manifest.codec_id, e
-                ))
-            })?;
-            (manifest.database_uuid, Some(codec))
-        } else {
-            ([0u8; 16], None)
-        };
-
-        if !manifest_exists {
-            match layout
-                .segments_dir()
-                .try_exists()
-                .map_err(StrataError::from)?
-            {
-                true => {}
-                false => {
-                    layout.create_segments_dir().map_err(StrataError::from)?;
-                    restrict_dir(layout.segments_dir());
-                }
-            }
-        }
-
-        // T3-E12 §D7: follower-without-MANIFEST falls back to the
-        // follower's own config codec so encrypted WAL-only recovery
-        // works. Primary and cache paths already use `cfg.storage.codec`
-        // directly; the follower now matches that when MANIFEST is
-        // absent. `follower_codec` (Some/None) stays meaningful for
-        // snapshot-install wiring below, which is only wired with a
-        // MANIFEST-persisted codec — without MANIFEST we don't know
-        // which snapshot schema to install against.
-        let wal_codec: Box<dyn strata_durability::codec::StorageCodec> = match &follower_codec {
-            Some(c) => clone_codec(c.as_ref()),
-            None => strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
-                StrataError::internal(format!(
-                    "follower (MANIFEST absent) could not initialize config codec '{}': {}",
-                    cfg.storage.codec, e
-                ))
-            })?,
-        };
-
-        // Drive recovery via the callback-driven API. Snapshot install is
-        // wired only when a codec was resolved from the MANIFEST above;
-        // otherwise the coordinator falls back to WAL-only, matching
-        // the pre-Chunk-3 follower behavior. The WAL reader, however,
-        // is always codec-aware via `wal_codec` so encrypted WAL-only
-        // recovery works even without a MANIFEST (T3-E12 §D7).
-        let mut storage = SegmentedStore::with_dir(
-            layout.segments_dir().to_path_buf(),
-            cfg.storage.effective_write_buffer_size(),
-        );
-        let mut recovery =
-            RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
-                .with_lossy_recovery(cfg.allow_lossy_recovery);
-        recovery = recovery.with_codec(clone_codec(wal_codec.as_ref()));
-        let install_codec_for_follower = follower_codec.as_ref().map(|c| clone_codec(c.as_ref()));
-
-        // Count records applied before any coordinator error so the lossy
-        // branch below can surface how far recovery progressed.
-        let records_applied_before_failure = Arc::new(AtomicU64::new(0));
-
-        let recover_result = {
-            let storage_ref = &storage;
-            let install_codec_ref = install_codec_for_follower.as_deref();
-            let counter = Arc::clone(&records_applied_before_failure);
-            recovery.recover(
-                |snapshot| {
-                    if let Some(install_codec) = install_codec_ref {
-                        let installed = super::snapshot_install::install_snapshot(
-                            &snapshot,
-                            install_codec,
-                            storage_ref,
-                        )?;
-                        info!(
-                            target: "strata::recovery",
-                            snapshot_id = snapshot.snapshot_id(),
-                            watermark = snapshot.watermark_txn(),
-                            entries = installed.total_installed(),
-                            "Follower installed snapshot into SegmentedStore"
-                        );
-                    }
-                    Ok(())
-                },
-                |record| {
-                    let result = apply_wal_record_to_memory_storage(storage_ref, record);
-                    if result.is_ok() {
-                        counter.fetch_add(1, Ordering::SeqCst);
-                    }
-                    result
-                },
-            )
-        };
-
-        let mut lossy_report: Option<LossyRecoveryReport> = None;
-        let mut stats = match recover_result {
-            Ok(stats) => stats,
-            Err(e) => {
-                // T3-E12 §D6: LegacyFormat is a hard-fail error that
-                // MUST NOT route through the lossy wipe (the wipe only
-                // recreates in-memory state and leaves pre-v3 segments
-                // on disk to re-poison every subsequent open). Operator
-                // must wipe `wal/` manually.
-                if matches!(e, StrataError::LegacyFormat { .. }) {
-                    return Err(e);
-                }
-
-                if cfg.allow_lossy_recovery {
-                    let report = LossyRecoveryReport {
-                        error: e.to_string(),
-                        error_kind: LossyErrorKind::from_strata_error(&e),
-                        records_applied_before_failure: records_applied_before_failure
-                            .load(Ordering::SeqCst),
-                        version_reached_before_failure: CommitVersion(storage.version()),
-                        discarded_on_wipe: true,
-                    };
-                    warn!(
-                        target: "strata::recovery::lossy",
-                        error = %e,
-                        error_kind = %report.error_kind,
-                        records_applied_before_failure = report.records_applied_before_failure,
-                        version_reached_before_failure =
-                            report.version_reached_before_failure.as_u64(),
-                        discarded_on_wipe = report.discarded_on_wipe,
-                        follower = true,
-                        "Lossy recovery fallback — discarding pre-failure state"
-                    );
-                    warn!(target: "strata::db",
-                        error = %e,
-                        "Follower recovery failed — starting with empty state");
-                    lossy_report = Some(report);
-                    storage = SegmentedStore::with_dir(
-                        layout.segments_dir().to_path_buf(),
-                        cfg.storage.effective_write_buffer_size(),
-                    );
-                    RecoveryStats::default()
-                } else {
-                    return Err(StrataError::corruption(format!(
-                        "WAL recovery failed in follower mode: {}. \
-                         Set allow_lossy_recovery=true to force open.",
-                        e
-                    )));
-                }
-            }
-        };
-
-        // Fold snapshot-installed storage version into stats so the follower's
-        // TransactionCoordinator bootstraps above snapshot entries.
-        stats.final_version = stats.final_version.max(CommitVersion(storage.version()));
-
-        info!(target: "strata::db",
-            txns_replayed = stats.txns_replayed,
-            writes_applied = stats.writes_applied,
-            from_checkpoint = stats.from_checkpoint,
-            "Follower recovery complete");
-
-        let result = strata_concurrency::RecoveryResult {
-            storage,
-            txn_manager: strata_concurrency::TransactionManager::with_txn_id(
-                stats.final_version,
-                stats.max_txn_id,
-            ),
-            stats,
-        };
-
-        let persisted_follower_state = match load_persisted_follower_state(&canonical_path) {
-            Ok(Some(state)) => match validate_blocked_state(
-                &state,
-                result.stats.max_txn_id,
-                result.stats.final_version,
-            ) {
-                Ok(()) => Some(state),
-                Err(reason) => {
-                    warn!(
-                        target: "strata::db",
-                        received = state.received_watermark.as_u64(),
-                        applied = state.applied_watermark.as_u64(),
-                        visible_version = state.visible_version.as_u64(),
-                        blocked_txn = state.blocked.blocked.txn_id.as_u64(),
-                        recovered_txn = result.stats.max_txn_id.as_u64(),
-                        recovered_version = result.stats.final_version.as_u64(),
-                        reason = %reason,
-                        "Ignoring inconsistent persisted follower state"
-                    );
-                    if let Err(error) = clear_persisted_follower_state(&canonical_path) {
-                        warn!(
-                            target: "strata::db",
-                            error = %error,
-                            "Failed to clear inconsistent persisted follower state"
-                        );
-                    }
-                    None
-                }
-            },
-            Ok(None) => None,
-            Err(e) => {
-                warn!(
-                    target: "strata::db",
-                    error = %e,
-                    "Failed to load persisted follower state"
-                );
-                None
-            }
-        };
-        let watermark = if let Some(state) = &persisted_follower_state {
-            super::refresh::ContiguousWatermark::from_state(
-                state.received_watermark,
-                state.applied_watermark,
-                Some(state.blocked.clone()),
-            )
-        } else {
-            super::refresh::ContiguousWatermark::new(result.stats.max_txn_id)
-        };
-
-        let coordinator = TransactionCoordinator::from_recovery_with_limits(
-            &result,
-            cfg.storage.max_write_buffer_entries,
-        );
-
-        let storage = Arc::new(result.storage);
-        apply_storage_config(&storage, &cfg.storage);
+        // Epic D3: unified recovery orchestration. `run_recovery` owns
+        // the follower-specific MANIFEST-or-config codec resolution,
+        // WAL-only-on-missing-MANIFEST branch, coordinator recovery
+        // with lossy fallback, segment recovery, and persisted
+        // follower-state restore. Pre-D3 this was ~260 inline lines
+        // with string-factory error wraps at four sites.
+        let outcome = Database::run_recovery(
+            &canonical_path,
+            &layout,
+            &cfg,
+            super::recovery::RecoveryMode::Follower,
+        )
+        .map_err(StrataError::from)?;
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
-        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
-
-        // `database_uuid` was already resolved from the MANIFEST above (or
-        // defaulted when absent) before recovery ran, so the snapshot-install
-        // codec and the instance UUID come from the same read.
-
         let db = Arc::new(Self {
             data_dir: canonical_path,
-            database_uuid,
-            storage,
+            database_uuid: outcome.database_uuid,
+            storage: outcome.storage,
             wal_writer: None, // No WAL writer — read-only
-            wal_codec,
+            wal_codec: outcome.wal_codec,
 
             persistence_mode: PersistenceMode::Disk,
-            coordinator,
+            coordinator: outcome.coordinator,
             durability_mode: parking_lot::RwLock::new(DurabilityMode::Cache), // Irrelevant for follower
             accepting_transactions: Arc::new(AtomicBool::new(true)),
             wal_writer_health: Arc::new(ParkingMutex::new(WalWriterHealth::Healthy)),
-            last_lossy_recovery_report: Arc::new(ParkingMutex::new(lossy_report)),
+            last_lossy_recovery_report: Arc::new(ParkingMutex::new(outcome.lossy_report)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::new(AtomicBool::new(false)),
@@ -722,7 +469,7 @@ impl Database {
             backpressure_counter: AtomicU64::new(0),
             lock_file: parking_lot::Mutex::new(None), // No lock acquired
             wal_dir,
-            watermark,
+            watermark: outcome.watermark,
             refresh_gate: super::refresh::RefreshGate::new(),
             refresh_publish_barrier: parking_lot::RwLock::new(()),
             follower: true,
@@ -744,7 +491,7 @@ impl Database {
             merge_registry: super::MergeHandlerRegistry::new(),
         });
 
-        if let Some(state) = persisted_follower_state {
+        if let Some(state) = outcome.persisted_follower_state {
             db.storage.set_version(state.visible_version);
             db.coordinator
                 .restore_visible_version(state.visible_version);
@@ -945,61 +692,6 @@ impl Database {
         }
     }
 
-    /// Recover on-disk segments and apply the typed outcome to the coordinator.
-    ///
-    /// Storage returns a self-contained `RecoveredState` (SE2) carrying the
-    /// version floor, per-branch version map, and a classified
-    /// `RecoveryHealth`. This entry point:
-    ///
-    /// - Emits telemetry summarising the outcome.
-    /// - Forwards the outcome through `coordinator.apply_storage_recovery`
-    ///   (single entry point for floor adoption post-SE2).
-    /// - On `Err(StorageError)` (pre-walk I/O failure), preserves the
-    ///   existing `allow_lossy` split: lossy callers log and continue, strict
-    ///   callers convert to `StrataError::corruption`.
-    ///
-    /// Strict-vs-lossy policy on `outcome.health` (e.g. refusing on
-    /// `DegradationClass::DataLoss`) is intentionally NOT applied here —
-    /// that is D4's scope, implemented inside the unified
-    /// `Database::run_recovery` orchestrator that D3 introduces. SE2
-    /// produces the classified outcome; D4 decides what to do with it.
-    fn recover_segments_and_apply(
-        storage: &Arc<SegmentedStore>,
-        coordinator: &TransactionCoordinator,
-        allow_lossy: bool,
-    ) -> StrataResult<()> {
-        match storage.recover_segments() {
-            Ok(outcome) => {
-                if outcome.segments_loaded > 0 {
-                    info!(target: "strata::db",
-                        branches = outcome.branches_recovered,
-                        segments = outcome.segments_loaded,
-                        "Recovered segments from disk");
-                }
-                if let strata_storage::RecoveryHealth::Degraded { faults, class } = &outcome.health
-                {
-                    warn!(
-                        target: "strata::recovery::health",
-                        class = ?class,
-                        fault_count = faults.len(),
-                        "storage recovered with degraded state"
-                    );
-                }
-                coordinator.apply_storage_recovery(&outcome);
-            }
-            Err(e) => {
-                warn!(target: "strata::db", error = %e, "Segment recovery failed");
-                if !allow_lossy {
-                    return Err(StrataError::corruption(format!(
-                        "Segment recovery failed: {}",
-                        e
-                    )));
-                }
-            }
-        }
-        Ok(())
-    }
-
     /// Shared tail of database open: recovery, WAL writer, coordinator, flush thread.
     fn open_finish(
         canonical_path: PathBuf,
@@ -1007,27 +699,29 @@ impl Database {
         cfg: StrataConfig,
         lock_file: Option<std::fs::File>,
     ) -> StrataResult<Arc<Self>> {
-        // Validate the configured codec exists before touching any state.
-        // This prevents creating a MANIFEST with an invalid codec_id.
-        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
-            StrataError::internal(format!(
-                "invalid storage codec '{}': {}",
-                cfg.storage.codec, e
-            ))
-        })?;
-
-        // T3-E12 Phase 2 removed the codec+WAL rejection that used to
-        // live here. Non-identity codecs now round-trip through the
-        // v3 outer envelope + codec-aware reader. Codec name is still
-        // validated earlier via `get_codec(&cfg.storage.codec)`;
-        // MANIFEST codec-mismatch checks on reopen stay as-is.
-
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
 
-        // Create only the non-authoritative support directories up front.
-        // Recreating `segments/` here on reopen would mask authoritative
-        // flushed-state loss before storage recovery has a chance to classify it.
+        // Epic D3: unified recovery orchestration. `run_recovery` owns
+        // codec validation (before any recovery-managed artifact
+        // creation), MANIFEST
+        // load-or-create, WAL replay with its lossy-fallback branch,
+        // coordinator construction, and SE2's segment recovery
+        // plus `coordinator.apply_storage_recovery`. Pre-D3 each of
+        // those steps lived inline here with string-factory error
+        // wraps scattered across 250 lines.
+        let outcome = Database::run_recovery(
+            &canonical_path,
+            &layout,
+            &cfg,
+            super::recovery::RecoveryMode::Primary,
+        )
+        .map_err(StrataError::from)?;
+
+        // Create only the non-authoritative support directories after
+        // recovery has validated the configured codec. Recreating
+        // `segments/` here on reopen would mask authoritative flushed-state
+        // loss before storage recovery has a chance to classify it.
         layout
             .create_non_segment_dirs()
             .map_err(StrataError::from)?;
@@ -1035,226 +729,39 @@ impl Database {
         restrict_dir(layout.snapshots_dir());
 
         let wal_dir = layout.wal_dir().to_path_buf();
-        let manifest_path = layout.manifest_path().to_path_buf();
-        let manifest_exists = ManifestManager::exists(&manifest_path);
 
-        // Load or create MANIFEST before recovery runs so the coordinator can
-        // consult it for snapshot identity and codec validation. On first
-        // open: generate a new UUID and persist it with the configured codec.
-        // On subsequent opens: load the existing UUID and reject codec drift.
-        //
-        // The coordinator's `plan_recovery` also validates codec, but only
-        // while inside `recover()`, whose error path is subject to the
-        // lossy-recovery fallback. Codec mismatch is a configuration error,
-        // not data corruption, and must NOT be swallowed by lossy mode —
-        // otherwise a misconfigured reopen would silently discard the
-        // database instead of alerting the operator. Keeping the check here
-        // keeps it ahead of the lossy branch.
-        let database_uuid = if manifest_exists {
-            let m = ManifestManager::load(manifest_path.clone())
-                .map_err(manifest_error_to_strata_error)?;
-            let stored_codec = &m.manifest().codec_id;
-            if stored_codec != &cfg.storage.codec {
-                return Err(StrataError::incompatible_reuse(format!(
-                    "codec mismatch: database at {} was created with '{}' but config specifies '{}'. \
-                     A database cannot be reopened with a different codec.",
-                    canonical_path.display(),
-                    stored_codec,
-                    cfg.storage.codec
-                )));
-            }
-            m.manifest().database_uuid
-        } else {
-            layout.create_segments_dir().map_err(StrataError::from)?;
-            restrict_dir(layout.segments_dir());
-            let uuid = *uuid::Uuid::new_v4().as_bytes();
-            ManifestManager::create(manifest_path, uuid, cfg.storage.codec.clone())
-                .map_err(|e| StrataError::internal(format!("failed to create MANIFEST: {}", e)))?;
-            uuid
-        };
-
+        // Defensive: tighten segments-dir permissions on reopen. On
+        // first-open `run_recovery` already restricted it via
+        // `prepare_manifest`; on reopen we don't know the historical
+        // perms of an existing dir.
         if matches!(layout.segments_dir().try_exists(), Ok(true)) {
             restrict_dir(layout.segments_dir());
         }
 
-        // Instantiate the configured storage codec (identity or aes-gcm-256).
-        // One instance is owned here for the WAL writer; a clone is handed to
-        // the coordinator for snapshot decode.
-        let codec = strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
-            StrataError::internal(format!("failed to initialize storage codec: {}", e))
-        })?;
+        // Clone the WAL codec once for the follower-refresh path kept
+        // on `Database.wal_codec`; the original moves into
+        // `WalWriter::new` below.
+        let wal_codec_for_db = clone_codec(outcome.wal_codec.as_ref());
 
-        // Drive recovery via the callback-driven API so the engine owns
-        // storage construction and snapshot install decoding.
-        let mut storage = SegmentedStore::with_dir(
-            layout.segments_dir().to_path_buf(),
-            cfg.storage.effective_write_buffer_size(),
-        );
-        let recovery_codec_for_install = clone_codec(codec.as_ref());
-        let recovery =
-            RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
-                .with_lossy_recovery(cfg.allow_lossy_recovery)
-                .with_codec(clone_codec(codec.as_ref()));
-
-        // Count records applied by `on_record` before a coordinator error so
-        // a subsequent lossy-fallback branch can surface how far recovery
-        // got. The coordinator drops its own stats on error; we track
-        // independently on the engine side.
-        let records_applied_before_failure = Arc::new(AtomicU64::new(0));
-
-        let recover_result = {
-            let storage_ref = &storage;
-            let install_codec = recovery_codec_for_install.as_ref();
-            let counter = Arc::clone(&records_applied_before_failure);
-            recovery.recover(
-                |snapshot| {
-                    let installed = super::snapshot_install::install_snapshot(
-                        &snapshot,
-                        install_codec,
-                        storage_ref,
-                    )?;
-                    info!(
-                        target: "strata::recovery",
-                        snapshot_id = snapshot.snapshot_id(),
-                        watermark = snapshot.watermark_txn(),
-                        entries = installed.total_installed(),
-                        "Installed snapshot into SegmentedStore"
-                    );
-                    Ok(())
-                },
-                |record| {
-                    let result = apply_wal_record_to_memory_storage(storage_ref, record);
-                    if result.is_ok() {
-                        counter.fetch_add(1, Ordering::SeqCst);
-                    }
-                    result
-                },
-            )
-        };
-
-        let mut lossy_report: Option<LossyRecoveryReport> = None;
-        let mut stats = match recover_result {
-            Ok(stats) => stats,
-            Err(e) => {
-                // T3-E12 §D6: LegacyFormat is a hard-fail error that
-                // MUST NOT route through the lossy wipe — the lossy
-                // branch only recreates the in-memory `SegmentedStore`
-                // and does NOT delete `wal/` on disk, so a pre-v3
-                // segment would re-poison the next open in an
-                // infinite loop. Operator must wipe `wal/` manually.
-                if matches!(e, StrataError::LegacyFormat { .. }) {
-                    return Err(e);
-                }
-
-                if cfg.allow_lossy_recovery {
-                    // Sample partial progress BEFORE the wipe so the
-                    // `LossyRecoveryReport` reflects what was discarded.
-                    let report = LossyRecoveryReport {
-                        error: e.to_string(),
-                        error_kind: LossyErrorKind::from_strata_error(&e),
-                        records_applied_before_failure: records_applied_before_failure
-                            .load(Ordering::SeqCst),
-                        version_reached_before_failure: CommitVersion(storage.version()),
-                        discarded_on_wipe: true,
-                    };
-                    warn!(
-                        target: "strata::recovery::lossy",
-                        error = %e,
-                        error_kind = %report.error_kind,
-                        records_applied_before_failure = report.records_applied_before_failure,
-                        version_reached_before_failure =
-                            report.version_reached_before_failure.as_u64(),
-                        discarded_on_wipe = report.discarded_on_wipe,
-                        follower = false,
-                        "Lossy recovery fallback — discarding pre-failure state"
-                    );
-                    warn!(
-                        target: "strata::db",
-                        error = %e,
-                        "Recovery failed — starting with empty state (allow_lossy_recovery=true)"
-                    );
-                    lossy_report = Some(report);
-                    // Discard any partial writes accumulated before the
-                    // failure so lossy-mode semantics match the pre-Epic-5
-                    // `RecoveryResult::empty()` fallback: no user data
-                    // surfaces from a failed recovery pass.
-                    storage = SegmentedStore::with_dir(
-                        layout.segments_dir().to_path_buf(),
-                        cfg.storage.effective_write_buffer_size(),
-                    );
-                    RecoveryStats::default()
-                } else {
-                    return Err(StrataError::corruption(format!(
-                        "WAL recovery failed: {}. Set allow_lossy_recovery=true to force open with data loss.",
-                        e
-                    )));
-                }
-            }
-        };
-
-        // Snapshot install advances `storage.version` beyond the per-record
-        // WAL versions the coordinator tracks in `stats.final_version`.
-        // Fold the storage-side counter back into stats so the downstream
-        // `TransactionCoordinator::from_recovery_with_limits` bootstraps
-        // above the snapshot's max commit version. Missing this leaves the
-        // commit version counter below installed data, producing monotonicity
-        // violations on the first post-reopen commit.
-        stats.final_version = stats.final_version.max(CommitVersion(storage.version()));
-
-        info!(
-            target: "strata::db",
-            txns_replayed = stats.txns_replayed,
-            writes_applied = stats.writes_applied,
-            deletes_applied = stats.deletes_applied,
-            final_version = stats.final_version.as_u64(),
-            from_checkpoint = stats.from_checkpoint,
-            "Recovery complete"
-        );
-
-        // T3-E12 §D3 Site 2: clone codec BEFORE the move into WalWriter
-        // so the Database can cache its own copy for the follower-
-        // refresh path (via `Database.wal_codec`). Primary doesn't
-        // typically call `refresh()`, but we populate uniformly across
-        // all three constructors so the field type stays
-        // `Box<dyn StorageCodec>` rather than `Option`.
-        let wal_codec_for_db = clone_codec(codec.as_ref());
-
-        // Open segmented WAL writer for appending
+        // Open segmented WAL writer for appending.
         let wal_writer = WalWriter::new(
             wal_dir.clone(),
-            database_uuid,
+            outcome.database_uuid,
             durability_mode,
             WalConfig::default(),
-            codec,
+            outcome.wal_codec,
         )?;
-
-        // Re-assemble the legacy `RecoveryResult` shape for downstream code
-        // paths (coordinator bootstrap, segment recovery bump). Chunk 3
-        // collapses this by introducing a stats-only coordinator constructor.
-        let result = strata_concurrency::RecoveryResult {
-            storage,
-            txn_manager: strata_concurrency::TransactionManager::with_txn_id(
-                stats.final_version,
-                stats.max_txn_id,
-            ),
-            stats,
-        };
-
-        let watermark = super::refresh::ContiguousWatermark::new(result.stats.max_txn_id);
 
         let wal_arc = Arc::new(ParkingMutex::new(wal_writer));
         let flush_shutdown = Arc::new(AtomicBool::new(false));
-        // Pre-create Arc-wrapped fields that need to be shared with flush thread
+        // Pre-create Arc-wrapped fields that need to be shared with flush thread.
         let accepting_transactions = Arc::new(AtomicBool::new(true));
         let wal_writer_health = Arc::new(ParkingMutex::new(WalWriterHealth::Healthy));
 
-        // Create coordinator with write buffer limit from config (before moving result.storage)
-        let coordinator = TransactionCoordinator::from_recovery_with_limits(
-            &result,
-            cfg.storage.max_write_buffer_entries,
-        );
-
-        // Configure block cache capacity before any segment reads
+        // Configure block cache capacity. `run_recovery` already
+        // completed segment recovery; post-open reads will hit this
+        // cache, so configuring it here is functionally equivalent to
+        // the pre-D3 ordering.
         {
             use strata_storage::block_cache;
             let effective_cache = cfg.storage.effective_block_cache_size();
@@ -1276,26 +783,20 @@ impl Database {
             );
         }
 
-        // Apply storage resource limits from config
-        let storage = Arc::new(result.storage);
-        apply_storage_config(&storage, &cfg.storage);
-
         let bg_threads = cfg.storage.background_threads.max(1);
-
-        Self::recover_segments_and_apply(&storage, &coordinator, cfg.allow_lossy_recovery)?;
 
         let db = Arc::new(Self {
             data_dir: canonical_path.clone(),
-            database_uuid,
-            storage,
+            database_uuid: outcome.database_uuid,
+            storage: outcome.storage,
             wal_writer: Some(Arc::clone(&wal_arc)),
             wal_codec: wal_codec_for_db,
             persistence_mode: PersistenceMode::Disk,
-            coordinator,
+            coordinator: outcome.coordinator,
             durability_mode: parking_lot::RwLock::new(durability_mode),
             accepting_transactions: Arc::clone(&accepting_transactions),
             wal_writer_health: Arc::clone(&wal_writer_health),
-            last_lossy_recovery_report: Arc::new(ParkingMutex::new(lossy_report)),
+            last_lossy_recovery_report: Arc::new(ParkingMutex::new(outcome.lossy_report)),
             extensions: DashMap::new(),
             config: parking_lot::RwLock::new(cfg),
             flush_shutdown: Arc::clone(&flush_shutdown),
@@ -1309,7 +810,7 @@ impl Database {
             backpressure_counter: AtomicU64::new(0),
             lock_file: parking_lot::Mutex::new(lock_file),
             wal_dir,
-            watermark,
+            watermark: outcome.watermark,
             refresh_gate: super::refresh::RefreshGate::new(),
             refresh_publish_barrier: parking_lot::RwLock::new(()),
             follower: false,

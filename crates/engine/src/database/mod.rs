@@ -27,6 +27,8 @@ pub mod dag_hook;
 pub mod merge_registry;
 pub mod observers;
 pub mod profile;
+pub(crate) mod recovery;
+mod recovery_error;
 mod registry;
 pub mod spec;
 
@@ -49,6 +51,7 @@ pub use observers::{
     BranchOpObserverRegistry, CommitInfo, CommitObserver, CommitObserverRegistry, ObserverError,
     ObserverErrorKind, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
 };
+pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{
     AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,
     UnblockError,
