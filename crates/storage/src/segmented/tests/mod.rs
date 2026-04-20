@@ -105,4 +105,6 @@ mod gc_under_degradation;
 mod leveled;
 mod lifecycle;
 mod materialize;
+mod post_restart_branch;
+mod publish_failures;
 mod resurrection;

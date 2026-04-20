@@ -11,6 +11,26 @@ use super::*;
 use crate::segmented::{DegradationClass, RecoveryFault, RecoveryHealth};
 use crate::StorageError;
 
+fn kv_key_for(branch_id: BranchId, name: &str) -> Key {
+    Key::new(
+        Arc::new(Namespace::new(branch_id, "default".to_string())),
+        TypeTag::KV,
+        name.as_bytes().to_vec(),
+    )
+}
+
+fn seed_branch(store: &SegmentedStore, branch_id: BranchId, key: &str, value: i64, version: u64) {
+    store
+        .put_with_version_mode(
+            kv_key_for(branch_id, key),
+            Value::Int(value),
+            CommitVersion(version),
+            None,
+            WriteMode::Append,
+        )
+        .unwrap();
+}
+
 /// After a corrupt-manifest recovery, `gc_orphan_segments()` must refuse
 /// and leave the would-be-orphaned `.sst` files on disk.
 #[test]
@@ -297,4 +317,71 @@ fn clear_branch_succeeds_under_degraded_recovery() {
         store.branches.get(&branch()).is_none(),
         "branch must be removed from the in-memory map regardless of gc refusal"
     );
+}
+
+/// After a degraded recovery skips one branch, `clear_branch()` on another
+/// branch must not let orphan GC delete the skipped branch's authoritative
+/// files. The degraded health snapshot must remain visible after the clear.
+#[test]
+fn clear_branch_under_degraded_recovery_preserves_skipped_branch_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let skipped = BranchId::from_bytes([31; 16]);
+    let cleared = BranchId::from_bytes([32; 16]);
+
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed_branch(&store, skipped, "lost", 11, 11);
+    store.rotate_memtable(&skipped);
+    store.flush_oldest_frozen(&skipped).unwrap();
+
+    seed_branch(&store, cleared, "live", 22, 22);
+    store.rotate_memtable(&cleared);
+    store.flush_oldest_frozen(&cleared).unwrap();
+    drop(store);
+
+    let skipped_dir = dir.path().join(super::hex_encode_branch(&skipped));
+    let skipped_ssts: Vec<_> = std::fs::read_dir(&skipped_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sst"))
+        .collect();
+    assert!(
+        !skipped_ssts.is_empty(),
+        "setup must produce authoritative skipped-branch SSTs"
+    );
+
+    let skipped_manifest = skipped_dir.join("segments.manifest");
+    let mut manifest_bytes = std::fs::read(&skipped_manifest).unwrap();
+    let mid = manifest_bytes.len() / 2;
+    manifest_bytes[mid] ^= 0xFF;
+    std::fs::write(&skipped_manifest, &manifest_bytes).unwrap();
+
+    let reopened = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let outcome = reopened.recover_segments().unwrap();
+    assert!(matches!(
+        outcome.health,
+        RecoveryHealth::Degraded {
+            class: DegradationClass::DataLoss,
+            ..
+        }
+    ));
+    assert!(reopened.branches.get(&skipped).is_none());
+    assert!(reopened.branches.get(&cleared).is_some());
+
+    assert!(reopened.clear_branch(&cleared));
+    assert!(reopened.branches.get(&cleared).is_none());
+    assert!(matches!(
+        &*reopened.last_recovery_health(),
+        RecoveryHealth::Degraded {
+            class: DegradationClass::DataLoss,
+            ..
+        }
+    ));
+
+    for sst in &skipped_ssts {
+        assert!(
+            sst.exists(),
+            "skipped branch SST {sst:?} must survive clear_branch while GC refuses"
+        );
+    }
 }
