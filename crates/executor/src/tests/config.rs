@@ -1663,7 +1663,11 @@ fn configure_set_storage_param_invalid_value_rejected() {
 fn configure_set_open_time_only_keys_rejected() {
     let executor = create_test_executor();
 
-    for key in ["background_threads", "allow_lossy_recovery"] {
+    for key in [
+        "background_threads",
+        "allow_lossy_recovery",
+        "allow_missing_manifest",
+    ] {
         let result = executor.execute(Command::ConfigureSet {
             key: key.into(),
             value: "4".into(),
@@ -1683,7 +1687,7 @@ fn configure_set_open_time_only_keys_rejected() {
 fn configure_get_open_time_only_keys_readable() {
     let executor = create_test_executor();
 
-    // background_threads and allow_lossy_recovery should be readable even though not settable
+    // Open-time-only keys should stay readable even though they are not settable.
     let result = executor
         .execute(Command::ConfigureGetKey {
             key: "background_threads".into(),
@@ -1708,5 +1712,16 @@ fn configure_get_open_time_only_keys_readable() {
         result,
         Output::ConfigValue(Some("false".into())),
         "allow_lossy_recovery default should be false"
+    );
+
+    let result = executor
+        .execute(Command::ConfigureGetKey {
+            key: "allow_missing_manifest".into(),
+        })
+        .unwrap();
+    assert_eq!(
+        result,
+        Output::ConfigValue(Some("false".into())),
+        "allow_missing_manifest default should be false"
     );
 }

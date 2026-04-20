@@ -54,9 +54,7 @@ fn assert_storage_degraded_refusal(err: StrataError, expected_class: Degradation
                 "storage-degraded refusal must name expected class {needle:?}; got: {message}"
             );
         }
-        other => panic!(
-            "expected StrataError::Corruption from D4 strict refusal, got {other:?}"
-        ),
+        other => panic!("expected StrataError::Corruption from D4 strict refusal, got {other:?}"),
     }
 }
 
@@ -91,7 +89,8 @@ fn seed_branch_with_manifest(db_path: &Path) -> BranchId {
         Database::open_runtime(OpenSpec::primary(db_path).with_subsystem(SearchSubsystem)).unwrap();
 
     let kv = KVStore::new(db.clone());
-    kv.put(&branch_id, "default", "seed", Value::Int(1)).unwrap();
+    kv.put(&branch_id, "default", "seed", Value::Int(1))
+        .unwrap();
 
     db.storage().rotate_memtable(&branch_id);
     db.storage().flush_oldest_frozen(&branch_id).unwrap();
@@ -255,8 +254,8 @@ fn clean_reopen_is_healthy() {
     seed_branch_with_manifest(&db_path);
     clear_open_handles();
 
-    let db =
-        Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem)).unwrap();
+    let db = Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem))
+        .unwrap();
 
     assert!(
         matches!(db.recovery_health(), RecoveryHealth::Healthy),
@@ -284,10 +283,9 @@ fn wal_lossy_report_unchanged_and_recovery_health_healthy() {
     // the post-wipe segment walk sees a clean directory and reports
     // Healthy. Pattern matches follower_tests.rs test_follower_lossy_recovery_populates_report.
     {
-        let db = Database::open_runtime(
-            OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem),
-        )
-        .unwrap();
+        let db =
+            Database::open_runtime(OpenSpec::primary(&db_path).with_subsystem(SearchSubsystem))
+                .unwrap();
         let kv = KVStore::new(db.clone());
         kv.put(&branch_id, "default", "k1", Value::Int(1)).unwrap();
         db.flush().unwrap();

@@ -255,8 +255,8 @@ impl Database {
         // `LossyRecoveryReport` untouched because no WAL wipe occurred;
         // operators read the classification via `Database::recovery_health()`.
         if let RecoveryHealth::Degraded { class, .. } = &seg_outcome.health {
-            let permitted = cfg.allow_lossy_recovery
-                || !policy_refuses(*class, cfg.allow_missing_manifest);
+            let permitted =
+                cfg.allow_lossy_recovery || !policy_refuses(*class, cfg.allow_missing_manifest);
             if !permitted {
                 return Err(RecoveryError::StorageDegraded(seg_outcome.health.clone()));
             }

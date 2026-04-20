@@ -1921,6 +1921,8 @@ impl Database {
             Some("storage.background_threads")
         } else if candidate.allow_lossy_recovery != guard.allow_lossy_recovery {
             Some("allow_lossy_recovery")
+        } else if candidate.allow_missing_manifest != guard.allow_missing_manifest {
+            Some("allow_missing_manifest")
         } else if candidate.durability != guard.durability {
             // `durability` is live-safe only through `set_durability_mode`,
             // which reconfigures the WAL writer, restarts the flush thread,

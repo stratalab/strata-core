@@ -499,6 +499,7 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         // Open-time only keys still readable
         "background_threads" => Some(cfg.storage.background_threads.to_string()),
         "allow_lossy_recovery" => Some(cfg.allow_lossy_recovery.to_string()),
+        "allow_missing_manifest" => Some(cfg.allow_missing_manifest.to_string()),
         _ => unreachable!(),
     };
 
