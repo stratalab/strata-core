@@ -105,3 +105,4 @@ mod gc_under_degradation;
 mod leveled;
 mod lifecycle;
 mod materialize;
+mod resurrection;
