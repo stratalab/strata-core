@@ -562,11 +562,12 @@ fn test_update_config_rejects_open_time_only_field_changes() {
 
     // Capture pre-change live values so we can confirm they are NOT
     // mutated even though the closure attempted the change.
-    let (before_threads, before_lossy, before_codec) = {
+    let (before_threads, before_lossy, before_missing_manifest, before_codec) = {
         let cfg = db.config();
         (
             cfg.storage.background_threads,
             cfg.allow_lossy_recovery,
+            cfg.allow_missing_manifest,
             cfg.storage.codec.clone(),
         )
     };
@@ -590,6 +591,13 @@ fn test_update_config_rejects_open_time_only_field_changes() {
             .is_err(),
         "allow_lossy_recovery must also be rejected"
     );
+    let err = db
+        .update_config(|cfg| cfg.allow_missing_manifest = !before_missing_manifest)
+        .expect_err("allow_missing_manifest must also be rejected");
+    assert!(
+        err.to_string().contains("allow_missing_manifest"),
+        "error must name the offending field, got: {err}"
+    );
     assert!(
         db.update_config(|cfg| cfg.storage.codec = "aes-gcm-256".to_string())
             .is_err(),
@@ -600,6 +608,7 @@ fn test_update_config_rejects_open_time_only_field_changes() {
     let after = db.config();
     assert_eq!(after.storage.background_threads, before_threads);
     assert_eq!(after.allow_lossy_recovery, before_lossy);
+    assert_eq!(after.allow_missing_manifest, before_missing_manifest);
     assert_eq!(after.storage.codec, before_codec);
 
     // A live-safe mutation still works.

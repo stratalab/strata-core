@@ -53,6 +53,7 @@ The classification is load-bearing in three places:
 | `google_api_key` | non-durability | no | — |
 | `storage` | (nested — see below) | — | — |
 | `allow_lossy_recovery` | open-time-only | yes (`CompatibilitySignature.allow_lossy_recovery`; also hashed into `open_config_fingerprint`) | rejected at runtime via `OPEN_TIME_ONLY_KEYS`. When `true`, any recovery error triggers a whole-database wipe-and-reopen; the fallback is observable via `Database::last_lossy_recovery_report()` (`Option<LossyRecoveryReport>`) and tracing target `strata::recovery::lossy` (see DR-011 and D-DR-9 in `durability-recovery-scope.md`). |
+| `allow_missing_manifest` | open-time-only | no | narrow opt-in that permits strict open when storage recovery only observed `DegradationClass::PolicyDowngrade` (currently the no-`segments.manifest` legacy-L0-promotion fallback). `DataLoss` remains refused unless `allow_lossy_recovery` is also set. D4 policy branch at `crates/engine/src/database/recovery.rs`; observability via `Database::recovery_health()` (`RecoveryHealth`) and tracing target `strata::recovery::health`. Intentionally **not** in `CompatibilitySignature` (unlike `allow_lossy_recovery`): D4's scope is the first-open policy decision only, so a second opener reusing the live handle via `OPEN_DATABASES` inherits the first opener's `recovery_health()` regardless of their own flag. Runtime mutation still rejected via `OPEN_TIME_ONLY_KEYS`. |
 | `telemetry` | non-durability | no | — |
 | `default_vector_dtype` | non-durability | no | — |
 | `snapshot_retention` | live-safe | no | `Database::prune_snapshots_once` (pub(crate)); invoked automatically post-checkpoint. Knob: `snapshot_retention.retain_count` (defaults to 10). The live MANIFEST snapshot is always preserved regardless of retain_count. Closes DG-015. |
@@ -97,7 +98,7 @@ The classification is load-bearing in three places:
 ## Durability/recovery coverage
 
 **Open-time-only:** `codec`, `background_threads`, `allow_lossy_recovery`,
-`durability = "cache"` (discriminant).
+`allow_missing_manifest`, `durability = "cache"` (discriminant).
 
 **Live-safe (durability/recovery domain):** `durability` (Standard↔Always
 switch). All other `StorageConfig` entries are live-safe but LSM-tuning, not

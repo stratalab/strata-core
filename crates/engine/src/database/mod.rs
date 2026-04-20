@@ -83,7 +83,7 @@ use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, VersionedValue};
 use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_durability::wal::{DurabilityMode, WalWriter};
-use strata_storage::{SegmentedStore, StorageIterator};
+use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator};
 
 // ============================================================================
 // Persistence Mode (Storage/Durability Split)
@@ -1445,6 +1445,30 @@ impl Database {
         self.last_lossy_recovery_report.lock().clone()
     }
 
+    /// Post-recovery storage-state classification from the most recent open.
+    ///
+    /// `Healthy` after a clean recovery. `Degraded` means SE2 observed one
+    /// or more storage recovery faults during this open; the `class` field
+    /// tells operators whether authoritative state was lost
+    /// (`DegradationClass::DataLoss`), a legacy-compatible fallback was
+    /// engaged (`PolicyDowngrade`), or a rebuildable cache failed
+    /// (`Telemetry`).
+    ///
+    /// Distinct from [`Self::last_lossy_recovery_report`]:
+    /// `recovery_health` reports on segment-level recovery and never
+    /// implies a data wipe, whereas `last_lossy_recovery_report` is
+    /// populated only by the DR-011 WAL wipe-and-reopen fallback. Both
+    /// can be consulted independently; neither implies the other.
+    ///
+    /// Read-through to the storage layer — no per-`Database` cache. In
+    /// strict mode any `DataLoss` (and `PolicyDowngrade` without the
+    /// `allow_missing_manifest` flag) refuses the open before this
+    /// accessor can be called, so a strict-mode `Database` handle will
+    /// only ever observe `Healthy` or `Telemetry`.
+    pub fn recovery_health(&self) -> RecoveryHealth {
+        (*self.storage.last_recovery_health()).clone()
+    }
+
     /// Attempt to resume a halted WAL writer.
     ///
     /// When the WAL writer halts due to background sync failure, this method
@@ -1897,6 +1921,8 @@ impl Database {
             Some("storage.background_threads")
         } else if candidate.allow_lossy_recovery != guard.allow_lossy_recovery {
             Some("allow_lossy_recovery")
+        } else if candidate.allow_missing_manifest != guard.allow_missing_manifest {
+            Some("allow_missing_manifest")
         } else if candidate.durability != guard.durability {
             // `durability` is live-safe only through `set_durability_mode`,
             // which reconfigures the WAL writer, restarts the flush thread,

@@ -66,10 +66,15 @@ const KNOWN_KEYS: &[&str] = &[
     // Open-time only (rejected at runtime with clear error)
     "background_threads",
     "allow_lossy_recovery",
+    "allow_missing_manifest",
 ];
 
 /// Keys that can only be set at database open time.
-const OPEN_TIME_ONLY_KEYS: &[&str] = &["background_threads", "allow_lossy_recovery"];
+const OPEN_TIME_ONLY_KEYS: &[&str] = &[
+    "background_threads",
+    "allow_lossy_recovery",
+    "allow_missing_manifest",
+];
 
 /// Storage keys that accept usize values (≥ 0).
 const STORAGE_USIZE_KEYS: &[&str] = &[
@@ -494,6 +499,7 @@ pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
         // Open-time only keys still readable
         "background_threads" => Some(cfg.storage.background_threads.to_string()),
         "allow_lossy_recovery" => Some(cfg.allow_lossy_recovery.to_string()),
+        "allow_missing_manifest" => Some(cfg.allow_missing_manifest.to_string()),
         _ => unreachable!(),
     };
 

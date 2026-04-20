@@ -30,6 +30,7 @@ const STRATA_CONFIG_FIELDS: &[&str] = &[
     "google_api_key",
     "storage",
     "allow_lossy_recovery",
+    "allow_missing_manifest",
     "telemetry",
     "default_vector_dtype",
     "snapshot_retention",
