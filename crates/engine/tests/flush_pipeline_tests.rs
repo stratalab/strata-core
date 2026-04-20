@@ -170,6 +170,14 @@ fn lifecycle_crash_before_flush() {
     std::fs::create_dir_all(&wal_dir).unwrap();
     let manifest_path = dir.path().join("MANIFEST");
     let segments_dir = dir.path().join("segments");
+    // Mirror what `Database::run_recovery` does via
+    // `layout.create_segments_dir()` before every `recover_segments()`
+    // call: SE2 classifies a missing segments dir as `RecoveryFault::Io`
+    // and returns Err, so the engine guarantees the directory exists
+    // first. This storage-level test sibling (`lifecycle_crash_after_
+    // segment_before_manifest`) avoids the issue only because its
+    // flush path creates the dir as a side effect.
+    std::fs::create_dir_all(&segments_dir).unwrap();
 
     let _manifest_mgr =
         ManifestManager::create(manifest_path.clone(), test_uuid(), "identity".to_string())
