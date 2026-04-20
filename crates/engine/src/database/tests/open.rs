@@ -437,6 +437,87 @@ fn corrupt_wal_segment(db_path: &std::path::Path) -> PathBuf {
     wal_dir
 }
 
+fn run_primary_recovery(
+    db_path: &std::path::Path,
+    cfg: StrataConfig,
+) -> Result<crate::database::recovery::RecoveryOutcome, crate::database::RecoveryError> {
+    let layout = strata_durability::layout::DatabaseLayout::from_root(db_path);
+    Database::run_recovery(
+        db_path,
+        &layout,
+        &cfg,
+        crate::database::recovery::RecoveryMode::Primary,
+    )
+}
+
+fn seed_snapshot_fixture(db_path: &std::path::Path, snapshot_id: u64, watermark: u64) -> PathBuf {
+    const TEST_UUID: [u8; 16] = [0xAA; 16];
+
+    let snapshots_dir = db_path.join("snapshots");
+    std::fs::create_dir_all(&snapshots_dir).unwrap();
+    let writer = strata_durability::SnapshotWriter::new(
+        snapshots_dir.clone(),
+        Box::new(strata_durability::codec::IdentityCodec),
+        TEST_UUID,
+    )
+    .unwrap();
+    let sections = vec![strata_durability::SnapshotSection::new(
+        strata_durability::format::primitive_tags::KV,
+        vec![0, 0, 0, 0],
+    )];
+    let info = writer
+        .create_snapshot(snapshot_id, watermark, sections)
+        .unwrap();
+
+    let mut mgr = strata_durability::ManifestManager::create(
+        db_path.join("MANIFEST"),
+        TEST_UUID,
+        "identity".to_string(),
+    )
+    .unwrap();
+    mgr.set_snapshot_watermark(snapshot_id, TxnId(watermark))
+        .unwrap();
+
+    info.path
+}
+
+fn write_invalid_payload_wal(db_path: &std::path::Path) {
+    let wal_dir = db_path.join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+    let mut wal = strata_durability::wal::WalWriter::new(
+        wal_dir,
+        [0u8; 16],
+        strata_durability::wal::DurabilityMode::Always,
+        WalConfig::for_testing(),
+        Box::new(strata_durability::codec::IdentityCodec),
+    )
+    .unwrap();
+    let record = WalRecord::new(TxnId(1), [7u8; 16], now_micros(), vec![0xFF]);
+    wal.append(&record).unwrap();
+    wal.flush().unwrap();
+}
+
+fn seed_outer_len_crc_mismatch(db_path: &std::path::Path) {
+    let wal_dir = db_path.join("wal");
+    std::fs::create_dir_all(&wal_dir).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    write_wal_txn(
+        &wal_dir,
+        1,
+        branch_id,
+        vec![(Key::new_kv(ns, "crc"), Value::Bytes(b"value".to_vec()))],
+        vec![],
+        1,
+    );
+
+    let segment_path = wal_dir.join("wal-000001.seg");
+    let mut bytes = std::fs::read(&segment_path).unwrap();
+    bytes[strata_durability::SEGMENT_HEADER_SIZE_V2 + 5] ^= 0xFF;
+    std::fs::write(&segment_path, &bytes).unwrap();
+}
+
 #[test]
 fn test_open_corrupted_wal_fails_by_default() {
     let temp_dir = TempDir::new().unwrap();
@@ -1003,4 +1084,105 @@ fn test_legacy_snapshot_under_lossy_flag_still_hard_fails() {
         matches!(result2, Err(StrataError::LegacyFormat { .. })),
         "second open must reproduce the same typed LegacyFormat error",
     );
+}
+
+#[test]
+fn test_run_recovery_reports_snapshot_missing_typed() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let snapshot_path = seed_snapshot_fixture(&db_path, 7, 100);
+    std::fs::remove_file(&snapshot_path).unwrap();
+
+    let err = match run_primary_recovery(&db_path, StrataConfig::default()) {
+        Ok(_) => panic!("missing snapshot must fail recovery"),
+        Err(err) => err,
+    };
+
+    match err {
+        crate::database::RecoveryError::SnapshotMissing {
+            role: crate::database::ErrorRole::Primary,
+            snapshot_id,
+            path,
+        } => {
+            assert_eq!(snapshot_id, 7);
+            assert_eq!(path, snapshot_path);
+        }
+        other => panic!("expected typed SnapshotMissing, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_run_recovery_reports_snapshot_crc_typed() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let snapshot_path = seed_snapshot_fixture(&db_path, 9, 101);
+
+    let mut bytes = std::fs::read(&snapshot_path).unwrap();
+    let corrupt_idx = bytes.len() - 7;
+    bytes[corrupt_idx] ^= 0xFF;
+    std::fs::write(&snapshot_path, &bytes).unwrap();
+
+    let err = match run_primary_recovery(&db_path, StrataConfig::default()) {
+        Ok(_) => panic!("corrupt snapshot must fail recovery"),
+        Err(err) => err,
+    };
+
+    match err {
+        crate::database::RecoveryError::SnapshotRead {
+            role: crate::database::ErrorRole::Primary,
+            snapshot_id,
+            path,
+            inner: strata_durability::SnapshotReadError::CrcMismatch { .. },
+        } => {
+            assert_eq!(snapshot_id, 9);
+            assert_eq!(path, snapshot_path);
+        }
+        other => panic!("expected typed SnapshotRead::CrcMismatch, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_run_recovery_reports_wal_checksum_typed() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    seed_outer_len_crc_mismatch(&db_path);
+
+    let err = match run_primary_recovery(&db_path, StrataConfig::default()) {
+        Ok(_) => panic!("outer envelope CRC mismatch must fail recovery"),
+        Err(err) => err,
+    };
+
+    match err {
+        crate::database::RecoveryError::WalChecksum {
+            role: crate::database::ErrorRole::Primary,
+            records_before,
+            ..
+        } => {
+            assert_eq!(records_before, 0);
+        }
+        other => panic!("expected typed WalChecksum, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_run_recovery_reports_payload_decode_typed() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    write_invalid_payload_wal(&db_path);
+
+    let err = match run_primary_recovery(&db_path, StrataConfig::default()) {
+        Ok(_) => panic!("invalid transaction payload must fail recovery"),
+        Err(err) => err,
+    };
+
+    match err {
+        crate::database::RecoveryError::PayloadDecode {
+            role: crate::database::ErrorRole::Primary,
+            txn_id,
+            ..
+        } => {
+            assert_eq!(txn_id, TxnId(1));
+        }
+        other => panic!("expected typed PayloadDecode, got: {other:?}"),
+    }
 }
