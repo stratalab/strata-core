@@ -293,10 +293,7 @@ impl SegmentedStore {
         // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
         // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
         #[cfg(test)]
-        crate::test_hooks::maybe_pause(
-            crate::test_hooks::pause_tag::COMPACT_BRANCH,
-            *branch_id,
-        );
+        crate::test_hooks::maybe_pause(crate::test_hooks::pause_tag::COMPACT_BRANCH, *branch_id);
         {
             let mut branch = match self.branches.get_mut(branch_id) {
                 Some(b) => b,
@@ -464,10 +461,7 @@ impl SegmentedStore {
         // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
         // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
         #[cfg(test)]
-        crate::test_hooks::maybe_pause(
-            crate::test_hooks::pause_tag::COMPACT_TIER,
-            *branch_id,
-        );
+        crate::test_hooks::maybe_pause(crate::test_hooks::pause_tag::COMPACT_TIER, *branch_id);
         {
             let mut branch = match self.branches.get_mut(branch_id) {
                 Some(b) => b,
@@ -694,10 +688,7 @@ impl SegmentedStore {
         // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
         // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
         #[cfg(test)]
-        crate::test_hooks::maybe_pause(
-            crate::test_hooks::pause_tag::COMPACT_L0_TO_L1,
-            *branch_id,
-        );
+        crate::test_hooks::maybe_pause(crate::test_hooks::pause_tag::COMPACT_L0_TO_L1, *branch_id);
         {
             let mut branch = match self.branches.get_mut(branch_id) {
                 Some(b) => b,
@@ -881,10 +872,7 @@ impl SegmentedStore {
             // No new files were built in the trivial-move path — only metadata
             // needs to be discarded, which happens naturally by not installing.
             #[cfg(test)]
-            crate::test_hooks::maybe_pause(
-                crate::test_hooks::pause_tag::COMPACT_LEVEL,
-                *branch_id,
-            );
+            crate::test_hooks::maybe_pause(crate::test_hooks::pause_tag::COMPACT_LEVEL, *branch_id);
             let mut branch = match self.branches.get_mut(branch_id) {
                 Some(b) => b,
                 None => {
@@ -1040,10 +1028,7 @@ impl SegmentedStore {
         // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
         // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
         #[cfg(test)]
-        crate::test_hooks::maybe_pause(
-            crate::test_hooks::pause_tag::COMPACT_LEVEL,
-            *branch_id,
-        );
+        crate::test_hooks::maybe_pause(crate::test_hooks::pause_tag::COMPACT_LEVEL, *branch_id);
         {
             let mut branch = match self.branches.get_mut(branch_id) {
                 Some(b) => b,

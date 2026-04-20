@@ -39,7 +39,11 @@ fn seed_two_l0_segments(store: &SegmentedStore, b: BranchId) {
     for i in 0_i64..50 {
         store
             .put_with_version_mode(
-                Key::new(Arc::clone(&ns), TypeTag::KV, format!("a{i:04}").into_bytes()),
+                Key::new(
+                    Arc::clone(&ns),
+                    TypeTag::KV,
+                    format!("a{i:04}").into_bytes(),
+                ),
                 Value::Int(i),
                 CommitVersion(1),
                 None,
@@ -52,9 +56,30 @@ fn seed_two_l0_segments(store: &SegmentedStore, b: BranchId) {
     for i in 0_i64..50 {
         store
             .put_with_version_mode(
-                Key::new(Arc::clone(&ns), TypeTag::KV, format!("b{i:04}").into_bytes()),
+                Key::new(
+                    Arc::clone(&ns),
+                    TypeTag::KV,
+                    format!("b{i:04}").into_bytes(),
+                ),
                 Value::Int(i),
                 CommitVersion(2),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+    }
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+}
+
+fn flush_branch_data(store: &SegmentedStore, b: BranchId, entries: &[(&str, i64, u64)]) {
+    let ns = Arc::new(Namespace::new(b, "default".to_string()));
+    for &(key_name, value, commit) in entries {
+        store
+            .put_with_version_mode(
+                Key::new(Arc::clone(&ns), TypeTag::KV, key_name.as_bytes().to_vec()),
+                Value::Int(value),
+                CommitVersion(commit),
                 None,
                 WriteMode::Append,
             )
@@ -68,12 +93,11 @@ fn count_sst_files(branch_dir: &std::path::Path) -> usize {
     if !branch_dir.exists() {
         return 0;
     }
-    std::fs::read_dir(branch_dir)
-        .map_or(0, |rd| {
-            rd.filter_map(Result::ok)
-                .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
-                .count()
-        })
+    std::fs::read_dir(branch_dir).map_or(0, |rd| {
+        rd.filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+            .count()
+    })
 }
 
 fn assert_branch_deleted_during_op(err: &StorageError, expected_op: BranchOp) {
@@ -184,6 +208,40 @@ fn compact_level_does_not_resurrect_cleared_branch() {
 }
 
 #[test]
+fn compact_level_trivial_move_does_not_resurrect_cleared_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
+    let b = test_branch(0xA5);
+
+    // Create exactly one L1 segment and no L2 overlap so compact_level(1, ...)
+    // takes the trivial-move path rather than the full rewrite path.
+    flush_branch_data(&store, b, &[("x", 1, 1)]);
+    store.compact_level(&b, 0, CommitVersion(0)).unwrap();
+    assert_eq!(store.level_segment_count(&b, 1), 1);
+    assert_eq!(store.level_segment_count(&b, 2), 0);
+
+    let branch_hex = hex_encode_branch(&b);
+    let branch_dir = dir.path().join(&branch_hex);
+
+    let pause = arm(pause_tag::COMPACT_LEVEL, b);
+    let s = Arc::clone(&store);
+    let handle = std::thread::spawn(move || s.compact_level(&b, 1, CommitVersion(0)));
+
+    wait_until_entered(&pause);
+    assert!(store.clear_branch(&b));
+    release(&pause);
+
+    let result = handle.join().unwrap();
+    drop(pause);
+
+    let err = result.expect_err("trivial-move compact_level must refuse to resurrect");
+    assert_branch_deleted_during_op(&err, BranchOp::CompactLevel);
+
+    assert!(!store.branches.contains_key(&b));
+    assert_eq!(count_sst_files(&branch_dir), 0);
+}
+
+#[test]
 fn compact_tier_does_not_resurrect_cleared_branch() {
     let dir = tempfile::tempdir().unwrap();
     let store = Arc::new(SegmentedStore::with_dir(dir.path().to_path_buf(), 0));
@@ -240,10 +298,7 @@ fn materialize_layer_does_not_resurrect_cleared_branch() {
     store.rotate_memtable(&parent);
     store.flush_oldest_frozen(&parent).unwrap();
 
-    store
-        .branches
-        .entry(child)
-        .or_insert_with(BranchState::new);
+    store.branches.entry(child).or_insert_with(BranchState::new);
     store.fork_branch(&parent, &child).unwrap();
     assert_eq!(store.inherited_layer_count(&child), 1);
 
@@ -283,33 +338,57 @@ fn serialized_same_branch_compactions_are_deterministic() {
     // store in a deterministic state. This pins the existing caller-serialized
     // contract; explicit per-branch compaction locking is T4's choice.
 
-    fn segment_file_ids(store: &SegmentedStore, b: &BranchId) -> Vec<u64> {
-        let branch = store.branches.get(b).unwrap();
-        let ver = branch.version.load();
-        let mut ids: Vec<u64> = ver
-            .levels
-            .iter()
-            .flat_map(|level| level.iter().map(|s| s.file_id()))
-            .collect();
-        ids.sort_unstable();
-        ids
+    #[derive(Debug, PartialEq)]
+    struct DeterministicOutcome {
+        first: Option<CompactionResult>,
+        second: Option<CompactionResult>,
+        level_counts: Vec<usize>,
+        entries: Vec<(Vec<u8>, Value, u64)>,
     }
 
-    fn run_once() -> Vec<u64> {
+    fn branch_entries(store: &SegmentedStore, b: &BranchId) -> Vec<(Vec<u8>, Value, u64)> {
+        let mut entries: Vec<_> = store
+            .list_branch(b)
+            .into_iter()
+            .map(|(key, value)| (key.user_key.into_vec(), value.value, value.version.as_u64()))
+            .collect();
+        entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+        entries
+    }
+
+    fn level_counts(store: &SegmentedStore, b: &BranchId) -> Vec<usize> {
+        let branch = store.branches.get(b).unwrap();
+        let ver = branch.version.load();
+        ver.levels.iter().map(std::vec::Vec::len).collect()
+    }
+
+    fn run_once() -> DeterministicOutcome {
         let dir = tempfile::tempdir().unwrap();
         let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
         let b = branch();
         seed_two_l0_segments(&store, b);
-        let _ = store.compact_branch(&b, CommitVersion(0)).unwrap();
-        let _ = store.compact_branch(&b, CommitVersion(0)).unwrap();
-        segment_file_ids(&store, &b)
+        let first = store.compact_branch(&b, CommitVersion(0)).unwrap();
+        let second = store.compact_branch(&b, CommitVersion(0)).unwrap();
+        DeterministicOutcome {
+            first,
+            second,
+            level_counts: level_counts(&store, &b),
+            entries: branch_entries(&store, &b),
+        }
     }
 
     let a = run_once();
     let b = run_once();
-    // Same shape across runs: one L0 segment, deterministic count.
-    assert_eq!(a.len(), b.len());
-    assert_eq!(a.len(), 1, "two compactions should collapse to one segment");
+    assert_eq!(a, b, "serialized compact_branch outcome must be stable");
+    assert!(a.first.is_some(), "first compaction should perform work");
+    assert_eq!(
+        a.second, None,
+        "second compaction should be a deterministic no-op"
+    );
+    assert_eq!(
+        a.level_counts[0], 1,
+        "two compactions should deterministically collapse to one L0 segment",
+    );
 }
 
 // ---------------------------------------------------------------------------
