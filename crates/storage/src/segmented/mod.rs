@@ -20,7 +20,7 @@ use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::seekable::{self, SeekableIterator as _};
 use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
-use crate::{StorageError, StorageResult};
+use crate::{BranchOp, StorageError, StorageResult};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -1802,11 +1802,32 @@ impl SegmentedStore {
         let segments_created = new_segments.len();
 
         // 2e. Atomic install (under DashMap write guard)
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (SE4 / SG-011).
+        #[cfg(test)]
+        crate::test_hooks::maybe_pause(
+            crate::test_hooks::pause_tag::MATERIALIZE_LAYER,
+            *child_branch_id,
+        );
         {
-            let mut branch = self
-                .branches
-                .entry(*child_branch_id)
-                .or_insert_with(BranchState::new);
+            let mut branch = match self.branches.get_mut(child_branch_id) {
+                Some(b) => b,
+                None => {
+                    let created_paths: Vec<_> = new_segments
+                        .iter()
+                        .map(|segment| segment.file_path().to_path_buf())
+                        .collect();
+                    for segment in &new_segments {
+                        crate::block_cache::global_cache().invalidate_file(segment.file_id());
+                    }
+                    self.cleanup_created_segment_files(&created_paths);
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *child_branch_id,
+                        op: BranchOp::MaterializeLayer,
+                    });
+                }
+            };
 
             // Prepend new segments to L0
             if !new_segments.is_empty() {

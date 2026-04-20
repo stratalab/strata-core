@@ -168,7 +168,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         prune_floor: CommitVersion,
-    ) -> io::Result<Option<PickAndCompactResult>> {
+    ) -> StorageResult<Option<PickAndCompactResult>> {
         if self.segments_dir.is_none() {
             return Ok(None);
         }
@@ -214,7 +214,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         prune_floor: CommitVersion,
-    ) -> io::Result<Option<CompactionResult>> {
+    ) -> StorageResult<Option<CompactionResult>> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => return Ok(None),
@@ -270,12 +270,12 @@ impl SegmentedStore {
             Ok(meta) => meta,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
             cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-            return Err(e);
+            return Err(e.into());
         }
 
         // Open the newly written segment.
@@ -283,17 +283,31 @@ impl SegmentedStore {
             Ok(seg) => seg,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e);
+                return Err(e.into());
             }
         };
 
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in old_segments) are kept.
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
+        #[cfg(test)]
+        crate::test_hooks::maybe_pause(
+            crate::test_hooks::pause_tag::COMPACT_BRANCH,
+            *branch_id,
+        );
         {
-            let mut branch = self
-                .branches
-                .entry(*branch_id)
-                .or_insert_with(BranchState::new);
+            let mut branch = match self.branches.get_mut(branch_id) {
+                Some(b) => b,
+                None => {
+                    cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *branch_id,
+                        op: BranchOp::CompactBranch,
+                    });
+                }
+            };
             let cur_ver = branch.version.load();
             let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
                 .l0_segments()
@@ -364,7 +378,7 @@ impl SegmentedStore {
         branch_id: &BranchId,
         segment_indices: &[usize],
         prune_floor: CommitVersion,
-    ) -> io::Result<Option<CompactionResult>> {
+    ) -> StorageResult<Option<CompactionResult>> {
         if segment_indices.len() < 2 {
             return Ok(None);
         }
@@ -428,29 +442,43 @@ impl SegmentedStore {
             Ok(meta) => meta,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
             cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-            return Err(e);
+            return Err(e.into());
         }
 
         let new_segment = match KVSegment::open(&seg_path) {
             Ok(seg) => seg,
             Err(e) => {
                 cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
-                return Err(e);
+                return Err(e.into());
             }
         };
 
         // Swap: remove only the segments we compacted, insert the new one.
         // Any segments added by concurrent flushes (not in selected_segments) are kept.
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
+        #[cfg(test)]
+        crate::test_hooks::maybe_pause(
+            crate::test_hooks::pause_tag::COMPACT_TIER,
+            *branch_id,
+        );
         {
-            let mut branch = self
-                .branches
-                .entry(*branch_id)
-                .or_insert_with(BranchState::new);
+            let mut branch = match self.branches.get_mut(branch_id) {
+                Some(b) => b,
+                None => {
+                    cleanup_partial_compaction_outputs(&branch_dir, seg_id, seg_id + 1);
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *branch_id,
+                        op: BranchOp::CompactTier,
+                    });
+                }
+            };
             let cur_ver = branch.version.load();
             let mut new_l0: Vec<Arc<KVSegment>> = cur_ver
                 .l0_segments()
@@ -500,7 +528,7 @@ impl SegmentedStore {
         &self,
         branch_id: &BranchId,
         prune_floor: CommitVersion,
-    ) -> io::Result<Option<CompactionResult>> {
+    ) -> StorageResult<Option<CompactionResult>> {
         let segments_dir = match &self.segments_dir {
             Some(d) => d,
             None => return Ok(None),
@@ -634,14 +662,14 @@ impl SegmentedStore {
             Err(e) => {
                 let end_id = next_id.load(Ordering::Relaxed);
                 cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
             for (path, _) in &outputs {
                 let _ = std::fs::remove_file(path);
             }
-            return Err(e);
+            return Err(e.into());
         }
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
@@ -656,17 +684,36 @@ impl SegmentedStore {
                     for (p, _) in &outputs {
                         let _ = std::fs::remove_file(p);
                     }
-                    return Err(e);
+                    return Err(e.into());
                 }
             }
         }
 
         // Atomic swap: L0 = only concurrently-flushed segments, L1 = non-overlapping + new
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
+        #[cfg(test)]
+        crate::test_hooks::maybe_pause(
+            crate::test_hooks::pause_tag::COMPACT_L0_TO_L1,
+            *branch_id,
+        );
         {
-            let mut branch = self
-                .branches
-                .entry(*branch_id)
-                .or_insert_with(BranchState::new);
+            let mut branch = match self.branches.get_mut(branch_id) {
+                Some(b) => b,
+                None => {
+                    for seg in &new_l1_segments {
+                        crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                    }
+                    for (path, _) in &outputs {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *branch_id,
+                        op: BranchOp::CompactL0ToL1,
+                    });
+                }
+            };
             let cur_ver = branch.version.load();
 
             // Keep only L0 segments that were added concurrently (not in our snapshot)
@@ -730,7 +777,7 @@ impl SegmentedStore {
         branch_id: &BranchId,
         level: usize,
         prune_floor: CommitVersion,
-    ) -> io::Result<Option<CompactionResult>> {
+    ) -> StorageResult<Option<CompactionResult>> {
         if level >= NUM_LEVELS - 1 {
             return Ok(None); // can't compact the last level further
         }
@@ -829,10 +876,24 @@ impl SegmentedStore {
         {
             // Metadata-only move: shift file to level+1 without I/O
             let moved_seg = Arc::clone(&input_segs[0]);
-            let mut branch = self
-                .branches
-                .entry(*branch_id)
-                .or_insert_with(BranchState::new);
+            // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+            // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
+            // No new files were built in the trivial-move path — only metadata
+            // needs to be discarded, which happens naturally by not installing.
+            #[cfg(test)]
+            crate::test_hooks::maybe_pause(
+                crate::test_hooks::pause_tag::COMPACT_LEVEL,
+                *branch_id,
+            );
+            let mut branch = match self.branches.get_mut(branch_id) {
+                Some(b) => b,
+                None => {
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *branch_id,
+                        op: BranchOp::CompactLevel,
+                    });
+                }
+            };
             let cur_ver = branch.version.load();
             let mut new_levels = cur_ver.levels.clone();
 
@@ -947,14 +1008,14 @@ impl SegmentedStore {
             Err(e) => {
                 let end_id = next_id.load(Ordering::Relaxed);
                 cleanup_partial_compaction_outputs(&branch_dir, start_id, end_id);
-                return Err(e.into());
+                return Err(e);
             }
         };
         if let Err(e) = check_corruption_flags(&corruption_flags) {
             for (path, _) in &outputs {
                 let _ = std::fs::remove_file(path);
             }
-            return Err(e);
+            return Err(e.into());
         }
 
         let output_entries: u64 = outputs.iter().map(|(_, m)| m.entry_count).sum();
@@ -969,17 +1030,36 @@ impl SegmentedStore {
                     for (p, _) in &outputs {
                         let _ = std::fs::remove_file(p);
                     }
-                    return Err(e);
+                    return Err(e.into());
                 }
             }
         }
 
         // ── 4. Atomic version swap ─────────────────────────────────────
+        //
+        // Use get_mut (not entry().or_insert_with) to avoid resurrecting a
+        // branch that was concurrently deleted by clear_branch (SE4 / SG-010).
+        #[cfg(test)]
+        crate::test_hooks::maybe_pause(
+            crate::test_hooks::pause_tag::COMPACT_LEVEL,
+            *branch_id,
+        );
         {
-            let mut branch = self
-                .branches
-                .entry(*branch_id)
-                .or_insert_with(BranchState::new);
+            let mut branch = match self.branches.get_mut(branch_id) {
+                Some(b) => b,
+                None => {
+                    for seg in &new_output_segments {
+                        crate::block_cache::global_cache().invalidate_file(seg.file_id());
+                    }
+                    for (path, _) in &outputs {
+                        let _ = std::fs::remove_file(path);
+                    }
+                    return Err(StorageError::BranchDeletedDuringOp {
+                        branch_id: *branch_id,
+                        op: BranchOp::CompactLevel,
+                    });
+                }
+            };
             let cur_ver = branch.version.load();
             let mut new_levels = cur_ver.levels.clone();
 

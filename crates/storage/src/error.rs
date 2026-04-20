@@ -1,3 +1,4 @@
+use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
@@ -9,6 +10,41 @@ use crate::segmented::{DegradationClass, RecoveryFault};
 
 /// Result alias for storage-local operations that can raise [`StorageError`].
 pub type StorageResult<T> = Result<T, StorageError>;
+
+/// Identifies the storage operation that observed a deleted branch mid-flight.
+///
+/// Used exclusively as a diagnostic tag on [`StorageError::BranchDeletedDuringOp`].
+/// This is **not** a lifecycle primitive and carries no behavior; Tranche 4
+/// owns the final branch-lifecycle shape (generation counter, tombstone map,
+/// per-branch lock). See `docs/design/architecture-cleanup/branch-primitives-scope.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum BranchOp {
+    /// `SegmentedStore::compact_branch` (all-L0 merge).
+    CompactBranch,
+    /// `SegmentedStore::compact_tier` (subset-of-L0 merge).
+    CompactTier,
+    /// `SegmentedStore::compact_l0_to_l1` (L0 → L1 leveled merge).
+    CompactL0ToL1,
+    /// `SegmentedStore::compact_level` (level N → N+1 leveled merge,
+    /// including the metadata-only trivial-move path).
+    CompactLevel,
+    /// `SegmentedStore::materialize_layer` (inherited-layer copy-down).
+    MaterializeLayer,
+}
+
+impl fmt::Display for BranchOp {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            BranchOp::CompactBranch => "compact_branch",
+            BranchOp::CompactTier => "compact_tier",
+            BranchOp::CompactL0ToL1 => "compact_l0_to_l1",
+            BranchOp::CompactLevel => "compact_level",
+            BranchOp::MaterializeLayer => "materialize_layer",
+        };
+        f.write_str(name)
+    }
+}
 
 /// Storage-local failures that need finer classification than raw `io::Error`.
 #[derive(Debug, Error)]
@@ -91,6 +127,24 @@ pub enum StorageError {
         /// requires a fresh reopen.
         class: DegradationClass,
     },
+
+    /// An in-flight compaction or materialize observed that `branch_id` was
+    /// removed from `self.branches` (via `clear_branch`) during the long-I/O
+    /// gap between snapshot and install. The op cleaned up any outputs it
+    /// built and refused to re-create the branch entry — a deletion proof
+    /// must be stronger than the later install.
+    ///
+    /// Current-state race fix only; Tranche 4 owns the final lifecycle shape
+    /// (generation counter, tombstone map, per-branch lock). Callers that
+    /// treat best-effort operations (background compaction, materialize) as
+    /// non-fatal should log this and continue.
+    #[error("branch {branch_id} was deleted during {op}; operation refused to resurrect")]
+    BranchDeletedDuringOp {
+        /// Branch that was removed from `self.branches` mid-operation.
+        branch_id: BranchId,
+        /// Identifies which storage op observed the deletion, for diagnostics.
+        op: BranchOp,
+    },
 }
 
 impl StorageError {
@@ -108,7 +162,8 @@ impl StorageError {
             StorageError::RecoveryAlreadyApplied
             | StorageError::RecoveryHealthResetRequiresSuccessfulRecovery
             | StorageError::GcRefusedDegradedRecovery { .. }
-            | StorageError::RecoveryHealthResetRequiresReopen { .. } => io::ErrorKind::Other,
+            | StorageError::RecoveryHealthResetRequiresReopen { .. }
+            | StorageError::BranchDeletedDuringOp { .. } => io::ErrorKind::Other,
         }
     }
 }
@@ -156,6 +211,9 @@ impl From<StorageError> for StrataError {
                     "reset_recovery_health() requires a fresh reopen after degraded recovery ({class:?})"
                 ))
             }
+            StorageError::BranchDeletedDuringOp { branch_id, op } => StrataError::storage(
+                format!("branch {branch_id} was deleted during {op}; operation refused to resurrect"),
+            ),
         }
     }
 }
