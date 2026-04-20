@@ -1503,13 +1503,13 @@ impl SegmentedStore {
     /// current store instance cannot reload later-restored files.
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
         match &**self.last_recovery_health.load() {
-            RecoveryHealth::Healthy => {}
-            RecoveryHealth::Degraded {
+            // Healthy and Telemetry-only degradation (rebuildable-cache errors)
+            // do not compromise deletion safety, so GC proceeds normally.
+            RecoveryHealth::Healthy
+            | RecoveryHealth::Degraded {
                 class: DegradationClass::Telemetry,
                 ..
-            } => {
-                // Rebuildable-cache errors don't compromise deletion safety.
-            }
+            } => {}
             RecoveryHealth::Degraded { class, .. } => {
                 return Err(StorageError::GcRefusedDegradedRecovery { class: *class });
             }

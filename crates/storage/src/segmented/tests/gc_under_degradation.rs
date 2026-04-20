@@ -8,9 +8,7 @@
 //! cleared on the same instance.
 
 use super::*;
-use crate::segmented::{
-    DegradationClass, RecoveryFault, RecoveryHealth,
-};
+use crate::segmented::{DegradationClass, RecoveryFault, RecoveryHealth};
 use crate::StorageError;
 
 /// After a corrupt-manifest recovery, `gc_orphan_segments()` must refuse
@@ -36,7 +34,10 @@ fn gc_refuses_after_corrupt_manifest_recovery() {
         .map(|e| e.path())
         .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("sst"))
         .collect();
-    assert!(!ssts_before.is_empty(), "setup must produce at least one sst");
+    assert!(
+        !ssts_before.is_empty(),
+        "setup must produce at least one sst"
+    );
 
     // Corrupt the manifest — recovery must classify this as DataLoss.
     let manifest_path = branch_dir.join("segments.manifest");
