@@ -11,6 +11,8 @@
 mod common;
 
 mod branching;
+mod branching_guardrails;
+mod merge_base_characterization;
 mod modes;
 mod primitives;
 mod recovery_cross_crate;

@@ -495,4 +495,111 @@ mod tests {
         assert_eq!(extract_version(&Version::Sequence(100)), 100);
         assert_eq!(extract_version(&Version::Counter(7)), 7);
     }
+
+    // =========================================================================
+    // B1 characterization: byte-stable executor → core BranchId derivation.
+    //
+    // Companion to crates/engine/tests/branch_id_characterization.rs (which
+    // locks the engine path). These tests pin the EXECUTOR side of the
+    // currently-duplicated derivation. B2 will collapse both into one
+    // canonical `BranchId::from_user_name` in `strata_core`. Until then,
+    // executor and engine MUST agree byte-for-byte; these anchors are the
+    // shared ground truth.
+    //
+    // Keep the LOCKED_INPUTS / HARDCODED_ANCHORS arrays IDENTICAL to the
+    // engine-side test. Drift between the two is a parity break.
+    // =========================================================================
+
+    /// Locked baseline for the BRANCH_NAMESPACE constant. Mirrors
+    /// `BRANCH_NAMESPACE` defined at the top of this file (line 75) and the
+    /// engine-side `BRANCH_NAMESPACE` at
+    /// `crates/engine/src/primitives/branch/index.rs:36`.
+    const B1_BRANCH_NAMESPACE_BYTES: [u8; 16] = [
+        0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
+        0xc8,
+    ];
+
+    /// Hardcoded anchors — MUST match the engine-side
+    /// `HARDCODED_ANCHORS` exactly. Drift = parity break = B2 cannot collapse
+    /// the two derivations without renaming branches in existing databases.
+    const B1_HARDCODED_ANCHORS: &[(&str, [u8; 16])] = &[
+        ("default", [0u8; 16]),
+        (
+            "main",
+            [
+                0x1f, 0x64, 0xc0, 0x67, 0xac, 0xf2, 0x50, 0x34, 0xa5, 0xd0, 0x92, 0xd5, 0x76, 0x41,
+                0x38, 0xec,
+            ],
+        ),
+        (
+            "_system_",
+            [
+                0x0d, 0x39, 0x06, 0xa0, 0xd8, 0x09, 0x58, 0x17, 0xb9, 0x0b, 0x09, 0xb6, 0x0e, 0x63,
+                0xc9, 0x7d,
+            ],
+        ),
+        (
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+            [
+                0xf4, 0x7a, 0xc1, 0x0b, 0x58, 0xcc, 0x43, 0x72, 0xa5, 0x67, 0x0e, 0x02, 0xb2, 0xc3,
+                0xd4, 0x79,
+            ],
+        ),
+    ];
+
+    #[test]
+    fn b1_executor_to_core_branch_id_matches_hardcoded_anchors() {
+        for &(name, expected) in B1_HARDCODED_ANCHORS {
+            let actual = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
+            assert_eq!(
+                actual, expected,
+                "to_core_branch_id({name:?}) drifted from its hardcoded anchor.\n\
+                 This is a BREAKING compatibility change AND a parity break\n\
+                 with the engine-side resolve_branch_name. See\n\
+                 crates/engine/tests/branch_id_characterization.rs for the\n\
+                 corresponding engine assertions.\n\
+                 expected {expected:02x?}\n\
+                 actual   {actual:02x?}"
+            );
+        }
+    }
+
+    #[test]
+    fn b1_executor_branch_namespace_constant_is_locked() {
+        assert_eq!(
+            BRANCH_NAMESPACE.as_bytes(),
+            &B1_BRANCH_NAMESPACE_BYTES,
+            "Executor BRANCH_NAMESPACE drifted from the locked B1 baseline.\n\
+             This is a BREAKING compatibility change."
+        );
+    }
+
+    /// Cross-implementation parity oracle: `to_core_branch_id` MUST match
+    /// the documented algorithm (see bridge.rs:79-99) byte-for-byte.
+    #[test]
+    fn b1_executor_to_core_branch_id_matches_documented_algorithm() {
+        let inputs: &[&str] = &[
+            "default",
+            "main",
+            "production",
+            "feature/abc",
+            "_system_",
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        ];
+        for &name in inputs {
+            let expected = if name == "default" {
+                [0u8; 16]
+            } else if let Ok(u) = uuid::Uuid::parse_str(name) {
+                *u.as_bytes()
+            } else {
+                let ns = uuid::Uuid::from_bytes(B1_BRANCH_NAMESPACE_BYTES);
+                *uuid::Uuid::new_v5(&ns, name.as_bytes()).as_bytes()
+            };
+            let actual = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
+            assert_eq!(
+                actual, expected,
+                "to_core_branch_id({name:?}) drifted from documented algorithm"
+            );
+        }
+    }
 }
