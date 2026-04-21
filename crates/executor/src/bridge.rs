@@ -76,12 +76,20 @@ impl Primitives {
 /// derivation. The algorithm is identical to the pre-B2 inline body:
 ///
 /// - `"default"` → nil UUID (all zeros)
-/// - Valid UUID string → parsed UUID bytes
+/// - Valid UUID string → parsed UUID bytes, except the reserved nil-UUID
+///   default-branch alias which is rejected as invalid input
 /// - Any other string → deterministic UUID-v5 over the canonical namespace
 ///
 /// This is the executor's adapter from user-facing branch names to the
 /// engine's canonical [`strata_core::types::BranchId`].
 pub fn to_core_branch_id(branch: &BranchId) -> crate::Result<strata_core::types::BranchId> {
+    if strata_core::branch::aliases_default_branch_sentinel(branch.as_str()) {
+        return Err(StrataError::invalid_input(
+            "branch name aliases reserved default-branch sentinel",
+        )
+        .into());
+    }
+
     Ok(strata_core::types::BranchId::from_user_name(
         branch.as_str(),
     ))
@@ -621,6 +629,22 @@ mod tests {
                  executor {executor:02x?}\n\
                  engine   {engine:02x?}"
             );
+        }
+    }
+
+    #[test]
+    fn b2_executor_to_core_branch_id_rejects_reserved_default_branch_aliases() {
+        for name in [
+            "00000000-0000-0000-0000-000000000000",
+            "00000000000000000000000000000000",
+            "00000000-0000-0000-0000-000000000000"
+                .to_uppercase()
+                .as_str(),
+        ] {
+            let err = to_core_branch_id(&BranchId::from(name)).unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("aliases reserved default-branch sentinel"));
         }
     }
 }

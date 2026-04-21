@@ -33,7 +33,9 @@ use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
 use crate::database::observers::{BranchOpEvent, BranchOpKind};
 use crate::database::Database;
-use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
+use crate::primitives::branch::{
+    aliases_default_branch_sentinel, resolve_branch_name, BranchIndex, BranchMetadata,
+};
 use crate::primitives::event::EventLog;
 use crate::SYSTEM_BRANCH;
 
@@ -155,6 +157,12 @@ fn validate_branch_name(name: &str) -> StrataResult<()> {
     if name.chars().any(|c| c.is_control()) {
         return Err(StrataError::invalid_input(
             "branch name cannot contain control characters",
+        ));
+    }
+
+    if aliases_default_branch_sentinel(name) {
+        return Err(StrataError::invalid_input(
+            "branch name aliases reserved default-branch sentinel",
         ));
     }
 
@@ -922,6 +930,7 @@ mod tests {
         assert!(validate_branch_name("feature-x").is_ok());
         assert!(validate_branch_name("feature/foo").is_ok());
         assert!(validate_branch_name("a").is_ok());
+        assert!(validate_branch_name("f47ac10b-58cc-4372-a567-0e02b2c3d479").is_ok());
 
         // Invalid: empty
         assert!(validate_branch_name("").is_err());
@@ -941,6 +950,25 @@ mod tests {
         // Invalid: control characters
         assert!(validate_branch_name("foo\nbar").is_err());
         assert!(validate_branch_name("foo\x00bar").is_err());
+
+        // Invalid: aliases the load-bearing default-branch nil UUID sentinel.
+        assert!(validate_branch_name("00000000-0000-0000-0000-000000000000").is_err());
+        assert!(validate_branch_name("00000000000000000000000000000000").is_err());
+        let upper_nil = "00000000-0000-0000-0000-000000000000".to_uppercase();
+        assert!(validate_branch_name(&upper_nil).is_err());
+    }
+
+    #[test]
+    fn test_create_rejects_default_branch_nil_uuid_alias() {
+        let db = Database::cache().unwrap();
+        let err = db
+            .branches()
+            .create("00000000-0000-0000-0000-000000000000")
+            .unwrap_err();
+        assert!(matches!(err, StrataError::InvalidInput { .. }));
+        assert!(err
+            .to_string()
+            .contains("aliases reserved default-branch sentinel"));
     }
 
     #[test]

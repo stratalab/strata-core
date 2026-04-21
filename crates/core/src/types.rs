@@ -11,16 +11,25 @@ use std::fmt;
 use std::sync::Arc;
 use uuid::Uuid;
 
-/// Unique identifier for an agent branch
+/// Unique identifier for a branch storage namespace.
 ///
-/// A BranchId is a wrapper around a UUID v4, providing unique identification
-/// for each agent execution branch. BranchIds are used throughout the system
-/// to scope data and enable branch-specific queries.
+/// `BranchId` is an opaque UUID wrapper used throughout the system for storage
+/// isolation, locking, and branch-scoped queries.
+///
+/// For user-facing branch names, the canonical mapping is
+/// [`BranchId::from_user_name`], which derives deterministic ids for normal
+/// names and preserves a few load-bearing sentinel cases. [`BranchId::new`] is
+/// still valid for synthetic or test-only ids, but it is not the canonical path
+/// for user-facing branch creation after B2.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BranchId(Uuid);
 
 impl BranchId {
-    /// Create a new random BranchId using UUID v4
+    /// Create a new random `BranchId` using UUID v4.
+    ///
+    /// Use this for synthetic/internal ids and tests. User-facing branch names
+    /// should normally go through [`BranchId::from_user_name`] so the branch
+    /// namespace remains deterministic across engine and executor.
     pub fn new() -> Self {
         Self(Uuid::new_v4())
     }

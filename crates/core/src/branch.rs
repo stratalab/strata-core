@@ -50,6 +50,16 @@ pub(crate) const BRANCH_NAMESPACE: Uuid = Uuid::from_bytes([
     0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
 ]);
 
+/// `true` if `name` resolves to the reserved nil-UUID branch sentinel without
+/// being the literal `"default"` branch name.
+///
+/// Public, user-facing engine/executor validation rejects these aliases so
+/// callers cannot address the nil-UUID sentinel branch by alternate spellings
+/// such as the canonical all-zero UUID string.
+pub fn aliases_default_branch_sentinel(name: &str) -> bool {
+    name != "default" && BranchId::from_user_name(name) == BranchId::from_bytes([0u8; 16])
+}
+
 impl BranchId {
     /// Canonical derivation from a user-facing branch name.
     ///
@@ -59,6 +69,8 @@ impl BranchId {
     ///    other casing hits the v5 path.
     /// 2. Input that parses as a UUID → passed through verbatim. This is how
     ///    synthetic/generated branch ids round-trip without being re-hashed.
+    ///    Public engine/executor validation rejects non-literal aliases of the
+    ///    nil-UUID default-branch sentinel.
     /// 3. Otherwise → deterministic UUID-v5 over (`BRANCH_NAMESPACE`, name).
     ///
     /// This is the only code path in the workspace that performs branch
@@ -125,10 +137,10 @@ impl BranchRef {
 
 /// Canonical branch lifecycle status.
 ///
-/// Replaces the three parallel `BranchStatus` enums that exist today in
-/// engine, executor, and core-branch-types. `Active` is writable, `Archived`
-/// is readable only, `Deleted` is neither writable nor treated as a live
-/// branch. Write-gate enforcement lands in B4.
+/// This becomes the canonical replacement for the parallel `BranchStatus`
+/// enums that exist today in engine, executor, and core-branch-types. B2
+/// lands the shared type; later epics migrate runtime users and enforce the
+/// write gate.
 ///
 /// The four-variant event-stream enum at
 /// `crates/core/src/branch_types.rs::BranchStatus` is distinct — it describes
@@ -139,9 +151,9 @@ impl BranchRef {
 pub enum BranchLifecycleStatus {
     /// Writable. Reads and writes both proceed.
     Active,
-    /// Readable, not writable. Mutating operations return `BranchArchived`.
+    /// Intended read-only state. B4 wires this into the branch write gate.
     Archived,
-    /// Not writable, not visible. Treated as branch-not-found.
+    /// Intended tombstoned state. B4 hides it from live branch surfaces.
     Deleted,
 }
 
@@ -270,6 +282,26 @@ mod tests {
         assert_eq!(*BranchId::from_user_name("default").as_bytes(), nil);
         assert_ne!(*BranchId::from_user_name("DEFAULT").as_bytes(), nil);
         assert_ne!(*BranchId::from_user_name("Default").as_bytes(), nil);
+    }
+
+    #[test]
+    fn aliases_default_branch_sentinel_only_matches_non_literal_nil_aliases() {
+        assert!(!aliases_default_branch_sentinel("default"));
+        assert!(aliases_default_branch_sentinel(
+            "00000000-0000-0000-0000-000000000000"
+        ));
+        assert!(aliases_default_branch_sentinel(
+            "00000000000000000000000000000000"
+        ));
+        assert!(aliases_default_branch_sentinel(
+            "00000000-0000-0000-0000-000000000000"
+                .to_uppercase()
+                .as_str()
+        ));
+        assert!(!aliases_default_branch_sentinel(
+            "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+        ));
+        assert!(!aliases_default_branch_sentinel("main"));
     }
 
     #[test]
