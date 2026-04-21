@@ -1145,21 +1145,23 @@ impl Database {
                     Self::validate_requested_config_reuse(&db, requested_cfg)?;
                 }
                 Self::validate_control_artifact_reuse(&db, &config_path)?;
+                crate::primitives::branch::validate_reserved_branch_aliases(&db)?;
                 Ok(db)
             }
             AcquiredDatabase::New { db, canonical_path } => {
-                let effective_default_branch =
-                    Self::resolve_effective_default_branch(&db, default_branch.clone())?;
-                let effective_signature = CompatibilitySignature::from_spec(
-                    super::spec::DatabaseMode::Primary,
-                    subsystem_names,
-                    durability_mode,
-                    codec_name,
-                    effective_default_branch.clone(),
-                    background_threads,
-                    allow_lossy_recovery,
-                );
                 Self::finish_opened_db(db, &canonical_path, move |db| {
+                    crate::primitives::branch::validate_reserved_branch_aliases(db)?;
+                    let effective_default_branch =
+                        Self::resolve_effective_default_branch(db, default_branch.clone())?;
+                    let effective_signature = CompatibilitySignature::from_spec(
+                        super::spec::DatabaseMode::Primary,
+                        subsystem_names,
+                        durability_mode,
+                        codec_name,
+                        effective_default_branch.clone(),
+                        background_threads,
+                        allow_lossy_recovery,
+                    );
                     db.set_runtime_signature(effective_signature);
                     // Write the *sanitized* resolved_cfg, not the original config.
                     // This ensures persisted config matches runtime state (e.g.,
@@ -1267,6 +1269,7 @@ impl Database {
             );
         }
 
+        crate::primitives::branch::validate_reserved_branch_aliases(&db)?;
         let effective_default_branch =
             Self::resolve_effective_default_branch(&db, requested_signature.default_branch)?;
         let effective_signature = CompatibilitySignature::from_spec(
@@ -1342,6 +1345,7 @@ impl Database {
 
         // Run lifecycle hooks (initialize and bootstrap)
         Self::run_lifecycle_hooks(&db, true)?;
+        crate::primitives::branch::validate_reserved_branch_aliases(&db)?;
 
         // Ensure default branch if specified
         if let Some(branch_name) = &default_branch {

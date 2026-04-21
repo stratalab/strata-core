@@ -133,8 +133,9 @@ architecture scope documents. The current allowed surface:
 `Subsystem` trait, `CommitObserver`/`CommitInfo`, `ReplayObserver`/`ReplayInfo`,
 `BranchOpObserver`/`BranchOpEvent`, `ObserverError`/`ObserverErrorKind`
 
-**Branch:** `BranchService` (full API), `BranchDagHook`, `BranchDagError`, `BranchId`,
-`BranchRef`, `BranchLifecycleStatus`, `EventStreamLifecycleStatus`, `ConflictPolicy`,
+**Branch:** `BranchService` (full API), `BranchDagHook`, `BranchDagError`, `BranchId`
+(with `BranchId::from_user_name`), `BranchRef`, `BranchGeneration`, `BranchLifecycleStatus`,
+`ForkAnchor`, `BranchControlRecord`, `EventStreamLifecycleStatus`, `ConflictPolicy`,
 `BranchMutationContract`, `PrimitiveLifecycleContract`, `ModeBehavior`
 
 **Durability:** `WalWriterHealth`, `FollowerStatus`, `ContiguousWatermark`,

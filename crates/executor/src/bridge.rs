@@ -70,32 +70,29 @@ impl Primitives {
 // BranchId Conversion
 // =============================================================================
 
-/// Namespace UUID for generating deterministic branch IDs.
-/// This is a fixed UUID used as the namespace for UUID v5 generation.
-const BRANCH_NAMESPACE: uuid::Uuid = uuid::Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-]);
-
 /// Convert executor's string-based BranchId to core BranchId.
 ///
-/// - "default" → `BranchId` with UUID::nil (all zeros)
-/// - Valid UUID string → `BranchId` with parsed UUID bytes
-/// - Any other string → `BranchId` with deterministic UUID v5 generated from name
+/// Delegates to the canonical [`strata_core::BranchId::from_user_name`]
+/// derivation. The algorithm is identical to the pre-B2 inline body:
 ///
-/// This allows users to use human-readable branch names like "main", "experiment-1",
-/// etc. while still providing a unique UUID for internal namespacing.
+/// - `"default"` → nil UUID (all zeros)
+/// - Valid UUID string → parsed UUID bytes, except the reserved nil-UUID
+///   default-branch alias which is rejected as invalid input
+/// - Any other string → deterministic UUID-v5 over the canonical namespace
+///
+/// This is the executor's adapter from user-facing branch names to the
+/// engine's canonical [`strata_core::types::BranchId`].
 pub fn to_core_branch_id(branch: &BranchId) -> crate::Result<strata_core::types::BranchId> {
-    let s = branch.as_str();
-    if s == "default" {
-        Ok(strata_core::types::BranchId::from_bytes([0u8; 16]))
-    } else if let Ok(u) = uuid::Uuid::parse_str(s) {
-        // If it's already a valid UUID, use it directly
-        Ok(strata_core::types::BranchId::from_bytes(*u.as_bytes()))
-    } else {
-        // Generate a deterministic UUID v5 from the branch name
-        let uuid = uuid::Uuid::new_v5(&BRANCH_NAMESPACE, s.as_bytes());
-        Ok(strata_core::types::BranchId::from_bytes(*uuid.as_bytes()))
+    if strata_core::branch::aliases_default_branch_sentinel(branch.as_str()) {
+        return Err(StrataError::invalid_input(
+            "branch name aliases reserved default-branch sentinel",
+        )
+        .into());
     }
+
+    Ok(strata_core::types::BranchId::from_user_name(
+        branch.as_str(),
+    ))
 }
 
 // =============================================================================
@@ -500,20 +497,21 @@ mod tests {
     // B1 characterization: byte-stable executor → core BranchId derivation.
     //
     // Companion to crates/engine/tests/branch_id_characterization.rs (which
-    // locks the engine path). These tests pin the EXECUTOR side of the
-    // currently-duplicated derivation. B2 will collapse both into one
-    // canonical `BranchId::from_user_name` in `strata_core`. Until then,
-    // executor and engine MUST agree byte-for-byte; these anchors are the
-    // shared ground truth.
+    // locks the engine path) and to crates/core/src/branch.rs tests (which
+    // lock the canonical core derivation). These tests pin the EXECUTOR
+    // path. After B2, all three share the one canonical derivation in
+    // `strata_core::BranchId::from_user_name`, but the executor keeps its
+    // own anchor table so the "both local anchor tables changed together"
+    // regression hole stays closed.
     //
     // Keep the LOCKED_INPUTS / HARDCODED_ANCHORS arrays IDENTICAL to the
     // engine-side test. Drift between the two is a parity break.
     // =========================================================================
 
-    /// Locked baseline for the BRANCH_NAMESPACE constant. Mirrors
-    /// `BRANCH_NAMESPACE` defined at the top of this file (line 75) and the
-    /// engine-side `BRANCH_NAMESPACE` at
-    /// `crates/engine/src/primitives/branch/index.rs:36`.
+    /// Locked baseline for the branch-namespace constant, mirroring the
+    /// `BRANCH_NAMESPACE` bytes in `strata_core::branch` and the engine-side
+    /// anchors in `crates/engine/tests/branch_id_characterization.rs`. Drift
+    /// here is a BREAKING compatibility change.
     const B1_BRANCH_NAMESPACE_BYTES: [u8; 16] = [
         0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
         0xc8,
@@ -575,18 +573,29 @@ mod tests {
         }
     }
 
+    /// The canonical namespace lives in `strata_core::branch` as of B2.
+    /// This test locks the executor path end-to-end against the B1 bytes:
+    /// any drift in the core namespace constant, the v5 input ordering, or
+    /// the executor's call into `BranchId::from_user_name` is caught here.
     #[test]
-    fn b1_executor_branch_namespace_constant_is_locked() {
+    fn b1_executor_branch_namespace_is_locked_in_core() {
+        let sample = "b1-executor-namespace-sample";
+        let ns = uuid::Uuid::from_bytes(B1_BRANCH_NAMESPACE_BYTES);
+        let expected = *uuid::Uuid::new_v5(&ns, sample.as_bytes()).as_bytes();
+        let actual = *to_core_branch_id(&BranchId::from(sample))
+            .unwrap()
+            .as_bytes();
         assert_eq!(
-            BRANCH_NAMESPACE.as_bytes(),
-            &B1_BRANCH_NAMESPACE_BYTES,
-            "Executor BRANCH_NAMESPACE drifted from the locked B1 baseline.\n\
-             This is a BREAKING compatibility change."
+            actual, expected,
+            "Executor path drifted from the locked B1 BRANCH_NAMESPACE \
+             bytes. The canonical constant now lives in `strata_core::branch` \
+             — this failure means the core namespace changed. BREAKING \
+             compatibility change."
         );
     }
 
     /// Cross-implementation parity oracle: `to_core_branch_id` MUST match
-    /// the documented algorithm (see bridge.rs:79-99) byte-for-byte.
+    /// the documented algorithm byte-for-byte.
     #[test]
     fn b1_executor_to_core_branch_id_matches_documented_algorithm() {
         for &name in B1_LOCKED_INPUTS {
@@ -620,6 +629,22 @@ mod tests {
                  executor {executor:02x?}\n\
                  engine   {engine:02x?}"
             );
+        }
+    }
+
+    #[test]
+    fn b2_executor_to_core_branch_id_rejects_reserved_default_branch_aliases() {
+        for name in [
+            "00000000-0000-0000-0000-000000000000",
+            "00000000000000000000000000000000",
+            "00000000-0000-0000-0000-000000000000"
+                .to_uppercase()
+                .as_str(),
+        ] {
+            let err = to_core_branch_id(&BranchId::from(name)).unwrap_err();
+            assert!(err
+                .to_string()
+                .contains("aliases reserved default-branch sentinel"));
         }
     }
 }

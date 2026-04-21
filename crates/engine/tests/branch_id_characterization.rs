@@ -18,7 +18,13 @@
 //! `crates/executor/src/bridge.rs` (mod tests) because `to_core_branch_id`
 //! is `pub(crate)`.
 
-use strata_engine::primitives::resolve_branch_name;
+use std::sync::Arc;
+
+use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::Value;
+use strata_engine::database::OpenSpec;
+use strata_engine::primitives::{resolve_branch_name, BranchMetadata};
+use strata_engine::{Database, SearchSubsystem};
 use uuid::Uuid;
 
 /// The RFC 4122 namespace UUID used to derive branch IDs from names.
@@ -258,4 +264,40 @@ fn engine_empty_string_resolves_to_v5_of_empty_input() {
     assert_eq!(actual, expected);
     // Empty MUST NOT collide with the default sentinel.
     assert_ne!(actual, [0u8; 16]);
+}
+
+/// Historical nil-UUID alias branch metadata must be quarantined on reopen
+/// before branch resolution can silently map it back onto the reserved nil
+/// sentinel namespace.
+#[test]
+fn engine_reopen_rejects_historical_default_branch_nil_uuid_alias_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = Database::open_runtime(OpenSpec::primary(temp.path()).with_subsystem(SearchSubsystem))
+        .unwrap();
+
+    let bad_name = "00000000-0000-0000-0000-000000000000";
+    let nil_branch = BranchId::from_bytes([0u8; 16]);
+    let namespace = Arc::new(Namespace::for_branch(nil_branch));
+    let key = Key::new_branch_with_id(namespace, bad_name);
+    let bad_meta = BranchMetadata::new(bad_name);
+    let stored = serde_json::to_string(&bad_meta).unwrap();
+
+    db.transaction(nil_branch, |txn| {
+        txn.put(key.clone(), Value::String(stored.clone()))?;
+        Ok(())
+    })
+    .unwrap();
+    db.shutdown().unwrap();
+    drop(db);
+
+    let err = match Database::open_runtime(
+        OpenSpec::primary(temp.path()).with_subsystem(SearchSubsystem),
+    ) {
+        Ok(_) => panic!("reopen should reject historical nil-UUID alias metadata"),
+        Err(err) => err,
+    };
+    assert!(matches!(err, strata_core::StrataError::Corruption { .. }));
+    assert!(err
+        .to_string()
+        .contains("branch metadata contains reserved default-branch sentinel alias"));
 }

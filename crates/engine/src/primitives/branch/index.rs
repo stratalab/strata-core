@@ -29,33 +29,69 @@ use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use tracing::{info, warn};
-use uuid::Uuid;
-
-/// Namespace UUID for generating deterministic branch IDs from names.
-/// Must match the executor's BRANCH_NAMESPACE for consistency.
-const BRANCH_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-]);
 
 /// Internal metadata key storing the effective default branch name for
 /// disk-backed databases. This lets follower and reopened primary handles
 /// recover branch semantics across process boundaries.
 const DEFAULT_BRANCH_MARKER_KEY: &str = "__default_branch__";
 
-/// Resolve a branch name to a core BranchId using the same logic as the executor.
+/// Resolve a branch name to a core `BranchId`.
 ///
-/// - "default" → nil UUID (all zeros)
-/// - Valid UUID string → parsed directly
-/// - Any other string → deterministic UUID v5 from name
+/// Passthrough to the canonical [`BranchId::from_user_name`] in
+/// `strata_core::branch` (B2 collapsed the duplicated engine/executor
+/// derivations). Kept as a free function so existing engine call sites
+/// read unchanged.
 pub fn resolve_branch_name(name: &str) -> BranchId {
-    if name == "default" {
-        BranchId::from_bytes([0u8; 16])
-    } else if let Ok(u) = Uuid::parse_str(name) {
-        BranchId::from_bytes(*u.as_bytes())
-    } else {
-        let uuid = Uuid::new_v5(&BRANCH_NAMESPACE, name.as_bytes());
-        BranchId::from_bytes(*uuid.as_bytes())
+    BranchId::from_user_name(name)
+}
+
+/// `true` if `name` resolves to the nil-UUID default-branch sentinel without
+/// being the literal `"default"` branch name.
+///
+/// These aliases are forbidden at user-facing boundaries because they collide
+/// with the reserved nil-UUID branch sentinel used by the literal `"default"`
+/// branch and branch-control paths.
+pub(crate) fn aliases_default_branch_sentinel(name: &str) -> bool {
+    strata_core::branch::aliases_default_branch_sentinel(name)
+}
+
+/// Reject persisted branch-control artifacts that still address the reserved
+/// nil-UUID branch sentinel by a non-literal alias.
+///
+/// This quarantines historical bad state from older builds before branch
+/// operations can resolve the alias back to the nil UUID and touch the wrong
+/// namespace during open/reopen. Runs on primary, follower, and cache
+/// open paths, so scans go through the read-only storage surface rather
+/// than `db.transaction()` (followers cannot commit).
+pub(crate) fn validate_reserved_branch_aliases(db: &Arc<Database>) -> StrataResult<()> {
+    if let Some(name) = read_default_branch_marker(db.as_ref())? {
+        if aliases_default_branch_sentinel(&name) {
+            return Err(StrataError::corruption(format!(
+                "persisted default branch marker uses reserved default-branch sentinel alias '{name}'"
+            )));
+        }
     }
+
+    let prefix = Key::new_branch_with_id(global_namespace(), "");
+    let rows = db.storage().scan_prefix(&prefix, CommitVersion::MAX)?;
+    for (key, _) in rows {
+        let Ok(name) = String::from_utf8(key.user_key.to_vec()) else {
+            continue;
+        };
+        if name.contains("__idx_")
+            || name == DEFAULT_BRANCH_MARKER_KEY
+            || strata_core::branch_dag::is_system_branch(&name)
+        {
+            continue;
+        }
+        if aliases_default_branch_sentinel(&name) {
+            return Err(StrataError::corruption(format!(
+                "branch metadata contains reserved default-branch sentinel alias '{name}'"
+            )));
+        }
+    }
+
+    Ok(())
 }
 
 // ========== Global Branch ID for BranchIndex Operations ==========
@@ -280,6 +316,12 @@ impl BranchIndex {
     /// ## Errors
     /// - `InvalidInput` if branch already exists
     pub(crate) fn create_branch(&self, branch_id: &str) -> StrataResult<Versioned<BranchMetadata>> {
+        if aliases_default_branch_sentinel(branch_id) {
+            return Err(StrataError::invalid_input(
+                "branch name aliases reserved default-branch sentinel",
+            ));
+        }
+
         let result = self.db.transaction(global_branch_id(), |txn| {
             let key = self.key_for(branch_id);
 
@@ -569,6 +611,55 @@ mod tests {
         ri.create_branch("test-run").unwrap();
         let result = ri.create_branch("test-run");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_create_branch_rejects_default_branch_nil_uuid_alias() {
+        let (_temp, _db, ri) = setup();
+
+        let err = ri
+            .create_branch("00000000-0000-0000-0000-000000000000")
+            .unwrap_err();
+        assert!(matches!(err, StrataError::InvalidInput { .. }));
+        assert!(err
+            .to_string()
+            .contains("aliases reserved default-branch sentinel"));
+    }
+
+    #[test]
+    fn test_validate_reserved_branch_aliases_rejects_historical_branch_metadata() {
+        let (_temp, _db, ri) = setup();
+        let bad_name = "00000000-0000-0000-0000-000000000000";
+
+        ri.db
+            .transaction(global_branch_id(), |txn| {
+                txn.put(
+                    ri.key_for(bad_name),
+                    to_stored_value(&BranchMetadata::new(bad_name))?,
+                )?;
+                Ok(())
+            })
+            .unwrap();
+
+        let err = validate_reserved_branch_aliases(&ri.db).unwrap_err();
+        assert!(matches!(err, StrataError::Corruption { .. }));
+        assert!(err
+            .to_string()
+            .contains("branch metadata contains reserved default-branch sentinel alias"));
+    }
+
+    #[test]
+    fn test_validate_reserved_branch_aliases_rejects_historical_default_marker() {
+        let (_temp, _db, ri) = setup();
+        let bad_name = "00000000-0000-0000-0000-000000000000";
+
+        write_default_branch_marker(&ri.db, bad_name).unwrap();
+
+        let err = validate_reserved_branch_aliases(&ri.db).unwrap_err();
+        assert!(matches!(err, StrataError::Corruption { .. }));
+        assert!(err.to_string().contains(
+            "persisted default branch marker uses reserved default-branch sentinel alias"
+        ));
     }
 
     #[test]
