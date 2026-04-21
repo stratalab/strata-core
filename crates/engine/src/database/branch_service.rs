@@ -26,8 +26,9 @@ use strata_core::{StrataError, StrataResult};
 
 use crate::branch_ops::with_branch_dag_hooks_suppressed;
 use crate::branch_ops::{
-    self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
-    MergeStrategy, NoteInfo, RevertInfo, TagInfo, ThreeWayDiffResult,
+    self, branch_control_store::BranchControlStore, BranchDiffResult, CherryPickFilter,
+    CherryPickInfo, DiffOptions, ForkInfo, MergeInfo, MergeStrategy, NoteInfo, RevertInfo, TagInfo,
+    ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
@@ -715,6 +716,7 @@ impl BranchService {
         branch_a: &str,
         branch_b: &str,
     ) -> StrataResult<Option<MergeBaseResult>> {
+        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
         let hook = self
             .dag_hook()
             .require("merge_base")
@@ -731,6 +733,7 @@ impl BranchService {
         branch: &str,
         limit: usize,
     ) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
+        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
         // Pass branch name directly — DAG is keyed by name, not BranchId UUID
         hook.log(branch, limit).map_err(dag_to_strata)
@@ -741,6 +744,7 @@ impl BranchService {
         &self,
         branch: &str,
     ) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
+        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
         let hook = self
             .dag_hook()
             .require("ancestors")
@@ -922,6 +926,34 @@ fn dag_to_strata(e: BranchDagError) -> StrataError {
 mod tests {
     use super::*;
     use crate::database::OpenSpec;
+    use strata_core::types::{Key, TypeTag};
+    use strata_core::value::Value;
+
+    fn seed_legacy_branch_metadata(db: &Arc<Database>, name: &str) {
+        let meta = BranchMetadata::new(name);
+        let json = serde_json::to_string(&meta).unwrap();
+        db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+            txn.put(
+                Key::new(
+                    Arc::new(strata_core::types::Namespace::for_branch(
+                        BranchId::from_bytes([0u8; 16]),
+                    )),
+                    TypeTag::Branch,
+                    name.as_bytes().to_vec(),
+                ),
+                Value::String(json),
+            )
+        })
+        .unwrap();
+    }
+
+    fn force_follower_mode(db: &Arc<Database>) {
+        let mut sig = db
+            .runtime_signature()
+            .expect("cache db has runtime signature");
+        sig.mode = crate::database::DatabaseMode::Follower;
+        db.set_runtime_signature(sig);
+    }
 
     #[test]
     fn test_validate_branch_name() {
@@ -1004,5 +1036,21 @@ mod tests {
         let db = Database::cache().unwrap();
         let err = db.branches().fork("_system_", "feature").unwrap_err();
         assert!(matches!(err, StrataError::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn test_branch_service_propagates_lineage_unavailable_on_unmigrated_follower() {
+        let db = Database::cache().unwrap();
+        force_follower_mode(&db);
+        seed_legacy_branch_metadata(&db, "legacy");
+
+        let merge_err = db.branches().merge_base("legacy", "legacy").unwrap_err();
+        assert!(merge_err.is_branch_lineage_unavailable());
+
+        let log_err = db.branches().log("legacy", 10).unwrap_err();
+        assert!(log_err.is_branch_lineage_unavailable());
+
+        let ancestors_err = db.branches().ancestors("legacy").unwrap_err();
+        assert!(ancestors_err.is_branch_lineage_unavailable());
     }
 }

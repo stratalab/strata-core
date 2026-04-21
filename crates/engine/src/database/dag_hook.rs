@@ -450,6 +450,14 @@ pub trait BranchDagHook: Send + Sync + 'static {
     /// rolls back.
     fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError>;
 
+    /// Reset the persisted DAG projection before a full rebuild.
+    ///
+    /// Default implementation is a no-op so existing test hooks do not
+    /// need to care about projection rebuilds.
+    fn reset_projection(&self) -> Result<(), BranchDagError> {
+        Ok(())
+    }
+
     /// Find the merge base (common ancestor) of two branches.
     ///
     /// Accepts branch names (not BranchId) because the DAG is keyed by name.

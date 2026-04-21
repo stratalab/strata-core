@@ -509,6 +509,11 @@ fn active_ptr_prefix_all() -> Key {
     )
 }
 
+fn control_record_prefix_for_id(id: BranchId) -> Key {
+    let user_key = format!("{CTL_RECORD_PREFIX}{}/", id_hex(id));
+    Key::new(global_namespace(), TypeTag::Branch, user_key.into_bytes())
+}
+
 fn parse_active_ptr_key(user_key: &[u8]) -> Option<BranchId> {
     let s = std::str::from_utf8(user_key).ok()?;
     let tail = s.strip_prefix(CTL_ACTIVE_PTR_PREFIX)?;
@@ -544,6 +549,10 @@ impl BranchControlStore {
             return Ok(false);
         }
         Ok(!self.is_migrated()?)
+    }
+
+    pub(crate) fn ensure_lineage_read_available(&self) -> StrataResult<()> {
+        self.guard_lineage_read()
     }
 
     // =========================================================================
@@ -678,13 +687,36 @@ impl BranchControlStore {
         let ap_key = active_ptr_key(id);
         let primary = self.db.transaction(global_branch_id(), |txn| {
             let Some(v) = txn.get(&ap_key)? else {
+                let mut has_live_record = false;
+                for (_k, v) in txn.scan_prefix(&control_record_prefix_for_id(id))? {
+                    let rec: BranchControlRecord = from_stored_value(&v)?;
+                    if matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                        has_live_record = true;
+                        break;
+                    }
+                }
+                if has_live_record {
+                    return Err(StrataError::corruption(format!(
+                        "control-store active pointer missing for branch '{name}' (id={id})"
+                    )));
+                }
                 return Ok(None);
             };
             let gen = decode_u64_value(&v)?;
             let rec_key = control_record_key(BranchRef::new(id, gen));
             match txn.get(&rec_key)? {
-                Some(rv) => Ok(Some(from_stored_value::<BranchControlRecord>(&rv)?)),
-                None => Ok(None),
+                Some(rv) => {
+                    let rec: BranchControlRecord = from_stored_value(&rv)?;
+                    if !matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                        return Err(StrataError::corruption(format!(
+                            "control-store active pointer for branch '{name}' (id={id}, gen={gen}) points to a non-active record"
+                        )));
+                    }
+                    Ok(Some(rec))
+                }
+                None => Err(StrataError::corruption(format!(
+                    "control-store active pointer for branch '{name}' (id={id}, gen={gen}) points to a missing record"
+                ))),
             }
         })?;
         if primary.is_some() {
@@ -758,6 +790,9 @@ impl BranchControlStore {
     /// `edges_for`, `find_merge_base`).
     fn guard_lineage_read(&self) -> StrataResult<()> {
         if self.is_migrated()? {
+            return Ok(());
+        }
+        if !self.can_synthesize_from_legacy()? {
             return Ok(());
         }
         // Empty databases (no legacy metadata either) should not trip
@@ -897,18 +932,27 @@ impl BranchControlStore {
             }
         }
 
-        // Merge-edge advancement (AD8, point semantics): if either side
-        // has a merge edge whose `merge_base` records a later shared
-        // point, prefer it.
-        for edge in self
-            .edges_for(a)?
-            .into_iter()
-            .chain(self.edges_for(b)?.into_iter())
-        {
-            if let Some(mb) = edge.merge_base {
-                match best {
-                    Some(cur) if mb.commit_version <= cur.commit_version => {}
-                    _ => best = Some(mb),
+        // Merge-edge advancement (AD8, point semantics): only direct
+        // merge edges between the compared lifecycle instances can
+        // advance the base. One-sided merges with unrelated third
+        // branches must not affect this pair's merge base.
+        for edge in self.edges_for(a)?.into_iter() {
+            if edge.kind == LineageEdgeKind::Merge && edge.source == Some(b) {
+                if let Some(mb) = edge.merge_base {
+                    match best {
+                        Some(cur) if mb.commit_version <= cur.commit_version => {}
+                        _ => best = Some(mb),
+                    }
+                }
+            }
+        }
+        for edge in self.edges_for(b)?.into_iter() {
+            if edge.kind == LineageEdgeKind::Merge && edge.source == Some(a) {
+                if let Some(mb) = edge.merge_base {
+                    match best {
+                        Some(cur) if mb.commit_version <= cur.commit_version => {}
+                        _ => best = Some(mb),
+                    }
                 }
             }
         }
@@ -1020,30 +1064,201 @@ impl BranchControlStore {
         Ok(report)
     }
 
-    /// Scaffold for rebuilding the `_branch_dag` projection from the
-    /// authoritative control-store state.
+    /// Rebuild the `_branch_dag` projection from the authoritative
+    /// control-store snapshot.
     ///
-    /// B3.1 lands only the store-side enumeration hook. The actual graph
-    /// wipe/rewrite remains deferred until the later B3 cutover where live
-    /// DAG helpers also stop writing name-keyed nodes; wiring this into open
-    /// before that point would over-claim rebuild semantics.
+    /// Best-effort per AD3: rebuild failures are logged and do not fail
+    /// database open. B3.1 rebuilds the current read-side DAG projection
+    /// from control records + lineage edges; later B3 work re-keys the
+    /// live helpers to the canonical `BranchRef` node encoding.
     pub(crate) fn rebuild_dag_projection(db: &Arc<Database>) {
-        let store = Self::new(db.clone());
-        match store.list_active() {
-            Ok(records) => {
-                info!(
-                    target: "strata::branch::dag_rebuild",
-                    records = records.len(),
-                    "DAG rebuild scaffold: snapshot enumerated; BranchRef re-key deferred to B3.3 live-helper cutover"
+        let rebuild = || -> StrataResult<()> {
+            let hook = match db.dag_hook().get() {
+                Some(hook) => hook,
+                None => return Ok(()),
+            };
+
+            let records = db.transaction(global_branch_id(), |txn| {
+                let mut out = Vec::new();
+                for (_k, v) in txn.scan_prefix(&control_record_prefix_all())? {
+                    out.push(from_stored_value::<BranchControlRecord>(&v)?);
+                }
+                Ok::<_, StrataError>(out)
+            })?;
+            let edges = db.transaction(global_branch_id(), |txn| {
+                let prefix = Key::new(
+                    global_namespace(),
+                    TypeTag::Branch,
+                    CTL_EDGE_PREFIX.as_bytes().to_vec(),
                 );
+                let mut out = Vec::new();
+                for (_k, v) in txn.scan_prefix(&prefix)? {
+                    out.push(from_stored_value::<LineageEdgeRecord>(&v)?);
+                }
+                Ok::<_, StrataError>(out)
+            })?;
+
+            hook.reset_projection().map_err(|e| {
+                StrataError::internal(format!(
+                    "failed to reset DAG projection before rebuild: {e}"
+                ))
+            })?;
+
+            let mut names = HashMap::new();
+            for rec in &records {
+                names.insert(rec.branch, rec.name.clone());
             }
-            Err(e) => {
-                warn!(
-                    target: "strata::branch::dag_rebuild",
-                    error = %e,
-                    "DAG rebuild scaffold failed to enumerate snapshot; will retry on next open"
-                );
+
+            for rec in &records {
+                hook.record_event(&DagEvent::create(rec.branch.id, rec.name.clone()))
+                    .map_err(|e| {
+                        StrataError::internal(format!(
+                            "failed to rebuild DAG create event for branch '{}': {e}",
+                            rec.name
+                        ))
+                    })?;
+                if matches!(rec.lifecycle, BranchLifecycleStatus::Deleted) {
+                    hook.record_event(&DagEvent::delete(rec.branch.id, rec.name.clone()))
+                        .map_err(|e| {
+                            StrataError::internal(format!(
+                                "failed to rebuild DAG delete event for branch '{}': {e}",
+                                rec.name
+                            ))
+                        })?;
+                }
             }
+
+            let mut edges = edges;
+            edges.sort_by_key(|edge| edge.commit_version.0);
+            for edge in edges {
+                let Some(target_name) = names.get(&edge.target).cloned() else {
+                    return Err(StrataError::corruption(format!(
+                        "cannot rebuild DAG projection: missing target name for BranchRef(id={}, gen={})",
+                        edge.target.id, edge.target.generation
+                    )));
+                };
+                let event = match edge.kind {
+                    LineageEdgeKind::Fork => {
+                        let source = edge.source.ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: fork edge for '{}' missing source",
+                                target_name
+                            ))
+                        })?;
+                        let source_name = names.get(&source).cloned().ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: missing source name for BranchRef(id={}, gen={})",
+                                source.id, source.generation
+                            ))
+                        })?;
+                        DagEvent::fork(
+                            edge.target.id,
+                            target_name,
+                            source.id,
+                            source_name,
+                            edge.commit_version,
+                        )
+                    }
+                    LineageEdgeKind::Merge => {
+                        let source = edge.source.ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: merge edge for '{}' missing source",
+                                target_name
+                            ))
+                        })?;
+                        let source_name = names.get(&source).cloned().ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: missing source name for BranchRef(id={}, gen={})",
+                                source.id, source.generation
+                            ))
+                        })?;
+                        let merge_info = crate::branch_ops::MergeInfo {
+                            source: source_name.clone(),
+                            target: target_name.clone(),
+                            keys_applied: 0,
+                            keys_deleted: 0,
+                            conflicts: Vec::new(),
+                            spaces_merged: 0,
+                            merge_version: Some(edge.commit_version.0),
+                        };
+                        // Strategy is informational on a replayed DAG
+                        // event (the merge is not re-executed). Strict is
+                        // used here to avoid a production
+                        // `MergeStrategy::LastWriterWins` literal that
+                        // would drift the B5 rename tripwire.
+                        DagEvent::merge(
+                            edge.target.id,
+                            target_name,
+                            source.id,
+                            source_name,
+                            edge.commit_version,
+                            merge_info,
+                            crate::branch_ops::MergeStrategy::Strict,
+                        )
+                    }
+                    LineageEdgeKind::Revert => {
+                        let revert_info = crate::branch_ops::RevertInfo {
+                            branch: target_name.clone(),
+                            from_version: edge.commit_version,
+                            to_version: edge.commit_version,
+                            keys_reverted: 0,
+                            revert_version: Some(edge.commit_version),
+                        };
+                        DagEvent::revert(
+                            edge.target.id,
+                            target_name,
+                            edge.commit_version,
+                            revert_info,
+                        )
+                    }
+                    LineageEdgeKind::CherryPick => {
+                        let source = edge.source.ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: cherry-pick edge for '{}' missing source",
+                                target_name
+                            ))
+                        })?;
+                        let source_name = names.get(&source).cloned().ok_or_else(|| {
+                            StrataError::corruption(format!(
+                                "cannot rebuild DAG projection: missing source name for BranchRef(id={}, gen={})",
+                                source.id, source.generation
+                            ))
+                        })?;
+                        let info = crate::branch_ops::CherryPickInfo {
+                            source: source_name.clone(),
+                            target: target_name.clone(),
+                            keys_applied: 0,
+                            keys_deleted: 0,
+                            cherry_pick_version: Some(edge.commit_version.0),
+                        };
+                        DagEvent::cherry_pick(
+                            edge.target.id,
+                            target_name,
+                            source.id,
+                            source_name,
+                            edge.commit_version,
+                            info,
+                        )
+                    }
+                };
+
+                hook.record_event(&event).map_err(|e| {
+                    StrataError::internal(format!(
+                        "failed to rebuild DAG projection event at version {}: {e}",
+                        edge.commit_version.0
+                    ))
+                })?;
+            }
+
+            Ok(())
+        };
+
+        if let Err(e) = rebuild() {
+            warn!(
+                target: "strata::branch::dag_rebuild",
+                error = %e,
+                "DAG projection rebuild failed; will retry on next open"
+            );
         }
     }
 
@@ -1636,6 +1851,68 @@ mod tests {
     }
 
     #[test]
+    fn find_merge_base_ignores_unrelated_one_sided_merge_edges() {
+        let (db, store) = fresh_store();
+        let main = BranchRef::new(BranchId::from_user_name("main"), 0);
+        let feature = BranchRef::new(BranchId::from_user_name("feature"), 0);
+        let unrelated = BranchRef::new(BranchId::from_user_name("unrelated"), 0);
+
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: main,
+                    name: "main".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )?;
+            store.put_record(
+                &BranchControlRecord {
+                    branch: feature,
+                    name: "feature".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: Some(strata_core::ForkAnchor {
+                        parent: main,
+                        point: CommitVersion(5),
+                    }),
+                },
+                txn,
+            )?;
+            store.put_record(
+                &BranchControlRecord {
+                    branch: unrelated,
+                    name: "unrelated".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )?;
+            store.append_edge(
+                &LineageEdgeRecord {
+                    kind: LineageEdgeKind::Merge,
+                    target: feature,
+                    source: Some(unrelated),
+                    commit_version: CommitVersion(99),
+                    merge_base: Some(MergeBasePoint {
+                        branch: unrelated,
+                        commit_version: CommitVersion(99),
+                    }),
+                },
+                txn,
+            )
+        });
+
+        let base = store.find_merge_base(main, feature).unwrap().unwrap();
+        assert_eq!(base.branch, main);
+        assert_eq!(
+            base.commit_version,
+            CommitVersion(5),
+            "merge-base between main and feature must not advance from a merge involving an unrelated third branch"
+        );
+    }
+
+    #[test]
     fn find_merge_base_across_generations_isolates_lineage_instances() {
         // Same name, two generations. Each generation has its own fork
         // anchor; merge_base must return the gen-1 lineage, not cross
@@ -1792,6 +2069,45 @@ mod tests {
             store.find_active_by_name("legacy-only").unwrap().is_none(),
             "migrated followers must not resurrect branches from legacy metadata"
         );
+    }
+
+    #[test]
+    fn active_pointer_missing_for_existing_control_record_is_corruption() {
+        let (db, store) = fresh_store();
+        let branch = BranchRef::new(BranchId::from_user_name("dangling"), 0);
+        write(&db, |txn| {
+            txn.put(
+                control_record_key(branch),
+                to_stored_value(&BranchControlRecord {
+                    branch,
+                    name: "dangling".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                })?,
+            )
+        });
+
+        let err = store.find_active_by_name("dangling").unwrap_err();
+        assert!(format!("{err}").contains("active pointer missing"));
+    }
+
+    #[test]
+    fn tombstoned_record_without_active_pointer_returns_none() {
+        let (db, store) = fresh_store();
+        let branch = BranchRef::new(BranchId::from_user_name("deleted"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "deleted".to_string(),
+                    lifecycle: BranchLifecycleStatus::Deleted,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+
+        assert!(store.find_active_by_name("deleted").unwrap().is_none());
     }
 
     #[test]
@@ -2343,6 +2659,137 @@ mod tests {
 
         let err = BranchControlStore::ensure_migrated(&db).unwrap_err();
         assert!(format!("{err}").contains("missing merge_version"));
+    }
+
+    #[derive(Default)]
+    struct RecordingRebuildHook {
+        reset_count: std::sync::Mutex<usize>,
+        events: std::sync::Mutex<Vec<DagEvent>>,
+    }
+
+    impl crate::database::dag_hook::BranchDagHook for RecordingRebuildHook {
+        fn name(&self) -> &'static str {
+            "rebuild-recorder"
+        }
+
+        fn record_event(
+            &self,
+            event: &DagEvent,
+        ) -> Result<(), crate::database::dag_hook::BranchDagError> {
+            self.events.lock().unwrap().push(event.clone());
+            Ok(())
+        }
+
+        fn reset_projection(&self) -> Result<(), crate::database::dag_hook::BranchDagError> {
+            *self.reset_count.lock().unwrap() += 1;
+            self.events.lock().unwrap().clear();
+            Ok(())
+        }
+
+        fn find_merge_base(
+            &self,
+            _a: &str,
+            _b: &str,
+        ) -> Result<
+            Option<crate::database::dag_hook::MergeBaseResult>,
+            crate::database::dag_hook::BranchDagError,
+        > {
+            Ok(None)
+        }
+
+        fn log(
+            &self,
+            _branch: &str,
+            _limit: usize,
+        ) -> Result<Vec<DagEvent>, crate::database::dag_hook::BranchDagError> {
+            Ok(Vec::new())
+        }
+
+        fn ancestors(
+            &self,
+            _branch: &str,
+        ) -> Result<
+            Vec<crate::database::dag_hook::AncestryEntry>,
+            crate::database::dag_hook::BranchDagError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn rebuild_dag_projection_replays_authoritative_snapshot_through_hook() {
+        let (db, store) = fresh_store();
+        let hook = Arc::new(RecordingRebuildHook::default());
+        db.install_dag_hook(hook.clone()).unwrap();
+
+        let main = BranchRef::new(BranchId::from_user_name("main"), 0);
+        let feature = BranchRef::new(BranchId::from_user_name("feature"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: main,
+                    name: "main".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )?;
+            store.put_record(
+                &BranchControlRecord {
+                    branch: feature,
+                    name: "feature".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: Some(ForkAnchor {
+                        parent: main,
+                        point: CommitVersion(3),
+                    }),
+                },
+                txn,
+            )?;
+            store.append_edge(
+                &LineageEdgeRecord {
+                    kind: LineageEdgeKind::Fork,
+                    target: feature,
+                    source: Some(main),
+                    commit_version: CommitVersion(3),
+                    merge_base: None,
+                },
+                txn,
+            )?;
+            store.append_edge(
+                &LineageEdgeRecord {
+                    kind: LineageEdgeKind::Merge,
+                    target: main,
+                    source: Some(feature),
+                    commit_version: CommitVersion(8),
+                    merge_base: Some(MergeBasePoint {
+                        branch: feature,
+                        commit_version: CommitVersion(8),
+                    }),
+                },
+                txn,
+            )
+        });
+
+        BranchControlStore::rebuild_dag_projection(&db);
+
+        assert_eq!(*hook.reset_count.lock().unwrap(), 1);
+        let events = hook.events.lock().unwrap().clone();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.kind == DagEventKind::BranchCreate)
+                .count(),
+            2
+        );
+        assert!(
+            events.iter().any(|event| event.kind == DagEventKind::Fork),
+            "fork edge must be replayed into the DAG projection"
+        );
+        assert!(
+            events.iter().any(|event| event.kind == DagEventKind::Merge),
+            "merge edge must be replayed into the DAG projection"
+        );
     }
 
     #[test]

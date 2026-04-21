@@ -10,9 +10,12 @@
 //! `BranchControlStore`. It is no longer authoritative for branch
 //! lineage or merge-base queries; those go through the store. The DAG
 //! remains for fast `log` / `ancestors` traversals. B3.1 lands the
-//! canonical node-id helper and migration-side store authority; the actual
-//! projection rebuild wiring is deferred to the later B3 cutover where live
-//! helpers also stop writing name-keyed nodes.
+//! `BranchRef`-keyed node helper, a `reset_projection` hook, and a
+//! store-driven rebuild entry point (`BranchControlStore::rebuild_dag_projection`).
+//! The rebuild is **not** wired into primary open yet: live write helpers
+//! still emit name-keyed events, so a wipe-and-replay on every open would
+//! drop events written between migration points. The B3.3 cutover moves
+//! live writes to the store and enables the rebuild on open.
 //!
 //! ## Node id encodings (transitional)
 //!
@@ -23,7 +26,7 @@
 //!   same-name recreated branches do not collide in the DAG.
 //!
 //! During B3.1 the live DAG is still name-keyed. The canonical encoding is
-//! staged here so the later rebuild/cutover can switch the graph in one pass.
+//! staged here so the later cutover can switch the graph in one pass.
 //!
 //! ## Write helpers
 //!
@@ -1537,6 +1540,31 @@ impl GraphBranchDagHook {
 impl BranchDagHook for GraphBranchDagHook {
     fn name(&self) -> &'static str {
         "graph"
+    }
+
+    fn reset_projection(&self) -> Result<(), BranchDagError> {
+        let db = self.upgrade_db()?;
+        let graph_store = GraphStore::new(db.clone());
+        let system_id = resolve_branch_name(SYSTEM_BRANCH);
+
+        if graph_store
+            .get_graph_meta(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH)
+            .map_err(|e| BranchDagError::new(BranchDagErrorKind::ReadFailed, e.to_string()))?
+            .is_some()
+        {
+            graph_store
+                .delete_graph(system_id, GRAPH_SPACE, BRANCH_DAG_GRAPH)
+                .map_err(Self::map_write_error)?;
+        }
+
+        ensure_branch_dag(&db).map_err(|e| {
+            BranchDagError::new(
+                BranchDagErrorKind::WriteFailed,
+                format!("failed to recreate _branch_dag during projection reset: {e}"),
+            )
+        })?;
+
+        Ok(())
     }
 
     fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
