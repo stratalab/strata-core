@@ -12,6 +12,7 @@
 //! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
 
 // Module declarations
+pub mod branch; // Canonical branch-truth types (B2)
 pub mod branch_dag; // Branch DAG types and constants
 pub mod branch_types; // Branch lifecycle types
 pub mod contract; // contract types
@@ -23,6 +24,11 @@ pub mod primitives; // primitive types (Event, Vector, JSON types)
 pub mod traits;
 pub mod types;
 pub mod value;
+
+// Re-export canonical branch-truth types at crate root.
+pub use branch::{
+    BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
+};
 
 // Re-export commonly used types and traits
 pub use branch_types::{BranchEventOffsets, BranchMetadata, BranchStatus};

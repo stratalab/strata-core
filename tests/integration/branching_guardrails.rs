@@ -25,10 +25,9 @@
 //!
 //! ## What's tracked today
 //!
-//! - `BRANCH_NAMESPACE` const sites — duplicated in
-//!   `crates/engine/src/primitives/branch/index.rs` and
-//!   `crates/executor/src/bridge.rs`. B2 collapses to one canonical
-//!   `BranchId::from_user_name` in `strata_core`.
+//! - `BRANCH_NAMESPACE` const sites — collapsed by B2 to the single
+//!   canonical declaration in `crates/core/src/branch.rs`. The guardrail
+//!   is kept (value = 1) so any future second site is caught immediately.
 //! - `merge_base_override` occurrences — the executor → engine override
 //!   plumbing B3 removes when lineage moves into `BranchControlStore`.
 //! - `MergeStrategy::LastWriterWins` literals — B5 renames to a name
@@ -66,8 +65,10 @@ const LOCKED_PATTERNS: &[Pattern] = &[
         // Trailing `:` so we match only `const BRANCH_NAMESPACE: <ty> = ...`
         // declarations, not test fixtures named `BRANCH_NAMESPACE_BYTES`.
         needle: "const BRANCH_NAMESPACE:",
-        rationale: "B2 will collapse the duplicated BRANCH_NAMESPACE consts \
-                    (engine + executor) into one canonical derivation in strata_core.",
+        rationale: "B2 collapsed the duplicated BRANCH_NAMESPACE consts \
+                    (engine + executor) into one canonical declaration in \
+                    strata_core::branch. The floor of 1 catches any \
+                    regression that would reintroduce a second site.",
     },
     Pattern {
         snapshot_key: "merge_base_override_occurrences",

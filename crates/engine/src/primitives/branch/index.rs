@@ -29,33 +29,20 @@ use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
 use tracing::{info, warn};
-use uuid::Uuid;
-
-/// Namespace UUID for generating deterministic branch IDs from names.
-/// Must match the executor's BRANCH_NAMESPACE for consistency.
-const BRANCH_NAMESPACE: Uuid = Uuid::from_bytes([
-    0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,
-]);
 
 /// Internal metadata key storing the effective default branch name for
 /// disk-backed databases. This lets follower and reopened primary handles
 /// recover branch semantics across process boundaries.
 const DEFAULT_BRANCH_MARKER_KEY: &str = "__default_branch__";
 
-/// Resolve a branch name to a core BranchId using the same logic as the executor.
+/// Resolve a branch name to a core `BranchId`.
 ///
-/// - "default" → nil UUID (all zeros)
-/// - Valid UUID string → parsed directly
-/// - Any other string → deterministic UUID v5 from name
+/// Passthrough to the canonical [`BranchId::from_user_name`] in
+/// `strata_core::branch` (B2 collapsed the duplicated engine/executor
+/// derivations). Kept as a free function so existing engine call sites
+/// read unchanged.
 pub fn resolve_branch_name(name: &str) -> BranchId {
-    if name == "default" {
-        BranchId::from_bytes([0u8; 16])
-    } else if let Ok(u) = Uuid::parse_str(name) {
-        BranchId::from_bytes(*u.as_bytes())
-    } else {
-        let uuid = Uuid::new_v5(&BRANCH_NAMESPACE, name.as_bytes());
-        BranchId::from_bytes(*uuid.as_bytes())
-    }
+    BranchId::from_user_name(name)
 }
 
 // ========== Global Branch ID for BranchIndex Operations ==========

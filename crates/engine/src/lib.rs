@@ -141,5 +141,11 @@ pub use strata_core::branch_dag::{
     BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
 
+// Re-export canonical branch-truth types (B2). `BranchId::from_user_name`
+// lives on the `BranchId` inherent impl and is reachable via `strata_core`.
+pub use strata_core::{
+    BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
+};
+
 #[cfg(feature = "perf-trace")]
 pub use instrumentation::{PerfBreakdown, PerfStats};
