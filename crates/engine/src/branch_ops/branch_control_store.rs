@@ -620,6 +620,35 @@ impl BranchControlStore {
         Ok(())
     }
 
+    /// Read the active-pointer row and `mark_deleted` the resulting
+    /// `BranchRef` inside `txn`.
+    ///
+    /// Used by `BranchService::delete` so the active-generation lookup
+    /// is part of the delete transaction's read set — OCC then rejects
+    /// any concurrent `delete` + `create` that advances the active
+    /// pointer between the read and commit, preventing divergence
+    /// between the legacy metadata purge and the control-record
+    /// lifecycle flip.
+    ///
+    /// Returns `Ok(Some(branch_ref))` with the marked ref, `Ok(None)` if
+    /// there was no active record for `name`, or `Err` if the record
+    /// referenced by the active pointer is missing / corrupted.
+    pub(crate) fn mark_deleted_by_name(
+        &self,
+        name: &str,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<Option<BranchRef>> {
+        let id = BranchId::from_user_name(name);
+        let ap_key = active_ptr_key(id);
+        let Some(v) = txn.get(&ap_key)? else {
+            return Ok(None);
+        };
+        let generation = decode_u64_value(&v)?;
+        let branch_ref = BranchRef::new(id, generation);
+        self.mark_deleted(branch_ref, txn)?;
+        Ok(Some(branch_ref))
+    }
+
     /// Allocate the next unused generation for `id` and advance the
     /// persisted counter. The returned value is unique within the database
     /// lifetime even across delete-and-recreate cycles.

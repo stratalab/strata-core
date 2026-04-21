@@ -37,13 +37,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
-use strata_core::{PrimitiveType, Version, VersionedValue};
+use strata_core::{
+    BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, PrimitiveType, Version,
+    VersionedValue,
+};
 use tracing::info;
+
+use crate::branch_ops::branch_control_store::BranchControlStore;
 
 // =============================================================================
 // Constants and key-format helpers
@@ -741,7 +747,8 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 /// human-readable message and creator that flow into the branch DAG event
 /// for audit / lineage queries.
 pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
-    fork_branch_with_metadata(db, source, destination, None, None)
+    let (parent_ref, dest_gen) = resolve_fork_lineage(db, source, destination)?;
+    fork_branch_with_metadata(db, source, destination, None, None, parent_ref, dest_gen)
 }
 
 /// Same as [`fork_branch`] but records `message` and `creator` on the
@@ -751,15 +758,26 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
 /// user-supplied audit metadata (`fork_with_options(message, creator)`)
 /// flows through to the DAG. Engine-direct callers (tests, internal
 /// subsystems) typically use the no-metadata [`fork_branch`] wrapper.
+///
+/// `parent_ref` and `dest_gen` are resolved by the caller (see
+/// [`resolve_fork_lineage`]) and threaded through so the KV metadata
+/// transaction can write the new `BranchControlRecord` atomically with
+/// the legacy `BranchMetadata` row (B3.2, AD6). Storage-fork-first
+/// ordering is preserved: the storage fork commits before the KV txn,
+/// so a crash between them leaves harmless orphan storage (refcounts
+/// rebuild from manifests on recovery).
 pub fn fork_branch_with_metadata(
     db: &Arc<Database>,
     source: &str,
     destination: &str,
     message: Option<&str>,
     creator: Option<&str>,
+    parent_ref: BranchRef,
+    dest_gen: BranchGeneration,
 ) -> StrataResult<ForkInfo> {
     let branch_index = BranchIndex::new(db.clone());
     let space_index = SpaceIndex::new(db.clone());
+    let control_store = BranchControlStore::new(db.clone());
 
     // 1. Verify source exists
     branch_index.get_branch(source)?.ok_or_else(|| {
@@ -840,9 +858,24 @@ pub fn fork_branch_with_metadata(
             .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?
     };
 
-    // 5. Create destination branch in KV metadata (WAL-protected).
-    //    If this fails, rollback the storage fork.
-    if let Err(e) = branch_index.create_branch(destination) {
+    // 5. Create destination branch in KV metadata (WAL-protected) AND
+    //    write the new BranchControlRecord atomically in the same
+    //    transaction (B3.2). If either fails, rollback the storage fork
+    //    so the visibility invariant holds (AD6).
+    let child_ref = BranchRef::new(dest_id, dest_gen);
+    let control_record = BranchControlRecord {
+        branch: child_ref,
+        name: destination.to_string(),
+        lifecycle: BranchLifecycleStatus::Active,
+        fork: Some(ForkAnchor {
+            parent: parent_ref,
+            point: fork_version,
+        }),
+    };
+    let kv_result = branch_index.create_branch_with_hook(destination, |txn| {
+        control_store.put_record(&control_record, txn)
+    });
+    if let Err(e) = kv_result {
         storage.clear_branch(&dest_id);
         return Err(e);
     }
@@ -863,6 +896,8 @@ pub fn fork_branch_with_metadata(
         source,
         destination,
         fork_version = fork_version.as_u64(),
+        parent_generation = parent_ref.generation,
+        dest_generation = dest_gen,
         "Branch forked (COW)"
     );
 
@@ -877,6 +912,43 @@ pub fn fork_branch_with_metadata(
     dispatch_fork_hook(db, &info, message, creator);
 
     Ok(info)
+}
+
+/// Resolve the parent `BranchRef` and allocate the child's generation for
+/// a fork, using the `BranchControlStore` as the authority.
+///
+/// The parent ref comes from `find_active_by_name(source)`; if the store
+/// has no active record for the source (e.g. a fresh cache database that
+/// hasn't routed creates through `BranchService`), the parent is
+/// synthesized at gen 0 so low-level callers (`fork_branch`, test
+/// fixtures) still work. `dest_gen` is allocated via a dedicated tiny
+/// transaction so the counter bump is durable before the KV metadata
+/// transaction runs.
+///
+/// Checks the destination up-front before bumping the counter so a
+/// trivially-failing fork (duplicate destination) does not leak a
+/// generation from the monotonic counter.
+pub(crate) fn resolve_fork_lineage(
+    db: &Arc<Database>,
+    source: &str,
+    destination: &str,
+) -> StrataResult<(BranchRef, BranchGeneration)> {
+    let store = BranchControlStore::new(db.clone());
+    let parent_ref = match store.find_active_by_name(source)? {
+        Some(rec) => rec.branch,
+        None => BranchRef::new(resolve_branch_name(source), 0),
+    };
+    if store.find_active_by_name(destination)?.is_some() {
+        return Err(StrataError::invalid_input(format!(
+            "Destination branch '{}' already exists",
+            destination
+        )));
+    }
+    let dest_id = resolve_branch_name(destination);
+    let dest_gen = db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+        store.next_generation(dest_id, txn)
+    })?;
+    Ok((parent_ref, dest_gen))
 }
 
 // =============================================================================

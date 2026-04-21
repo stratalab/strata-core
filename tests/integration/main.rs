@@ -12,6 +12,7 @@ mod common;
 
 mod branching;
 mod branching_guardrails;
+mod branching_recreate_state_machine;
 mod merge_base_characterization;
 mod modes;
 mod primitives;
