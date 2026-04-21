@@ -1171,6 +1171,22 @@ impl Database {
                     if let Some(branch_name) = &effective_default_branch {
                         Self::ensure_default_branch(db, branch_name)?;
                     }
+                    // B3.1: migrate any legacy BranchMetadata into
+                    // BranchControlStore. Runs once per database; second
+                    // open is a no-op. Lifecycle hooks above install the
+                    // DAG hook first, so migration's uncapped DAG log
+                    // fallback for fork-anchor derivation can run.
+                    crate::branch_ops::branch_control_store::BranchControlStore::ensure_migrated(
+                        db,
+                    )?;
+                    // B3.1 defers the DAG projection rebuild: live write
+                    // helpers still record name-keyed events, so a wipe-
+                    // and-replay from the store on every open would drop
+                    // live-session events written between migration
+                    // points. `BranchControlStore::rebuild_dag_projection`
+                    // remains available for explicit invocation; the
+                    // B3.3 cutover will wire it into open once live
+                    // helpers also emit from the store.
                     Ok(())
                 })
             }
