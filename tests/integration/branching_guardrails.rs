@@ -5,10 +5,10 @@
 //!
 //! ## How it works
 //!
-//! For each pattern in `LOCKED_PATTERNS`, the test walks every `*.rs` file
-//! under `crates/`, `src/`, and `tests/` (skipping `target/`,
-//! `benchmarks/`, `.git/`, `.claude/`) and counts substring matches. The
-//! totals are compared against the snapshot at
+//! For each pattern in `LOCKED_PATTERNS`, the test walks production `*.rs`
+//! files under `crates/**/src/**` and `src/**` (skipping `tests/`,
+//! `benches/`, `target/`, `benchmarks/`, `.git/`, `.claude/`) and counts
+//! substring matches in code, not comments. The totals are compared against the snapshot at
 //! `tests/integration/data/branching_transitional_shapes.json`.
 //!
 //! Drift in either direction fails the test:
@@ -35,11 +35,16 @@
 //!   that matches runtime behavior (per Lockstep Set 5 in the plan).
 //! - `BranchId::new()` random-construction sites — proxy for places where
 //!   a generation-aware identity will be needed once B3 lands `BranchRef`.
+//!
+//! These are intentionally **production-code** tripwires. Characterization
+//! tests cover public behavior; this guardrail is meant to measure
+//! transitional implementation shapes, so comment text and test-only
+//! references must not move the baseline.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 // =============================================================================
 // Patterns
@@ -145,18 +150,82 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> std::io::Result<()> {
                 continue;
             }
             collect_rs_files(&path, out)?;
-        } else if ft.is_file()
-            && path.extension().and_then(|e| e.to_str()) == Some("rs")
-            && !SKIP_FILE_NAMES.contains(&name)
-        {
+        } else if ft.is_file() && is_production_rs_file(&path) && !SKIP_FILE_NAMES.contains(&name) {
             out.push(path);
         }
     }
     Ok(())
 }
 
-/// Count substring occurrences across all `.rs` files under the workspace
-/// root, line by line (so multi-occurrence lines count multiply).
+fn is_production_rs_file(path: &Path) -> bool {
+    if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+        return false;
+    }
+
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(s) => s.to_str(),
+            _ => None,
+        })
+        .collect();
+
+    let has_src = components.contains(&"src");
+    let in_tests = components.contains(&"tests");
+    let in_benches = components.contains(&"benches");
+
+    has_src && !in_tests && !in_benches
+}
+
+fn strip_comments_from_line<'a>(line: &'a str, in_block_comment: &mut bool) -> Option<&'a str> {
+    let mut rest = line.trim_start();
+
+    loop {
+        if *in_block_comment {
+            if let Some(end) = rest.find("*/") {
+                rest = &rest[end + 2..];
+                *in_block_comment = false;
+                rest = rest.trim_start();
+                continue;
+            }
+            return None;
+        }
+
+        if rest.is_empty() || rest.starts_with("//") {
+            return None;
+        }
+
+        if rest.starts_with("/*") {
+            rest = &rest[2..];
+            *in_block_comment = true;
+            continue;
+        }
+
+        if let Some(start) = rest.find("/*") {
+            let prefix = &rest[..start];
+            if prefix.trim().is_empty() {
+                rest = &rest[start + 2..];
+                *in_block_comment = true;
+                continue;
+            }
+            return Some(prefix.trim_end());
+        }
+
+        if let Some(start) = rest.find("//") {
+            let prefix = &rest[..start];
+            if prefix.trim().is_empty() {
+                return None;
+            }
+            return Some(prefix.trim_end());
+        }
+
+        return Some(rest);
+    }
+}
+
+/// Count substring occurrences across production `.rs` files under the
+/// workspace root, ignoring comment-only text. Multiple occurrences on one
+/// code line still count multiply.
 fn measure_pattern(needle: &str) -> u64 {
     let root = workspace_root();
     let mut files = Vec::new();
@@ -166,12 +235,16 @@ fn measure_pattern(needle: &str) -> u64 {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
+        let mut in_block_comment = false;
         for line in content.lines() {
+            let Some(code) = strip_comments_from_line(line, &mut in_block_comment) else {
+                continue;
+            };
             // Multiple occurrences on one line still count multiply —
             // this catches macro-expanded patterns that might reuse
             // a needle several times in a single physical line.
             let mut idx = 0;
-            while let Some(pos) = line[idx..].find(needle) {
+            while let Some(pos) = code[idx..].find(needle) {
                 total += 1;
                 idx += pos + needle.len();
             }
@@ -289,4 +362,49 @@ fn snapshot_covers_every_locked_pattern() {
             pattern.snapshot_key
         );
     }
+}
+
+#[test]
+fn production_file_filter_excludes_tests_and_benches() {
+    assert!(is_production_rs_file(Path::new(
+        "crates/executor/src/bridge.rs"
+    )));
+    assert!(!is_production_rs_file(Path::new(
+        "tests/integration/branching_guardrails.rs"
+    )));
+    assert!(!is_production_rs_file(Path::new(
+        "crates/engine/benches/transaction_benchmarks.rs"
+    )));
+}
+
+#[test]
+fn strip_comments_ignores_comment_only_occurrences() {
+    let mut in_block = false;
+
+    assert_eq!(
+        strip_comments_from_line("let x = merge_base_override;", &mut in_block),
+        Some("let x = merge_base_override;")
+    );
+    assert_eq!(
+        strip_comments_from_line("// merge_base_override", &mut in_block),
+        None
+    );
+    assert_eq!(
+        strip_comments_from_line("let x = 1; // merge_base_override", &mut in_block),
+        Some("let x = 1;")
+    );
+
+    assert_eq!(
+        strip_comments_from_line("/* merge_base_override", &mut in_block),
+        None
+    );
+    assert!(in_block);
+    assert_eq!(
+        strip_comments_from_line(
+            "still comment */ let y = merge_base_override;",
+            &mut in_block
+        ),
+        Some("let y = merge_base_override;")
+    );
+    assert!(!in_block);
 }

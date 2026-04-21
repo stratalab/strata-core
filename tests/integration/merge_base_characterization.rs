@@ -35,8 +35,7 @@
 //! - **B**: unrelated branches refuse merge with the locked error
 //!   vocabulary.
 //! - **D**: `db.branches().merge_base()` returns a DAG-derived merge base
-//!   for fresh forks and a negative result (None or Err) for unrelated
-//!   branches.
+//!   for fresh forks and `Ok(None)` for unrelated branches.
 //! - **E**: `MergeOptions::merge_base` override is honored by
 //!   `BranchService::merge_with_options` even between storage-unrelated
 //!   branches — the contract B3 will remove.
@@ -160,7 +159,8 @@ fn a2_parent_to_child_merge_with_parent_post_fork_write() {
 // =============================================================================
 
 /// Scenario B: unrelated branches refuse merge with a "no fork or merge
-/// relationship" `StrataError`. Locks today's external error vocabulary.
+/// relationship found" `StrataError`. Locks today's external error
+/// vocabulary.
 #[test]
 fn b_unrelated_branches_refuse_merge() {
     let test_db = TestDb::new();
@@ -176,8 +176,8 @@ fn b_unrelated_branches_refuse_merge() {
     );
     let msg = format!("{}", result.unwrap_err());
     assert!(
-        msg.contains("no fork or merge relationship") || msg.contains("merge base"),
-        "expected merge-base-related error; got: {msg}"
+        msg.contains("no fork or merge relationship found"),
+        "expected locked unrelated-merge error substring; got: {msg}"
     );
 }
 
@@ -219,8 +219,9 @@ fn d_branchservice_merge_base_returns_some_for_fresh_fork() {
     );
 }
 
-/// `db.branches().merge_base()` on unrelated branches reports a negative
-/// result (Ok(None) or Err). Both are acceptable today; B2 will normalize.
+/// `db.branches().merge_base()` on unrelated branches returns `Ok(None)`.
+/// This is the documented public contract today and B2 must preserve it
+/// unless it intentionally changes the surface.
 #[test]
 fn d_branchservice_merge_base_negative_for_unrelated_branches() {
     let test_db = TestDb::new();
@@ -228,17 +229,13 @@ fn d_branchservice_merge_base_negative_for_unrelated_branches() {
     branches.create("alpha_d").unwrap();
     branches.create("beta_d").unwrap();
 
-    let result = branches.merge_base("alpha_d", "beta_d");
-    // Both shapes are acceptable today (B2 will normalize):
-    //   Ok(None) — explicit "no merge base"
-    //   Err(_)   — DAG raises an error for no path
-    // Only Ok(Some(_)) is wrong.
-    if let Ok(Some(mb)) = result {
-        panic!(
-            "unrelated branches MUST NOT report a merge base; got {} @ {:?}",
-            mb.branch_name, mb.commit_version
-        );
-    }
+    let result = branches
+        .merge_base("alpha_d", "beta_d")
+        .expect("unrelated merge_base lookup MUST return Ok(None), not an error");
+    assert!(
+        result.is_none(),
+        "unrelated branches MUST NOT report a merge base; got {result:?}"
+    );
 }
 
 // =============================================================================

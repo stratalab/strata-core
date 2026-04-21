@@ -519,6 +519,17 @@ mod tests {
         0xc8,
     ];
 
+    /// Locked input set. MUST stay identical to the engine-side
+    /// `LOCKED_INPUTS` in `crates/engine/tests/branch_id_characterization.rs`.
+    const B1_LOCKED_INPUTS: &[&str] = &[
+        "default",
+        "main",
+        "production",
+        "feature/abc",
+        "_system_",
+        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    ];
+
     /// Hardcoded anchors — MUST match the engine-side
     /// `HARDCODED_ANCHORS` exactly. Drift = parity break = B2 cannot collapse
     /// the two derivations without renaming branches in existing databases.
@@ -578,15 +589,7 @@ mod tests {
     /// the documented algorithm (see bridge.rs:79-99) byte-for-byte.
     #[test]
     fn b1_executor_to_core_branch_id_matches_documented_algorithm() {
-        let inputs: &[&str] = &[
-            "default",
-            "main",
-            "production",
-            "feature/abc",
-            "_system_",
-            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-        ];
-        for &name in inputs {
+        for &name in B1_LOCKED_INPUTS {
             let expected = if name == "default" {
                 [0u8; 16]
             } else if let Ok(u) = uuid::Uuid::parse_str(name) {
@@ -599,6 +602,23 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "to_core_branch_id({name:?}) drifted from documented algorithm"
+            );
+        }
+    }
+
+    /// Direct parity lock with the engine-side implementation. This closes
+    /// the "both local anchor tables changed together" hole: executor and
+    /// engine must agree on the exact bytes for the same shared inputs.
+    #[test]
+    fn b1_executor_to_core_branch_id_matches_engine_resolve_branch_name() {
+        for &name in B1_LOCKED_INPUTS {
+            let executor = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
+            let engine = *strata_engine::primitives::resolve_branch_name(name).as_bytes();
+            assert_eq!(
+                executor, engine,
+                "executor/engine branch-id parity drifted for {name:?}\n\
+                 executor {executor:02x?}\n\
+                 engine   {engine:02x?}"
             );
         }
     }
