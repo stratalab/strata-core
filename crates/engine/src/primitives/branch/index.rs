@@ -17,6 +17,7 @@
 //! - Primary key format: `<global_namespace>:<TypeTag::Branch>:<branch_id>`
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
+use crate::branch_ops::branch_control_store::is_control_store_key;
 use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
@@ -75,6 +76,12 @@ pub(crate) fn validate_reserved_branch_aliases(db: &Arc<Database>) -> StrataResu
     let prefix = Key::new_branch_with_id(global_namespace(), "");
     let rows = db.storage().scan_prefix(&prefix, CommitVersion::MAX)?;
     for (key, _) in rows {
+        // Control-store rows (records, counters, active-pointer index,
+        // lineage edges) live in this scan range. Skip them before
+        // attempting to interpret the user_key as a branch name.
+        if is_control_store_key(&key.user_key) {
+            continue;
+        }
         let Ok(name) = String::from_utf8(key.user_key.to_vec()) else {
             continue;
         };
@@ -388,6 +395,13 @@ impl BranchIndex {
             Ok(results
                 .into_iter()
                 .filter_map(|(k, _)| {
+                    // Control-store rows share this scan range. Skip them
+                    // before even decoding as UTF-8 — edge keys include
+                    // raw generation / commit-version suffixes that are
+                    // never user-facing branch names.
+                    if is_control_store_key(&k.user_key) {
+                        return None;
+                    }
                     let key_str = String::from_utf8(k.user_key.to_vec()).ok()?;
                     // Filter out index keys (legacy) and system branches
                     if key_str.contains("__idx_")

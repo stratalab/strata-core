@@ -4,12 +4,37 @@
 //! `_branch_dag` graph on database init, and records branch lifecycle
 //! events (creation, forks, merges, deletion) as nodes and edges in the DAG.
 //!
-//! Write helpers (`dag_add_branch`, `dag_record_fork`, `dag_record_merge`,
-//! `dag_set_status`, `dag_mark_deleted`, `dag_set_message`) are called
-//! best-effort from executor handlers — failures are logged, never propagated.
+//! ## Authority model (post-B3)
 //!
-//! Read helpers (`dag_get_status`, `dag_get_branch_info`, `find_children`)
-//! assemble branch lineage from the graph.
+//! After B3 lands, this DAG is a **derived read-side projection** of
+//! `BranchControlStore`. It is no longer authoritative for branch
+//! lineage or merge-base queries; those go through the store. The DAG
+//! remains for fast `log` / `ancestors` traversals and the rebuild path
+//! regenerates it from the store on each open.
+//!
+//! ## Node id encodings (transitional)
+//!
+//! - Legacy: [`dag_branch_node_id`] keys by branch *name*. Live write
+//!   helpers still use this until the B3.3 live-helper cutover.
+//! - Canonical: [`dag_branch_node_id_for_ref`] keys by `BranchRef`
+//!   (`<id_hex>/<generation>`). The rebuild path uses this so same-name
+//!   recreated branches do not collide in the DAG.
+//!
+//! Both encodings can coexist within a single open session because the
+//! rebuild wipes and rewrites on every open.
+//!
+//! ## Write helpers
+//!
+//! `dag_add_branch`, `dag_record_fork`, `dag_record_merge`,
+//! `dag_set_status`, `dag_mark_deleted`, `dag_set_message` are called
+//! best-effort from executor handlers — failures are logged, never
+//! propagated.
+//!
+//! ## Read helpers
+//!
+//! `dag_get_status`, `dag_get_branch_info`, `find_children` assemble
+//! branch lineage from the graph. These remain valid read paths; merge-
+//! base queries go through `BranchControlStore` instead.
 
 pub use strata_core::branch_dag::*;
 
@@ -23,6 +48,7 @@ use tracing::warn;
 use crate::keys::{validate_node_id, GRAPH_SPACE};
 use crate::types::{Direction, EdgeData, NodeData};
 use crate::GraphStore;
+use strata_core::BranchRef;
 use strata_engine::primitives::branch::resolve_branch_name;
 use strata_engine::{CherryPickInfo, Database, MergeInfo, MergeStrategy, RevertInfo};
 
@@ -34,6 +60,22 @@ fn dag_branch_node_id(name: &str) -> String {
     } else {
         format!("{BRANCH_NODE_ID_PREFIX}{}", resolve_branch_name(name))
     }
+}
+
+/// `BranchRef`-keyed DAG node id: `<id_hex>/<generation>`.
+///
+/// This is the B3-canonical encoding used by the DAG rebuild path and by
+/// live helpers once the B3.3 cutover completes. Until then, live
+/// write helpers (`dag_add_branch`, `dag_record_fork`, etc.) continue to
+/// use the legacy name-keyed [`dag_branch_node_id`] — the rebuild wipes
+/// and rewrites the DAG with this encoding on each open so lifecycle
+/// instances of the same name never collide in authoritative reads.
+///
+/// Kept `pub(crate)` to match the legacy [`dag_branch_node_id`] helper:
+/// no external caller needs node-id construction today; B3.3 live
+/// helpers will promote this to `pub` once they carry `BranchRef`.
+pub(crate) fn dag_branch_node_id_for_ref(branch: BranchRef) -> String {
+    format!("{id}/{gen}", id = branch.id, gen = branch.generation)
 }
 
 fn branch_name_from_node(node_id: &str, node: &NodeData) -> String {

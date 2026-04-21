@@ -16,6 +16,7 @@
 //! - [`json_merge`] — Per-document JSON three-way merge helpers used by
 //!   `JsonMergeHandler` to combine disjoint path edits on the same doc.
 
+pub(crate) mod branch_control_store;
 pub mod dag_hooks;
 pub(crate) mod json_merge;
 pub mod primitive_merge;
