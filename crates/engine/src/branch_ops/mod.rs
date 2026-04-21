@@ -4521,6 +4521,19 @@ mod tests {
             layers_before,
         );
 
+        // Drain any background compaction chain left over from the setup
+        // writes. `schedule_background_compaction` deduplicates via the
+        // `compaction_in_flight` flag, and the chain only calls
+        // `run_materialization` at `idle_count == 0`. If we skip this drain,
+        // under heavy parallel test contention (feature-matrix CI) the leftover
+        // chain is still spinning idle rounds when our trigger write fires,
+        // the trigger's `schedule_background_compaction` is a no-op, and
+        // materialization never runs for the newly-built fork chain — see
+        // `database/transaction.rs:compaction_round` for the idle-round state
+        // machine. Draining here guarantees the flag is clear before we trigger,
+        // so the next chain starts fresh at `idle_count == 0`.
+        db.scheduler().drain();
+
         // Write to root — triggers schedule_flush_if_needed().
         // Root's memtable is NOT full, so branches_needing_flush() returns
         // empty. Pre-fix, this early-returned and skipped materialization.
