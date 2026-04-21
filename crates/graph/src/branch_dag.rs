@@ -9,19 +9,21 @@
 //! After B3 lands, this DAG is a **derived read-side projection** of
 //! `BranchControlStore`. It is no longer authoritative for branch
 //! lineage or merge-base queries; those go through the store. The DAG
-//! remains for fast `log` / `ancestors` traversals and the rebuild path
-//! regenerates it from the store on each open.
+//! remains for fast `log` / `ancestors` traversals. B3.1 lands the
+//! canonical node-id helper and migration-side store authority; the actual
+//! projection rebuild wiring is deferred to the later B3 cutover where live
+//! helpers also stop writing name-keyed nodes.
 //!
 //! ## Node id encodings (transitional)
 //!
 //! - Legacy: [`dag_branch_node_id`] keys by branch *name*. Live write
 //!   helpers still use this until the B3.3 live-helper cutover.
 //! - Canonical: [`dag_branch_node_id_for_ref`] keys by `BranchRef`
-//!   (`<id_hex>/<generation>`). The rebuild path uses this so same-name
-//!   recreated branches do not collide in the DAG.
+//!   (`<id_hex>/<generation>`). The later rebuild/cutover path uses this so
+//!   same-name recreated branches do not collide in the DAG.
 //!
-//! Both encodings can coexist within a single open session because the
-//! rebuild wipes and rewrites on every open.
+//! During B3.1 the live DAG is still name-keyed. The canonical encoding is
+//! staged here so the later rebuild/cutover can switch the graph in one pass.
 //!
 //! ## Write helpers
 //!

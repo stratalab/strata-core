@@ -1035,6 +1035,8 @@ pub enum StrataError {
     },
 }
 
+const BRANCH_LINEAGE_UNAVAILABLE_PREFIX: &str = "branch_lineage_unavailable:";
+
 impl StrataError {
     // =========================================================================
     // Constructors
@@ -1170,6 +1172,21 @@ impl StrataError {
         }
     }
 
+    /// Create an InvalidOperation that specifically marks branch-lineage
+    /// reads as unavailable, while preserving the existing wire/error-code
+    /// shape used for invalid operations.
+    ///
+    /// This gives callers a reliable predicate via
+    /// [`StrataError::is_branch_lineage_unavailable`] without introducing a
+    /// new public enum variant mid-tranche.
+    pub fn branch_lineage_unavailable(reason: impl Into<String>) -> Self {
+        let reason = reason.into();
+        StrataError::invalid_operation(
+            EntityRef::branch(BranchId::from_bytes([0u8; 16])),
+            format!("{BRANCH_LINEAGE_UNAVAILABLE_PREFIX}{reason}"),
+        )
+    }
+
     /// Create an InvalidInput error
     ///
     /// ## Example
@@ -1181,6 +1198,17 @@ impl StrataError {
         StrataError::InvalidInput {
             message: message.into(),
         }
+    }
+
+    /// Returns true when this error represents the dedicated
+    /// branch-lineage-unavailable condition used during B3 follower legacy
+    /// synthesis.
+    pub fn is_branch_lineage_unavailable(&self) -> bool {
+        matches!(
+            self,
+            StrataError::InvalidOperation { reason, .. }
+                if reason.starts_with(BRANCH_LINEAGE_UNAVAILABLE_PREFIX)
+        )
     }
 
     /// Create an IncompatibleReuse error

@@ -1179,9 +1179,6 @@ impl Database {
                     crate::branch_ops::branch_control_store::BranchControlStore::ensure_migrated(
                         db,
                     )?;
-                    // DAG projection rebuild is best-effort and never
-                    // fails the open — see AD3 in b3-phasing-plan.md.
-                    crate::branch_ops::branch_control_store::BranchControlStore::rebuild_dag_projection(db);
                     Ok(())
                 })
             }

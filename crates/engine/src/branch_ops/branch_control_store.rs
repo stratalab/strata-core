@@ -61,7 +61,7 @@ use strata_core::{
 use tracing::{info, warn};
 
 use crate::database::dag_hook::{DagEvent, DagEventKind};
-use crate::database::Database;
+use crate::database::{Database, DatabaseMode};
 
 // =============================================================================
 // Key prefixes
@@ -171,10 +171,7 @@ impl BranchLineageUnavailable {
     }
 
     pub(crate) fn into_strata_error(self) -> StrataError {
-        StrataError::invalid_operation(
-            strata_core::EntityRef::branch(BranchId::from_bytes([0u8; 16])),
-            self.reason,
-        )
+        StrataError::branch_lineage_unavailable(self.reason)
     }
 }
 
@@ -347,16 +344,19 @@ fn collect_legacy_branch_metadata(db: &Arc<Database>) -> StrataResult<Vec<String
     Ok(out)
 }
 
-/// Collect an uncapped DAG log per migrated branch. Missing DAG hook is not
-/// an error — we fall through with an empty map and migration proceeds with
-/// storage-only fork anchors.
+/// Collect an uncapped DAG log per migrated branch.
+///
+/// Missing DAG hook is not an error — we fall through with an empty map and
+/// migration proceeds with storage-only fork anchors. But if a hook is
+/// installed and a branch log cannot be read, migration fails closed because
+/// legacy merge lineage would otherwise be silently dropped.
 fn collect_dag_log_per_branch(
     db: &Arc<Database>,
     names: &[String],
-) -> HashMap<String, Vec<DagEvent>> {
+) -> StrataResult<HashMap<String, Vec<DagEvent>>> {
     let mut out = HashMap::new();
     let Some(hook) = db.dag_hook().get() else {
-        return out;
+        return Ok(out);
     };
     for name in names {
         match hook.log(name, usize::MAX) {
@@ -364,16 +364,13 @@ fn collect_dag_log_per_branch(
                 out.insert(name.clone(), events);
             }
             Err(e) => {
-                warn!(
-                    target: "strata::branch::migration",
-                    branch = %name,
-                    error = %e,
-                    "DAG log read failed during migration; proceeding without this branch's lineage"
-                );
+                return Err(StrataError::corruption(format!(
+                    "B3.1 migration could not read legacy DAG history for branch '{name}': {e}"
+                )));
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Derive the fork anchor for a legacy branch at migration time.
@@ -424,50 +421,79 @@ fn derive_fork_anchor(
 ///
 /// Gen-0 `BranchRef`s throughout — legacy events predate generation
 /// tracking (AD1).
-fn dag_event_to_edge(event: &DagEvent, target: BranchRef) -> Option<LineageEdgeRecord> {
+fn dag_event_to_edge(
+    event: &DagEvent,
+    target: BranchRef,
+) -> StrataResult<Option<LineageEdgeRecord>> {
     match event.kind {
         DagEventKind::Fork => {
-            let parent_id = event.source_branch_id?;
-            Some(LineageEdgeRecord {
+            let parent_id = event.source_branch_id.ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "legacy DAG fork event for '{}' is missing source_branch_id",
+                    event.branch_name
+                ))
+            })?;
+            Ok(Some(LineageEdgeRecord {
                 kind: LineageEdgeKind::Fork,
                 target,
                 source: Some(BranchRef::new(parent_id, 0)),
                 commit_version: event.commit_version,
                 merge_base: None,
-            })
+            }))
         }
         DagEventKind::Merge => {
-            let source_id = event.source_branch_id?;
-            Some(LineageEdgeRecord {
+            let source_id = event.source_branch_id.ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "legacy DAG merge event for '{}' is missing source_branch_id",
+                    event.branch_name
+                ))
+            })?;
+            let merge_info = event.merge_info.as_ref().ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "legacy DAG merge event for '{}' is missing MergeInfo",
+                    event.branch_name
+                ))
+            })?;
+            let merge_version = merge_info.merge_version.ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "legacy DAG merge event for '{}' is missing merge_version",
+                    event.branch_name
+                ))
+            })?;
+            Ok(Some(LineageEdgeRecord {
                 kind: LineageEdgeKind::Merge,
                 target,
                 source: Some(BranchRef::new(source_id, 0)),
                 commit_version: event.commit_version,
-                // Legacy events don't record merge_base; leave absent.
-                // Post-B3 merges populate it; lineage queries that need
-                // repeated-merge advancement against legacy history
-                // walk fork anchors instead.
-                merge_base: None,
-            })
+                merge_base: Some(MergeBasePoint {
+                    branch: BranchRef::new(source_id, 0),
+                    commit_version: CommitVersion(merge_version),
+                }),
+            }))
         }
-        DagEventKind::Revert => Some(LineageEdgeRecord {
+        DagEventKind::Revert => Ok(Some(LineageEdgeRecord {
             kind: LineageEdgeKind::Revert,
             target,
             source: None,
             commit_version: event.commit_version,
             merge_base: None,
-        }),
+        })),
         DagEventKind::CherryPick => {
-            let source_id = event.source_branch_id?;
-            Some(LineageEdgeRecord {
+            let source_id = event.source_branch_id.ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "legacy DAG cherry-pick event for '{}' is missing source_branch_id",
+                    event.branch_name
+                ))
+            })?;
+            Ok(Some(LineageEdgeRecord {
                 kind: LineageEdgeKind::CherryPick,
                 target,
                 source: Some(BranchRef::new(source_id, 0)),
                 commit_version: event.commit_version,
                 merge_base: None,
-            })
+            }))
         }
-        DagEventKind::BranchCreate | DagEventKind::BranchDelete => None,
+        DagEventKind::BranchCreate | DagEventKind::BranchDelete => Ok(None),
     }
 }
 
@@ -507,6 +533,17 @@ pub(crate) struct BranchControlStore {
 impl BranchControlStore {
     pub(crate) fn new(db: Arc<Database>) -> Self {
         Self { db }
+    }
+
+    fn can_synthesize_from_legacy(&self) -> StrataResult<bool> {
+        let is_follower = matches!(
+            self.db.runtime_signature().map(|sig| sig.mode),
+            Some(DatabaseMode::Follower)
+        );
+        if !is_follower {
+            return Ok(false);
+        }
+        Ok(!self.is_migrated()?)
     }
 
     // =========================================================================
@@ -652,6 +689,9 @@ impl BranchControlStore {
         })?;
         if primary.is_some() {
             return Ok(primary);
+        }
+        if !self.can_synthesize_from_legacy()? {
+            return Ok(None);
         }
         self.synthesize_from_legacy(name, id)
     }
@@ -917,7 +957,7 @@ impl BranchControlStore {
         }
 
         // Pass 2: gather DAG events per branch (outside txn, read-only).
-        let dag_snapshot: HashMap<String, Vec<DagEvent>> = collect_dag_log_per_branch(db, &legacy);
+        let dag_snapshot: HashMap<String, Vec<DagEvent>> = collect_dag_log_per_branch(db, &legacy)?;
 
         // Pass 3: single atomic write. The outer scan above is the
         // authoritative "already migrated" guard — no re-check needed
@@ -953,15 +993,9 @@ impl BranchControlStore {
                 // Backfill lineage edges from the DAG for this branch.
                 if let Some(events) = dag_snapshot.get(name) {
                     for event in events {
-                        let Some(edge) = dag_event_to_edge(event, branch_ref) else {
+                        let Some(edge) = dag_event_to_edge(event, branch_ref)? else {
                             // Skip BranchCreate / BranchDelete (lifecycle,
-                            // not lineage) and any malformed events.
-                            if !matches!(
-                                event.kind,
-                                DagEventKind::BranchCreate | DagEventKind::BranchDelete
-                            ) {
-                                report.unmatched_dag_events += 1;
-                            }
+                            // not lineage).
                             continue;
                         };
                         store.append_edge(&edge, txn)?;
@@ -986,17 +1020,13 @@ impl BranchControlStore {
         Ok(report)
     }
 
-    /// Rebuild the `_branch_dag` graph projection from the authoritative
-    /// control-store state.
+    /// Scaffold for rebuilding the `_branch_dag` projection from the
+    /// authoritative control-store state.
     ///
-    /// Best-effort per AD3: failures are logged and do not fail the open.
-    /// On the next open this runs again (idempotent), so transient graph
-    /// errors self-heal without operator action.
-    ///
-    /// B3.1 lands the scaffold only — the actual wipe + rewrite to
-    /// `BranchRef`-keyed DAG nodes is deferred to the B3.3 live-helper
-    /// cutover, where existing write helpers are also re-keyed in the
-    /// same PR so the DAG is never a mix of the two encodings.
+    /// B3.1 lands only the store-side enumeration hook. The actual graph
+    /// wipe/rewrite remains deferred until the later B3 cutover where live
+    /// DAG helpers also stop writing name-keyed nodes; wiring this into open
+    /// before that point would over-claim rebuild semantics.
     pub(crate) fn rebuild_dag_projection(db: &Arc<Database>) {
         let store = Self::new(db.clone());
         match store.list_active() {
@@ -1190,6 +1220,7 @@ mod tests {
         assert!(e.reason.contains("primary migration required"));
         let se = e.into_strata_error();
         assert!(matches!(se, StrataError::InvalidOperation { .. }));
+        assert!(se.is_branch_lineage_unavailable());
     }
 
     #[test]
@@ -1207,6 +1238,14 @@ mod tests {
         let db = Database::cache().unwrap();
         let store = BranchControlStore::new(db.clone());
         (db, store)
+    }
+
+    fn force_follower_mode(db: &Arc<Database>) {
+        let mut sig = db
+            .runtime_signature()
+            .expect("cache db has runtime signature");
+        sig.mode = DatabaseMode::Follower;
+        db.set_runtime_signature(sig);
     }
 
     fn write<F>(db: &Arc<Database>, f: F)
@@ -1673,6 +1712,7 @@ mod tests {
     #[test]
     fn follower_synthesis_returns_gen0_record_for_legacy_branch() {
         let (db, store) = fresh_store();
+        force_follower_mode(&db);
         seed_legacy_branch_metadata(&db, "legacy-feature");
 
         let rec = store
@@ -1688,17 +1728,19 @@ mod tests {
 
     #[test]
     fn follower_synthesis_returns_none_for_unknown_branch() {
-        let (_db, store) = fresh_store();
+        let (db, store) = fresh_store();
+        force_follower_mode(&db);
         assert!(store.find_active_by_name("not-seeded").unwrap().is_none());
     }
 
     #[test]
     fn follower_synthesis_refuses_find_merge_base_when_legacy_present() {
         let (db, store) = fresh_store();
+        force_follower_mode(&db);
         seed_legacy_branch_metadata(&db, "legacy");
         let r = BranchRef::new(BranchId::from_user_name("legacy"), 0);
         let err = store.find_merge_base(r, r).unwrap_err();
-        assert!(matches!(err, StrataError::InvalidOperation { .. }));
+        assert!(err.is_branch_lineage_unavailable());
         let msg = format!("{err}");
         assert!(
             msg.contains("primary migration required"),
@@ -1709,18 +1751,47 @@ mod tests {
     #[test]
     fn follower_synthesis_refuses_list_active_when_legacy_present() {
         let (db, store) = fresh_store();
+        force_follower_mode(&db);
         seed_legacy_branch_metadata(&db, "legacy");
         let err = store.list_active().unwrap_err();
-        assert!(matches!(err, StrataError::InvalidOperation { .. }));
+        assert!(err.is_branch_lineage_unavailable());
     }
 
     #[test]
     fn follower_synthesis_refuses_edges_for_when_legacy_present() {
         let (db, store) = fresh_store();
+        force_follower_mode(&db);
         seed_legacy_branch_metadata(&db, "legacy");
         let r = BranchRef::new(BranchId::from_user_name("legacy"), 0);
         let err = store.edges_for(r).unwrap_err();
-        assert!(matches!(err, StrataError::InvalidOperation { .. }));
+        assert!(err.is_branch_lineage_unavailable());
+    }
+
+    #[test]
+    fn legacy_synthesis_does_not_run_on_migrated_or_non_follower_db() {
+        let (db, store) = fresh_store();
+        seed_legacy_branch_metadata(&db, "legacy-only");
+        assert!(
+            store.find_active_by_name("legacy-only").unwrap().is_none(),
+            "cache/primary-like DB must not synthesize legacy records"
+        );
+
+        force_follower_mode(&db);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: BranchRef::new(BranchId::from_user_name("other"), 0),
+                    name: "other".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        assert!(
+            store.find_active_by_name("legacy-only").unwrap().is_none(),
+            "migrated followers must not resurrect branches from legacy metadata"
+        );
     }
 
     #[test]
@@ -1981,7 +2052,9 @@ mod tests {
         let source_id = BranchId::from_user_name("source");
 
         let fork = DagEvent::fork(target.id, "target", source_id, "source", CommitVersion(1));
-        let fork_edge = dag_event_to_edge(&fork, target).expect("Fork → edge");
+        let fork_edge = dag_event_to_edge(&fork, target)
+            .unwrap()
+            .expect("Fork → edge");
         assert_eq!(fork_edge.kind, LineageEdgeKind::Fork);
         assert_eq!(fork_edge.source, Some(BranchRef::new(source_id, 0)));
 
@@ -2005,11 +2078,18 @@ mod tests {
             // test modules too).
             crate::branch_ops::MergeStrategy::Strict,
         );
-        let merge_edge = dag_event_to_edge(&merge, target).expect("Merge → edge");
+        let merge_edge = dag_event_to_edge(&merge, target)
+            .unwrap()
+            .expect("Merge → edge");
         assert_eq!(merge_edge.kind, LineageEdgeKind::Merge);
         assert_eq!(merge_edge.source, Some(BranchRef::new(source_id, 0)));
-        // Legacy events do not carry merge_base; post-B3 live writes do.
-        assert!(merge_edge.merge_base.is_none());
+        assert_eq!(
+            merge_edge.merge_base,
+            Some(MergeBasePoint {
+                branch: BranchRef::new(source_id, 0),
+                commit_version: CommitVersion(10),
+            })
+        );
 
         let revert = DagEvent::revert(
             target.id,
@@ -2023,7 +2103,9 @@ mod tests {
                 revert_version: Some(CommitVersion(5)),
             },
         );
-        let revert_edge = dag_event_to_edge(&revert, target).expect("Revert → edge");
+        let revert_edge = dag_event_to_edge(&revert, target)
+            .unwrap()
+            .expect("Revert → edge");
         assert_eq!(revert_edge.kind, LineageEdgeKind::Revert);
         assert!(revert_edge.source.is_none());
 
@@ -2041,15 +2123,17 @@ mod tests {
                 cherry_pick_version: Some(7),
             },
         );
-        let cherry_edge = dag_event_to_edge(&cherry, target).expect("CherryPick → edge");
+        let cherry_edge = dag_event_to_edge(&cherry, target)
+            .unwrap()
+            .expect("CherryPick → edge");
         assert_eq!(cherry_edge.kind, LineageEdgeKind::CherryPick);
         assert_eq!(cherry_edge.source, Some(BranchRef::new(source_id, 0)));
 
         // Lifecycle events produce no lineage edge.
         let create = DagEvent::create(target.id, "target");
-        assert!(dag_event_to_edge(&create, target).is_none());
+        assert!(dag_event_to_edge(&create, target).unwrap().is_none());
         let delete = DagEvent::delete(target.id, "target");
-        assert!(dag_event_to_edge(&delete, target).is_none());
+        assert!(dag_event_to_edge(&delete, target).unwrap().is_none());
     }
 
     /// End-to-end migration backfill: legacy `BranchMetadata` + DAG
@@ -2142,12 +2226,123 @@ mod tests {
             1,
             "parent has a Merge edge backfilled from the DAG log"
         );
+        let merge_edge = parent_edges
+            .iter()
+            .find(|e| e.kind == LineageEdgeKind::Merge)
+            .expect("merge edge backfilled");
+        assert_eq!(
+            merge_edge.merge_base,
+            Some(MergeBasePoint {
+                branch: child_ref,
+                commit_version: CommitVersion(8),
+            })
+        );
         // Child's control record also has the fork anchor set directly
         // (AD1: fork origin lives on the control record for fast lookup).
         let child_rec = store.get_record(child_ref).unwrap().unwrap();
         let anchor = child_rec.fork.expect("child fork anchor");
         assert_eq!(anchor.parent, parent_ref);
         assert_eq!(anchor.point, CommitVersion(3));
+    }
+
+    struct FailingLogDagHook;
+
+    impl crate::database::dag_hook::BranchDagHook for FailingLogDagHook {
+        fn name(&self) -> &'static str {
+            "failing-log-test"
+        }
+
+        fn record_event(
+            &self,
+            _event: &DagEvent,
+        ) -> Result<(), crate::database::dag_hook::BranchDagError> {
+            Ok(())
+        }
+
+        fn find_merge_base(
+            &self,
+            _a: &str,
+            _b: &str,
+        ) -> Result<
+            Option<crate::database::dag_hook::MergeBaseResult>,
+            crate::database::dag_hook::BranchDagError,
+        > {
+            Ok(None)
+        }
+
+        fn log(
+            &self,
+            branch: &str,
+            _limit: usize,
+        ) -> Result<Vec<DagEvent>, crate::database::dag_hook::BranchDagError> {
+            Err(crate::database::dag_hook::BranchDagError::read_failed(
+                format!("cannot read DAG log for {branch}"),
+            ))
+        }
+
+        fn ancestors(
+            &self,
+            _branch: &str,
+        ) -> Result<
+            Vec<crate::database::dag_hook::AncestryEntry>,
+            crate::database::dag_hook::BranchDagError,
+        > {
+            Ok(Vec::new())
+        }
+    }
+
+    #[test]
+    fn migration_fails_closed_when_legacy_dag_log_is_unreadable() {
+        let db = Database::cache().unwrap();
+        db.install_dag_hook(Arc::new(FailingLogDagHook)).unwrap();
+        seed_legacy_branch_metadata(&db, "legacy");
+
+        let err = BranchControlStore::ensure_migrated(&db).unwrap_err();
+        assert!(format!("{err}").contains("could not read legacy DAG history"));
+
+        let store = BranchControlStore::new(db.clone());
+        assert!(
+            store
+                .get_record(BranchRef::new(BranchId::from_user_name("legacy"), 0))
+                .unwrap()
+                .is_none(),
+            "failed migration must not leave partial control-store state behind"
+        );
+    }
+
+    #[test]
+    fn migration_fails_closed_when_legacy_merge_event_lacks_merge_version() {
+        let db = Database::cache().unwrap();
+        let hook = Arc::new(RecordingDagHook::new());
+        db.install_dag_hook(hook.clone()).unwrap();
+
+        for name in ["parent", "child"] {
+            seed_legacy_branch_metadata(&db, name);
+        }
+
+        let parent_id = BranchId::from_user_name("parent");
+        let child_id = BranchId::from_user_name("child");
+        hook.record_event(&DagEvent::merge(
+            parent_id,
+            "parent",
+            child_id,
+            "child",
+            CommitVersion(8),
+            crate::branch_ops::MergeInfo {
+                source: "child".to_string(),
+                target: "parent".to_string(),
+                keys_applied: 1,
+                keys_deleted: 0,
+                spaces_merged: 1,
+                conflicts: Vec::new(),
+                merge_version: None,
+            },
+            crate::branch_ops::MergeStrategy::Strict,
+        ))
+        .unwrap();
+
+        let err = BranchControlStore::ensure_migrated(&db).unwrap_err();
+        assert!(format!("{err}").contains("missing merge_version"));
     }
 
     #[test]
