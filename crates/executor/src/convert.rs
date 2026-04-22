@@ -45,6 +45,20 @@ impl From<StrataError> for Error {
                 hint: None,
             },
 
+            StrataError::BranchNotFoundByName { name, .. } => Error::BranchNotFound {
+                branch: name,
+                hint: None,
+            },
+
+            // Archived lifecycle: distinct operator-visible state (B4).
+            // Never flattened into InvalidInput / ConstraintViolation /
+            // Internal — the whole point of the typed variant is that the
+            // archived state survives the boundary.
+            StrataError::BranchArchived { name } => Error::BranchArchived {
+                branch: name,
+                hint: None,
+            },
+
             // Type errors
             StrataError::WrongType { expected, actual } => Error::WrongType {
                 expected,
@@ -308,6 +322,36 @@ mod tests {
                 assert_eq!(actual, 768);
             }
             _ => panic!("Expected DimensionMismatch"),
+        }
+    }
+
+    #[test]
+    fn branch_archived_maps_to_typed_variant_not_flattened() {
+        // KD2: the whole point of the typed executor variant is that
+        // archived state survives the boundary. Confirm the conversion
+        // does not collapse into InvalidInput / ConstraintViolation /
+        // Internal.
+        let err = StrataError::branch_archived("release/2026-03");
+        let converted: Error = err.into();
+        match converted {
+            Error::BranchArchived { branch, hint } => {
+                assert_eq!(branch, "release/2026-03");
+                assert!(hint.is_none());
+            }
+            other => panic!("expected Error::BranchArchived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_not_found_by_name_maps_to_typed_variant_with_user_name() {
+        let err = StrataError::branch_not_found_by_name("release/2026-03");
+        let converted: Error = err.into();
+        match converted {
+            Error::BranchNotFound { branch, hint } => {
+                assert_eq!(branch, "release/2026-03");
+                assert!(hint.is_none());
+            }
+            other => panic!("expected Error::BranchNotFound, got {other:?}"),
         }
     }
 }

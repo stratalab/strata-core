@@ -394,11 +394,19 @@ impl BranchService {
         reject_system_branch(name, "delete")?;
         reject_default_branch(&self.db, name, "delete")?;
 
+        let store = BranchControlStore::new(self.db.clone());
+
+        // B4 lifecycle gate: delete is permitted for `Active` and `Archived`
+        // targets; `Deleted` and missing branches surface as
+        // `BranchNotFound`. Archived records stay visible via the widened
+        // active-pointer semantics (KD1). Runs before `BranchMutation::new`
+        // so a lifecycle-refused delete never registers rollback actions.
+        store.require_visible_by_name(name)?;
+
         let mut mutation = BranchMutation::new(&self.db);
         let branch_id = resolve_branch_name(name);
 
         let index = BranchIndex::new(self.db.clone());
-        let store = BranchControlStore::new(self.db.clone());
 
         if mutation.has_dag_hook() {
             mutation.on_rollback_restore_branch(name)?;
@@ -529,29 +537,29 @@ impl BranchService {
         reject_system_branch(source, "fork from")?;
         validate_branch_name(destination)?;
 
-        // Create mutation context for atomicity
-        let mut mutation = BranchMutation::new(&self.db);
-
-        // Fork requires DAG — without it, lineage is lost
-        mutation.require_dag_hook("fork")?;
-
-        // B3.2: preallocate only the destination generation here. The
-        // source `BranchRef` must be resolved inside fork's quiesce
-        // guard so the fork anchor points at the exact lifecycle
-        // instance whose storage snapshot is being forked.
         let store = BranchControlStore::new(self.db.clone());
         let branch_index = BranchIndex::new(self.db.clone());
 
-        // Fail the duplicate-destination case before bumping the
-        // next-generation counter; otherwise a spurious `fork` attempt to
-        // an existing name burns a generation before `fork_branch_with_metadata`
-        // ever observes the collision.
+        // B4 lifecycle gate: fork is a read-then-create op. The source
+        // needs to be visible (Active or Archived — copying a frozen
+        // snapshot is valid); the destination must have no live record,
+        // which preserves the pre-B4 duplicate semantics after the
+        // active-pointer widening (KD1: an Archived record also counts
+        // as a live duplicate for name allocation, not as a fork-from
+        // lifecycle state the gate can override).
+        store.require_visible_by_name(source)?;
         if branch_index.exists(destination)? || store.find_active_by_name(destination)?.is_some() {
             return Err(StrataError::invalid_input(format!(
                 "Destination branch '{}' already exists",
                 destination
             )));
         }
+
+        // Create mutation context for atomicity
+        let mut mutation = BranchMutation::new(&self.db);
+
+        // Fork requires DAG — without it, lineage is lost
+        mutation.require_dag_hook("fork")?;
 
         let dest_id = resolve_branch_name(destination);
         let dest_gen = self
@@ -677,25 +685,23 @@ impl BranchService {
         reject_system_branch(source, "merge from")?;
         reject_system_branch(target, "merge into")?;
 
+        // B4 lifecycle gate: source must be visible (Active or Archived —
+        // merging from a frozen snapshot is valid); target must be
+        // writable. An archived target refuses with `BranchArchived`.
+        //
+        // Gate reads the same records the low-level merge needs for
+        // generation-scoped lineage, so we snapshot them here rather than
+        // re-reading inside the merge body. Placed before
+        // `BranchMutation::new` so a lifecycle-refused merge never
+        // registers rollback actions.
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store.require_visible_by_name(source)?;
+        let target_rec = store.require_writable_by_name(target)?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Merge requires DAG — without it, merge provenance is lost
         mutation.require_dag_hook("merge")?;
-
-        // Snapshot source / target `BranchRef`s before the merge runs so
-        // the low-level path can enforce the same lifecycle instances end
-        // to end. The merge base persisted on the edge must come from the
-        // low-level merge execution itself, not a separately-taken service
-        // snapshot, otherwise concurrent lineage changes on the same
-        // generations can make the edge describe a different ancestor point
-        // than the merge actually used.
-        let store = BranchControlStore::new(self.db.clone());
-        let source_rec = store
-            .find_active_by_name(source)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
-        let target_rec = store
-            .find_active_by_name(target)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
 
         let merge_exec = with_branch_dag_hooks_suppressed(|| {
             branch_ops::merge_branches_with_metadata_expected_detailed(
@@ -806,19 +812,17 @@ impl BranchService {
     ) -> StrataResult<RevertInfo> {
         reject_system_branch(branch, "revert")?;
 
+        // B4 lifecycle gate: revert targets must be writable. The captured
+        // `BranchRef` also pins the lifecycle instance against a concurrent
+        // delete+recreate between here and the edge write.
+        let store = BranchControlStore::new(self.db.clone());
+        let branch_rec = store.require_writable_by_name(branch)?;
+        let branch_id = branch_rec.branch.id;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Revert requires DAG — without it, revert history is lost
         mutation.require_dag_hook("revert")?;
-
-        // Resolve target `BranchRef` before the revert so a concurrent
-        // delete+recreate between here and the edge write cannot land
-        // the revert edge on the wrong lifecycle instance.
-        let store = BranchControlStore::new(self.db.clone());
-        let branch_rec = store
-            .find_active_by_name(branch)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch)))?;
-        let branch_id = branch_rec.branch.id;
 
         // Execute the revert
         let info = with_branch_dag_hooks_suppressed(|| {
@@ -877,20 +881,17 @@ impl BranchService {
         reject_system_branch(source, "cherry-pick from")?;
         reject_system_branch(target, "cherry-pick into")?;
 
+        // B4 lifecycle gate: source must be visible, target must be writable.
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store.require_visible_by_name(source)?;
+        let target_rec = store.require_writable_by_name(target)?;
+        let source_id = source_rec.branch.id;
+        let target_id = target_rec.branch.id;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
         mutation.require_dag_hook("cherry_pick")?;
-
-        let store = BranchControlStore::new(self.db.clone());
-        let source_rec = store
-            .find_active_by_name(source)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
-        let target_rec = store
-            .find_active_by_name(target)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
-        let source_id = source_rec.branch.id;
-        let target_id = target_rec.branch.id;
 
         // Execute the cherry-pick
         let info = with_branch_dag_hooks_suppressed(|| {
@@ -966,18 +967,15 @@ impl BranchService {
         reject_system_branch(source, "cherry-pick from")?;
         reject_system_branch(target, "cherry-pick into")?;
 
+        // B4 lifecycle gate: source must be visible, target must be writable.
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store.require_visible_by_name(source)?;
+        let target_rec = store.require_writable_by_name(target)?;
+
         let mut mutation = BranchMutation::new(&self.db);
 
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
         mutation.require_dag_hook("cherry_pick")?;
-
-        let store = BranchControlStore::new(self.db.clone());
-        let source_rec = store
-            .find_active_by_name(source)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
-        let target_rec = store
-            .find_active_by_name(target)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
         let source_id = source_rec.branch.id;
         let target_id = target_rec.branch.id;
 
@@ -1078,10 +1076,10 @@ impl BranchService {
 
         let a_rec = store
             .find_active_by_name(branch_a)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_a)))?;
+            .ok_or_else(|| StrataError::branch_not_found_by_name(branch_a))?;
         let b_rec = store
             .find_active_by_name(branch_b)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_b)))?;
+            .ok_or_else(|| StrataError::branch_not_found_by_name(branch_b))?;
 
         let Some(point) = store.find_merge_base(a_rec.branch, b_rec.branch)? else {
             return Ok(None);
@@ -1122,7 +1120,7 @@ impl BranchService {
                         branch
                     )));
                 }
-                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+                return Err(StrataError::branch_not_found_by_name(branch));
             }
         }
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
@@ -1145,7 +1143,7 @@ impl BranchService {
                         branch
                     )));
                 }
-                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+                return Err(StrataError::branch_not_found_by_name(branch));
             }
         }
         let hook = self
@@ -1171,20 +1169,25 @@ impl BranchService {
         creator: Option<&str>,
     ) -> StrataResult<TagInfo> {
         reject_system_branch(branch, "tag")?;
-        let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
 
-        // Emit observer event with the tagged branch's generation-aware
-        // identity (B3.4). `create_tag` already verified the branch exists,
-        // so the active control record is the authoritative `BranchRef`.
-        let branch_id = resolve_branch_name(branch);
-        let branch_ref = BranchControlStore::new(self.db.clone())
-            .find_active_by_name(branch)?
-            .map(|rec| rec.branch)
-            .ok_or_else(|| {
-                StrataError::corruption(format!(
-                    "tagged branch '{branch}' has no active control record after successful tag write"
-                ))
-            })?;
+        // B4/KD4: annotation writes follow the same lifecycle gate as
+        // structural mutations. Tags on an Archived branch are refused —
+        // an archived lifecycle instance is read-only.
+        let store = BranchControlStore::new(self.db.clone());
+        let branch_rec = store.require_writable_by_name(branch)?;
+        let branch_ref = branch_rec.branch;
+
+        let info = branch_ops::create_tag_with_expected(
+            &self.db,
+            branch,
+            name,
+            version,
+            message,
+            creator,
+            Some(branch_ref),
+        )?;
+
+        let branch_id = branch_rec.branch.id;
         let event = BranchOpEvent {
             kind: BranchOpKind::Tag,
             branch_id,
@@ -1214,20 +1217,19 @@ impl BranchService {
     /// Emits a `BranchOpEvent::Untag` to observers if the tag existed.
     pub fn untag(&self, branch: &str, name: &str) -> StrataResult<bool> {
         reject_system_branch(branch, "untag")?;
-        let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
+
+        // B4/KD4: tag deletion is a branch-scoped write; same gate as tag
+        // creation. Archived → `BranchArchived`; Deleted/missing →
+        // `BranchNotFound`.
+        let store = BranchControlStore::new(self.db.clone());
+        let branch_rec = store.require_writable_by_name(branch)?;
+
+        let deleted =
+            branch_ops::delete_tag_with_expected(&self.db, branch, name, Some(branch_rec.branch))?;
 
         if deleted {
-            // Emit observer event with the branch's generation-aware
-            // identity (B3.4).
-            let branch_id = resolve_branch_name(branch);
-            let branch_ref = BranchControlStore::new(self.db.clone())
-                .find_active_by_name(branch)?
-                .map(|rec| rec.branch)
-                .ok_or_else(|| {
-                    StrataError::corruption(format!(
-                        "untagged branch '{branch}' has no active control record after successful tag delete"
-                    ))
-                })?;
+            let branch_id = branch_rec.branch.id;
+            let branch_ref = branch_rec.branch;
             let event = BranchOpEvent {
                 kind: BranchOpKind::Untag,
                 branch_id,
@@ -1284,12 +1286,33 @@ impl BranchService {
         metadata: Option<strata_core::Value>,
     ) -> StrataResult<NoteInfo> {
         reject_system_branch(branch, "add note to")?;
-        let note = branch_ops::add_note(&self.db, branch, version, message, author, metadata)?;
+
+        // B4/KD4: notes are branch-scoped writes; same gate as tags.
+        let branch_rec =
+            BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
+
+        let note = branch_ops::add_note_with_expected(
+            &self.db,
+            branch,
+            version,
+            message,
+            author,
+            metadata,
+            Some(branch_rec.branch),
+        )?;
 
         let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let payload = strata_core::value::Value::object(
             [
                 ("branch".to_string(), branch.into()),
+                (
+                    "branch_id".to_string(),
+                    branch_rec.branch.id.to_string().into(),
+                ),
+                (
+                    "branch_generation".to_string(),
+                    strata_core::Value::Int(branch_rec.branch.generation as i64),
+                ),
                 (
                     "version".to_string(),
                     strata_core::Value::Int(version.0 as i64),
@@ -1327,7 +1350,12 @@ impl BranchService {
     /// Delete a note from a specific version on a branch.
     pub fn delete_note(&self, branch: &str, version: CommitVersion) -> StrataResult<bool> {
         reject_system_branch(branch, "delete note from")?;
-        branch_ops::delete_note(&self.db, branch, version)
+
+        // B4/KD4: note deletion follows the same gate as creation.
+        let branch_rec =
+            BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
+
+        branch_ops::delete_note_with_expected(&self.db, branch, version, Some(branch_rec.branch))
     }
 
     // =========================================================================
@@ -1651,6 +1679,32 @@ mod tests {
     }
 
     #[test]
+    fn test_history_reads_preserve_missing_branch_name_in_not_found() {
+        let db = Database::cache().unwrap();
+
+        let merge_err = db
+            .branches()
+            .merge_base("missing-a", "missing-b")
+            .unwrap_err();
+        assert!(
+            matches!(merge_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-a"),
+            "merge_base should preserve the user branch name, got {merge_err:?}"
+        );
+
+        let log_err = db.branches().log("missing-log", 10).unwrap_err();
+        assert!(
+            matches!(log_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-log"),
+            "log should preserve the user branch name, got {log_err:?}"
+        );
+
+        let ancestors_err = db.branches().ancestors("missing-ancestors").unwrap_err();
+        assert!(
+            matches!(ancestors_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-ancestors"),
+            "ancestors should preserve the user branch name, got {ancestors_err:?}"
+        );
+    }
+
+    #[test]
     fn test_merge_dag_failure_rolls_back_prewritten_lineage_edge() {
         let temp_dir = TempDir::new().unwrap();
         let db = Database::open_runtime(
@@ -1734,6 +1788,180 @@ mod tests {
             log.iter()
                 .any(|event| event.kind == DagEventKind::BranchCreate),
             "projection rebuild should preserve authoritative pre-existing history"
+        );
+    }
+
+    // =========================================================================
+    // B4.1: lifecycle write gate end-to-end smoke
+    // =========================================================================
+    //
+    // Unit coverage for `require_writable_by_name` / `require_visible_by_name`
+    // lives in `branch_control_store::tests`. These tests prove the gate is
+    // actually wired into `BranchService` entry points; exhaustive
+    // operation × lifecycle matrix coverage is B4.2.
+
+    /// Helper: flip a branch's control record to `Archived` directly through
+    /// the store. No public engine path produces `Archived` today (B4
+    /// deferred the archive op).
+    fn archive_branch_for_test(db: &Arc<Database>, name: &str) -> BranchRef {
+        let store = BranchControlStore::new(db.clone());
+        let rec = store
+            .find_active_by_name(name)
+            .unwrap()
+            .expect("branch must exist before archiving");
+        db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: rec.branch,
+                    name: rec.name.clone(),
+                    lifecycle: BranchLifecycleStatus::Archived,
+                    fork: rec.fork,
+                },
+                txn,
+            )
+        })
+        .unwrap();
+        rec.branch
+    }
+
+    #[test]
+    fn test_merge_into_archived_target_returns_branch_archived() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook).unwrap();
+        db.branches().create("main").unwrap();
+        let kv = KVStore::new(db.clone());
+        let main_id = BranchId::from_user_name("main");
+        kv.put(&main_id, "default", "seed", Value::Int(1)).unwrap();
+        db.branches().fork("main", "feature").unwrap();
+
+        // Archive the merge target.
+        archive_branch_for_test(&db, "main");
+
+        let err = db
+            .branches()
+            .merge_with_options("feature", "main", MergeOptions::default())
+            .unwrap_err();
+        match err {
+            StrataError::BranchArchived { ref name } => assert_eq!(name, "main"),
+            other => panic!("expected BranchArchived on archived merge target, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_merge_from_archived_source_succeeds_archived_is_visible() {
+        // KD-matrix: source needs `require_visible`; Archived is visible, so
+        // merging *from* a frozen snapshot must still be allowed.
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook).unwrap();
+        db.branches().create("main").unwrap();
+        let kv = KVStore::new(db.clone());
+        let main_id = BranchId::from_user_name("main");
+        kv.put(&main_id, "default", "seed", Value::Int(1)).unwrap();
+        db.branches().fork("main", "feature").unwrap();
+        let feature_id = BranchId::from_user_name("feature");
+        kv.put(&feature_id, "default", "feature-key", Value::Int(42))
+            .unwrap();
+
+        archive_branch_for_test(&db, "feature");
+
+        // Merge archived source → active target. Gate allows this;
+        // real work completes with an archived source snapshot.
+        db.branches()
+            .merge_with_options("feature", "main", MergeOptions::default())
+            .expect("merge from archived source must succeed");
+    }
+
+    #[test]
+    fn test_tag_on_archived_branch_returns_branch_archived() {
+        // KD4: annotation writes follow the same gate as structural mutations.
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook).unwrap();
+        db.branches().create("release").unwrap();
+        archive_branch_for_test(&db, "release");
+
+        let err = db
+            .branches()
+            .tag("release", "v1.0", None, None, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, StrataError::BranchArchived { ref name } if name == "release"),
+            "expected BranchArchived on archived branch tag, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_branch_note_audit_payload_carries_generation() {
+        let db = Database::cache().unwrap();
+        db.branches().create("release").unwrap();
+        db.branches()
+            .add_note("release", CommitVersion(1), "gen0", None, None)
+            .unwrap();
+
+        db.branches().delete("release").unwrap();
+        db.branches().create("release").unwrap();
+        db.branches()
+            .add_note("release", CommitVersion(2), "gen1", None, None)
+            .unwrap();
+
+        let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+        let events = EventLog::new(db.clone())
+            .get_by_type(&system_branch_id, "default", "branch.note", None, None)
+            .unwrap();
+        assert_eq!(events.len(), 2, "expected one audit event per note write");
+
+        let payload0 = events[0]
+            .value
+            .payload
+            .as_object()
+            .expect("branch.note payload must be an object");
+        assert_eq!(
+            payload0.get("branch").and_then(|v| v.as_str()),
+            Some("release")
+        );
+        assert_eq!(
+            payload0.get("branch_generation").and_then(|v| v.as_int()),
+            Some(0)
+        );
+        assert!(payload0
+            .get("branch_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty()));
+
+        let payload1 = events[1]
+            .value
+            .payload
+            .as_object()
+            .expect("branch.note payload must be an object");
+        assert_eq!(
+            payload1.get("branch_generation").and_then(|v| v.as_int()),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn test_delete_on_archived_branch_is_allowed() {
+        // Delete uses `require_visible`, not `require_writable`: archived
+        // lifecycle instances remain deletable so operators can retire them.
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook).unwrap();
+        db.branches().create("retired").unwrap();
+        archive_branch_for_test(&db, "retired");
+
+        db.branches()
+            .delete("retired")
+            .expect("delete must accept an archived target");
+        let store = BranchControlStore::new(db.clone());
+        assert!(
+            store.find_active_by_name("retired").unwrap().is_none(),
+            "delete of archived branch must clear the active pointer"
         );
     }
 

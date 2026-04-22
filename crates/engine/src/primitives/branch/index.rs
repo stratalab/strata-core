@@ -17,8 +17,8 @@
 //! - Primary key format: `<global_namespace>:<TypeTag::Branch>:<branch_id>`
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
-use crate::branch_ops::branch_control_store::is_control_store_key;
 use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
+use crate::branch_ops::{self, branch_control_store::is_control_store_key};
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -554,6 +554,12 @@ impl BranchIndex {
                     Self::delete_namespace_data(txn, meta_id)?;
                 }
             }
+
+            // Branch-scoped annotations live under the `_system_` branch, not
+            // under the user branch namespace. Clear them in the same
+            // transaction so same-name recreate cannot inherit stale tags or
+            // notes from the prior lifecycle instance.
+            branch_ops::delete_annotations_for_branch_in_txn(txn, branch_id)?;
 
             // Delete the branch metadata entry
             txn.delete(meta_key.clone())?;

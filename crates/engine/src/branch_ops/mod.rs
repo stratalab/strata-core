@@ -85,6 +85,31 @@ fn note_prefix(branch: &str) -> String {
     format!("note:{branch}:")
 }
 
+/// Delete all branch-scoped tag/note annotation rows for `branch` inside an
+/// existing transaction.
+///
+/// Tags and notes live under the `_system_` branch, so branch deletion must
+/// clear them explicitly; deleting the user branch namespace alone is not
+/// sufficient. Keeping this cleanup in the same transaction as branch metadata
+/// deletion prevents same-name recreate from inheriting stale annotations.
+pub(crate) fn delete_annotations_for_branch_in_txn(
+    txn: &mut strata_concurrency::TransactionContext,
+    branch: &str,
+) -> StrataResult<()> {
+    let system_id = resolve_branch_name(SYSTEM_BRANCH);
+    let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
+
+    for prefix in [tag_prefix(branch), note_prefix(branch)] {
+        let prefix_key = Key::new(ns.clone(), TypeTag::KV, prefix.into_bytes());
+        let entries = txn.scan_prefix(&prefix_key)?;
+        for (key, _) in entries {
+            txn.delete(key)?;
+        }
+    }
+
+    Ok(())
+}
+
 // =============================================================================
 // Snapshot map builders (ENG-DEBT-001)
 // =============================================================================
@@ -2613,7 +2638,21 @@ pub fn create_tag(
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<TagInfo> {
-    resolve_and_verify(db, branch)?;
+    create_tag_with_expected(db, branch, name, version, message, creator, None)
+}
+
+/// Create a tag on a branch while pinning the expected branch lifecycle
+/// instance.
+pub(crate) fn create_tag_with_expected(
+    db: &Arc<Database>,
+    branch: &str,
+    name: &str,
+    version: Option<u64>,
+    message: Option<&str>,
+    creator: Option<&str>,
+    expected_branch_ref: Option<BranchRef>,
+) -> StrataResult<TagInfo> {
+    resolve_and_verify_with_expected(db, branch, expected_branch_ref)?;
 
     if branch.contains(':') {
         return Err(StrataError::invalid_input("Branch name cannot contain ':'"));
@@ -2646,7 +2685,10 @@ pub fn create_tag(
     let tag_value = serde_json::to_string(&tag_info)
         .map_err(|e| StrataError::internal(format!("Failed to serialize tag: {}", e)))?;
 
-    db.transaction(system_id, |txn| {
+    db.transaction(system_id, move |txn| {
+        if let Some(expected) = expected_branch_ref {
+            verify_expected_active_ref_in_txn(txn, branch, expected)?;
+        }
         let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
         let key = Key::new(ns, TypeTag::KV, tag_key.as_bytes().to_vec());
         txn.put(key, Value::String(tag_value.clone()))?;
@@ -2660,6 +2702,18 @@ pub fn create_tag(
 ///
 /// Returns `true` if the tag existed and was deleted.
 pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<bool> {
+    delete_tag_with_expected(db, branch, name, None)
+}
+
+/// Delete a tag while pinning the expected branch lifecycle instance.
+pub(crate) fn delete_tag_with_expected(
+    db: &Arc<Database>,
+    branch: &str,
+    name: &str,
+    expected_branch_ref: Option<BranchRef>,
+) -> StrataResult<bool> {
+    resolve_and_verify_with_expected(db, branch, expected_branch_ref)?;
+
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
     let tag_key = tag_key(branch, name);
 
@@ -2670,7 +2724,10 @@ pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<
         .any(|(k, _)| k.namespace.space == "default" && *k.user_key == *tag_key.as_bytes());
 
     if exists {
-        db.transaction(system_id, |txn| {
+        db.transaction(system_id, move |txn| {
+            if let Some(expected) = expected_branch_ref {
+                verify_expected_active_ref_in_txn(txn, branch, expected)?;
+            }
             let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
             let key = Key::new(ns, TypeTag::KV, tag_key.as_bytes().to_vec());
             txn.delete(key)?;
@@ -2763,7 +2820,20 @@ pub fn add_note(
     author: Option<&str>,
     metadata: Option<Value>,
 ) -> StrataResult<NoteInfo> {
-    resolve_and_verify(db, branch)?;
+    add_note_with_expected(db, branch, version, message, author, metadata, None)
+}
+
+/// Add a note while pinning the expected branch lifecycle instance.
+pub(crate) fn add_note_with_expected(
+    db: &Arc<Database>,
+    branch: &str,
+    version: CommitVersion,
+    message: &str,
+    author: Option<&str>,
+    metadata: Option<Value>,
+    expected_branch_ref: Option<BranchRef>,
+) -> StrataResult<NoteInfo> {
+    resolve_and_verify_with_expected(db, branch, expected_branch_ref)?;
 
     if branch.contains(':') {
         return Err(StrataError::invalid_input("Branch name cannot contain ':'"));
@@ -2784,7 +2854,10 @@ pub fn add_note(
     let note_value = serde_json::to_string(&note)
         .map_err(|e| StrataError::internal(format!("Failed to serialize note: {}", e)))?;
 
-    db.transaction(system_id, |txn| {
+    db.transaction(system_id, move |txn| {
+        if let Some(expected) = expected_branch_ref {
+            verify_expected_active_ref_in_txn(txn, branch, expected)?;
+        }
         let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
         let key = Key::new(ns, TypeTag::KV, note_key.as_bytes().to_vec());
         txn.put(key, Value::String(note_value.clone()))?;
@@ -2836,6 +2909,18 @@ pub fn get_notes(
 ///
 /// Returns `true` if the note existed and was deleted.
 pub fn delete_note(db: &Arc<Database>, branch: &str, version: CommitVersion) -> StrataResult<bool> {
+    delete_note_with_expected(db, branch, version, None)
+}
+
+/// Delete a note while pinning the expected branch lifecycle instance.
+pub(crate) fn delete_note_with_expected(
+    db: &Arc<Database>,
+    branch: &str,
+    version: CommitVersion,
+    expected_branch_ref: Option<BranchRef>,
+) -> StrataResult<bool> {
+    resolve_and_verify_with_expected(db, branch, expected_branch_ref)?;
+
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
     let note_key = note_key(branch, version.as_u64());
 
@@ -2846,7 +2931,10 @@ pub fn delete_note(db: &Arc<Database>, branch: &str, version: CommitVersion) -> 
         .any(|(k, _)| k.namespace.space == "default" && *k.user_key == *note_key.as_bytes());
 
     if exists {
-        db.transaction(system_id, |txn| {
+        db.transaction(system_id, move |txn| {
+            if let Some(expected) = expected_branch_ref {
+                verify_expected_active_ref_in_txn(txn, branch, expected)?;
+            }
             let ns = Arc::new(Namespace::for_branch_space(system_id, "default"));
             let key = Key::new(ns, TypeTag::KV, note_key.as_bytes().to_vec());
             txn.delete(key)?;
@@ -5263,6 +5351,40 @@ mod tests {
         assert_eq!(tags[0].name, "t2");
     }
 
+    #[test]
+    fn test_tag_with_expected_rejects_recreated_branch_generation() {
+        let (_temp, db) = setup_with_branch("main");
+        let store = BranchControlStore::new(db.clone());
+        let stale_ref = store.require_writable_by_name("main").unwrap().branch;
+
+        db.branches().delete("main").unwrap();
+        db.branches().create("main").unwrap();
+
+        let err = create_tag_with_expected(&db, "main", "v1.0", None, None, None, Some(stale_ref))
+            .unwrap_err();
+        assert!(
+            matches!(err, StrataError::Conflict { .. }),
+            "recreated branch must reject stale expected ref, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_delete_clears_tags_before_same_name_recreate() {
+        let (_temp, db) = setup_with_branch("main");
+        create_tag(&db, "main", "v1.0", None, None, None).unwrap();
+
+        db.branches().delete("main").unwrap();
+        db.branches().create("main").unwrap();
+
+        assert!(
+            list_tags(&db, "main").unwrap().is_empty(),
+            "recreated branch must not inherit tags from the prior lifecycle"
+        );
+
+        create_tag(&db, "main", "v1.0", None, None, None)
+            .expect("same-name recreate must allow reusing a deleted lifecycle's tag name");
+    }
+
     // =========================================================================
     // Note Tests
     // =========================================================================
@@ -5303,6 +5425,42 @@ mod tests {
         let notes = get_notes(&db, "main", None).unwrap();
         assert_eq!(notes.len(), 1);
         assert_eq!(notes[0].version, 2);
+    }
+
+    #[test]
+    fn test_delete_note_with_expected_rejects_recreated_branch_generation() {
+        let (_temp, db) = setup_with_branch("main");
+        add_note(&db, "main", CommitVersion(1), "note1", None, None).unwrap();
+
+        let store = BranchControlStore::new(db.clone());
+        let stale_ref = store.require_writable_by_name("main").unwrap().branch;
+
+        db.branches().delete("main").unwrap();
+        db.branches().create("main").unwrap();
+
+        let err =
+            delete_note_with_expected(&db, "main", CommitVersion(1), Some(stale_ref)).unwrap_err();
+        assert!(
+            matches!(err, StrataError::Conflict { .. }),
+            "recreated branch must reject stale expected ref, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_delete_clears_notes_before_same_name_recreate() {
+        let (_temp, db) = setup_with_branch("main");
+        add_note(&db, "main", CommitVersion(1), "note1", None, None).unwrap();
+
+        db.branches().delete("main").unwrap();
+        db.branches().create("main").unwrap();
+
+        assert!(
+            get_notes(&db, "main", None).unwrap().is_empty(),
+            "recreated branch must not inherit notes from the prior lifecycle"
+        );
+
+        add_note(&db, "main", CommitVersion(1), "note1", None, None)
+            .expect("same-name recreate must allow reusing a deleted lifecycle's note slot");
     }
 
     // =========================================================================
