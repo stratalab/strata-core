@@ -215,6 +215,99 @@ impl BranchService {
     // Core Operations (DAG optional)
     // =========================================================================
 
+    /// Create a branch as part of bundle import, preserving the bundle's
+    /// generation only when the target database has no prior lineage for the
+    /// name.
+    ///
+    /// This stays `pub(crate)` because bundle import is the only caller. The
+    /// helper exists to keep import on the canonical branch mutation boundary:
+    /// control-record write, rollback, DAG create, and observer emission all
+    /// follow the same path as ordinary branch creation.
+    pub(crate) fn create_imported_branch(
+        &self,
+        name: &str,
+        bundle_generation: u64,
+    ) -> StrataResult<(BranchMetadata, BranchRef, bool)> {
+        reject_system_branch(name, "import")?;
+        validate_branch_name(name)?;
+
+        let mut mutation = BranchMutation::new(&self.db);
+        let branch_id = resolve_branch_name(name);
+        let store = BranchControlStore::new(self.db.clone());
+        let index = BranchIndex::new(self.db.clone());
+
+        // Fail closed on metadata/control-store splits before import.
+        let metadata_exists = index.exists(name)?;
+        let active_control = store.find_active_by_name(name)?;
+        match (metadata_exists, active_control) {
+            (true, Some(_)) => {
+                return Err(StrataError::invalid_input(format!(
+                    "Branch '{}' already exists. Delete it first or use a different name.",
+                    name
+                )));
+            }
+            (true, None) => {
+                return Err(StrataError::corruption(format!(
+                    "branch '{}' has legacy metadata but no active control record during import",
+                    name
+                )));
+            }
+            (false, Some(_)) => {
+                return Err(StrataError::corruption(format!(
+                    "branch '{}' has an active control record but no legacy metadata during import",
+                    name
+                )));
+            }
+            (false, None) => {}
+        }
+
+        let bundle_seed_value = bundle_generation.checked_add(1).ok_or_else(|| {
+            StrataError::invalid_input(
+                "Bundle generation u64::MAX cannot be imported — would overflow next-gen counter",
+            )
+        })?;
+
+        let chosen_generation: std::sync::Mutex<Option<(u64, bool)>> = std::sync::Mutex::new(None);
+        let versioned = with_branch_dag_hooks_suppressed(|| {
+            index.create_branch_with_hook(name, |txn| {
+                let allocated = store.next_generation(branch_id, txn)?;
+                let (generation, collision) = if allocated == 0 {
+                    if bundle_generation > 0 {
+                        store.seed_next_generation(branch_id, bundle_seed_value, txn)?;
+                    }
+                    (bundle_generation, false)
+                } else {
+                    (allocated, true)
+                };
+
+                let record = BranchControlRecord {
+                    branch: BranchRef::new(branch_id, generation),
+                    name: name.to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                };
+                store.put_record(&record, txn)?;
+                *chosen_generation.lock().unwrap() = Some((generation, collision));
+                Ok(())
+            })
+        })?;
+
+        let (generation, collision) = chosen_generation.lock().unwrap().expect(
+            "create_branch_with_hook closure must run on the success path; \
+             chosen_generation would otherwise stay None",
+        );
+        let branch_ref = BranchRef::new(branch_id, generation);
+
+        self.db.unmark_branch_deleting(&branch_id);
+
+        mutation.on_rollback_delete_branch(name, false);
+        let event = DagEvent::create(branch_id, name).with_branch_ref(branch_ref);
+        mutation.record_dag_event(&event)?;
+        mutation.commit(BranchOpEvent::create(branch_ref, name));
+
+        Ok((versioned.value, branch_ref, collision))
+    }
+
     /// Create a new branch.
     ///
     /// Emits a DAG create event if a DAG hook is installed.
@@ -241,6 +334,11 @@ impl BranchService {
         }
 
         let index = BranchIndex::new(self.db.clone());
+        // Capture the generation allocated inside the txn so the observer
+        // event carries the new lifecycle instance's full `BranchRef`
+        // (B3.4) — the closure runs synchronously, so the mutex is purely
+        // a one-shot inside-out channel.
+        let allocated_gen: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
         let versioned = with_branch_dag_hooks_suppressed(|| {
             index.create_branch_with_hook(name, |txn| {
                 let generation = store.next_generation(branch_id, txn)?;
@@ -250,9 +348,16 @@ impl BranchService {
                     lifecycle: BranchLifecycleStatus::Active,
                     fork: None,
                 };
-                store.put_record(&record, txn)
+                store.put_record(&record, txn)?;
+                *allocated_gen.lock().unwrap() = Some(generation);
+                Ok(())
             })
         })?;
+        let generation = allocated_gen.lock().unwrap().expect(
+            "create_branch_with_hook closure must run on the success path; \
+             allocated_gen would otherwise stay None",
+        );
+        let branch_ref = BranchRef::new(branch_id, generation);
 
         // B3.2: recreating a previously-deleted name must yield a
         // writable branch. `BranchIndex::delete_branch` intentionally
@@ -268,11 +373,11 @@ impl BranchService {
         mutation.on_rollback_delete_branch(name, false);
 
         // Record to DAG if hook installed (optional, not required)
-        let event = DagEvent::create(branch_id, name);
+        let event = DagEvent::create(branch_id, name).with_branch_ref(branch_ref);
         mutation.record_dag_event(&event)?;
 
         // Commit: fires observers
-        mutation.commit(BranchOpEvent::create(branch_id, name));
+        mutation.commit(BranchOpEvent::create(branch_ref, name));
 
         Ok(versioned.value)
     }
@@ -310,10 +415,19 @@ impl BranchService {
         // A missing active record here is corruption: the legacy metadata
         // row exists (BranchIndex resolved it) but the authoritative
         // control store has no active lifecycle for the same branch name.
+        // Capture the deleted lifecycle instance's `BranchRef` so the
+        // observer event records the exact generation that was tombstoned
+        // (B3.4). The closure runs synchronously inside
+        // `delete_branch_with_hook`, so the mutex is just a one-shot
+        // inside-out channel.
+        let deleted_ref: std::sync::Mutex<Option<BranchRef>> = std::sync::Mutex::new(None);
         let delete_result = with_branch_dag_hooks_suppressed(|| {
             index.delete_branch_with_hook(name, |txn| {
                 match store.mark_deleted_by_name(name, txn)? {
-                    Some(_) => Ok(()),
+                    Some(branch_ref) => {
+                        *deleted_ref.lock().unwrap() = Some(branch_ref);
+                        Ok(())
+                    }
                     None => Err(StrataError::corruption(format!(
                         "live branch '{name}' has legacy metadata but no active control record"
                     ))),
@@ -325,13 +439,17 @@ impl BranchService {
             mutation.cancel();
             return Err(e);
         }
+        let branch_ref = deleted_ref.lock().unwrap().expect(
+            "delete_branch_with_hook closure must run on the success path; \
+             deleted_ref would otherwise stay None",
+        );
 
         // Record to DAG if hook installed (optional, not required)
-        let event = DagEvent::delete(branch_id, name);
+        let event = DagEvent::delete(branch_id, name).with_branch_ref(branch_ref);
         mutation.record_dag_event(&event)?;
 
         // Commit: fires observers
-        mutation.commit(BranchOpEvent::delete(branch_id, name));
+        mutation.commit(BranchOpEvent::delete(branch_ref, name));
 
         Ok(())
     }
@@ -458,8 +576,41 @@ impl BranchService {
         // We set clear_storage=true because fork_branch creates storage state
         mutation.on_rollback_delete_branch(destination, true);
 
+        // Resolve the authoritative lifecycle refs written by the fork txn
+        // once, then reuse them for both DAG and observer emission. This keeps
+        // the projection and observer surfaces aligned to the exact
+        // generation-aware parent/child relationship the storage fork used.
+        let fork_refs = if let Some(fork_version) = info.fork_version {
+            // Read the freshly-written child control record so the
+            // observer event carries the exact source `BranchRef` recorded
+            // on its fork anchor (B3.4). This avoids a `find_active_by_name`
+            // race against a concurrent delete + recreate of `source`
+            // between the fork txn and the observer notification.
+            //
+            // Fallback path: if the fork anchor is somehow absent (the
+            // child record itself missing or carrying `fork: None`),
+            // resolve the source via `find_active_by_name` instead of
+            // assuming gen 0 — a recreated source could be at any
+            // generation, and reporting gen 0 in the observer event
+            // would silently mislabel the parent's lifecycle instance.
+            let dest_ref = BranchRef::new(dest_id, dest_gen);
+            let anchor_parent = store
+                .get_record(dest_ref)?
+                .and_then(|rec| rec.fork.map(|anchor| anchor.parent));
+            let source_ref = anchor_parent.ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "forked branch '{}' is missing authoritative ForkAnchor parent in control store",
+                    destination
+                ))
+            })?;
+
+            Some((fork_version, dest_ref, source_ref))
+        } else {
+            None
+        };
+
         // Record to DAG — if this fails, rollback is executed
-        if let Some(fork_version) = info.fork_version {
+        if let Some((fork_version, dest_ref, source_ref)) = fork_refs {
             let source_id = resolve_branch_name(source);
             let dest_id = resolve_branch_name(destination);
             let mut event = DagEvent::fork(
@@ -468,7 +619,9 @@ impl BranchService {
                 source_id,
                 source,
                 CommitVersion(fork_version),
-            );
+            )
+            .with_branch_ref(dest_ref)
+            .with_source_branch_ref(source_ref);
             if let Some(msg) = &options.message {
                 event = event.with_message(msg.clone());
             }
@@ -476,14 +629,11 @@ impl BranchService {
                 event = event.with_creator(creator.clone());
             }
             mutation.record_dag_event(&event)?;
-        }
 
-        // Commit: fires observers, clears rollback actions
-        if let Some(fork_version) = info.fork_version {
             let mut observer_event = BranchOpEvent::fork(
-                resolve_branch_name(destination),
+                dest_ref,
                 destination,
-                resolve_branch_name(source),
+                source_ref,
                 source,
                 CommitVersion(fork_version),
             );
@@ -600,7 +750,9 @@ impl BranchService {
                 CommitVersion(merge_version),
                 info.clone(),
                 options.strategy,
-            );
+            )
+            .with_branch_ref(target_rec.branch)
+            .with_source_branch_ref(source_rec.branch);
             if let Some(msg) = &options.message {
                 event = event.with_message(msg.clone());
             }
@@ -615,9 +767,9 @@ impl BranchService {
                 crate::MergeStrategy::Strict => "strict",
             };
             let mut observer_event = BranchOpEvent::merge(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 strategy_str,
                 info.keys_applied,
@@ -688,12 +840,13 @@ impl BranchService {
             mutation.on_rollback_revert_range(branch, revert_version, revert_version);
             mutation.on_rollback_delete_lineage_edge(branch_rec.branch, revert_version);
             append_revert_edge(&self.db, &store, branch_rec.branch, revert_version)?;
-            let event = DagEvent::revert(branch_id, branch, revert_version, info.clone());
+            let event = DagEvent::revert(branch_id, branch, revert_version, info.clone())
+                .with_branch_ref(branch_rec.branch);
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::revert(
-                branch_id,
+                branch_rec.branch,
                 branch,
                 from_version,
                 to_version,
@@ -774,14 +927,16 @@ impl BranchService {
                 source,
                 CommitVersion(cp_version),
                 info.clone(),
-            );
+            )
+            .with_branch_ref(target_rec.branch)
+            .with_source_branch_ref(source_rec.branch);
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 info.keys_applied,
                 info.keys_deleted,
@@ -861,14 +1016,16 @@ impl BranchService {
                 source,
                 CommitVersion(cp_version),
                 info.clone(),
-            );
+            )
+            .with_branch_ref(target_rec.branch)
+            .with_source_branch_ref(source_rec.branch);
             mutation.record_dag_event(&event)?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 info.keys_applied,
                 info.keys_deleted,
@@ -954,9 +1111,21 @@ impl BranchService {
         branch: &str,
         limit: usize,
     ) -> StrataResult<Vec<crate::database::dag_hook::DagEvent>> {
-        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
+        let store = BranchControlStore::new(self.db.clone());
+        store.ensure_lineage_read_available()?;
+        match store.find_active_by_name(branch)? {
+            Some(_) => {}
+            None => {
+                if BranchIndex::new(self.db.clone()).exists(branch)? {
+                    return Err(StrataError::corruption(format!(
+                        "branch '{}' has legacy metadata but no active control record for DAG history read",
+                        branch
+                    )));
+                }
+                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+            }
+        }
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
-        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
         hook.log(branch, limit).map_err(dag_to_strata)
     }
 
@@ -965,12 +1134,24 @@ impl BranchService {
         &self,
         branch: &str,
     ) -> StrataResult<Vec<crate::database::dag_hook::AncestryEntry>> {
-        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
+        let store = BranchControlStore::new(self.db.clone());
+        store.ensure_lineage_read_available()?;
+        match store.find_active_by_name(branch)? {
+            Some(_) => {}
+            None => {
+                if BranchIndex::new(self.db.clone()).exists(branch)? {
+                    return Err(StrataError::corruption(format!(
+                        "branch '{}' has legacy metadata but no active control record for DAG ancestry read",
+                        branch
+                    )));
+                }
+                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+            }
+        }
         let hook = self
             .dag_hook()
             .require("ancestors")
             .map_err(dag_to_strata)?;
-        // Pass branch name directly — DAG is keyed by name, not BranchId UUID
         hook.ancestors(branch).map_err(dag_to_strata)
     }
 
@@ -992,13 +1173,25 @@ impl BranchService {
         reject_system_branch(branch, "tag")?;
         let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
 
-        // Emit observer event
+        // Emit observer event with the tagged branch's generation-aware
+        // identity (B3.4). `create_tag` already verified the branch exists,
+        // so the active control record is the authoritative `BranchRef`.
         let branch_id = resolve_branch_name(branch);
+        let branch_ref = BranchControlStore::new(self.db.clone())
+            .find_active_by_name(branch)?
+            .map(|rec| rec.branch)
+            .ok_or_else(|| {
+                StrataError::corruption(format!(
+                    "tagged branch '{branch}' has no active control record after successful tag write"
+                ))
+            })?;
         let event = BranchOpEvent {
             kind: BranchOpKind::Tag,
             branch_id,
+            branch_ref,
             branch_name: Some(branch.to_string()),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version: Some(CommitVersion(info.version)),
             tag_name: Some(name.to_string()),
@@ -1024,13 +1217,24 @@ impl BranchService {
         let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
 
         if deleted {
-            // Emit observer event
+            // Emit observer event with the branch's generation-aware
+            // identity (B3.4).
             let branch_id = resolve_branch_name(branch);
+            let branch_ref = BranchControlStore::new(self.db.clone())
+                .find_active_by_name(branch)?
+                .map(|rec| rec.branch)
+                .ok_or_else(|| {
+                    StrataError::corruption(format!(
+                        "untagged branch '{branch}' has no active control record after successful tag delete"
+                    ))
+                })?;
             let event = BranchOpEvent {
                 kind: BranchOpKind::Untag,
                 branch_id,
+                branch_ref,
                 branch_name: Some(branch.to_string()),
                 source_branch_id: None,
+                source_branch_ref: None,
                 source_branch_name: None,
                 commit_version: None,
                 tag_name: Some(name.to_string()),
@@ -1426,6 +1630,24 @@ mod tests {
 
         let ancestors_err = db.branches().ancestors("legacy").unwrap_err();
         assert!(ancestors_err.is_branch_lineage_unavailable());
+    }
+
+    #[test]
+    fn test_branch_service_history_reads_fail_closed_on_metadata_without_control_record() {
+        let db = Database::cache().unwrap();
+        seed_legacy_branch_metadata(&db, "legacy");
+
+        let log_err = db.branches().log("legacy", 10).unwrap_err();
+        assert!(matches!(log_err, StrataError::Corruption { .. }));
+        assert!(log_err
+            .to_string()
+            .contains("legacy metadata but no active control record"));
+
+        let ancestors_err = db.branches().ancestors("legacy").unwrap_err();
+        assert!(matches!(ancestors_err, StrataError::Corruption { .. }));
+        assert!(ancestors_err
+            .to_string()
+            .contains("legacy metadata but no active control record"));
     }
 
     #[test]

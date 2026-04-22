@@ -2,7 +2,7 @@
   "schema_version": 1,
   "description": "Locked counts of branching transitional shapes. See tests/integration/branching_guardrails.rs for what each key tracks and why.",
   "shapes": {
-    "branch_id_random_new_sites": 722,
+    "branch_id_random_new_sites": 724,
     "branch_namespace_const_sites": 1,
     "merge_base_override_occurrences": 0,
     "merge_strategy_lastwriterwins_literals": 75

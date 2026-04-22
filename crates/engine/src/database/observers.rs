@@ -31,6 +31,7 @@ use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
+use strata_core::BranchRef;
 
 // =============================================================================
 // Error Types
@@ -265,16 +266,35 @@ impl fmt::Display for BranchOpKind {
 }
 
 /// Information about a branch operation.
+///
+/// B3.4 carries the generation-aware [`BranchRef`] alongside the legacy
+/// `BranchId`. `branch_ref` is the canonical identity; `branch_id` is
+/// retained as a back-compat shadow populated from `branch_ref.id` (full
+/// removal lands in B4+ once observer callers no longer read `branch_id`).
 #[derive(Debug, Clone)]
 pub struct BranchOpEvent {
     /// What kind of operation.
     pub kind: BranchOpKind,
     /// The primary branch affected (created, deleted, target of merge, etc.).
+    ///
+    /// Back-compat shadow of `branch_ref.id` — same value, name-erased of
+    /// generation. Prefer `branch_ref` in new code.
     pub branch_id: BranchId,
+    /// Generation-aware identity of the primary branch (B3.4).
+    ///
+    /// Same lifecycle instance as `branch_id`, plus the [`BranchGeneration`]
+    /// that distinguishes a recreated branch from its earlier instance.
+    ///
+    /// [`BranchGeneration`]: strata_core::BranchGeneration
+    pub branch_ref: BranchRef,
     /// The branch name (if known).
     pub branch_name: Option<String>,
     /// Source branch for fork/merge/cherry-pick (if applicable).
+    ///
+    /// Back-compat shadow of `source_branch_ref.map(|r| r.id)`.
     pub source_branch_id: Option<BranchId>,
+    /// Generation-aware source identity for fork/merge/cherry-pick (B3.4).
+    pub source_branch_ref: Option<BranchRef>,
     /// Source branch name (for fork: parent, for merge/cherry-pick: source).
     pub source_branch_name: Option<String>,
     /// The commit version at which the operation occurred.
@@ -301,12 +321,18 @@ pub struct BranchOpEvent {
 
 impl BranchOpEvent {
     /// Create a simple event for branch create.
-    pub fn create(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+    ///
+    /// `branch_ref` carries the generation-aware identity of the new
+    /// lifecycle instance; the legacy `branch_id` field is populated from
+    /// `branch_ref.id`.
+    pub fn create(branch_ref: BranchRef, branch_name: impl Into<String>) -> Self {
         Self {
             kind: BranchOpKind::Create,
-            branch_id,
+            branch_id: branch_ref.id,
+            branch_ref,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version: None,
             tag_name: None,
@@ -322,12 +348,16 @@ impl BranchOpEvent {
     }
 
     /// Create a simple event for branch delete.
-    pub fn delete(branch_id: BranchId, branch_name: impl Into<String>) -> Self {
+    ///
+    /// `branch_ref` is the lifecycle instance being tombstoned.
+    pub fn delete(branch_ref: BranchRef, branch_name: impl Into<String>) -> Self {
         Self {
             kind: BranchOpKind::Delete,
-            branch_id,
+            branch_id: branch_ref.id,
+            branch_ref,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version: None,
             tag_name: None,
@@ -343,18 +373,23 @@ impl BranchOpEvent {
     }
 
     /// Create an event for branch fork.
+    ///
+    /// `branch_ref` is the freshly-created child; `source_branch_ref` is the
+    /// parent's lifecycle instance at the fork point.
     pub fn fork(
-        branch_id: BranchId,
+        branch_ref: BranchRef,
         branch_name: impl Into<String>,
-        source_branch_id: BranchId,
+        source_branch_ref: BranchRef,
         source_branch_name: impl Into<String>,
         commit_version: CommitVersion,
     ) -> Self {
         Self {
             kind: BranchOpKind::Fork,
-            branch_id,
+            branch_id: branch_ref.id,
+            branch_ref,
             branch_name: Some(branch_name.into()),
-            source_branch_id: Some(source_branch_id),
+            source_branch_id: Some(source_branch_ref.id),
+            source_branch_ref: Some(source_branch_ref),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(commit_version),
             tag_name: None,
@@ -371,9 +406,9 @@ impl BranchOpEvent {
 
     /// Create an event for branch merge.
     pub fn merge(
-        target_branch_id: BranchId,
+        target_branch_ref: BranchRef,
         target_branch_name: impl Into<String>,
-        source_branch_id: BranchId,
+        source_branch_ref: BranchRef,
         source_branch_name: impl Into<String>,
         strategy: impl Into<String>,
         keys_applied: u64,
@@ -382,9 +417,11 @@ impl BranchOpEvent {
     ) -> Self {
         Self {
             kind: BranchOpKind::Merge,
-            branch_id: target_branch_id,
+            branch_id: target_branch_ref.id,
+            branch_ref: target_branch_ref,
             branch_name: Some(target_branch_name.into()),
-            source_branch_id: Some(source_branch_id),
+            source_branch_id: Some(source_branch_ref.id),
+            source_branch_ref: Some(source_branch_ref),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: Some(merge_version),
             tag_name: None,
@@ -401,7 +438,7 @@ impl BranchOpEvent {
 
     /// Create an event for branch revert.
     pub fn revert(
-        branch_id: BranchId,
+        branch_ref: BranchRef,
         branch_name: impl Into<String>,
         from_version: CommitVersion,
         to_version: CommitVersion,
@@ -409,9 +446,11 @@ impl BranchOpEvent {
     ) -> Self {
         Self {
             kind: BranchOpKind::Revert,
-            branch_id,
+            branch_id: branch_ref.id,
+            branch_ref,
             branch_name: Some(branch_name.into()),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version: None,
             tag_name: None,
@@ -428,18 +467,20 @@ impl BranchOpEvent {
 
     /// Create an event for cherry-pick.
     pub fn cherry_pick(
-        target_branch_id: BranchId,
+        target_branch_ref: BranchRef,
         target_branch_name: impl Into<String>,
-        source_branch_id: BranchId,
+        source_branch_ref: BranchRef,
         source_branch_name: impl Into<String>,
         keys_applied: u64,
         keys_deleted: u64,
     ) -> Self {
         Self {
             kind: BranchOpKind::CherryPick,
-            branch_id: target_branch_id,
+            branch_id: target_branch_ref.id,
+            branch_ref: target_branch_ref,
             branch_name: Some(target_branch_name.into()),
-            source_branch_id: Some(source_branch_id),
+            source_branch_id: Some(source_branch_ref.id),
+            source_branch_ref: Some(source_branch_ref),
             source_branch_name: Some(source_branch_name.into()),
             commit_version: None,
             tag_name: None,
@@ -795,14 +836,48 @@ mod tests {
     #[test]
     fn test_branch_op_event_builders() {
         let branch_id = BranchId::new();
-        let event = BranchOpEvent::create(branch_id, "main")
+        let branch_ref = BranchRef::new(branch_id, 0);
+        let event = BranchOpEvent::create(branch_ref, "main")
             .with_message("Initial branch")
             .with_creator("system");
 
         assert_eq!(event.kind, BranchOpKind::Create);
+        assert_eq!(event.branch_id, branch_id);
+        assert_eq!(event.branch_ref, branch_ref);
         assert_eq!(event.branch_name, Some("main".to_string()));
         assert_eq!(event.message, Some("Initial branch".to_string()));
         assert_eq!(event.creator, Some("system".to_string()));
+    }
+
+    #[test]
+    fn test_branch_op_event_legacy_branch_id_mirrors_ref() {
+        let branch_id = BranchId::new();
+        let source_id = BranchId::new();
+        let branch_ref = BranchRef::new(branch_id, 4);
+        let source_ref = BranchRef::new(source_id, 2);
+
+        let create = BranchOpEvent::create(branch_ref, "feature");
+        assert_eq!(create.branch_id, branch_ref.id);
+        assert_eq!(create.branch_ref, branch_ref);
+        assert!(create.source_branch_ref.is_none());
+
+        let fork = BranchOpEvent::fork(branch_ref, "feature", source_ref, "main", CommitVersion(7));
+        assert_eq!(fork.branch_id, branch_ref.id);
+        assert_eq!(fork.source_branch_id, Some(source_ref.id));
+        assert_eq!(fork.source_branch_ref, Some(source_ref));
+
+        let merge = BranchOpEvent::merge(
+            branch_ref,
+            "main",
+            source_ref,
+            "feature",
+            "last_writer_wins",
+            3,
+            1,
+            CommitVersion(11),
+        );
+        assert_eq!(merge.branch_ref, branch_ref);
+        assert_eq!(merge.source_branch_ref, Some(source_ref));
     }
 
     #[test]

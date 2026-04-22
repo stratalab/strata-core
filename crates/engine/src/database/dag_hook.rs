@@ -1,15 +1,19 @@
 //! Per-database branch DAG hook.
 //!
-//! The `BranchDagHook` trait provides a fail-fast hook for branch DAG
-//! operations. Unlike observers (which are best-effort), DAG hooks are
-//! load-bearing: failures propagate and abort the branch operation.
+//! The `BranchDagHook` trait provides a hook for branch DAG operations.
+//! After the B3 cutover (`docs/design/branching/b3-phasing-plan.md`),
+//! `BranchControlStore` is the **authoritative** source for fork + merge
+//! lineage and `find_merge_base`; the DAG is a derived read-side
+//! projection used only for `log` and `ancestors` history traversals.
 //!
 //! ## Why This Exists
 //!
-//! The branch DAG (`_branch_dag` graph on `_system_` branch) records every
-//! fork, merge, revert, and cherry-pick. This data is required for
-//! `compute_merge_base` — without it, merge-base computation falls back to
-//! expensive engine-level fork-info lookup.
+//! The DAG (`_branch_dag` graph on `_system_` branch) records every fork,
+//! merge, revert, and cherry-pick as a node and edge so that
+//! `BranchService::log` and `BranchService::ancestors` can answer
+//! ordered-history queries without walking the control store on every
+//! call. It is **not** consulted for `merge_base`: that authority lives
+//! in `BranchControlStore::find_merge_base` (B3.3).
 //!
 //! The graph crate implements the actual DAG storage, but the engine cannot
 //! depend on the graph crate (cycle: graph depends on engine). This trait
@@ -18,9 +22,13 @@
 //!
 //! ## Failure Model
 //!
-//! DAG hooks are **fail-fast**: if a hook returns `Err`, the branch operation
-//! fails and rolls back. This is the opposite of observers, which swallow
-//! errors. The DAG is correctness-critical for merge-base computation.
+//! DAG hooks are **load-bearing for write provenance**: if a hook returns
+//! `Err` while recording a fork / merge / revert / cherry-pick event,
+//! `BranchMutation` rolls back the underlying operation so the DAG
+//! projection stays consistent with the authoritative control-store
+//! lineage. The store remains the source of truth for `merge_base`; the
+//! DAG is best-effort *for queries*, but write recording is still
+//! gated so the projection cannot diverge silently.
 //!
 //! ## Per-Database vs Global
 //!
@@ -34,14 +42,13 @@
 //! 2. `BranchService::fork()` calls `db.dag_hook().record_event(...)`
 //! 3. If no hook is installed, DAG-required operations return an error
 //!
-//! Operations that require a DAG hook:
-//! - `fork` - records parent → fork → child edges
-//! - `merge` - records source → merge → target edges
-//! - `revert` - records revert event
-//! - `cherry_pick` - records cherry-pick event
-//! - `merge_base` - queries DAG for common ancestor
-//! - `log` - queries DAG for branch history
-//! - `ancestors` - queries DAG for ancestry chain
+//! Operations that require a DAG hook (write-side provenance recording
+//! through the projection):
+//! - `fork`, `merge`, `revert`, `cherry_pick`
+//! - `log`, `ancestors` — read history from the projection
+//!
+//! Operations that no longer require a DAG hook (post-B3.3):
+//! - `merge_base` — answered by `BranchControlStore::find_merge_base`
 //!
 //! Operations that work without a DAG hook:
 //! - `create`, `delete`, `list`, `exists`, `info`, `diff`, `diff3`
@@ -53,6 +60,7 @@ use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
+use strata_core::BranchRef;
 
 use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
 
@@ -197,10 +205,20 @@ pub struct DagEvent {
     pub kind: DagEventKind,
     /// The primary branch affected.
     pub branch_id: BranchId,
+    /// Generation-aware identity of the primary branch when known.
+    ///
+    /// B3.4 threads `BranchRef` through the DAG write path so the graph
+    /// projection can key nodes by lifecycle instance instead of by
+    /// branch name alone. Legacy callers may still leave this unset; the
+    /// graph layer falls back to the older name-keyed behavior in that
+    /// case.
+    pub branch_ref: Option<BranchRef>,
     /// The branch name.
     pub branch_name: String,
     /// Source branch for fork/merge/cherry-pick.
     pub source_branch_id: Option<BranchId>,
+    /// Generation-aware source identity when known.
+    pub source_branch_ref: Option<BranchRef>,
     /// Source branch name.
     pub source_branch_name: Option<String>,
     /// The commit version at which the event occurred.
@@ -231,8 +249,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::BranchCreate,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version,
             message: None,
@@ -262,8 +282,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::BranchDelete,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version,
             message: None,
@@ -293,8 +315,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Fork,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -323,8 +347,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Merge,
             branch_id: target_branch_id,
+            branch_ref: None,
             branch_name: target_branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -346,8 +372,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Revert,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: Some(format!("v{}..v{}", info.from_version.0, info.to_version.0)),
             commit_version,
             message: None,
@@ -371,8 +399,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::CherryPick,
             branch_id: target_branch_id,
+            branch_ref: None,
             branch_name: target_branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -393,6 +423,20 @@ impl DagEvent {
     /// Set the creator.
     pub fn with_creator(mut self, creator: impl Into<String>) -> Self {
         self.creator = Some(creator.into());
+        self
+    }
+
+    /// Attach the generation-aware primary branch identity.
+    pub fn with_branch_ref(mut self, branch_ref: BranchRef) -> Self {
+        self.branch_id = branch_ref.id;
+        self.branch_ref = Some(branch_ref);
+        self
+    }
+
+    /// Attach the generation-aware source branch identity.
+    pub fn with_source_branch_ref(mut self, source_branch_ref: BranchRef) -> Self {
+        self.source_branch_id = Some(source_branch_ref.id);
+        self.source_branch_ref = Some(source_branch_ref);
         self
     }
 }

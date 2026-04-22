@@ -9,13 +9,23 @@
 //! `merge_branches`, and friends — but the engine cannot depend on the graph
 //! crate directly (cycle: `strata-graph` already depends on `strata-engine`).
 //!
+//! ## Authority (post-B3)
+//!
+//! After the B3 cutover (see `docs/design/branching/b3-phasing-plan.md`),
+//! `BranchControlStore` is the authoritative source for fork + merge
+//! lineage and `find_merge_base`. The DAG written through these hooks is a
+//! derived **read-side projection** used only for `log` and `ancestors`
+//! ordered-history traversals. The store is rebuilt as the projection
+//! source on every primary open, so the DAG can be regenerated from
+//! authoritative state if it ever falls behind.
+//!
 //! ## Failure model
 //!
 //! Best-effort hooks log warnings on failure — they never propagate errors
-//! back through the engine, because the underlying branch operation has already
-//! committed by the time the hook fires. The DAG is a query-optimization index
-//! for `compute_merge_base_from_dag`; staleness degrades gracefully to
-//! engine-level fork-info lookup.
+//! back through the engine. Because the DAG is no longer authoritative for
+//! merge-base, hook failure does not corrupt lineage truth: the next open
+//! re-runs `BranchControlStore::rebuild_dag_projection` and the projection
+//! is restored from the store.
 //!
 //! ## Lifecycle
 //!

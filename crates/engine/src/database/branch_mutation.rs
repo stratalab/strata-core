@@ -856,8 +856,10 @@ mod tests {
         assert!(mutation.record_dag_event(&event).is_ok());
 
         // Commit should work
-        let observer_event =
-            super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
+        let observer_event = super::super::observers::BranchOpEvent::create(
+            strata_core::BranchRef::new(BranchId::new(), 0),
+            "test",
+        );
         mutation.commit(observer_event);
     }
 
@@ -876,8 +878,10 @@ mod tests {
         assert_eq!(hook.event_count(), 1);
 
         // Commit
-        let observer_event =
-            super::super::observers::BranchOpEvent::create(BranchId::new(), "test");
+        let observer_event = super::super::observers::BranchOpEvent::create(
+            strata_core::BranchRef::new(BranchId::new(), 0),
+            "test",
+        );
         mutation.commit(observer_event);
     }
 
