@@ -70,18 +70,22 @@ pub type BranchCreateHook = fn(db: &Arc<Database>, branch: &str);
 /// historical lineage is preserved).
 pub type BranchDeleteHook = fn(db: &Arc<Database>, branch: &str);
 
-/// Hook fired when `branch_ops::fork_branch` (or its `_with_metadata`
-/// variant) succeeds. The implementation should create a `fork` event node
-/// and the parent → event → child edges, recording `fork_version`,
-/// `message`, and `creator`.
+/// Hook fired when
+/// `BranchService::fork` / `BranchService::fork_with_options` succeeds.
+/// Internally this is dispatched from the crate-private
+/// `branch_ops::fork_branch_with_metadata` helper. The implementation
+/// should create a `fork` event node and the parent → event → child
+/// edges, recording `fork_version`, `message`, and `creator`.
 pub type BranchForkHook =
     fn(db: &Arc<Database>, info: &ForkInfo, message: Option<&str>, creator: Option<&str>);
 
-/// Hook fired when `branch_ops::merge_branches` (or its `_with_metadata`
-/// variant) succeeds. The implementation should create a `merge` event node
-/// and the source → event → target edges, recording `merge_version`,
-/// `keys_applied`, `spaces_merged`, the conflict count, the strategy,
-/// `message`, and `creator`.
+/// Hook fired when
+/// `BranchService::merge` / `BranchService::merge_with_options`
+/// succeeds. Internally this is dispatched from the crate-private
+/// `branch_ops::merge_branches_with_metadata` helper. The implementation
+/// should create a `merge` event node and the source → event → target
+/// edges, recording `merge_version`, `keys_applied`, `spaces_merged`,
+/// the conflict count, the strategy, `message`, and `creator`.
 pub type BranchMergeHook = fn(
     db: &Arc<Database>,
     info: &MergeInfo,
@@ -90,18 +94,23 @@ pub type BranchMergeHook = fn(
     creator: Option<&str>,
 );
 
-/// Hook fired when `branch_ops::revert_version_range` (or its `_with_metadata`
-/// variant) succeeds. The implementation should create a `revert` event node
-/// linked from the affected branch, recording `from_version`, `to_version`,
+/// Hook fired when `BranchService::revert` succeeds. Internally this is
+/// dispatched from the crate-private
+/// `branch_ops::revert_version_range_with_metadata` helper. The
+/// implementation should create a `revert` event node linked from the
+/// affected branch, recording `from_version`, `to_version`,
 /// `revert_version`, `keys_reverted`, `message`, and `creator`.
 pub type BranchRevertHook =
     fn(db: &Arc<Database>, info: &RevertInfo, message: Option<&str>, creator: Option<&str>);
 
-/// Hook fired when `branch_ops::cherry_pick_from_diff` or `cherry_pick_keys`
-/// succeeds. The implementation should create a `cherry_pick` event node and
-/// source → event → target edges, recording `keys_applied`, `keys_deleted`,
-/// and `cherry_pick_version`. Cherry-picks are auditable as a distinct event
-/// type from merges because they apply only a filtered subset of the diff.
+/// Hook fired when `BranchService::cherry_pick` or
+/// `BranchService::cherry_pick_from_diff` succeeds. Internally this is
+/// dispatched from the crate-private `branch_ops::cherry_pick_from_diff`
+/// or `branch_ops::cherry_pick_keys` helper. The implementation should
+/// create a `cherry_pick` event node and source → event → target edges,
+/// recording `keys_applied`, `keys_deleted`, and `cherry_pick_version`.
+/// Cherry-picks are auditable as a distinct event type from merges
+/// because they apply only a filtered subset of the diff.
 pub type BranchCherryPickHook =
     fn(db: &Arc<Database>, source: &str, target: &str, info: &CherryPickInfo);
 
@@ -114,13 +123,18 @@ pub struct BranchDagHooks {
     pub on_create: BranchCreateHook,
     /// Fired by `BranchIndex::delete_branch`.
     pub on_delete: BranchDeleteHook,
-    /// Fired by `branch_ops::fork_branch` (and the `_with_metadata` variant).
+    /// Fired by `BranchService::fork` via the crate-private
+    /// `branch_ops::fork_branch_with_metadata` helper.
     pub on_fork: BranchForkHook,
-    /// Fired by `branch_ops::merge_branches` (and the `_with_metadata` variant).
+    /// Fired by `BranchService::merge` via the crate-private
+    /// `branch_ops::merge_branches_with_metadata` helper.
     pub on_merge: BranchMergeHook,
-    /// Fired by `branch_ops::revert_version_range` (and the `_with_metadata` variant).
+    /// Fired by `BranchService::revert` via the crate-private
+    /// `branch_ops::revert_version_range_with_metadata` helper.
     pub on_revert: BranchRevertHook,
-    /// Fired by `branch_ops::cherry_pick_from_diff` and `cherry_pick_keys`.
+    /// Fired by `BranchService::cherry_pick` /
+    /// `BranchService::cherry_pick_from_diff` via the crate-private
+    /// `branch_ops::cherry_pick_from_diff` and `cherry_pick_keys` helpers.
     pub on_cherry_pick: BranchCherryPickHook,
 }
 
