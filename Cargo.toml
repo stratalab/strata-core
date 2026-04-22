@@ -191,7 +191,7 @@ strata-core = { path = "crates/core" }
 strata-storage = { path = "crates/storage" }
 strata-concurrency = { path = "crates/concurrency" }
 strata-durability = { path = "crates/durability" }
-strata-engine = { path = "crates/engine" }
+strata-engine = { path = "crates/engine", features = ["test-support"] }
 strata-graph = { path = "crates/graph" }
 strata-vector = { path = "crates/vector" }
 strata-intelligence = { path = "crates/intelligence" }

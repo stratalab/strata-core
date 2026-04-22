@@ -6,6 +6,8 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
+pub mod branching;
+
 use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, OpenOptions};
 use std::hash::{Hash, Hasher};
