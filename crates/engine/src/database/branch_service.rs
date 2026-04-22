@@ -16,6 +16,81 @@
 //! branches.fork("main", "feature-x")?;
 //! branches.merge("feature-x", "main", MergeOptions::default())?;
 //! ```
+//!
+//! ## Same-name serialization (B4.4)
+//!
+//! Concurrent mutations that target the same branch name — e.g. a
+//! `delete foo` racing a fresh `create foo`, a `fork x → foo` racing a
+//! `delete foo`, or two threads calling `fork ? → foo` at once — must
+//! never leave a half-state: every live record, active-pointer row,
+//! and DAG projection converges to a single consistent winner and the
+//! losers fail with a typed, retryable error. Same-name safety is
+//! enforced by **three interlocking mechanisms**, not by a per-name
+//! lifecycle lock. A change to any one of them weakens the whole model.
+//!
+//! 1. **Quiesce.** `BranchIndex::delete_branch_with_hook` calls
+//!    `db.mark_branch_deleting(branch_id)` (see
+//!    `primitives/branch/index.rs:536`) before the delete transaction
+//!    opens. New transactions attempting to start on the marked branch
+//!    are rejected with a typed error: a write that arrived after the
+//!    quiesce mark cannot land on the lifecycle instance that is about
+//!    to be tombstoned.
+//!
+//! 2. **Drain.** Immediately after the mark, the delete path acquires
+//!    `db.branch_commit_lock(branch_id)` (see
+//!    `primitives/branch/index.rs:542`). This lock is the same one
+//!    every commit path holds across `commit()`; holding it here
+//!    forces the delete to wait for any in-flight commit that started
+//!    before the quiesce mark to finish and release. Once the lock is
+//!    held, no new commit can acquire it — the mark rejects the next
+//!    caller after it takes the lock. Combined with (1), the target
+//!    branch's commit queue is strictly empty at the moment the delete
+//!    transaction opens.
+//!
+//! 3. **OCC on the active pointer.**
+//!    `BranchControlStore::mark_deleted_by_name` (see
+//!    `branch_ops/branch_control_store.rs:642`) reads
+//!    `__ctl__active__/<id>` **inside** the delete transaction, adding
+//!    that row to the transaction's read set. Any concurrent
+//!    `create` / fork-destination / recreate that advances or clears
+//!    the active pointer between the read and the delete's commit
+//!    aborts with `StrataError::Conflict`. This catches races the
+//!    per-branch mark + commit lock cannot see — e.g. two threads
+//!    allocating a fresh generation for the same *name* on two
+//!    different lifecycle instances — because the active-pointer row
+//!    is a name-scoped rendezvous point, not a branch-id-scoped one.
+//!
+//! ### Why not a per-name lifecycle lock
+//!
+//! The quiesce + drain + OCC stack already serialises every race the
+//! B4 scope targets (see `docs/design/branching/b4-phasing-plan.md`
+//! KD5). A `BranchLifecycleLock` keyed by branch name would add
+//! contention on the cross-lifecycle-instance name rendezvous — the
+//! single point in the system where a `foo@genN` tombstone and a
+//! fresh `foo@genN+1` allocation meet — without fixing a race the
+//! existing stack cannot already reject. B4.4 introduces such a lock
+//! **only if** the race harness in
+//! `tests/integration/branching_same_name_race.rs` reveals a failure
+//! case the stack above cannot serialise. As of B4.4 ship, the
+//! harness passes deterministically without it.
+//!
+//! The harness covers: concurrent delete + create, delete-then-create
+//! sequential (generation monotonicity), fork-destination race,
+//! double-fork-to-same-destination, and merge-target disappearance.
+//! Each invariant below is asserted end-to-end by at least one
+//! scenario:
+//!
+//! - At most one winner per race; all losers surface a typed error
+//!   (`BranchNotFoundByName` / `InvalidInput` duplicate /
+//!   `Conflict` / `BranchArchived`).
+//! - No orphaned lineage edges, DAG events, or observer notifications
+//!   from the losing side.
+//! - Generation monotonicity holds across interleavings: every
+//!   successful create on a tombstoned name observes a generation
+//!   strictly greater than every prior tombstone under that name.
+//! - Merge / fork never silently target a branch that has already
+//!   transitioned to `Deleted` — they either complete against the
+//!   pre-transition state or fail with a typed error.
 
 use std::sync::Arc;
 
@@ -1429,6 +1504,24 @@ impl BranchService {
     ) -> StrataResult<usize> {
         let store = BranchControlStore::new(self.db.clone());
         Ok(store.edges_for(branch)?.len())
+    }
+
+    /// TEST-ONLY: read the control record at a specific `BranchRef`
+    /// regardless of lifecycle state.
+    ///
+    /// The production `control_record(name)` helper returns only the
+    /// live record (via the active-pointer row). Tests that assert
+    /// tombstone preservation — e.g. B4.4's delete-recreate cycle
+    /// suite checking that each historical generation still has a
+    /// `Deleted` record persisted — need to reach the underlying
+    /// `BranchControlStore::get_record` by-ref path.
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn control_record_for_ref_for_test(
+        &self,
+        branch: BranchRef,
+    ) -> StrataResult<Option<BranchControlRecord>> {
+        BranchControlStore::new(self.db.clone()).get_record(branch)
     }
 
     // =========================================================================

@@ -1,6 +1,8 @@
-//! B4.2 — lifecycle persistence and same-name recreate across reopen.
+//! B4.2 / B4.4 — lifecycle persistence and same-name recreate across
+//! reopen.
 //!
-//! Locks the post-reopen half of the B4.2 coverage bar:
+//! Locks the post-reopen half of the B4.2 coverage bar plus B4.4's
+//! tombstone-preservation clauses:
 //!
 //! - An `Archived` lifecycle written before reopen is still observable
 //!   after reopen and continues to refuse writes with `BranchArchived`.
@@ -10,6 +12,10 @@
 //!   tombstoned generation.
 //! - The `next_generation` counter survives reopen so the monotonicity
 //!   holds after more than one cycle.
+//! - Four successive create → delete cycles within a single session
+//!   leave four distinct `Deleted` tombstones at generations 0, 1, 2,
+//!   3 with the live-record pointer advancing after each cycle
+//!   (B4.4).
 //! - Bundle import onto a tombstoned target ignores the bundle's
 //!   generation and allocates a fresh one (AD7), and that fresh
 //!   generation survives a subsequent reopen.
@@ -275,6 +281,167 @@ fn next_generation_counter_is_monotone_across_reopens() {
         .unwrap()
         .unwrap();
     assert_eq!(final_rec.branch.generation, 4);
+}
+
+// =============================================================================
+// B4.4 — tombstone preservation across in-session delete + recreate cycles
+// =============================================================================
+
+#[test]
+fn four_create_delete_cycles_leave_four_distinct_tombstones() {
+    // B4.4 closeout bar: within a single session (no reopens between
+    // cycles), four successive create → delete cycles on the same
+    // name produce four `Deleted` tombstones at generations 0, 1, 2,
+    // 3. After each cycle the live-record pointer has advanced to the
+    // next generation, and the prior generations' records remain
+    // persisted (not overwritten, not purged).
+    //
+    // This is the in-session companion to
+    // `next_generation_counter_is_monotone_across_reopens`, which
+    // drives the same counter through reopens. Together they bracket
+    // the invariant: tombstones survive both in-session drift and
+    // cold restarts.
+    let test_db = TestDb::new();
+    let branches = test_db.db.branches();
+
+    let mut tombstoned_refs: Vec<BranchRef> = Vec::new();
+
+    for cycle in 0..4u64 {
+        branches.create("cycled").unwrap();
+        let live = branches.control_record("cycled").unwrap().unwrap().branch;
+        assert_eq!(
+            live.generation, cycle,
+            "cycle {cycle}: live record must sit at the expected generation",
+        );
+
+        // Before the delete, every already-tombstoned generation must
+        // still be readable as `Deleted` — no earlier cycle's record
+        // can be overwritten by this cycle's create.
+        for (prior_cycle, prior_ref) in tombstoned_refs.iter().enumerate() {
+            let rec = branches
+                .control_record_for_ref_for_test(*prior_ref)
+                .unwrap()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "cycle {cycle}: tombstone for prior cycle {prior_cycle} at {prior_ref:?} must still exist",
+                    )
+                });
+            assert!(
+                matches!(
+                    rec.lifecycle,
+                    strata_core::branch::BranchLifecycleStatus::Deleted
+                ),
+                "cycle {cycle}: prior cycle {prior_cycle} record must be `Deleted`, got {:?}",
+                rec.lifecycle,
+            );
+            assert_eq!(rec.branch, *prior_ref);
+        }
+
+        branches.delete("cycled").unwrap();
+        tombstoned_refs.push(live);
+
+        // Post-delete: the live-record pointer is cleared.
+        assert!(
+            branches.control_record("cycled").unwrap().is_none(),
+            "cycle {cycle}: post-delete live record must be absent",
+        );
+        // The just-tombstoned generation is now a `Deleted` record.
+        let tombstoned = branches
+            .control_record_for_ref_for_test(live)
+            .unwrap()
+            .expect("tombstone record must exist by ref post-delete");
+        assert!(
+            matches!(
+                tombstoned.lifecycle,
+                strata_core::branch::BranchLifecycleStatus::Deleted
+            ),
+            "cycle {cycle}: just-deleted record must be `Deleted`, got {:?}",
+            tombstoned.lifecycle,
+        );
+    }
+
+    // Final proof: re-create one more time. The new generation must
+    // be 4 — the `next_generation` pointer advanced monotonically
+    // through every cycle without reusing any of the tombstoned refs.
+    branches.create("cycled").unwrap();
+    let after = branches.control_record("cycled").unwrap().unwrap().branch;
+    assert_eq!(
+        after.generation, 4,
+        "post-4-cycles create must land at gen 4, proving next_gen tracked every delete",
+    );
+    // And all four prior tombstones are still persisted.
+    for (cycle, prior_ref) in tombstoned_refs.iter().enumerate() {
+        let rec = branches
+            .control_record_for_ref_for_test(*prior_ref)
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.branch, *prior_ref);
+        assert!(matches!(
+            rec.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Deleted
+        ));
+        // Sanity: the cycle-N tombstone must be at generation N.
+        assert_eq!(rec.branch.generation, cycle as u64);
+    }
+}
+
+#[test]
+fn in_session_cycles_survive_reopen_without_collapsing_tombstones() {
+    // Companion to `four_create_delete_cycles_leave_four_distinct_tombstones`:
+    // run 3 in-session cycles, reopen, and assert every tombstone is
+    // still readable post-reopen. Guards against a hypothetical
+    // snapshot / WAL path that preserves only the most-recent
+    // generation's record (a silent tombstone compaction).
+    let mut test_db = TestDb::new();
+    let mut tombstoned_refs: Vec<BranchRef> = Vec::new();
+
+    for _ in 0..3u64 {
+        test_db.db.branches().create("survivor").unwrap();
+        let live = test_db
+            .db
+            .branches()
+            .control_record("survivor")
+            .unwrap()
+            .unwrap()
+            .branch;
+        test_db.db.branches().delete("survivor").unwrap();
+        tombstoned_refs.push(live);
+    }
+
+    test_db.reopen();
+
+    for (cycle, prior_ref) in tombstoned_refs.iter().enumerate() {
+        let rec = test_db
+            .db
+            .branches()
+            .control_record_for_ref_for_test(*prior_ref)
+            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("post-reopen: tombstone for cycle {cycle} at {prior_ref:?} must persist")
+            });
+        assert!(
+            matches!(
+                rec.lifecycle,
+                strata_core::branch::BranchLifecycleStatus::Deleted
+            ),
+            "post-reopen: cycle {cycle} record must be `Deleted`",
+        );
+    }
+
+    // A fresh create must still land strictly past the highest
+    // tombstoned gen.
+    test_db.db.branches().create("survivor").unwrap();
+    let after = test_db
+        .db
+        .branches()
+        .control_record("survivor")
+        .unwrap()
+        .unwrap()
+        .branch;
+    assert_eq!(
+        after.generation, 3,
+        "post-reopen create after 3 cycles must be gen 3",
+    );
 }
 
 // =============================================================================

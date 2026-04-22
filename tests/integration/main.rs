@@ -16,6 +16,7 @@ mod branching_generation_migration;
 mod branching_guardrails;
 mod branching_lifecycle_gate;
 mod branching_lifecycle_restart;
+mod branching_same_name_race;
 mod branching_merge_lineage_edges;
 mod branching_recreate_state_machine;
 mod merge_base_characterization;
