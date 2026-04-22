@@ -1359,6 +1359,77 @@ impl BranchService {
     }
 
     // =========================================================================
+    // Test-only helpers (B4.2)
+    // =========================================================================
+    //
+    // These are `#[doc(hidden)] pub` so the coverage-matrix tests in
+    // `tests/integration/branching_lifecycle_*` can synthesize lifecycle
+    // states no production path produces (most notably `Archived`) and
+    // observe the control-store's lineage surface without leaking
+    // `BranchControlStore` itself through the public API.
+    //
+    // The test hooks deliberately bypass the write gate — their whole
+    // purpose is to set up state the gate is then asserted against. Do
+    // not build product code on top of them.
+
+    /// TEST-ONLY: overwrite the live `BranchControlRecord` for `name` with
+    /// a new lifecycle status, bypassing the B4 write gate.
+    ///
+    /// Returns the `BranchRef` of the affected lifecycle instance (the
+    /// generation is unchanged). Refuses if the branch has no live record
+    /// — callers must create the branch first, then mutate its lifecycle.
+    ///
+    /// The update is atomic: the record row and the active-pointer row
+    /// are written inside one transaction, matching the same
+    /// `put_record` path the production create/delete paths take. When
+    /// `status = Deleted`, the active pointer is cleared so subsequent
+    /// `require_writable` / `require_visible` calls see a missing
+    /// lifecycle (B4/KD1).
+    ///
+    /// Caveat: flipping to `Deleted` via this helper writes the control
+    /// record but does NOT purge the legacy `BranchMetadata` the way
+    /// `BranchService::delete` does. A subsequent `create` on the same
+    /// name will observe leftover metadata and fail the
+    /// metadata/control-store consistency check. Use
+    /// `BranchService::delete` for Deleted state in realistic flows;
+    /// reserve this helper for `Archived` (or round-tripping back to
+    /// `Active` in tests that need idempotency).
+    #[doc(hidden)]
+    pub fn set_lifecycle_for_test(
+        &self,
+        name: &str,
+        status: BranchLifecycleStatus,
+    ) -> StrataResult<BranchRef> {
+        let store = BranchControlStore::new(self.db.clone());
+        let record = store
+            .find_active_by_name(name)?
+            .ok_or_else(|| StrataError::branch_not_found_by_name(name))?;
+        let branch_ref = record.branch;
+        self.db
+            .transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+                let mut updated = record.clone();
+                updated.lifecycle = status;
+                store.put_record(&updated, txn)
+            })?;
+        Ok(branch_ref)
+    }
+
+    /// TEST-ONLY: number of lineage edges whose `target` is the live
+    /// lifecycle instance of `name`.
+    ///
+    /// Returns `Ok(0)` when `name` has no live record. Used by the B4.2
+    /// coverage matrix to assert that a lifecycle-refused mutation
+    /// appends no lineage edge to the target.
+    #[doc(hidden)]
+    pub fn lineage_edge_count_for_test(&self, name: &str) -> StrataResult<usize> {
+        let store = BranchControlStore::new(self.db.clone());
+        let Some(record) = store.find_active_by_name(name)? else {
+            return Ok(0);
+        };
+        Ok(store.edges_for(record.branch)?.len())
+    }
+
+    // =========================================================================
     // Internal Helpers
     // =========================================================================
 
