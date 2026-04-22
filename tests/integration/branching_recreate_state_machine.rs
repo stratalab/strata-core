@@ -28,7 +28,9 @@ use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_core::branch::BranchLifecycleStatus;
+use strata_core::value::Value;
 use strata_core::{BranchId, BranchRef};
+use strata_engine::primitives::extensions::KVStoreExt;
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)
@@ -350,6 +352,78 @@ fn recreate_cycles_from_cross_thread_creates_allocate_monotonic_generations() {
         rec.branch.generation, 3,
         "three full cycles yield gen 3 regardless of which thread performed the create"
     );
+}
+
+#[test]
+fn stale_pre_delete_transaction_cannot_commit_into_recreated_generation() {
+    let test_db = TestDb::new();
+    let db = test_db.db.clone();
+    let branches = db.branches();
+
+    branches.create("guarded").unwrap();
+    let branch_id = resolve("guarded");
+    let mut txn = db.begin_transaction(branch_id).unwrap();
+    txn.kv_put("late-write", Value::Int(7)).unwrap();
+
+    branches.delete("guarded").unwrap();
+    branches.create("guarded").unwrap();
+
+    let err = txn.commit().unwrap_err();
+    assert!(
+        err.to_string().contains("lifecycle advanced")
+            || err.to_string().contains("no longer has active generation"),
+        "stale pre-delete txn must be rejected after recreate; got: {err}"
+    );
+
+    assert!(
+        test_db
+            .kv()
+            .get(&branch_id, "default", "late-write")
+            .unwrap()
+            .is_none(),
+        "stale transaction must not write into the recreated branch"
+    );
+    let rec = branches.control_record("guarded").unwrap().unwrap();
+    assert_eq!(rec.branch.generation, 1);
+}
+
+#[test]
+fn stale_pre_delete_transaction_cannot_commit_into_recreated_literal_default_branch() {
+    let test_db = TestDb::new();
+    let db = test_db.db.clone();
+    let branches = db.branches();
+
+    branches.create("default").unwrap();
+    let branch_id = resolve("default");
+    let mut txn = db.begin_transaction(branch_id).unwrap();
+    txn.kv_put("late-default-write", Value::Int(9)).unwrap();
+
+    branches.delete("default").unwrap();
+    branches.create("default").unwrap();
+
+    let err = txn.commit().unwrap_err();
+    // Literal "default" shares the nil BranchId with internal global
+    // branch-index operations, so its generation guard is lazily seeded via
+    // the active-pointer read key rather than the eager per-branch guard used
+    // by ordinary branches. The important invariant is rejection of the stale
+    // pre-delete transaction, not the exact error variant.
+    assert!(
+        err.to_string().contains("lifecycle advanced")
+            || err.to_string().contains("no longer has active generation")
+            || err.to_string().contains("Validation failed"),
+        "stale pre-delete txn on literal default branch must be rejected after recreate; got: {err}"
+    );
+
+    assert!(
+        test_db
+            .kv()
+            .get(&branch_id, "default", "late-default-write")
+            .unwrap()
+            .is_none(),
+        "stale transaction must not write into the recreated literal default branch"
+    );
+    let rec = branches.control_record("default").unwrap().unwrap();
+    assert_eq!(rec.branch.generation, 1);
 }
 
 // ============================================================================

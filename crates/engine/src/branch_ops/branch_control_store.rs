@@ -757,6 +757,37 @@ impl BranchControlStore {
         self.synthesize_from_legacy(name, id)
     }
 
+    /// Return the currently-active generation for `id`, if any.
+    ///
+    /// This is the branch-lifecycle guard used by transaction begin/commit:
+    /// transactions snapshot the active generation at start, then abort on
+    /// commit if the branch has been deleted or recreated in the meantime.
+    pub(crate) fn active_generation_for_id(&self, id: BranchId) -> StrataResult<Option<u64>> {
+        let ap_key = active_ptr_key(id);
+        match self
+            .db
+            .storage()
+            .get_versioned(&ap_key, CommitVersion::MAX)?
+        {
+            Some(v) => Ok(Some(decode_u64_value(&v.value)?)),
+            None => {
+                for (_k, v) in self
+                    .db
+                    .storage()
+                    .scan_prefix(&control_record_prefix_for_id(id), CommitVersion::MAX)?
+                {
+                    let rec: BranchControlRecord = from_stored_value(&v.value)?;
+                    if matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                        return Err(StrataError::corruption(format!(
+                            "control-store active pointer missing for branch id={id} with active record present"
+                        )));
+                    }
+                }
+                Ok(None)
+            }
+        }
+    }
+
     /// Synthesize a gen-0 `BranchControlRecord` for a follower running
     /// in legacy mode (AD5). Returns `None` if there is no legacy
     /// metadata for `name` either. Fork anchor is derived from storage.

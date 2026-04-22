@@ -257,11 +257,11 @@ impl BranchService {
         // B3.2: recreating a previously-deleted name must yield a
         // writable branch. `BranchIndex::delete_branch` intentionally
         // leaves the `is_branch_deleting` mark set to reject pre-delete
-        // in-flight commits (#1916); the mark must be cleared once a
-        // fresh lifecycle instance is in place so its own writes can
-        // commit. Stale in-flight commits from pre-delete txns that
-        // race with the fresh lifecycle instance will be addressed by
-        // the B4 generation-aware lifecycle write gate.
+        // in-flight commits (#1916); the mark is cleared once the fresh
+        // lifecycle instance is durable. Transactions now snapshot the
+        // branch's active generation at start and recheck it on commit,
+        // so stale pre-delete txns abort instead of writing into the new
+        // lifecycle instance.
         self.db.unmark_branch_deleting(&branch_id);
 
         // Rollback: delete the branch on DAG failure
@@ -307,13 +307,17 @@ impl BranchService {
         // the delete txn's read set → OCC fails it on conflict rather
         // than silently operating on a stale `BranchRef`.
         //
-        // `None` means no active record for this name (databases that
-        // skipped B3.1 migration, or the record was tombstoned between
-        // the BranchIndex metadata read and the hook); the delete
-        // degrades to the legacy-metadata-only path in that case.
+        // A missing active record here is corruption: the legacy metadata
+        // row exists (BranchIndex resolved it) but the authoritative
+        // control store has no active lifecycle for the same branch name.
         let delete_result = with_branch_dag_hooks_suppressed(|| {
             index.delete_branch_with_hook(name, |txn| {
-                store.mark_deleted_by_name(name, txn).map(|_| ())
+                match store.mark_deleted_by_name(name, txn)? {
+                    Some(_) => Ok(()),
+                    None => Err(StrataError::corruption(format!(
+                        "live branch '{name}' has legacy metadata but no active control record"
+                    ))),
+                }
             })
         });
 
@@ -422,34 +426,18 @@ impl BranchService {
         // Fork requires DAG — without it, lineage is lost
         mutation.require_dag_hook("fork")?;
 
-        // B3.2: resolve the parent's canonical `BranchRef` and preallocate
-        // the child's generation so the KV metadata transaction (inside
-        // `fork_branch_with_metadata`) can write the `BranchControlRecord`
-        // with a fork anchor pointing at the exact parent lifecycle
-        // instance.
-        //
-        // Known narrow race: a concurrent `delete` + `create` on the
-        // source name that completes between this lookup and fork's
-        // quiesce guard can leave `parent_ref` pointing at the prior
-        // generation while storage forks from the new one. The
-        // `is_branch_deleting` check inside the quiesce guard catches
-        // in-progress deletes; a completed delete+recreate escapes it
-        // because `unmark_branch_deleting` runs at the end of the new
-        // `create`. The B4 generation-aware lifecycle write gate will
-        // close this window structurally.
+        // B3.2: preallocate only the destination generation here. The
+        // source `BranchRef` must be resolved inside fork's quiesce
+        // guard so the fork anchor points at the exact lifecycle
+        // instance whose storage snapshot is being forked.
         let store = BranchControlStore::new(self.db.clone());
-        let parent_ref = store
-            .find_active_by_name(source)?
-            .map(|rec| rec.branch)
-            .ok_or_else(|| {
-                StrataError::invalid_input(format!("Source branch '{}' not found", source))
-            })?;
+        let branch_index = BranchIndex::new(self.db.clone());
 
         // Fail the duplicate-destination case before bumping the
         // next-generation counter; otherwise a spurious `fork` attempt to
         // an existing name burns a generation before `fork_branch_with_metadata`
         // ever observes the collision.
-        if store.find_active_by_name(destination)?.is_some() {
+        if branch_index.exists(destination)? || store.find_active_by_name(destination)?.is_some() {
             return Err(StrataError::invalid_input(format!(
                 "Destination branch '{}' already exists",
                 destination
@@ -471,7 +459,6 @@ impl BranchService {
                 destination,
                 options.message.as_deref(),
                 options.creator.as_deref(),
-                parent_ref,
                 dest_gen,
             )
         })?;

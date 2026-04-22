@@ -117,6 +117,25 @@ fn global_namespace() -> Arc<Namespace> {
     Arc::new(Namespace::for_branch(global_branch_id()))
 }
 
+/// Internal transaction branch id used for global branch-index metadata work.
+///
+/// Most delete operations can run on the global/nil branch because the target
+/// branch lock is distinct and the global branch id is convenient. Literal
+/// `"default"` is special: it resolves to the same nil BranchId used by
+/// global branch-index operations. In that case, using the nil branch for an
+/// internal metadata transaction can self-conflict with delete marks / commit
+/// locks that intentionally remain on the real branch while a lifecycle
+/// cutover is in progress. Route the internal metadata transaction through
+/// `_system_` instead while leaving the target delete mark/lock on the actual
+/// branch being created/deleted.
+fn admin_transaction_branch_id(target_branch_id: BranchId) -> BranchId {
+    if target_branch_id == global_branch_id() {
+        resolve_branch_name(crate::SYSTEM_BRANCH)
+    } else {
+        global_branch_id()
+    }
+}
+
 fn default_branch_marker_key() -> Key {
     Key::new_branch_with_id(global_namespace(), DEFAULT_BRANCH_MARKER_KEY)
 }
@@ -348,7 +367,9 @@ impl BranchIndex {
             ));
         }
 
-        let result = self.db.transaction(global_branch_id(), |txn| {
+        let txn_branch_id = admin_transaction_branch_id(resolve_branch_name(branch_id));
+        let result = self.db.transaction(txn_branch_id, |txn| {
+            txn.set_allow_cross_branch(true);
             self.create_branch_in_txn(branch_id, txn)
                 .and_then(|versioned| pre_commit(txn).map(|_| versioned))
         })?;
@@ -521,7 +542,8 @@ impl BranchIndex {
         let target_lock = self.db.branch_commit_lock(&executor_branch_id);
         let _target_guard = target_lock.lock();
 
-        let result = self.db.transaction(global_branch_id(), |txn| {
+        let txn_branch_id = admin_transaction_branch_id(executor_branch_id);
+        let result = self.db.transaction(txn_branch_id, |txn| {
             txn.set_allow_cross_branch(true);
             // Delete data from the executor's namespace
             Self::delete_namespace_data(txn, executor_branch_id)?;
@@ -587,10 +609,19 @@ impl BranchIndex {
 
         // Clean up storage-layer segments, manifest, and refcounts (#1702).
         // Must happen after logical deletion so in-progress reads see the
-        // deletion before files disappear. clear_branch_storage also
-        // retries directory removal after gc_orphan_segments as a safety
-        // net for anything drain() may have missed.
-        self.db.clear_branch_storage(&executor_branch_id);
+        // deletion before files disappear.
+        //
+        // Literal `"default"` is special: its canonical BranchId is the same
+        // nil branch id used by global branch-index/control-store metadata.
+        // The delete transaction above already tombstones user primitive rows
+        // in that namespace. A physical `clear_branch_storage(nil)` would also
+        // wipe the branch-control ledger itself (next-generation counters,
+        // active pointers, metadata rows for other branches), breaking
+        // generation-safe recreate. Keep nil/default deletion logical-only at
+        // the storage layer; later compaction/GC will reclaim the user data.
+        if executor_branch_id != global_branch_id() {
+            self.db.clear_branch_storage(&executor_branch_id);
+        }
 
         let subsystems = self.db.installed_subsystems();
         for subsystem in subsystems.iter() {

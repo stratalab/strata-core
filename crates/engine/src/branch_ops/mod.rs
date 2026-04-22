@@ -747,8 +747,8 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 /// human-readable message and creator that flow into the branch DAG event
 /// for audit / lineage queries.
 pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
-    let (parent_ref, dest_gen) = resolve_fork_lineage(db, source, destination)?;
-    fork_branch_with_metadata(db, source, destination, None, None, parent_ref, dest_gen)
+    let dest_gen = resolve_fork_generation(db, destination)?;
+    fork_branch_with_metadata(db, source, destination, None, None, dest_gen)
 }
 
 /// Same as [`fork_branch`] but records `message` and `creator` on the
@@ -759,20 +759,19 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
 /// flows through to the DAG. Engine-direct callers (tests, internal
 /// subsystems) typically use the no-metadata [`fork_branch`] wrapper.
 ///
-/// `parent_ref` and `dest_gen` are resolved by the caller (see
-/// [`resolve_fork_lineage`]) and threaded through so the KV metadata
-/// transaction can write the new `BranchControlRecord` atomically with
-/// the legacy `BranchMetadata` row (B3.2, AD6). Storage-fork-first
-/// ordering is preserved: the storage fork commits before the KV txn,
-/// so a crash between them leaves harmless orphan storage (refcounts
-/// rebuild from manifests on recovery).
+/// `dest_gen` is preallocated by the caller (see
+/// [`resolve_fork_generation`]). The source `BranchRef` is resolved
+/// inside fork's quiesce guard so the control-store fork anchor points
+/// at the same lifecycle instance whose storage snapshot is being
+/// forked. Storage-fork-first ordering is preserved: the storage fork
+/// commits before the KV txn, so a crash between them leaves harmless
+/// orphan storage (refcounts rebuild from manifests on recovery).
 pub fn fork_branch_with_metadata(
     db: &Arc<Database>,
     source: &str,
     destination: &str,
     message: Option<&str>,
     creator: Option<&str>,
-    parent_ref: BranchRef,
     dest_gen: BranchGeneration,
 ) -> StrataResult<ForkInfo> {
     let branch_index = BranchIndex::new(db.clone());
@@ -845,7 +844,7 @@ pub fn fork_branch_with_metadata(
     // commit() acquires quiesce.read() → branch_commit_lock, so nesting
     // branch_commit_lock inside quiesce.write() would invert the lock order
     // and deadlock with concurrent commits on the source branch.
-    let (fork_version, _segments_shared) = {
+    let (parent_ref, fork_version, _segments_shared) = {
         let _quiesce_guard = db.quiesce_commits();
         if db.is_branch_deleting(&source_id) {
             return Err(StrataError::invalid_input(format!(
@@ -853,9 +852,14 @@ pub fn fork_branch_with_metadata(
                 source
             )));
         }
-        storage
+        let parent_ref = match control_store.find_active_by_name(source)? {
+            Some(rec) => rec.branch,
+            None => BranchRef::new(source_id, 0),
+        };
+        let (fork_version, shared) = storage
             .fork_branch(&source_id, &dest_id)
-            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?
+            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?;
+        (parent_ref, fork_version, shared)
     };
 
     // 5. Create destination branch in KV metadata (WAL-protected) AND
@@ -914,31 +918,22 @@ pub fn fork_branch_with_metadata(
     Ok(info)
 }
 
-/// Resolve the parent `BranchRef` and allocate the child's generation for
-/// a fork, using the `BranchControlStore` as the authority.
+/// Allocate the child's next generation for a fork.
 ///
-/// The parent ref comes from `find_active_by_name(source)`; if the store
-/// has no active record for the source (e.g. a fresh cache database that
-/// hasn't routed creates through `BranchService`), the parent is
-/// synthesized at gen 0 so low-level callers (`fork_branch`, test
-/// fixtures) still work. `dest_gen` is allocated via a dedicated tiny
-/// transaction so the counter bump is durable before the KV metadata
-/// transaction runs.
+/// The source `BranchRef` is resolved later, under fork's quiesce guard,
+/// so the fork anchor is derived from the exact lifecycle instance whose
+/// storage snapshot is being copied.
 ///
 /// Checks the destination up-front before bumping the counter so a
 /// trivially-failing fork (duplicate destination) does not leak a
 /// generation from the monotonic counter.
-pub(crate) fn resolve_fork_lineage(
+pub(crate) fn resolve_fork_generation(
     db: &Arc<Database>,
-    source: &str,
     destination: &str,
-) -> StrataResult<(BranchRef, BranchGeneration)> {
+) -> StrataResult<BranchGeneration> {
     let store = BranchControlStore::new(db.clone());
-    let parent_ref = match store.find_active_by_name(source)? {
-        Some(rec) => rec.branch,
-        None => BranchRef::new(resolve_branch_name(source), 0),
-    };
-    if store.find_active_by_name(destination)?.is_some() {
+    let branch_index = BranchIndex::new(db.clone());
+    if branch_index.exists(destination)? || store.find_active_by_name(destination)?.is_some() {
         return Err(StrataError::invalid_input(format!(
             "Destination branch '{}' already exists",
             destination
@@ -948,7 +943,7 @@ pub(crate) fn resolve_fork_lineage(
     let dest_gen = db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
         store.next_generation(dest_id, txn)
     })?;
-    Ok((parent_ref, dest_gen))
+    Ok(dest_gen)
 }
 
 // =============================================================================
