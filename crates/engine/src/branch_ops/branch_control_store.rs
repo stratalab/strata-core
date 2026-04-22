@@ -1310,7 +1310,11 @@ impl BranchControlStore {
                         // event — legacy migration writes both an anchor
                         // and a Fork edge, and we only want one Fork node
                         // in the projection per fork.
-                        if fork_anchors_emitted.contains(&(edge.target, source, edge.commit_version)) {
+                        if fork_anchors_emitted.contains(&(
+                            edge.target,
+                            source,
+                            edge.commit_version,
+                        )) {
                             continue;
                         }
                         let source_name = names.get(&source).cloned().ok_or_else(|| {

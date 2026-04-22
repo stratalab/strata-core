@@ -7275,8 +7275,8 @@ fn dag_records_branch_create_and_delete() {
 
     // After create, branch should exist in DAG with status=active and a
     // populated created_at timestamp.
-    let node = dag_query_node(&test_db, &p, "dag_lifecycle")
-        .expect("branch node missing after create");
+    let node =
+        dag_query_node(&test_db, &p, "dag_lifecycle").expect("branch node missing after create");
     assert_eq!(node.object_type.as_deref(), Some("branch"));
     let props = node.properties.expect("branch node has no properties");
     assert_eq!(props.get("status").and_then(|v| v.as_str()), Some("active"));
