@@ -1497,54 +1497,43 @@ pub enum MergeActionKind {
 
 /// Compute the merge base between two branches.
 ///
-/// Priority:
-/// 1. `merge_base_override` from the executor (DAG-derived, covers repeated merges
-///    and materialized branches).
-/// 2. Storage-level fork info from `InheritedLayer` (fast path for COW branches).
-/// 3. None (unrelated branches → two-way fallback).
+/// B3.3 cutover: delegates to [`BranchControlStore::find_merge_base`].
+/// The store's lineage edges are the single authority — no caller
+/// override, no storage-fork fallback, no DAG fallback. This matches
+/// the [`crate::database::BranchService::merge_base`] inspection path so
+/// both `merge` apply and `merge_base` inspection read from the same
+/// lineage (see B3.3 done-when in
+/// `docs/design/branching/b3-phasing-plan.md`).
 fn compute_merge_base(
     db: &Arc<Database>,
     source_id: BranchId,
     target_id: BranchId,
-    merge_base_override: Option<(BranchId, u64)>,
-) -> Option<MergeBase> {
-    // 1. Executor-provided override (from DAG)
-    if let Some((branch_id, version)) = merge_base_override {
-        return Some(MergeBase {
-            branch_id,
-            version: CommitVersion(version),
-        });
-    }
+) -> StrataResult<Option<MergeBase>> {
+    let store = BranchControlStore::new(db.clone());
+    let Some(source_gen) = store.active_generation_for_id(source_id)? else {
+        return Ok(None);
+    };
+    let Some(target_gen) = store.active_generation_for_id(target_id)? else {
+        return Ok(None);
+    };
+    let source_ref = BranchRef::new(source_id, source_gen);
+    let target_ref = BranchRef::new(target_id, target_gen);
 
-    // 2. Check storage for fork relationship
-    let storage = db.storage();
+    let Some(point) = store.find_merge_base(source_ref, target_ref)? else {
+        return Ok(None);
+    };
 
-    // Case A: source was forked from target (child merging into parent)
-    if let Some((parent_id, fork_version)) = storage.get_fork_info(&source_id) {
-        if parent_id == target_id {
-            // Ancestor is the target (parent) at fork_version.
-            // The child inherited from the parent at this version, so reading
-            // the child at fork_version returns the same data as the parent
-            // at fork_version (via inherited layers).
-            return Some(MergeBase {
-                branch_id: source_id,
-                version: fork_version,
-            });
-        }
-    }
-
-    // Case B: target was forked from source (parent merging into child)
-    if let Some((parent_id, fork_version)) = storage.get_fork_info(&target_id) {
-        if parent_id == source_id {
-            return Some(MergeBase {
-                branch_id: target_id,
-                version: fork_version,
-            });
-        }
-    }
-
-    // No relationship found
-    None
+    // Apply-path reads are keyed by `BranchId` + version via
+    // `list_by_type_at_version`. The `BranchRef` generation is preserved
+    // on the stored edge and surfaced by `BranchControlStore` queries;
+    // here we collapse back to a plain `MergeBase` because the ancestor
+    // read path does not need generation disambiguation (same-name
+    // recreate yields a new id-equivalent generation, and storage reads
+    // are keyed by `BranchId` regardless).
+    Ok(Some(MergeBase {
+        branch_id: point.branch.id,
+        version: point.commit_version,
+    }))
 }
 
 /// Per-(space, type_tag) entry slices gathered for a three-way merge.
@@ -1909,9 +1898,8 @@ fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id:
 /// between the branches, then classifies each key using a 14-case decision matrix.
 /// Correctly handles delete propagation and preserves target-only changes.
 ///
-/// The `merge_base_override` parameter is populated by the executor from DAG data,
-/// covering repeated merges and materialized branches where storage-level fork
-/// info is no longer available.
+/// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] — no
+/// caller-supplied override.
 ///
 /// # Errors
 ///
@@ -1928,17 +1916,8 @@ pub fn merge_branches(
     source: &str,
     target: &str,
     strategy: MergeStrategy,
-    merge_base_override: Option<(BranchId, u64)>,
 ) -> StrataResult<MergeInfo> {
-    merge_branches_with_metadata(
-        db,
-        source,
-        target,
-        strategy,
-        merge_base_override,
-        None,
-        None,
-    )
+    merge_branches_with_metadata(db, source, target, strategy, None, None)
 }
 
 /// Same as [`merge_branches`] but records `message` and `creator` on the
@@ -1946,23 +1925,18 @@ pub fn merge_branches(
 ///
 /// The executor's `branch_merge` handler calls this variant so that
 /// user-supplied audit metadata flows through to the DAG.
-#[allow(clippy::too_many_arguments)]
 pub fn merge_branches_with_metadata(
     db: &Arc<Database>,
     source: &str,
     target: &str,
     strategy: MergeStrategy,
-    merge_base_override: Option<(BranchId, u64)>,
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<MergeInfo> {
     let source_id = resolve_and_verify(db, source)?;
     let target_id = resolve_and_verify(db, target)?;
 
-    // Compute merge base
-    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
-
-    let merge_base = match merge_base {
+    let merge_base = match compute_merge_base(db, source_id, target_id)? {
         Some(mb) => mb,
         None => {
             return Err(StrataError::invalid_input(format!(
@@ -2181,9 +2155,8 @@ pub fn merge_branches_with_metadata(
 /// without applying any merge strategy. This is useful for inspection
 /// before deciding to merge.
 ///
-/// The `merge_base_override` parameter is populated by the executor from DAG data,
-/// covering repeated merges and materialized branches where storage-level fork
-/// info is no longer available.
+/// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] —
+/// no caller-supplied override.
 ///
 /// # Errors
 ///
@@ -2193,15 +2166,11 @@ pub fn diff_three_way(
     db: &Arc<Database>,
     source: &str,
     target: &str,
-    merge_base_override: Option<(BranchId, u64)>,
 ) -> StrataResult<ThreeWayDiffResult> {
     let source_id = resolve_and_verify(db, source)?;
     let target_id = resolve_and_verify(db, target)?;
 
-    // Compute merge base
-    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
-
-    let merge_base = match merge_base {
+    let merge_base = match compute_merge_base(db, source_id, target_id)? {
         Some(mb) => mb,
         None => {
             return Err(StrataError::invalid_input(format!(
@@ -2304,9 +2273,8 @@ pub fn diff_three_way(
 ///
 /// Returns `None` if the branches have no fork or merge relationship.
 ///
-/// The `merge_base_override` parameter is populated by the executor from DAG data,
-/// covering repeated merges and materialized branches where storage-level fork
-/// info is no longer available.
+/// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] —
+/// no caller-supplied override.
 ///
 /// # Errors
 ///
@@ -2315,14 +2283,11 @@ pub fn get_merge_base(
     db: &Arc<Database>,
     source: &str,
     target: &str,
-    merge_base_override: Option<(BranchId, u64)>,
 ) -> StrataResult<Option<MergeBaseInfo>> {
     let source_id = resolve_and_verify(db, source)?;
     let target_id = resolve_and_verify(db, target)?;
 
-    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
-
-    match merge_base {
+    match compute_merge_base(db, source_id, target_id)? {
         None => Ok(None),
         Some(mb) => {
             // Resolve merge base branch_id back to a name
@@ -3099,20 +3064,19 @@ fn check_graph_action_atomicity(
 ///
 /// This is a selective merge: computes the three-way diff between source and
 /// target, then applies only the changes that match the filter criteria.
+///
+/// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] —
+/// no caller-supplied override.
 pub fn cherry_pick_from_diff(
     db: &Arc<Database>,
     source: &str,
     target: &str,
     filter: CherryPickFilter,
-    merge_base_override: Option<(BranchId, u64)>,
 ) -> StrataResult<CherryPickInfo> {
     let source_id = resolve_and_verify(db, source)?;
     let target_id = resolve_and_verify(db, target)?;
 
-    // Compute merge base
-    let merge_base = compute_merge_base(db, source_id, target_id, merge_base_override);
-
-    let merge_base = match merge_base {
+    let merge_base = match compute_merge_base(db, source_id, target_id)? {
         Some(mb) => mb,
         None => {
             return Err(StrataError::invalid_input(format!(
@@ -3364,8 +3328,10 @@ mod tests {
 
     fn setup_with_branch(name: &str) -> (TempDir, Arc<Database>) {
         let (temp_dir, db) = setup();
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch(name).unwrap();
+        // Go through BranchService so the canonical BranchControlRecord
+        // is written alongside the legacy metadata — merge_base reads
+        // from the control store after B3.3.
+        db.branches().create(name).unwrap();
         (temp_dir, db)
     }
 
@@ -3469,7 +3435,7 @@ mod tests {
     fn test_fork_destination_exists() {
         let (_temp, db) = setup_with_branch("source");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("dest").unwrap();
+        db.branches().create("dest").unwrap();
 
         let result = fork_branch(&db, "source", "dest");
         assert!(result.is_err());
@@ -3555,7 +3521,7 @@ mod tests {
     fn test_diff_empty_branches() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         let diff = diff_branches(&db, "a", "b").unwrap();
         assert_eq!(diff.summary.total_added, 0);
@@ -3567,7 +3533,7 @@ mod tests {
     fn test_diff_one_populated() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "k1", Value::Int(1));
         write_kv(&db, "a", "default", "k2", Value::Int(2));
@@ -3588,7 +3554,7 @@ mod tests {
     fn test_diff_modifications() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "shared", Value::Int(1));
         write_kv(&db, "b", "default", "shared", Value::Int(2));
@@ -3610,7 +3576,7 @@ mod tests {
     fn test_diff_multi_space() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         let space_index = SpaceIndex::new(db.clone());
         let id_a = resolve_branch_name("a");
@@ -3657,7 +3623,7 @@ mod tests {
         );
 
         let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert!(
             info.keys_applied >= 2,
             "shared (conflict resolved) + new_key"
@@ -3684,7 +3650,7 @@ mod tests {
         write_kv(&db, "target", "default", "target_key", Value::Int(1));
         write_kv(&db, "source", "default", "source_key", Value::Int(2));
 
-        let info = merge_branches(&db, "source", "target", MergeStrategy::Strict, None).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::Strict).unwrap();
         assert!(info.keys_applied >= 1);
 
         assert_eq!(
@@ -3708,7 +3674,7 @@ mod tests {
         write_kv(&db, "target", "default", "shared", Value::Int(10));
         write_kv(&db, "source", "default", "shared", Value::Int(2));
 
-        let result = merge_branches(&db, "source", "target", MergeStrategy::Strict, None);
+        let result = merge_branches(&db, "source", "target", MergeStrategy::Strict);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3734,7 +3700,7 @@ mod tests {
         write_kv(&db, "target", "default", "target_only", Value::Int(1));
         write_kv(&db, "source", "default", "source_only", Value::Int(2));
 
-        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
 
         // Both keys should exist on target
         assert_eq!(
@@ -3769,7 +3735,7 @@ mod tests {
         let versions_before = history_before.len();
 
         // Merge (both modified from ancestor=1 → conflict, LWW takes source=99)
-        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+        merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
 
         // Check version history after merge — should have one more version
         let ns2 = Arc::new(Namespace::for_branch_space(target_id, "default"));
@@ -3813,7 +3779,7 @@ mod tests {
 
         // Merge source into target
         let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert_eq!(info.keys_applied, 1, "Binary key entry should be merged");
 
         // Verify the binary key data is in target
@@ -3847,7 +3813,7 @@ mod tests {
         );
 
         let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
 
         // Should report the conflict even though LWW resolved it
         assert_eq!(info.conflicts.len(), 1, "Should report 1 conflict");
@@ -3867,7 +3833,7 @@ mod tests {
         write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
 
         let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_applied >= 1);
         assert_eq!(
             read_kv(&db, "target", "default", "k1"),
@@ -3880,12 +3846,12 @@ mod tests {
         // Two branches with no fork relationship should fail
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "k1", Value::Int(1));
         write_kv(&db, "b", "default", "k2", Value::Int(2));
 
-        let result = merge_branches(&db, "a", "b", MergeStrategy::LastWriterWins, None);
+        let result = merge_branches(&db, "a", "b", MergeStrategy::LastWriterWins);
         assert!(result.is_err(), "Merging unrelated branches should error");
         let err = result.unwrap_err().to_string();
         assert!(
@@ -3903,7 +3869,7 @@ mod tests {
     fn test_diff_filter_by_primitive_kv_only() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         // Write KV and JSON data to branch A only
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
@@ -3936,7 +3902,7 @@ mod tests {
     fn test_diff_filter_by_multiple_primitives() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
         write_json(&db, "a", "default", "j1", Value::String("doc".into()));
@@ -3962,7 +3928,7 @@ mod tests {
     fn test_diff_filter_by_space() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         let space_index = SpaceIndex::new(db.clone());
         let id_a = resolve_branch_name("a");
@@ -4017,7 +3983,7 @@ mod tests {
     fn test_diff_filter_combined_primitive_and_space() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         let space_index = SpaceIndex::new(db.clone());
         let id_a = resolve_branch_name("a");
@@ -4050,7 +4016,7 @@ mod tests {
     fn test_diff_filter_empty_primitives_returns_empty() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "k1", Value::Int(1));
 
@@ -4077,7 +4043,7 @@ mod tests {
     fn test_diff_filter_nonexistent_space_returns_empty() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "k1", Value::Int(1));
 
@@ -4103,7 +4069,7 @@ mod tests {
     fn test_diff_as_of_sees_old_values() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         // Write initial value to A
         write_kv(&db, "a", "default", "key", Value::Int(1));
@@ -4151,7 +4117,7 @@ mod tests {
     fn test_diff_as_of_before_any_writes_returns_empty() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         // Record a timestamp before any data writes
         let before_ts = std::time::SystemTime::now()
@@ -4182,7 +4148,7 @@ mod tests {
     fn test_diff_as_of_with_filter() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         // Write KV data
         write_kv(&db, "a", "default", "kv1", Value::Int(1));
@@ -4217,7 +4183,7 @@ mod tests {
         // produces the same result as diff_branches
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         write_kv(&db, "a", "default", "k1", Value::Int(1));
         write_kv(&db, "b", "default", "k1", Value::Int(2));
@@ -4234,7 +4200,7 @@ mod tests {
         // Verify that complex Value types round-trip through diff correctly
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
         let complex_val = Value::Array(Box::new(vec![
             Value::Int(1),
@@ -4293,16 +4259,16 @@ mod tests {
         // Write to source
         write_kv(&db, "source", "default", "shared", Value::Int(1));
 
-        // Fork — capture fork_version for later (needed after materialization)
-        let fork_info = fork_branch(&db, "source", "dest").unwrap();
-        let fork_version = fork_info.fork_version.unwrap();
-        let dest_id = resolve_branch_name("dest");
+        // Fork — control-store `ForkAnchor` persists after materialization
+        // so merge_base survives storage-layer flattening.
+        let _fork_info = fork_branch(&db, "source", "dest").unwrap();
 
         // Write different data to dest
         write_kv(&db, "dest", "default", "dest_only", Value::Int(42));
 
-        // Materialize dest — this removes inherited layers, so storage
-        // can no longer determine the fork relationship
+        // Materialize dest — this removes inherited layers from storage,
+        // but the `BranchControlStore` fork anchor survives so
+        // merge_base is still computable.
         let mat_info = materialize_branch(&db, "dest").unwrap();
         assert!(mat_info.layers_collapsed > 0);
 
@@ -4313,16 +4279,12 @@ mod tests {
             "dest_only should show as added in dest"
         );
 
-        // Merge dest → source: must pass merge base explicitly since inherited
-        // layers are gone (in production, the executor reads this from the DAG)
-        let merge_info = merge_branches(
-            &db,
-            "dest",
-            "source",
-            MergeStrategy::LastWriterWins,
-            Some((dest_id, fork_version)),
-        )
-        .unwrap();
+        // Merge dest → source: B3.3 derives merge base from the control
+        // store's persisted `ForkAnchor`, so the merge succeeds without
+        // a caller-supplied override even though storage's fork info
+        // was flattened by materialization.
+        let merge_info =
+            merge_branches(&db, "dest", "source", MergeStrategy::LastWriterWins).unwrap();
         assert!(merge_info.keys_applied > 0);
 
         // Source should now have dest_only
@@ -4652,7 +4614,7 @@ mod tests {
         {
             let db = Database::open(temp_dir.path()).unwrap();
             let branch_index = BranchIndex::new(db.clone());
-            branch_index.create_branch("main").unwrap();
+            db.branches().create("main").unwrap();
 
             write_kv(
                 &db,
@@ -4701,7 +4663,7 @@ mod tests {
         // Use a cache (in-memory) database where storage fork must fail
         let db = Database::cache().unwrap();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("source").unwrap();
+        db.branches().create("source").unwrap();
 
         write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
 
@@ -4732,7 +4694,7 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let db = Database::open(temp_dir.path()).unwrap();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("main").unwrap();
+        db.branches().create("main").unwrap();
 
         write_kv(
             &db,
@@ -4953,7 +4915,7 @@ mod tests {
 
         // Merge child → parent
         let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_deleted >= 1, "should have deleted at least 1 key");
 
         // Verify: "a" still exists, "b" is gone
@@ -4975,7 +4937,7 @@ mod tests {
 
         // Child does nothing. Merge child → parent.
         let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert_eq!(info.keys_deleted, 0, "nothing should be deleted");
 
         // Verify: both "a" and "b" still exist on parent
@@ -4999,7 +4961,7 @@ mod tests {
         write_kv(&db, "child", "default", "b", Value::Int(20));
 
         // Merge child → parent
-        merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+        merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
 
         // Verify: a=10 (parent's change preserved), b=20 (child's change applied), c=3 (unchanged)
         assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(10)));
@@ -5021,7 +4983,7 @@ mod tests {
         write_kv(&db, "child", "default", "a", Value::Int(20));
 
         // Strict merge should fail
-        let result = merge_branches(&db, "child", "parent", MergeStrategy::Strict, None);
+        let result = merge_branches(&db, "child", "parent", MergeStrategy::Strict);
         assert!(result.is_err(), "Strict merge should fail on conflict");
 
         // Parent's value should be unchanged
@@ -5029,7 +4991,7 @@ mod tests {
 
         // LWW merge should succeed with source's value
         let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_applied >= 1);
         assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(20)));
     }
@@ -5043,7 +5005,7 @@ mod tests {
         write_kv(&db, "child", "default", "b", Value::Int(2));
 
         let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins, None).unwrap();
+            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(
             info.merge_version.is_some(),
             "merge should return a version"
@@ -5144,7 +5106,7 @@ mod tests {
         write_kv(&db, "parent", "default", "a", Value::Int(10));
         write_kv(&db, "child", "default", "b", Value::Int(20));
 
-        let result = diff_three_way(&db, "child", "parent", None).unwrap();
+        let result = diff_three_way(&db, "child", "parent").unwrap();
 
         // Should see: a=TargetChanged, b=SourceChanged
         let a_entry = result.entries.iter().find(|e| e.key == "a").unwrap();
@@ -5164,7 +5126,7 @@ mod tests {
 
         let fork_info = fork_branch(&db, "parent", "child").unwrap();
 
-        let base = get_merge_base(&db, "child", "parent", None).unwrap();
+        let base = get_merge_base(&db, "child", "parent").unwrap();
         assert!(base.is_some());
         let base = base.unwrap();
         assert_eq!(base.version, CommitVersion(fork_info.fork_version.unwrap()));
@@ -5174,9 +5136,9 @@ mod tests {
     fn test_get_merge_base_unrelated() {
         let (_temp, db) = setup_with_branch("a");
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("b").unwrap();
+        db.branches().create("b").unwrap();
 
-        let base = get_merge_base(&db, "a", "b", None).unwrap();
+        let base = get_merge_base(&db, "a", "b").unwrap();
         assert!(base.is_none());
     }
 
@@ -5311,7 +5273,7 @@ mod tests {
             spaces: None,
             primitives: None,
         };
-        let info = cherry_pick_from_diff(&db, "child", "parent", filter, None).unwrap();
+        let info = cherry_pick_from_diff(&db, "child", "parent", filter).unwrap();
         assert_eq!(info.keys_applied, 1);
 
         // Only "b" should be changed
@@ -5655,7 +5617,7 @@ mod tests {
 
             barrier.wait();
             let result =
-                merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins, None);
+                merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins);
             writer.join().unwrap();
 
             // Both merge and concurrent write have committed at this point.
@@ -5752,8 +5714,7 @@ mod tests {
                     "source1",
                     "target",
                     MergeStrategy::LastWriterWins,
-                    None,
-                )
+                    )
             });
             let t2 = thread::spawn(move || {
                 b2.wait();
@@ -5762,8 +5723,7 @@ mod tests {
                     "source2",
                     "target",
                     MergeStrategy::LastWriterWins,
-                    None,
-                )
+                    )
             });
 
             let r1 = t1.join().unwrap();
@@ -5807,8 +5767,8 @@ mod tests {
         // concurrent writes don't produce an inconsistent diff.
         let (_temp, db) = setup();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("snap-a").unwrap();
-        branch_index.create_branch("snap-b").unwrap();
+        db.branches().create("snap-a").unwrap();
+        db.branches().create("snap-b").unwrap();
 
         // Write different data to each branch
         write_kv(&db, "snap-a", "default", "shared", Value::Int(1));

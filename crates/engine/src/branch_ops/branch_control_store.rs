@@ -931,15 +931,20 @@ impl BranchControlStore {
     /// Compute the merge base of two lifecycle instances as a
     /// `MergeBasePoint` per AD8.
     ///
-    /// Semantics (B3.1 subset, extended in B3.3):
+    /// Algorithm (B3.3 point semantics):
     ///
-    /// - If one branch is the other's fork ancestor, returns the fork
-    ///   anchor point.
-    /// - If both share a common fork ancestor, returns that ancestor at
-    ///   `min(fork_point_from_a, fork_point_from_b)`.
-    /// - If either branch has a merge edge whose `merge_base` records a
-    ///   later shared point, returns the most recent such point
-    ///   (repeated-merge advancement).
+    /// 1. Build each branch's ancestor chain — its own history expanded
+    ///    through every `Fork → parent` anchor and every `Merge → source`
+    ///    edge, with the commit version at which each event made the
+    ///    ancestor visible on this branch.
+    /// 2. Intersect the two chains on `BranchRef`; for each shared
+    ///    `BranchRef`, the shared visibility point is
+    ///    `min(a_commit_version, b_commit_version)`.
+    /// 3. Return the candidate with the largest shared commit version —
+    ///    the most recent shared point. Repeated merges between the same
+    ///    two generations advance the base because each merge adds a
+    ///    fresh point to the target's chain.
+    ///
     /// - Returns `None` if the branches are unrelated.
     /// - Returns `Err(BranchLineageUnavailable)` on an unmigrated
     ///   follower (AD5).
@@ -959,7 +964,9 @@ impl BranchControlStore {
         let chain_a = self.ancestor_chain(a)?;
         let chain_b = self.ancestor_chain(b)?;
 
-        // Build a "how far can A see this branch" map.
+        // Build a "how far can A see this branch" map. Repeated points
+        // for the same branch (e.g. multiple merges from the same source)
+        // collapse to the most recent visibility.
         let mut reach_a: HashMap<BranchRef, CommitVersion> = HashMap::new();
         for point in &chain_a {
             reach_a
@@ -972,47 +979,51 @@ impl BranchControlStore {
                 .or_insert(point.commit_version);
         }
 
-        // Search B's chain for a `BranchRef` A can also see; take
-        // min(reach_a, reach_b) as the shared visibility point. Keep the
-        // most recent such point (largest shared commit version).
-        let mut best: Option<MergeBasePoint> = None;
+        // Collapse B's chain the same way so the search picks the most
+        // recent point per branch even when the chain contains duplicates
+        // (repeated merges).
+        let mut reach_b: HashMap<BranchRef, CommitVersion> = HashMap::new();
         for point in &chain_b {
-            let Some(cv_a) = reach_a.get(&point.branch) else {
+            reach_b
+                .entry(point.branch)
+                .and_modify(|cv| {
+                    if point.commit_version > *cv {
+                        *cv = point.commit_version;
+                    }
+                })
+                .or_insert(point.commit_version);
+        }
+
+        // Intersect: shared visibility is min(reach_a, reach_b); keep the
+        // candidate with the largest shared commit version.
+        //
+        // Sort by `(id bytes, generation)` before iteration so two
+        // candidates with identical shared commit versions resolve to a
+        // deterministic winner. `HashMap` iteration order is randomised
+        // per-process; without sorting, a tie would produce
+        // non-deterministic `merge_base` results across runs and — worse
+        // — across replicas reading the same lineage.
+        let mut ordered_b: Vec<(BranchRef, CommitVersion)> =
+            reach_b.iter().map(|(k, v)| (*k, *v)).collect();
+        ordered_b.sort_by(|a, b| {
+            a.0.id
+                .as_bytes()
+                .cmp(b.0.id.as_bytes())
+                .then(a.0.generation.cmp(&b.0.generation))
+        });
+        let mut best: Option<MergeBasePoint> = None;
+        for (branch, cv_b) in ordered_b {
+            let Some(cv_a) = reach_a.get(&branch) else {
                 continue;
             };
-            let shared_cv = (*cv_a).min(point.commit_version);
+            let shared_cv = (*cv_a).min(cv_b);
             match best {
                 Some(cur) if shared_cv <= cur.commit_version => {}
                 _ => {
                     best = Some(MergeBasePoint {
-                        branch: point.branch,
+                        branch,
                         commit_version: shared_cv,
                     })
-                }
-            }
-        }
-
-        // Merge-edge advancement (AD8, point semantics): only direct
-        // merge edges between the compared lifecycle instances can
-        // advance the base. One-sided merges with unrelated third
-        // branches must not affect this pair's merge base.
-        for edge in self.edges_for(a)?.into_iter() {
-            if edge.kind == LineageEdgeKind::Merge && edge.source == Some(b) {
-                if let Some(mb) = edge.merge_base {
-                    match best {
-                        Some(cur) if mb.commit_version <= cur.commit_version => {}
-                        _ => best = Some(mb),
-                    }
-                }
-            }
-        }
-        for edge in self.edges_for(b)?.into_iter() {
-            if edge.kind == LineageEdgeKind::Merge && edge.source == Some(a) {
-                if let Some(mb) = edge.merge_base {
-                    match best {
-                        Some(cur) if mb.commit_version <= cur.commit_version => {}
-                        _ => best = Some(mb),
-                    }
                 }
             }
         }
@@ -1322,9 +1333,23 @@ impl BranchControlStore {
         }
     }
 
-    /// Walk fork anchors back from `branch` to the root, producing the
-    /// lineage chain as points. Starting branch is its own point at
-    /// `CommitVersion::MAX` (it can see all of its own history).
+    /// Produce the ancestor chain for `branch`: every `BranchRef` whose
+    /// state `branch` has visibility into, with the commit version at
+    /// which that visibility was established. The chain is the union of:
+    ///
+    /// 1. `branch` itself at [`CommitVersion::MAX`] (it can see all of
+    ///    its own history).
+    /// 2. The fork anchor of every walked ancestor — each fork parent
+    ///    appears at `fork.point`, the version of the parent at which
+    ///    the descendant was branched.
+    /// 3. Every merge source that ever landed on the walked chain,
+    ///    recorded at the merge commit version — the version of the
+    ///    source at which its state flowed into the target.
+    ///
+    /// Cycle-safe: each `BranchRef` is walked at most once. Merge-edge
+    /// traversal is bounded by the lineage DAG already persisted in the
+    /// store, so every new point is either a fresh fork parent or a
+    /// fresh merge source.
     fn ancestor_chain(&self, branch: BranchRef) -> StrataResult<Vec<MergeBasePoint>> {
         let mut chain = vec![MergeBasePoint {
             branch,
@@ -1332,22 +1357,54 @@ impl BranchControlStore {
         }];
         let mut visited: HashSet<BranchRef> = HashSet::new();
         visited.insert(branch);
-        let mut current = branch;
-        loop {
-            let Some(rec) = self.get_record(current)? else {
-                break;
-            };
-            let Some(anchor) = rec.fork else {
-                break;
-            };
-            if !visited.insert(anchor.parent) {
-                break;
+
+        // BFS over fork parents and merge sources. Starts at `branch`
+        // and expands through its fork anchor and every merge edge, then
+        // through those ancestors' own fork anchors and merge edges.
+        let mut queue: Vec<BranchRef> = vec![branch];
+        while let Some(current) = queue.pop() {
+            // Fork anchor: the parent's version at the fork point.
+            if let Some(rec) = self.get_record(current)? {
+                if let Some(anchor) = rec.fork {
+                    if visited.insert(anchor.parent) {
+                        chain.push(MergeBasePoint {
+                            branch: anchor.parent,
+                            commit_version: anchor.point,
+                        });
+                        queue.push(anchor.parent);
+                    } else {
+                        // Seen before — still record the point so a
+                        // later fork of the same ancestor at a different
+                        // version is visible in the chain.
+                        chain.push(MergeBasePoint {
+                            branch: anchor.parent,
+                            commit_version: anchor.point,
+                        });
+                    }
+                }
             }
-            chain.push(MergeBasePoint {
-                branch: anchor.parent,
-                commit_version: anchor.point,
-            });
-            current = anchor.parent;
+
+            // Merge edges landing on `current`: every merge introduces
+            // visibility into the source's history at the merge commit
+            // version. Revert / CherryPick edges do not advance merge
+            // visibility — revert is a target-only rewind, cherry-pick
+            // applies a cherry-picked subset without claiming full merge
+            // incorporation.
+            for edge in self.edges_for(current)?.into_iter() {
+                if edge.kind != LineageEdgeKind::Merge {
+                    continue;
+                }
+                let Some(source) = edge.source else {
+                    continue;
+                };
+                chain.push(MergeBasePoint {
+                    branch: source,
+                    commit_version: edge.commit_version,
+                });
+                if visited.insert(source) {
+                    queue.push(source);
+                }
+            }
         }
         Ok(chain)
     }

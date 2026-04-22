@@ -225,7 +225,7 @@ pub fn branch_diff_three_way(
     // Route through BranchService — it resolves DAG-backed merge bases when
     // the graph subsystem is installed and falls back to storage-level fork
     // info otherwise.
-    let result = convert_result(p.db.branches().diff3(&branch_a, &branch_b, None))?;
+    let result = convert_result(p.db.branches().diff3(&branch_a, &branch_b))?;
 
     Ok(Output::ThreeWayDiff(result))
 }
@@ -294,7 +294,7 @@ pub fn branch_cherry_pick(
             primitives: filter_primitives,
         };
         p.db.branches()
-            .cherry_pick_from_diff(&source, &target, filter, None)
+            .cherry_pick_from_diff(&source, &target, filter)
     })?;
 
     Ok(Output::BranchCherryPicked(info))

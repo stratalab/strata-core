@@ -26,10 +26,12 @@ use strata_core::EntityRef;
 use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult};
 
 use crate::branch_ops::with_branch_dag_hooks_suppressed;
+use crate::branch_ops::branch_control_store::{
+    BranchControlStore, LineageEdgeKind, LineageEdgeRecord, MergeBasePoint,
+};
 use crate::branch_ops::{
-    self, branch_control_store::BranchControlStore, BranchDiffResult, CherryPickFilter,
-    CherryPickInfo, DiffOptions, ForkInfo, MergeInfo, MergeStrategy, NoteInfo, RevertInfo, TagInfo,
-    ThreeWayDiffResult,
+    self, BranchDiffResult, CherryPickFilter, CherryPickInfo, DiffOptions, ForkInfo, MergeInfo,
+    MergeStrategy, NoteInfo, RevertInfo, TagInfo, ThreeWayDiffResult,
 };
 use crate::database::branch_mutation::BranchMutation;
 use crate::database::dag_hook::{BranchDagError, DagEvent, DagHookSlot, MergeBaseResult};
@@ -46,12 +48,17 @@ use crate::SYSTEM_BRANCH;
 // =============================================================================
 
 /// Options for branch merge operations.
+///
+/// B3.3 removed the `merge_base` field. Merge base is derived from the
+/// authoritative [`BranchControlStore`] lineage (fork anchors + merge
+/// edges) — callers can no longer inject a synthetic base. Unrelated
+/// branches now refuse to merge; before B3.3 a caller-supplied override
+/// could bypass that check, which silently produced incorrect ancestor
+/// reads.
 #[derive(Debug, Clone)]
 pub struct MergeOptions {
     /// Conflict resolution strategy.
     pub strategy: MergeStrategy,
-    /// Optional merge base override (branch_id, version).
-    pub merge_base: Option<(BranchId, u64)>,
     /// Optional commit message.
     pub message: Option<String>,
     /// Optional creator identifier.
@@ -62,7 +69,6 @@ impl Default for MergeOptions {
     fn default() -> Self {
         Self {
             strategy: MergeStrategy::LastWriterWins,
-            merge_base: None,
             message: None,
             creator: None,
         }
@@ -87,12 +93,6 @@ impl MergeOptions {
     /// Set the creator identifier.
     pub fn with_creator(mut self, creator: impl Into<String>) -> Self {
         self.creator = Some(creator.into());
-        self
-    }
-
-    /// Set the merge base override.
-    pub fn with_merge_base(mut self, branch_id: BranchId, version: u64) -> Self {
-        self.merge_base = Some((branch_id, version));
         self
     }
 }
@@ -379,20 +379,11 @@ impl BranchService {
     }
 
     /// Three-way diff between branches.
-    pub fn diff3(
-        &self,
-        source: &str,
-        target: &str,
-        merge_base: Option<(BranchId, u64)>,
-    ) -> StrataResult<ThreeWayDiffResult> {
-        let merge_base = match merge_base {
-            Some(merge_base) => Some(merge_base),
-            None if self.dag_hook().get().is_some() => self
-                .merge_base(source, target)?
-                .map(|mb| (mb.branch_id, mb.commit_version.0)),
-            None => None,
-        };
-        branch_ops::diff_three_way(&self.db, source, target, merge_base)
+    ///
+    /// B3.3: merge base is derived from the authoritative
+    /// [`BranchControlStore`] — callers no longer inject a base.
+    pub fn diff3(&self, source: &str, target: &str) -> StrataResult<ThreeWayDiffResult> {
+        branch_ops::diff_three_way(&self.db, source, target)
     }
 
     // =========================================================================
@@ -522,6 +513,11 @@ impl BranchService {
     ///
     /// Requires a DAG hook to be installed — merges without DAG recording would
     /// lose merge provenance and break merge-base computation.
+    ///
+    /// B3.3: merge base is always derived from the authoritative
+    /// [`BranchControlStore`]; after a successful merge, a
+    /// `LineageEdgeRecord::Merge` edge is appended to the store so
+    /// subsequent `find_merge_base` calls advance past this merge point.
     pub fn merge_with_options(
         &self,
         source: &str,
@@ -536,12 +532,19 @@ impl BranchService {
         // Merge requires DAG — without it, merge provenance is lost
         mutation.require_dag_hook("merge")?;
 
-        let merge_base = match options.merge_base {
-            Some(merge_base) => Some(merge_base),
-            None => self
-                .merge_base(source, target)?
-                .map(|mb| (mb.branch_id, mb.commit_version.0)),
-        };
+        // Snapshot source / target `BranchRef`s + the pre-merge base
+        // BEFORE the merge runs. The stored edge records the merge base
+        // that was actually used for ancestor reads, which is what future
+        // audit / replay consumers need — not the post-merge advanced
+        // base (the latter is derivable from the chain anyway).
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store
+            .find_active_by_name(source)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
+        let target_rec = store
+            .find_active_by_name(target)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
+        let pre_merge_base = store.find_merge_base(source_rec.branch, target_rec.branch)?;
 
         let info = with_branch_dag_hooks_suppressed(|| {
             branch_ops::merge_branches_with_metadata(
@@ -549,16 +552,20 @@ impl BranchService {
                 source,
                 target,
                 options.strategy,
-                merge_base,
                 options.message.as_deref(),
                 options.creator.as_deref(),
             )
         })?;
 
         // Record to DAG — only if merge actually committed changes
-        let source_id = resolve_branch_name(source);
-        let target_id = resolve_branch_name(target);
+        let source_id = source_rec.branch.id;
+        let target_id = target_rec.branch.id;
         if let Some(merge_version) = info.merge_version {
+            // Register rollback FIRST so every downstream failure
+            // (DAG write, edge write) triggers a compensating revert
+            // of the merge commit range. Without this, a failure later
+            // in the block would leave the merge commit applied with
+            // no lineage authority and no compensating revert.
             mutation.on_rollback_revert_range(
                 target,
                 CommitVersion(merge_version),
@@ -580,6 +587,21 @@ impl BranchService {
                 event = event.with_creator(creator.clone());
             }
             mutation.record_dag_event(&event)?;
+
+            // Persist lineage edge LAST so a failed write triggers
+            // `BranchMutation`'s drop-time rollback, which reverts the
+            // merge commit range and leaves no stale edge referencing
+            // a rolled-back commit. The DAG event written above becomes
+            // stale (log-only surface tolerates that after B4); the
+            // merge-base authority stays consistent with target state.
+            append_merge_edge(
+                &self.db,
+                &store,
+                target_rec.branch,
+                source_rec.branch,
+                CommitVersion(merge_version),
+                pre_merge_base,
+            )?;
 
             // Commit: fires observers
             let strategy_str = match options.strategy {
@@ -631,7 +653,14 @@ impl BranchService {
         // Revert requires DAG — without it, revert history is lost
         mutation.require_dag_hook("revert")?;
 
-        let branch_id = resolve_branch_name(branch);
+        // Resolve target `BranchRef` before the revert so a concurrent
+        // delete+recreate between here and the edge write cannot land
+        // the revert edge on the wrong lifecycle instance.
+        let store = BranchControlStore::new(self.db.clone());
+        let branch_rec = store
+            .find_active_by_name(branch)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch)))?;
+        let branch_id = branch_rec.branch.id;
 
         // Execute the revert
         let info = with_branch_dag_hooks_suppressed(|| {
@@ -640,9 +669,15 @@ impl BranchService {
 
         // Record to DAG — only if revert actually committed changes
         if let Some(revert_version) = info.revert_version {
+            // Register rollback FIRST; edge + DAG writes are the
+            // downstream steps a failure mid-path needs to compensate.
             mutation.on_rollback_revert_range(branch, revert_version, revert_version);
             let event = DagEvent::revert(branch_id, branch, revert_version, info.clone());
             mutation.record_dag_event(&event)?;
+
+            // Edge LAST so a failed write triggers `BranchMutation`
+            // drop-time rollback and leaves no stale edge.
+            append_revert_edge(&self.db, &store, branch_rec.branch, revert_version)?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::revert(
@@ -682,8 +717,15 @@ impl BranchService {
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
         mutation.require_dag_hook("cherry_pick")?;
 
-        let source_id = resolve_branch_name(source);
-        let target_id = resolve_branch_name(target);
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store
+            .find_active_by_name(source)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
+        let target_rec = store
+            .find_active_by_name(target)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
+        let source_id = source_rec.branch.id;
+        let target_id = target_rec.branch.id;
 
         // Execute the cherry-pick
         let info = with_branch_dag_hooks_suppressed(|| {
@@ -692,6 +734,7 @@ impl BranchService {
 
         // Record to DAG — only if cherry-pick actually committed changes
         if let Some(cp_version) = info.cherry_pick_version {
+            // Register rollback FIRST.
             mutation.on_rollback_revert_range(
                 target,
                 CommitVersion(cp_version),
@@ -706,6 +749,15 @@ impl BranchService {
                 info.clone(),
             );
             mutation.record_dag_event(&event)?;
+
+            // Edge LAST so failure is cleaned up by drop-time rollback.
+            append_cherry_pick_edge(
+                &self.db,
+                &store,
+                target_rec.branch,
+                source_rec.branch,
+                CommitVersion(cp_version),
+            )?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
@@ -737,7 +789,6 @@ impl BranchService {
         source: &str,
         target: &str,
         filter: CherryPickFilter,
-        merge_base: Option<(BranchId, u64)>,
     ) -> StrataResult<CherryPickInfo> {
         reject_system_branch(source, "cherry-pick from")?;
         reject_system_branch(target, "cherry-pick into")?;
@@ -747,22 +798,24 @@ impl BranchService {
         // Cherry-pick requires DAG — without it, cherry-pick history is lost
         mutation.require_dag_hook("cherry_pick")?;
 
-        let source_id = resolve_branch_name(source);
-        let target_id = resolve_branch_name(target);
-        let merge_base = match merge_base {
-            Some(merge_base) => Some(merge_base),
-            None => self
-                .merge_base(source, target)?
-                .map(|mb| (mb.branch_id, mb.commit_version.0)),
-        };
+        let store = BranchControlStore::new(self.db.clone());
+        let source_rec = store
+            .find_active_by_name(source)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(source)))?;
+        let target_rec = store
+            .find_active_by_name(target)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(target)))?;
+        let source_id = source_rec.branch.id;
+        let target_id = target_rec.branch.id;
 
         // Execute the cherry-pick
         let info = with_branch_dag_hooks_suppressed(|| {
-            branch_ops::cherry_pick_from_diff(&self.db, source, target, filter, merge_base)
+            branch_ops::cherry_pick_from_diff(&self.db, source, target, filter)
         })?;
 
         // Record to DAG — only if cherry-pick actually committed changes
         if let Some(cp_version) = info.cherry_pick_version {
+            // Register rollback FIRST.
             mutation.on_rollback_revert_range(
                 target,
                 CommitVersion(cp_version),
@@ -777,6 +830,15 @@ impl BranchService {
                 info.clone(),
             );
             mutation.record_dag_event(&event)?;
+
+            // Edge LAST so failure is cleaned up by drop-time rollback.
+            append_cherry_pick_edge(
+                &self.db,
+                &store,
+                target_rec.branch,
+                source_rec.branch,
+                CommitVersion(cp_version),
+            )?;
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
@@ -820,20 +882,46 @@ impl BranchService {
     /// Find the merge base (common ancestor) of two branches.
     ///
     /// Returns `None` if no common ancestor exists (unrelated branches).
+    ///
+    /// B3.3 cutover: authority is `BranchControlStore::find_merge_base`
+    /// — no DAG fallback, no storage fallback. The store's lineage edges
+    /// cover every fork/merge that B3.1 migration backfilled plus every
+    /// new write from B3.2/B3.3, so a `None` result means the two
+    /// generations are genuinely unrelated.
     pub fn merge_base(
         &self,
         branch_a: &str,
         branch_b: &str,
     ) -> StrataResult<Option<MergeBaseResult>> {
-        BranchControlStore::new(self.db.clone()).ensure_lineage_read_available()?;
-        let hook = self
-            .dag_hook()
-            .require("merge_base")
-            .map_err(dag_to_strata)?;
+        let store = BranchControlStore::new(self.db.clone());
 
-        // Pass branch names directly — DAG is keyed by name, not BranchId UUID
-        hook.find_merge_base(branch_a, branch_b)
-            .map_err(dag_to_strata)
+        let a_rec = store
+            .find_active_by_name(branch_a)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_a)))?;
+        let b_rec = store
+            .find_active_by_name(branch_b)?
+            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_b)))?;
+
+        let Some(point) = store.find_merge_base(a_rec.branch, b_rec.branch)? else {
+            return Ok(None);
+        };
+
+        let branch_name = if point.branch == a_rec.branch {
+            a_rec.name
+        } else if point.branch == b_rec.branch {
+            b_rec.name
+        } else {
+            store
+                .get_record(point.branch)?
+                .map(|r| r.name)
+                .unwrap_or_else(|| point.branch.id.to_string())
+        };
+
+        Ok(Some(MergeBaseResult {
+            branch_id: point.branch.id,
+            branch_name,
+            commit_version: point.commit_version,
+        }))
     }
 
     /// Get the history log for a branch.
@@ -1025,6 +1113,74 @@ impl BranchService {
 
 fn dag_to_strata(e: BranchDagError) -> StrataError {
     StrataError::invalid_input(e.message)
+}
+
+// =============================================================================
+// Lineage edge writers (B3.3)
+// =============================================================================
+//
+// Lineage edges live on the engine-global control-store namespace (nil
+// UUID branch, "default" space) rather than the user's target branch,
+// so edge writes use a transaction keyed on the global branch id — not
+// the target branch's id. This matches how `BranchControlStore::put_record`
+// participates in create / fork transactions, and keeps lineage writes
+// out of the user branch's OCC read/write sets.
+
+fn append_merge_edge(
+    db: &Arc<Database>,
+    store: &BranchControlStore,
+    target: BranchRef,
+    source: BranchRef,
+    commit_version: CommitVersion,
+    merge_base: Option<MergeBasePoint>,
+) -> StrataResult<()> {
+    let edge = LineageEdgeRecord {
+        kind: LineageEdgeKind::Merge,
+        target,
+        source: Some(source),
+        commit_version,
+        merge_base,
+    };
+    db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+        store.append_edge(&edge, txn)
+    })
+}
+
+fn append_revert_edge(
+    db: &Arc<Database>,
+    store: &BranchControlStore,
+    target: BranchRef,
+    commit_version: CommitVersion,
+) -> StrataResult<()> {
+    let edge = LineageEdgeRecord {
+        kind: LineageEdgeKind::Revert,
+        target,
+        source: None,
+        commit_version,
+        merge_base: None,
+    };
+    db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+        store.append_edge(&edge, txn)
+    })
+}
+
+fn append_cherry_pick_edge(
+    db: &Arc<Database>,
+    store: &BranchControlStore,
+    target: BranchRef,
+    source: BranchRef,
+    commit_version: CommitVersion,
+) -> StrataResult<()> {
+    let edge = LineageEdgeRecord {
+        kind: LineageEdgeKind::CherryPick,
+        target,
+        source: Some(source),
+        commit_version,
+        merge_base: None,
+    };
+    db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+        store.append_edge(&edge, txn)
+    })
 }
 
 // =============================================================================
