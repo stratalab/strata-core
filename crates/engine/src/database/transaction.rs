@@ -7,12 +7,13 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_core::{StrataError, StrataResult};
+use strata_core::{Storage, StrataError, StrataResult};
 use strata_durability::wal::DurabilityMode;
 use strata_durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::SegmentedStore;
 
 use super::Database;
+use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore};
 use crate::transaction::{Transaction, TransactionPool};
 
 /// Return freed heap pages to the OS.
@@ -754,6 +755,13 @@ impl Database {
         // Override start_version set by pool acquire (which reads storage.version()
         // directly, bypassing the visible_version wait) (#1913).
         txn.start_version = snapshot_version;
+        let branch_generation_guard = self.branch_generation_guard_for(branch_id)?;
+        txn.set_branch_generation_guard(branch_generation_guard);
+        let seeded = self.seed_branch_generation_read_guard(&mut txn)?;
+        txn.set_branch_generation_guard_key(
+            branch_generation_guard.map(|_| active_ptr_key(branch_id)),
+            seeded,
+        );
         txn.set_max_write_entries(self.coordinator.max_write_buffer_entries());
         Ok(txn)
     }
@@ -832,6 +840,12 @@ impl Database {
         }
 
         let had_writes = !txn.is_read_only();
+        if had_writes {
+            if let Err(e) = self.validate_branch_generation_guard(txn) {
+                self.abort_transaction_in_place(txn, format!("Commit failed: {}", e));
+                return Err(e);
+            }
+        }
         // Admission control: reject writes when L0 is saturated (#1924).
         // Must run BEFORE commit so the caller gets a clean error.
         if had_writes {
@@ -860,6 +874,59 @@ impl Database {
             self.schedule_flush_if_needed();
         }
         Ok(version.as_u64())
+    }
+
+    fn branch_generation_guard_for(&self, branch_id: BranchId) -> StrataResult<Option<u64>> {
+        BranchControlStore::new(Self::shared(self)).active_generation_for_id(branch_id)
+    }
+
+    fn seed_branch_generation_read_guard(
+        &self,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<bool> {
+        if txn.branch_generation_guard.is_none() {
+            return Ok(false);
+        }
+
+        if txn.branch_id == BranchId::from_bytes([0u8; 16]) {
+            return Ok(false);
+        }
+
+        let key = active_ptr_key(txn.branch_id);
+        let version = self
+            .storage
+            .get_versioned(&key, txn.start_version)?
+            .map(|entry| CommitVersion(entry.version.as_u64()))
+            .unwrap_or(CommitVersion::ZERO);
+        txn.read_set.insert(key, version);
+        Ok(true)
+    }
+
+    fn validate_branch_generation_guard(&self, txn: &TransactionContext) -> StrataResult<()> {
+        if !txn.branch_generation_guard_is_seeded() {
+            return Ok(());
+        }
+        let Some(expected_generation) = txn.branch_generation_guard else {
+            return Ok(());
+        };
+
+        let current_generation =
+            BranchControlStore::new(Self::shared(self)).active_generation_for_id(txn.branch_id)?;
+        match current_generation {
+            Some(current_generation) if current_generation == expected_generation => Ok(()),
+            Some(current_generation) => Err(StrataError::TransactionAborted {
+                reason: format!(
+                    "Branch {} lifecycle advanced from generation {} to {}",
+                    txn.branch_id, expected_generation, current_generation
+                ),
+            }),
+            None => Err(StrataError::TransactionAborted {
+                reason: format!(
+                    "Branch {} lifecycle no longer has active generation {}",
+                    txn.branch_id, expected_generation
+                ),
+            }),
+        }
     }
 
     /// Legacy compatibility shim for callers still routing through Database.

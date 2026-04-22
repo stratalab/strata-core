@@ -22,6 +22,7 @@ use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use crate::database::Database;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
 use strata_core::traits::Storage;
@@ -114,6 +115,25 @@ fn global_branch_id() -> BranchId {
 /// Get the global namespace for BranchIndex operations
 fn global_namespace() -> Arc<Namespace> {
     Arc::new(Namespace::for_branch(global_branch_id()))
+}
+
+/// Internal transaction branch id used for global branch-index metadata work.
+///
+/// Most delete operations can run on the global/nil branch because the target
+/// branch lock is distinct and the global branch id is convenient. Literal
+/// `"default"` is special: it resolves to the same nil BranchId used by
+/// global branch-index operations. In that case, using the nil branch for an
+/// internal metadata transaction can self-conflict with delete marks / commit
+/// locks that intentionally remain on the real branch while a lifecycle
+/// cutover is in progress. Route the internal metadata transaction through
+/// `_system_` instead while leaving the target delete mark/lock on the actual
+/// branch being created/deleted.
+fn admin_transaction_branch_id(target_branch_id: BranchId) -> BranchId {
+    if target_branch_id == global_branch_id() {
+        resolve_branch_name(crate::SYSTEM_BRANCH)
+    } else {
+        global_branch_id()
+    }
 }
 
 fn default_branch_marker_key() -> Key {
@@ -323,28 +343,35 @@ impl BranchIndex {
     /// ## Errors
     /// - `InvalidInput` if branch already exists
     pub(crate) fn create_branch(&self, branch_id: &str) -> StrataResult<Versioned<BranchMetadata>> {
+        self.create_branch_with_hook(branch_id, |_| Ok(()))
+    }
+
+    /// Create a new branch, running `pre_commit` inside the same KV
+    /// transaction that writes the legacy `BranchMetadata` row.
+    ///
+    /// Used by `BranchService::create` (B3.2) to write the new
+    /// `BranchControlRecord` atomically with the metadata row. The hook
+    /// runs after the metadata is staged; if it returns an error the
+    /// entire transaction rolls back.
+    pub(crate) fn create_branch_with_hook<F>(
+        &self,
+        branch_id: &str,
+        pre_commit: F,
+    ) -> StrataResult<Versioned<BranchMetadata>>
+    where
+        F: FnOnce(&mut TransactionContext) -> StrataResult<()>,
+    {
         if aliases_default_branch_sentinel(branch_id) {
             return Err(StrataError::invalid_input(
                 "branch name aliases reserved default-branch sentinel",
             ));
         }
 
-        let result = self.db.transaction(global_branch_id(), |txn| {
-            let key = self.key_for(branch_id);
-
-            // Check if branch already exists
-            if txn.get(&key)?.is_some() {
-                return Err(StrataError::invalid_input(format!(
-                    "Branch '{}' already exists",
-                    branch_id
-                )));
-            }
-
-            let branch_meta = BranchMetadata::new(branch_id);
-            txn.put(key, to_stored_value(&branch_meta)?)?;
-
-            info!(target: "strata::branch", %branch_id, "Branch created");
-            Ok(branch_meta.into_versioned())
+        let txn_branch_id = admin_transaction_branch_id(resolve_branch_name(branch_id));
+        let result = self.db.transaction(txn_branch_id, |txn| {
+            txn.set_allow_cross_branch(true);
+            self.create_branch_in_txn(branch_id, txn)
+                .and_then(|versioned| pre_commit(txn).map(|_| versioned))
         })?;
 
         // Note: DAG recording is handled by BranchService.create(), which is
@@ -354,6 +381,43 @@ impl BranchIndex {
         dispatch_create_hook(&self.db, branch_id);
 
         Ok(result)
+    }
+
+    /// Create a new branch's legacy `BranchMetadata` row inside an
+    /// externally-owned transaction.
+    ///
+    /// Low-level entry point used by fork and hooked-create paths that
+    /// need to batch the metadata write with additional control-store
+    /// writes in one atomic commit (B3.2). Does not dispatch any DAG
+    /// hooks — that is the caller's responsibility.
+    ///
+    /// ## Errors
+    /// - `InvalidInput` if branch already exists or name aliases the
+    ///   reserved default-branch sentinel.
+    pub(crate) fn create_branch_in_txn(
+        &self,
+        branch_id: &str,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<Versioned<BranchMetadata>> {
+        if aliases_default_branch_sentinel(branch_id) {
+            return Err(StrataError::invalid_input(
+                "branch name aliases reserved default-branch sentinel",
+            ));
+        }
+
+        let key = self.key_for(branch_id);
+        if txn.get(&key)?.is_some() {
+            return Err(StrataError::invalid_input(format!(
+                "Branch '{}' already exists",
+                branch_id
+            )));
+        }
+
+        let branch_meta = BranchMetadata::new(branch_id);
+        txn.put(key, to_stored_value(&branch_meta)?)?;
+
+        info!(target: "strata::branch", %branch_id, "Branch created");
+        Ok(branch_meta.into_versioned())
     }
 
     /// Get branch metadata
@@ -425,6 +489,26 @@ impl BranchIndex {
     ///
     /// USE WITH CAUTION - this is irreversible!
     pub(crate) fn delete_branch(&self, branch_id: &str) -> StrataResult<()> {
+        self.delete_branch_with_hook(branch_id, |_| Ok(()))
+    }
+
+    /// Delete a branch and ALL its data, running `pre_commit` inside the
+    /// same KV transaction that purges the legacy metadata + namespace
+    /// data.
+    ///
+    /// Used by `BranchService::delete` (B3.2) to atomically mark the
+    /// corresponding `BranchControlRecord` as `Deleted` alongside the
+    /// legacy purge. The hook runs after namespace data is staged for
+    /// removal and before the metadata row is dropped; if it errors the
+    /// entire delete transaction rolls back and the branch remains live.
+    pub(crate) fn delete_branch_with_hook<F>(
+        &self,
+        branch_id: &str,
+        pre_commit: F,
+    ) -> StrataResult<()>
+    where
+        F: FnOnce(&mut TransactionContext) -> StrataResult<()>,
+    {
         // First get the branch metadata (read-only, no WAL after #970)
         let branch_meta = self
             .get_branch(branch_id)?
@@ -458,7 +542,8 @@ impl BranchIndex {
         let target_lock = self.db.branch_commit_lock(&executor_branch_id);
         let _target_guard = target_lock.lock();
 
-        let result = self.db.transaction(global_branch_id(), |txn| {
+        let txn_branch_id = admin_transaction_branch_id(executor_branch_id);
+        let result = self.db.transaction(txn_branch_id, |txn| {
             txn.set_allow_cross_branch(true);
             // Delete data from the executor's namespace
             Self::delete_namespace_data(txn, executor_branch_id)?;
@@ -472,6 +557,12 @@ impl BranchIndex {
 
             // Delete the branch metadata entry
             txn.delete(meta_key.clone())?;
+
+            // B3.2: run the caller-supplied hook (e.g. mark_deleted on the
+            // BranchControlRecord) inside the same transaction so legacy
+            // metadata purge and control-record lifecycle flip commit
+            // together.
+            pre_commit(txn)?;
 
             info!(target: "strata::branch", %branch_id, "Branch deleted");
             Ok(())
@@ -518,10 +609,19 @@ impl BranchIndex {
 
         // Clean up storage-layer segments, manifest, and refcounts (#1702).
         // Must happen after logical deletion so in-progress reads see the
-        // deletion before files disappear. clear_branch_storage also
-        // retries directory removal after gc_orphan_segments as a safety
-        // net for anything drain() may have missed.
-        self.db.clear_branch_storage(&executor_branch_id);
+        // deletion before files disappear.
+        //
+        // Literal `"default"` is special: its canonical BranchId is the same
+        // nil branch id used by global branch-index/control-store metadata.
+        // The delete transaction above already tombstones user primitive rows
+        // in that namespace. A physical `clear_branch_storage(nil)` would also
+        // wipe the branch-control ledger itself (next-generation counters,
+        // active pointers, metadata rows for other branches), breaking
+        // generation-safe recreate. Keep nil/default deletion logical-only at
+        // the storage layer; later compaction/GC will reclaim the user data.
+        if executor_branch_id != global_branch_id() {
+            self.db.clear_branch_storage(&executor_branch_id);
+        }
 
         let subsystems = self.db.installed_subsystems();
         for subsystem in subsystems.iter() {

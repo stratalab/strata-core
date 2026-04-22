@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
 use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{BranchId, Key};
+use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
@@ -450,6 +450,26 @@ pub struct TransactionContext {
     pub txn_id: TxnId,
     /// Branch this transaction belongs to
     pub branch_id: BranchId,
+    /// Active branch generation observed when the transaction started.
+    ///
+    /// When present, commit rechecks that the branch still points at this
+    /// generation before applying writes. This prevents pre-delete
+    /// transactions on `foo@gen0` from committing into a freshly recreated
+    /// `foo@gen1` while the public transaction API is still keyed by
+    /// `BranchId` alone (B3.2).
+    pub branch_generation_guard: Option<u64>,
+    /// Snapshot key for the active-generation pointer row that backs
+    /// `branch_generation_guard`.
+    ///
+    /// For ordinary branches this is seeded into `read_set` at BEGIN.
+    /// For the nil-UUID `"default"` branch it is armed lazily only when the
+    /// transaction touches branch data, so internal global-metadata traffic
+    /// on the same nil namespace is not spuriously coupled to default-branch
+    /// lifecycle churn.
+    branch_generation_guard_key: Option<Key>,
+    /// Whether the active-generation pointer row has been seeded into
+    /// `read_set` for OCC validation.
+    branch_generation_guard_seeded: bool,
 
     // Snapshot isolation
     /// Version at transaction start (snapshot version)
@@ -583,6 +603,9 @@ impl TransactionContext {
         TransactionContext {
             txn_id,
             branch_id,
+            branch_generation_guard: None,
+            branch_generation_guard_key: None,
+            branch_generation_guard_seeded: false,
             start_version,
             store: None,
             read_set: HashMap::new(),
@@ -633,6 +656,9 @@ impl TransactionContext {
         TransactionContext {
             txn_id,
             branch_id,
+            branch_generation_guard: None,
+            branch_generation_guard_key: None,
+            branch_generation_guard_seeded: false,
             start_version,
             store: Some(store),
             read_set: HashMap::new(),
@@ -916,6 +942,22 @@ impl TransactionContext {
     /// and read-set tracking is skipped, saving memory on large scans.
     pub fn set_read_only(&mut self, read_only: bool) {
         self.read_only = read_only;
+    }
+
+    /// Pin the active generation this transaction is allowed to write to.
+    pub fn set_branch_generation_guard(&mut self, generation: Option<u64>) {
+        self.branch_generation_guard = generation;
+    }
+
+    /// Register the snapshot key used to validate the active generation row.
+    pub fn set_branch_generation_guard_key(&mut self, key: Option<Key>, seeded: bool) {
+        self.branch_generation_guard_key = key;
+        self.branch_generation_guard_seeded = seeded;
+    }
+
+    /// `true` iff the lifecycle guard row has been seeded into `read_set`.
+    pub fn branch_generation_guard_is_seeded(&self) -> bool {
+        self.branch_generation_guard_seeded
     }
 
     /// Allow operations on keys whose branch_id differs from this transaction's.
@@ -1447,9 +1489,42 @@ impl TransactionContext {
 
     /// Common pre-operation guard: verify the transaction is active and the key
     /// belongs to this transaction's branch.
-    fn guard(&self, key: &Key) -> StrataResult<()> {
+    fn guard(&mut self, key: &Key) -> StrataResult<()> {
         self.ensure_active()?;
+        self.maybe_seed_branch_generation_read_guard(key)?;
         self.enforce_branch_scope(key)
+    }
+
+    fn maybe_seed_branch_generation_read_guard(&mut self, key: &Key) -> StrataResult<()> {
+        if self.read_only
+            || self.branch_generation_guard.is_none()
+            || self.branch_generation_guard_seeded
+        {
+            return Ok(());
+        }
+
+        let Some(guard_key) = self.branch_generation_guard_key.clone() else {
+            return Ok(());
+        };
+
+        let nil_branch = BranchId::from_bytes([0u8; 16]);
+        if self.branch_id == nil_branch
+            && (self.allow_cross_branch || key.type_tag == TypeTag::Branch)
+        {
+            return Ok(());
+        }
+
+        let Some(store) = self.store.as_ref() else {
+            return Ok(());
+        };
+
+        let version = store
+            .get_versioned(&guard_key, self.start_version)?
+            .map(|entry| CommitVersion(entry.version.as_u64()))
+            .unwrap_or(CommitVersion::ZERO);
+        self.read_set.insert(guard_key, version);
+        self.branch_generation_guard_seeded = true;
+        Ok(())
     }
 
     /// Reject if the same key already has a CAS operation in this transaction.
@@ -1867,6 +1942,9 @@ impl TransactionContext {
         // Update identity
         self.txn_id = txn_id;
         self.branch_id = branch_id;
+        self.branch_generation_guard = None;
+        self.branch_generation_guard_key = None;
+        self.branch_generation_guard_seeded = false;
 
         // Update store and version
         self.start_version = store

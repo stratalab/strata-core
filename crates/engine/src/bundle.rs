@@ -236,8 +236,9 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         )));
     }
 
-    // 3. Create branch via BranchIndex
-    branch_index.create_branch(branch_id_str)?;
+    // 3. Create branch through the canonical branch service so B3.2's
+    // control-record / generation model applies to imported branches too.
+    db.branches().create(branch_id_str)?;
 
     // 4. Resolve BranchId for namespace
     let branch_meta = branch_index
@@ -277,11 +278,11 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         keys_written += put_count;
     }
 
-    // Note: the DAG `on_create` hook already fired from inside
-    // `BranchIndex::create_branch(branch_id_str)` above (step 3). We do
-    // NOT fire it again here — doing so would upsert the branch node and
-    // clobber the timestamps from the first fire. Branch import shows up
-    // in the lineage graph as a freshly-created branch automatically.
+    // Note: the DAG create event already fired from inside
+    // `BranchService::create(branch_id_str)` above (step 3). We do NOT fire
+    // it again here — doing so would upsert the branch node and clobber the
+    // timestamps from the first fire. Branch import shows up in the lineage
+    // graph as a freshly-created branch automatically.
 
     Ok(ImportInfo {
         branch_id: branch_id_str.to_string(),
@@ -336,8 +337,7 @@ mod tests {
 
     fn setup_with_branch(branch_name: &str) -> (TempDir, Arc<Database>) {
         let (temp_dir, db) = setup();
-        let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch(branch_name).unwrap();
+        db.branches().create(branch_name).unwrap();
         (temp_dir, db)
     }
 
@@ -453,6 +453,33 @@ mod tests {
         let import_info = import_branch(&import_db, &bundle_path).unwrap();
         assert_eq!(import_info.branch_id, "export-branch");
         assert!(import_info.transactions_applied > 0);
+        let control = import_db
+            .branches()
+            .control_record("export-branch")
+            .unwrap()
+            .expect("imported branch should have a control record");
+        assert_eq!(control.branch.generation, 0);
+    }
+
+    #[test]
+    fn test_imported_branch_recreate_bumps_generation() {
+        let (temp_dir, db) = setup_with_branch("export-branch");
+        let bundle_path = temp_dir.path().join("export.branchbundle.tar.zst");
+        export_branch(&db, "export-branch", &bundle_path).unwrap();
+
+        let import_dir = TempDir::new().unwrap();
+        let import_db = Database::open(import_dir.path()).unwrap();
+        import_branch(&import_db, &bundle_path).unwrap();
+
+        import_db.branches().delete("export-branch").unwrap();
+        import_db.branches().create("export-branch").unwrap();
+
+        let control = import_db
+            .branches()
+            .control_record("export-branch")
+            .unwrap()
+            .expect("recreated imported branch should stay on the control-store path");
+        assert_eq!(control.branch.generation, 1);
     }
 
     #[test]

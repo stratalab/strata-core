@@ -62,13 +62,14 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult, VersionedValue};
+use strata_core::{BranchControlRecord, StrataError, StrataResult, VersionedValue};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};
 use super::observers::BranchOpEvent;
 use super::Database;
-use crate::branch_ops::{is_user_visible_space, DATA_TYPE_TAGS};
+use crate::branch_ops::branch_control_store::BranchControlStore;
+use crate::branch_ops::{is_user_visible_space, with_branch_dag_hooks_suppressed, DATA_TYPE_TAGS};
 use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
 use crate::SpaceIndex;
 
@@ -131,23 +132,35 @@ impl RollbackAction {
                 );
 
                 let branch_index = BranchIndex::new(db.clone());
+                let control_store = BranchControlStore::new(db.clone());
                 let branch_id = crate::primitives::branch::resolve_branch_name(&name);
+                let metadata_exists = branch_index.exists(&name)?;
 
-                // Delete from KV metadata
-                if let Err(e) = branch_index.delete_branch(&name) {
-                    // Branch might not exist if the mutation that created it
-                    // failed before KV write
-                    warn!(
-                        target: "strata::branch_mutation",
-                        branch = %name,
-                        error = %e,
-                        "Rollback delete_branch failed (branch may not exist)"
-                    );
-                }
-
-                // Clear storage if requested
-                if clear_storage {
-                    db.clear_branch_storage(&branch_id);
+                if metadata_exists {
+                    if let Err(e) = with_branch_dag_hooks_suppressed(|| {
+                        branch_index.delete_branch_with_hook(&name, |txn| {
+                            match control_store.mark_deleted_by_name(&name, txn)? {
+                                Some(_) => Ok(()),
+                                None => Err(StrataError::corruption(format!(
+                                    "rollback delete for branch '{name}' found legacy metadata without an active control record"
+                                ))),
+                            }
+                        })
+                    }) {
+                        warn!(
+                            target: "strata::branch_mutation",
+                            branch = %name,
+                            error = %e,
+                            "Rollback delete_branch failed"
+                        );
+                    }
+                } else if let Some(rec) = control_store.find_active_by_name(&name)? {
+                    db.transaction(global_branch_id(), |txn| {
+                        control_store.mark_deleted(rec.branch, txn)
+                    })?;
+                    if clear_storage {
+                        db.clear_branch_storage(&branch_id);
+                    }
                 }
 
                 Ok(())
@@ -183,6 +196,7 @@ impl RollbackAction {
 struct BranchSnapshot {
     name: String,
     metadata: BranchMetadata,
+    control_record: BranchControlRecord,
     executor_branch_id: BranchId,
     metadata_branch_id: Option<BranchId>,
     entries: Vec<(Key, Value)>,
@@ -192,10 +206,17 @@ struct BranchSnapshot {
 impl BranchSnapshot {
     fn capture(db: &Arc<Database>, name: &str) -> StrataResult<Self> {
         let branch_index = BranchIndex::new(db.clone());
+        let control_store = BranchControlStore::new(db.clone());
         let metadata = branch_index
             .get_branch(name)?
             .ok_or_else(|| StrataError::invalid_input(format!("Branch '{}' not found", name)))?
             .value;
+        let control_record = control_store.find_active_by_name(name)?.ok_or_else(|| {
+            StrataError::corruption(format!(
+                "branch '{}' has legacy metadata but no active control record",
+                name
+            ))
+        })?;
 
         let executor_branch_id = resolve_branch_name(name);
         let metadata_branch_id = BranchId::from_string(&metadata.branch_id)
@@ -214,6 +235,7 @@ impl BranchSnapshot {
         Ok(Self {
             name: name.to_string(),
             metadata,
+            control_record,
             executor_branch_id,
             metadata_branch_id,
             entries,
@@ -224,10 +246,12 @@ impl BranchSnapshot {
     fn restore(self, db: &Arc<Database>) -> StrataResult<()> {
         let meta_key = Key::new_branch_with_id(global_namespace(), &self.name);
         let metadata_value = stored_branch_metadata_value(&self.metadata)?;
+        let control_store = BranchControlStore::new(db.clone());
 
         db.transaction(global_branch_id(), |txn| {
             txn.set_allow_cross_branch(true);
             txn.put(meta_key.clone(), metadata_value.clone())?;
+            control_store.put_record(&self.control_record, txn)?;
             for (key, value) in &self.entries {
                 txn.put(key.clone(), value.clone())?;
             }
@@ -813,12 +837,12 @@ mod tests {
     fn test_mutation_dag_failure_triggers_rollback() {
         let db = Database::cache().unwrap();
         let hook = Arc::new(TestDagHook::new());
-        hook.set_should_fail(true);
         db.install_dag_hook(hook.clone()).unwrap();
 
         // Create a branch that will be rolled back
+        db.branches().create("rollback-test").unwrap();
+        hook.set_should_fail(true);
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("rollback-test").unwrap();
         assert!(branch_index.exists("rollback-test").unwrap());
 
         let mut mutation = BranchMutation::new(&db);
@@ -831,6 +855,42 @@ mod tests {
 
         // Branch should be deleted by rollback
         assert!(!branch_index.exists("rollback-test").unwrap());
+        let store = BranchControlStore::new(db.clone());
+        let tombstone = store
+            .get_record(strata_core::BranchRef::new(
+                resolve_branch_name("rollback-test"),
+                0,
+            ))
+            .unwrap()
+            .expect("rollback should leave a tombstone control record");
+        assert!(matches!(
+            tombstone.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Deleted
+        ));
+    }
+
+    #[test]
+    fn test_rollback_delete_does_not_emit_best_effort_delete_hook() {
+        let db = Database::cache().unwrap();
+        let hook = Arc::new(TestDagHook::new());
+        db.install_dag_hook(hook.clone()).unwrap();
+
+        db.branches().create("rollback-hook-test").unwrap();
+        assert_eq!(
+            hook.event_count(),
+            1,
+            "branch creation should record exactly one canonical DAG event"
+        );
+
+        let mut mutation = BranchMutation::new(&db);
+        mutation.on_rollback_delete_branch("rollback-hook-test", false);
+        mutation.abort().unwrap();
+
+        assert_eq!(
+            hook.event_count(),
+            1,
+            "rollback delete must not emit a best-effort DAG delete hook"
+        );
     }
 
     #[test]
@@ -838,8 +898,8 @@ mod tests {
         let db = Database::cache().unwrap();
 
         // Create a branch
+        db.branches().create("inject-test").unwrap();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("inject-test").unwrap();
 
         let mut mutation = BranchMutation::new(&db);
         mutation.on_rollback_delete_branch("inject-test", false);
@@ -852,6 +912,18 @@ mod tests {
 
         // Branch should be deleted
         assert!(!branch_index.exists("inject-test").unwrap());
+        let store = BranchControlStore::new(db.clone());
+        let tombstone = store
+            .get_record(strata_core::BranchRef::new(
+                resolve_branch_name("inject-test"),
+                0,
+            ))
+            .unwrap()
+            .expect("rollback should leave a tombstone control record");
+        assert!(matches!(
+            tombstone.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Deleted
+        ));
     }
 
     #[test]
@@ -859,8 +931,8 @@ mod tests {
         let db = Database::cache().unwrap();
 
         // Create a branch
+        db.branches().create("abort-test").unwrap();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("abort-test").unwrap();
 
         let mut mutation = BranchMutation::new(&db);
         mutation.on_rollback_delete_branch("abort-test", false);
@@ -870,6 +942,18 @@ mod tests {
 
         // Branch should be deleted
         assert!(!branch_index.exists("abort-test").unwrap());
+        let store = BranchControlStore::new(db.clone());
+        let tombstone = store
+            .get_record(strata_core::BranchRef::new(
+                resolve_branch_name("abort-test"),
+                0,
+            ))
+            .unwrap()
+            .expect("rollback should leave a tombstone control record");
+        assert!(matches!(
+            tombstone.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Deleted
+        ));
     }
 
     #[test]
@@ -877,8 +961,8 @@ mod tests {
         let db = Database::cache().unwrap();
 
         // Create a branch
+        db.branches().create("drop-test").unwrap();
         let branch_index = BranchIndex::new(db.clone());
-        branch_index.create_branch("drop-test").unwrap();
 
         {
             let mut mutation = BranchMutation::new(&db);
@@ -888,6 +972,54 @@ mod tests {
 
         // Branch should be deleted by drop
         assert!(!branch_index.exists("drop-test").unwrap());
+        let store = BranchControlStore::new(db.clone());
+        let tombstone = store
+            .get_record(strata_core::BranchRef::new(
+                resolve_branch_name("drop-test"),
+                0,
+            ))
+            .unwrap()
+            .expect("rollback should leave a tombstone control record");
+        assert!(matches!(
+            tombstone.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Deleted
+        ));
+    }
+
+    #[test]
+    fn test_rollback_restore_branch_restores_active_control_record() {
+        let db = Database::cache().unwrap();
+        db.branches().create("restore-test").unwrap();
+
+        let mut mutation = BranchMutation::new(&db);
+        mutation.on_rollback_restore_branch("restore-test").unwrap();
+
+        let branch_index = BranchIndex::new(db.clone());
+        let store = BranchControlStore::new(db.clone());
+        branch_index
+            .delete_branch_with_hook("restore-test", |txn| {
+                match store.mark_deleted_by_name("restore-test", txn)? {
+                    Some(_) => Ok(()),
+                    None => Err(StrataError::corruption(
+                        "test setup deleted branch without active control record".to_string(),
+                    )),
+                }
+            })
+            .unwrap();
+
+        mutation.abort().unwrap();
+
+        assert!(branch_index.exists("restore-test").unwrap());
+        let restored = db
+            .branches()
+            .control_record("restore-test")
+            .unwrap()
+            .expect("rollback restore must reactivate the control record");
+        assert!(matches!(
+            restored.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Active
+        ));
+        assert_eq!(restored.branch.generation, 0);
     }
 
     #[test]

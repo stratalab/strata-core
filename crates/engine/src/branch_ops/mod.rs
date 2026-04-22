@@ -37,13 +37,19 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
+use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
-use strata_core::{PrimitiveType, Version, VersionedValue};
+use strata_core::{
+    BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, PrimitiveType, Version,
+    VersionedValue,
+};
 use tracing::info;
+
+use crate::branch_ops::branch_control_store::BranchControlStore;
 
 // =============================================================================
 // Constants and key-format helpers
@@ -741,7 +747,8 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 /// human-readable message and creator that flow into the branch DAG event
 /// for audit / lineage queries.
 pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
-    fork_branch_with_metadata(db, source, destination, None, None)
+    let dest_gen = resolve_fork_generation(db, destination)?;
+    fork_branch_with_metadata(db, source, destination, None, None, dest_gen)
 }
 
 /// Same as [`fork_branch`] but records `message` and `creator` on the
@@ -751,15 +758,25 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
 /// user-supplied audit metadata (`fork_with_options(message, creator)`)
 /// flows through to the DAG. Engine-direct callers (tests, internal
 /// subsystems) typically use the no-metadata [`fork_branch`] wrapper.
+///
+/// `dest_gen` is preallocated by the caller (see
+/// [`resolve_fork_generation`]). The source `BranchRef` is resolved
+/// inside fork's quiesce guard so the control-store fork anchor points
+/// at the same lifecycle instance whose storage snapshot is being
+/// forked. Storage-fork-first ordering is preserved: the storage fork
+/// commits before the KV txn, so a crash between them leaves harmless
+/// orphan storage (refcounts rebuild from manifests on recovery).
 pub fn fork_branch_with_metadata(
     db: &Arc<Database>,
     source: &str,
     destination: &str,
     message: Option<&str>,
     creator: Option<&str>,
+    dest_gen: BranchGeneration,
 ) -> StrataResult<ForkInfo> {
     let branch_index = BranchIndex::new(db.clone());
     let space_index = SpaceIndex::new(db.clone());
+    let control_store = BranchControlStore::new(db.clone());
 
     // 1. Verify source exists
     branch_index.get_branch(source)?.ok_or_else(|| {
@@ -827,7 +844,7 @@ pub fn fork_branch_with_metadata(
     // commit() acquires quiesce.read() → branch_commit_lock, so nesting
     // branch_commit_lock inside quiesce.write() would invert the lock order
     // and deadlock with concurrent commits on the source branch.
-    let (fork_version, _segments_shared) = {
+    let (parent_ref, fork_version, _segments_shared) = {
         let _quiesce_guard = db.quiesce_commits();
         if db.is_branch_deleting(&source_id) {
             return Err(StrataError::invalid_input(format!(
@@ -835,14 +852,34 @@ pub fn fork_branch_with_metadata(
                 source
             )));
         }
-        storage
+        let parent_ref = match control_store.find_active_by_name(source)? {
+            Some(rec) => rec.branch,
+            None => BranchRef::new(source_id, 0),
+        };
+        let (fork_version, shared) = storage
             .fork_branch(&source_id, &dest_id)
-            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?
+            .map_err(|e| StrataError::storage(format!("fork failed: {}", e)))?;
+        (parent_ref, fork_version, shared)
     };
 
-    // 5. Create destination branch in KV metadata (WAL-protected).
-    //    If this fails, rollback the storage fork.
-    if let Err(e) = branch_index.create_branch(destination) {
+    // 5. Create destination branch in KV metadata (WAL-protected) AND
+    //    write the new BranchControlRecord atomically in the same
+    //    transaction (B3.2). If either fails, rollback the storage fork
+    //    so the visibility invariant holds (AD6).
+    let child_ref = BranchRef::new(dest_id, dest_gen);
+    let control_record = BranchControlRecord {
+        branch: child_ref,
+        name: destination.to_string(),
+        lifecycle: BranchLifecycleStatus::Active,
+        fork: Some(ForkAnchor {
+            parent: parent_ref,
+            point: fork_version,
+        }),
+    };
+    let kv_result = branch_index.create_branch_with_hook(destination, |txn| {
+        control_store.put_record(&control_record, txn)
+    });
+    if let Err(e) = kv_result {
         storage.clear_branch(&dest_id);
         return Err(e);
     }
@@ -863,6 +900,8 @@ pub fn fork_branch_with_metadata(
         source,
         destination,
         fork_version = fork_version.as_u64(),
+        parent_generation = parent_ref.generation,
+        dest_generation = dest_gen,
         "Branch forked (COW)"
     );
 
@@ -877,6 +916,34 @@ pub fn fork_branch_with_metadata(
     dispatch_fork_hook(db, &info, message, creator);
 
     Ok(info)
+}
+
+/// Allocate the child's next generation for a fork.
+///
+/// The source `BranchRef` is resolved later, under fork's quiesce guard,
+/// so the fork anchor is derived from the exact lifecycle instance whose
+/// storage snapshot is being copied.
+///
+/// Checks the destination up-front before bumping the counter so a
+/// trivially-failing fork (duplicate destination) does not leak a
+/// generation from the monotonic counter.
+pub(crate) fn resolve_fork_generation(
+    db: &Arc<Database>,
+    destination: &str,
+) -> StrataResult<BranchGeneration> {
+    let store = BranchControlStore::new(db.clone());
+    let branch_index = BranchIndex::new(db.clone());
+    if branch_index.exists(destination)? || store.find_active_by_name(destination)?.is_some() {
+        return Err(StrataError::invalid_input(format!(
+            "Destination branch '{}' already exists",
+            destination
+        )));
+    }
+    let dest_id = resolve_branch_name(destination);
+    let dest_gen = db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
+        store.next_generation(dest_id, txn)
+    })?;
+    Ok(dest_gen)
 }
 
 // =============================================================================
