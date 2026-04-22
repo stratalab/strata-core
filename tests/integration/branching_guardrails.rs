@@ -409,3 +409,108 @@ fn strip_comments_ignores_comment_only_occurrences() {
     );
     assert!(!in_block);
 }
+
+// =============================================================================
+// B4.3 tripwire: branch_ops low-level mutation surface is empty
+// =============================================================================
+
+/// Known `pub fn` items in `crates/engine/src/branch_ops/mod.rs` that are
+/// deliberately left on the public surface. Read-only diff / merge-base /
+/// annotation query helpers plus storage-maintenance (`materialize_branch`)
+/// are the full allow-list. Every other `pub fn` in that file must go
+/// through `BranchService`.
+const BRANCH_OPS_PUB_FN_ALLOWLIST: &[&str] = &[
+    "diff_branches",
+    "diff_branches_with_options",
+    "diff_three_way",
+    "get_merge_base",
+    "get_notes",
+    "list_tags",
+    "materialize_branch",
+    "resolve_tag",
+];
+
+fn branch_ops_mod_path() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates")
+        .join("engine")
+        .join("src")
+        .join("branch_ops")
+        .join("mod.rs")
+}
+
+/// Extract the identifier after `pub fn ` on a code line, if any. Returns
+/// `None` for non-matching lines or lines that are inside a comment (those
+/// are already stripped by `strip_comments_from_line`).
+fn parse_pub_fn_name(code: &str) -> Option<&str> {
+    let after = code.strip_prefix("pub fn ")?;
+    let end = after
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .unwrap_or(after.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&after[..end])
+    }
+}
+
+/// B4.3 tripwire. After bypass collapse, every `pub fn` in
+/// `crates/engine/src/branch_ops/mod.rs` must either be a declared
+/// read-only helper on the allow-list or be tightened to `pub(crate)`.
+/// Any new unlisted `pub fn` is a regression — either move the callsite
+/// to `BranchService` or bump the allow-list with justification.
+#[test]
+fn branch_ops_pub_mutation_surface_is_empty() {
+    let path = branch_ops_mod_path();
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+
+    let mut in_block_comment = false;
+    let mut violations: Vec<String> = Vec::new();
+
+    for (lineno, line) in src.lines().enumerate() {
+        let Some(code) = strip_comments_from_line(line, &mut in_block_comment) else {
+            continue;
+        };
+        let Some(name) = parse_pub_fn_name(code) else {
+            continue;
+        };
+        if !BRANCH_OPS_PUB_FN_ALLOWLIST.contains(&name) {
+            violations.push(format!(
+                "  {}:{}: `pub fn {name}` is not on the branch_ops allow-list",
+                path.display(),
+                lineno + 1,
+            ));
+        }
+    }
+
+    if !violations.is_empty() {
+        let joined = violations.join("\n");
+        panic!(
+            "B4.3 tripwire: unlisted public mutation surface in branch_ops/mod.rs:\n\n\
+             {joined}\n\n\
+             If this is a new read-only helper, add its name to\n\
+             `BRANCH_OPS_PUB_FN_ALLOWLIST` in\n\
+             tests/integration/branching_guardrails.rs.\n\
+             Otherwise move the callers to BranchService and tighten the\n\
+             helper to `pub(crate)`."
+        );
+    }
+}
+
+#[test]
+fn parse_pub_fn_name_extracts_identifier() {
+    assert_eq!(
+        parse_pub_fn_name("pub fn diff_branches("),
+        Some("diff_branches")
+    );
+    assert_eq!(
+        parse_pub_fn_name("pub fn materialize_branch(db: &Arc<Database>) {"),
+        Some("materialize_branch")
+    );
+    assert_eq!(
+        parse_pub_fn_name("pub(crate) fn fork_branch_with_metadata"),
+        None
+    );
+    assert_eq!(parse_pub_fn_name("fn private_helper()"), None);
+    assert_eq!(parse_pub_fn_name("pub fn "), None);
+}

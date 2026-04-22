@@ -751,7 +751,8 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 // Fork
 // =============================================================================
 
-/// Fork a branch via O(1) COW (copy-on-write).
+/// Fork a branch via O(1) COW (copy-on-write), recording `message` and
+/// `creator` on the resulting branch DAG fork event.
 ///
 /// Creates a new branch with `destination` name and shares the source's
 /// segments via inherited layers. No data is copied — writes to the
@@ -760,30 +761,6 @@ fn resolve_and_verify(db: &Arc<Database>, name: &str) -> StrataResult<BranchId> 
 /// Requires a disk-backed database. Ephemeral (in-memory) databases
 /// return an error.
 ///
-/// # Errors
-///
-/// - Source branch does not exist
-/// - Destination branch already exists
-/// - Database is ephemeral (no segments directory)
-///
-/// # See also
-///
-/// [`fork_branch_with_metadata`] — same operation but accepts an optional
-/// human-readable message and creator that flow into the branch DAG event
-/// for audit / lineage queries.
-pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
-    let dest_gen = resolve_fork_generation(db, destination)?;
-    fork_branch_with_metadata(db, source, destination, None, None, dest_gen)
-}
-
-/// Same as [`fork_branch`] but records `message` and `creator` on the
-/// resulting branch DAG fork event.
-///
-/// The executor's `branch_fork` handler calls this variant so that
-/// user-supplied audit metadata (`fork_with_options(message, creator)`)
-/// flows through to the DAG. Engine-direct callers (tests, internal
-/// subsystems) typically use the no-metadata [`fork_branch`] wrapper.
-///
 /// `dest_gen` is preallocated by the caller (see
 /// [`resolve_fork_generation`]). The source `BranchRef` is resolved
 /// inside fork's quiesce guard so the control-store fork anchor points
@@ -791,7 +768,17 @@ pub fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> Strat
 /// forked. Storage-fork-first ordering is preserved: the storage fork
 /// commits before the KV txn, so a crash between them leaves harmless
 /// orphan storage (refcounts rebuild from manifests on recovery).
-pub fn fork_branch_with_metadata(
+///
+/// Canonical entry point: [`crate::database::BranchService::fork`] /
+/// [`crate::database::BranchService::fork_with_options`]. This helper is
+/// `pub(crate)` and must not be called from outside the engine crate.
+///
+/// # Errors
+///
+/// - Source branch does not exist
+/// - Destination branch already exists
+/// - Database is ephemeral (no segments directory)
+pub(crate) fn fork_branch_with_metadata(
     db: &Arc<Database>,
     source: &str,
     destination: &str,
@@ -2004,10 +1991,11 @@ fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id:
 }
 
 // =============================================================================
-// Merge (public entry point)
+// Merge
 // =============================================================================
 
-/// Merge data from source branch into target branch using three-way merge.
+/// Merge data from source branch into target branch using three-way merge,
+/// recording `message` and `creator` on the resulting branch DAG merge event.
 ///
 /// Computes the common ancestor (merge base) from the fork/merge relationship
 /// between the branches, then classifies each key using a 14-case decision matrix.
@@ -2016,31 +2004,16 @@ fn reload_secondary_backends(db: &Arc<Database>, target_id: BranchId, source_id:
 /// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] — no
 /// caller-supplied override.
 ///
+/// Canonical entry point: [`crate::database::BranchService::merge`] /
+/// [`crate::database::BranchService::merge_with_options`]. This helper is
+/// `pub(crate)` and must not be called from outside the engine crate.
+///
 /// # Errors
 ///
 /// - Either branch does not exist
 /// - No fork or merge relationship between branches
 /// - `Strict` strategy with conflicts
-///
-/// # See also
-///
-/// [`merge_branches_with_metadata`] — same operation but accepts an optional
-/// human-readable message and creator that flow into the branch DAG event.
-pub fn merge_branches(
-    db: &Arc<Database>,
-    source: &str,
-    target: &str,
-    strategy: MergeStrategy,
-) -> StrataResult<MergeInfo> {
-    merge_branches_with_metadata(db, source, target, strategy, None, None)
-}
-
-/// Same as [`merge_branches`] but records `message` and `creator` on the
-/// resulting branch DAG merge event.
-///
-/// The executor's `branch_merge` handler calls this variant so that
-/// user-supplied audit metadata flows through to the DAG.
-pub fn merge_branches_with_metadata(
+pub(crate) fn merge_branches_with_metadata(
     db: &Arc<Database>,
     source: &str,
     target: &str,
@@ -2626,11 +2599,15 @@ pub struct TagInfo {
 ///
 /// If `version` is `None`, tags the current database version.
 ///
+/// Canonical entry point: [`crate::database::BranchService::tag`]. This
+/// helper is `pub(crate)` and must not be called from outside the engine
+/// crate.
+///
 /// # Errors
 ///
 /// - Branch does not exist
 /// - Serialization failure (internal)
-pub fn create_tag(
+pub(crate) fn create_tag(
     db: &Arc<Database>,
     branch: &str,
     name: &str,
@@ -2701,7 +2678,11 @@ pub(crate) fn create_tag_with_expected(
 /// Delete a tag.
 ///
 /// Returns `true` if the tag existed and was deleted.
-pub fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<bool> {
+///
+/// Canonical entry point: [`crate::database::BranchService::untag`]. This
+/// helper is `pub(crate)` and must not be called from outside the engine
+/// crate.
+pub(crate) fn delete_tag(db: &Arc<Database>, branch: &str, name: &str) -> StrataResult<bool> {
     delete_tag_with_expected(db, branch, name, None)
 }
 
@@ -2808,11 +2789,15 @@ pub struct NoteInfo {
 
 /// Add a note to a specific version of a branch.
 ///
+/// Canonical entry point: [`crate::database::BranchService::add_note`].
+/// This helper is `pub(crate)` and must not be called from outside the
+/// engine crate.
+///
 /// # Errors
 ///
 /// - Branch does not exist
 /// - Serialization failure (internal)
-pub fn add_note(
+pub(crate) fn add_note(
     db: &Arc<Database>,
     branch: &str,
     version: CommitVersion,
@@ -2908,7 +2893,15 @@ pub fn get_notes(
 /// Delete a note at a specific version.
 ///
 /// Returns `true` if the note existed and was deleted.
-pub fn delete_note(db: &Arc<Database>, branch: &str, version: CommitVersion) -> StrataResult<bool> {
+///
+/// Canonical entry point: [`crate::database::BranchService::delete_note`].
+/// This helper is `pub(crate)` and must not be called from outside the
+/// engine crate.
+pub(crate) fn delete_note(
+    db: &Arc<Database>,
+    branch: &str,
+    version: CommitVersion,
+) -> StrataResult<bool> {
     delete_note_with_expected(db, branch, version, None)
 }
 
@@ -2964,30 +2957,18 @@ pub struct RevertInfo {
     pub revert_version: Option<CommitVersion>,
 }
 
-/// Revert a version range on a branch.
+/// Revert a version range on a branch, recording `message` and `creator`
+/// on the resulting branch DAG revert event.
 ///
 /// For each key modified in [from_version, to_version], restores its value
 /// to what it was at (from_version - 1). Only reverts keys whose current
 /// value matches the state at to_version — keys modified after to_version
 /// are left untouched (preserving subsequent work).
 ///
-/// # See also
-///
-/// [`revert_version_range_with_metadata`] — same operation but accepts an
-/// optional human-readable message and creator that flow into the branch
-/// DAG revert event.
-pub fn revert_version_range(
-    db: &Arc<Database>,
-    branch: &str,
-    from_version: CommitVersion,
-    to_version: CommitVersion,
-) -> StrataResult<RevertInfo> {
-    revert_version_range_with_metadata(db, branch, from_version, to_version, None, None)
-}
-
-/// Same as [`revert_version_range`] but records `message` and `creator`
-/// on the resulting branch DAG revert event.
-pub fn revert_version_range_with_metadata(
+/// Canonical entry point: [`crate::database::BranchService::revert`]. This
+/// helper is `pub(crate)` and must not be called from outside the engine
+/// crate.
+pub(crate) fn revert_version_range_with_metadata(
     db: &Arc<Database>,
     branch: &str,
     from_version: CommitVersion,
@@ -3164,7 +3145,11 @@ pub struct CherryPickFilter {
 ///
 /// Reads the current value of each specified key from source and writes
 /// it to target in a single transaction.
-pub fn cherry_pick_keys(
+///
+/// Canonical entry point:
+/// [`crate::database::BranchService::cherry_pick`]. This helper is
+/// `pub(crate)` and must not be called from outside the engine crate.
+pub(crate) fn cherry_pick_keys(
     db: &Arc<Database>,
     source: &str,
     target: &str,
@@ -3355,7 +3340,11 @@ fn check_graph_action_atomicity(
 ///
 /// B3.3: merge base comes from [`BranchControlStore::find_merge_base`] —
 /// no caller-supplied override.
-pub fn cherry_pick_from_diff(
+///
+/// Canonical entry point:
+/// [`crate::database::BranchService::cherry_pick_from_diff`]. This helper
+/// is `pub(crate)` and must not be called from outside the engine crate.
+pub(crate) fn cherry_pick_from_diff(
     db: &Arc<Database>,
     source: &str,
     target: &str,
@@ -3643,6 +3632,34 @@ mod tests {
         // from the control store after B3.3.
         db.branches().create(name).unwrap();
         (temp_dir, db)
+    }
+
+    // Test-only low-level helpers. B4.3 deleted the public no-metadata
+    // `fork_branch` / `merge_branches` / `revert_version_range` wrappers
+    // from the module surface; the characterization tests below exercise
+    // the underlying `_with_metadata` helpers directly, so we re-introduce
+    // the convenience wrappers here scoped to the test module.
+    fn fork_branch(db: &Arc<Database>, source: &str, destination: &str) -> StrataResult<ForkInfo> {
+        let dest_gen = resolve_fork_generation(db, destination)?;
+        fork_branch_with_metadata(db, source, destination, None, None, dest_gen)
+    }
+
+    fn merge_branches(
+        db: &Arc<Database>,
+        source: &str,
+        target: &str,
+        strategy: MergeStrategy,
+    ) -> StrataResult<MergeInfo> {
+        merge_branches_with_metadata(db, source, target, strategy, None, None)
+    }
+
+    fn revert_version_range(
+        db: &Arc<Database>,
+        branch: &str,
+        from_version: CommitVersion,
+        to_version: CommitVersion,
+    ) -> StrataResult<RevertInfo> {
+        revert_version_range_with_metadata(db, branch, from_version, to_version, None, None)
     }
 
     fn write_kv(db: &Arc<Database>, branch: &str, space: &str, key: &str, value: Value) {
