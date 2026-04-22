@@ -49,7 +49,7 @@ use strata_core::{
 };
 use tracing::info;
 
-use crate::branch_ops::branch_control_store::BranchControlStore;
+use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore, MergeBasePoint};
 
 // =============================================================================
 // Constants and key-format helpers
@@ -1504,6 +1504,103 @@ pub enum MergeActionKind {
 /// both `merge` apply and `merge_base` inspection read from the same
 /// lineage (see B3.3 done-when in
 /// `docs/design/branching/b3-phasing-plan.md`).
+fn compute_merge_base_for_refs(
+    db: &Arc<Database>,
+    source_ref: BranchRef,
+    target_ref: BranchRef,
+) -> StrataResult<Option<MergeBase>> {
+    let Some(point) = compute_merge_base_point_for_refs(db, source_ref, target_ref)? else {
+        return Ok(None);
+    };
+
+    Ok(Some(MergeBase {
+        branch_id: point.branch.id,
+        version: point.commit_version,
+    }))
+}
+
+fn compute_merge_base_point_for_refs(
+    db: &Arc<Database>,
+    source_ref: BranchRef,
+    target_ref: BranchRef,
+) -> StrataResult<Option<MergeBasePoint>> {
+    let store = BranchControlStore::new(db.clone());
+    store.find_merge_base(source_ref, target_ref)
+}
+
+fn verify_expected_active_ref(
+    db: &Arc<Database>,
+    branch_name: &str,
+    expected: BranchRef,
+) -> StrataResult<()> {
+    let store = BranchControlStore::new(db.clone());
+    match store.active_generation_for_id(expected.id)? {
+        Some(current_generation) if current_generation == expected.generation => Ok(()),
+        Some(current_generation) => Err(StrataError::conflict(format!(
+            "branch '{}' lifecycle advanced from generation {} to {} during operation",
+            branch_name, expected.generation, current_generation
+        ))),
+        None => Err(StrataError::conflict(format!(
+            "branch '{}' lifecycle no longer has active generation {} during operation",
+            branch_name, expected.generation
+        ))),
+    }
+}
+
+fn resolve_and_verify_with_expected(
+    db: &Arc<Database>,
+    name: &str,
+    expected: Option<BranchRef>,
+) -> StrataResult<BranchId> {
+    if let Some(expected) = expected {
+        verify_expected_active_ref(db, name, expected)?;
+        return Ok(expected.id);
+    }
+    resolve_and_verify(db, name)
+}
+
+fn verify_expected_active_ref_in_txn(
+    txn: &mut strata_concurrency::TransactionContext,
+    branch_name: &str,
+    expected: BranchRef,
+) -> StrataResult<()> {
+    let key = active_ptr_key(expected.id);
+    txn.set_allow_cross_branch(true);
+    let current = txn.get(&key)?;
+    txn.set_allow_cross_branch(false);
+
+    let current_generation = match current {
+        Some(Value::Int(v)) if v >= 0 => v as u64,
+        Some(other) => {
+            return Err(StrataError::corruption(format!(
+                "branch '{}' lifecycle guard stored invalid active generation value: {:?}",
+                branch_name, other
+            )));
+        }
+        None => {
+            return Err(StrataError::conflict(format!(
+                "branch '{}' lifecycle no longer has active generation {} during operation",
+                branch_name, expected.generation
+            )));
+        }
+    };
+
+    if current_generation != expected.generation {
+        return Err(StrataError::conflict(format!(
+            "branch '{}' lifecycle advanced from generation {} to {} during operation",
+            branch_name, expected.generation, current_generation
+        )));
+    }
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub(crate) struct MergeExecutionResult {
+    pub info: MergeInfo,
+    pub merge_base_used: MergeBasePoint,
+}
+
 fn compute_merge_base(
     db: &Arc<Database>,
     source_id: BranchId,
@@ -1519,10 +1616,6 @@ fn compute_merge_base(
     let source_ref = BranchRef::new(source_id, source_gen);
     let target_ref = BranchRef::new(target_id, target_gen);
 
-    let Some(point) = store.find_merge_base(source_ref, target_ref)? else {
-        return Ok(None);
-    };
-
     // Apply-path reads are keyed by `BranchId` + version via
     // `list_by_type_at_version`. The `BranchRef` generation is preserved
     // on the stored edge and surfaced by `BranchControlStore` queries;
@@ -1530,10 +1623,7 @@ fn compute_merge_base(
     // read path does not need generation disambiguation (same-name
     // recreate yields a new id-equivalent generation, and storage reads
     // are keyed by `BranchId` regardless).
-    Ok(Some(MergeBase {
-        branch_id: point.branch.id,
-        version: point.commit_version,
-    }))
+    compute_merge_base_for_refs(db, source_ref, target_ref)
 }
 
 /// Per-(space, type_tag) entry slices gathered for a three-way merge.
@@ -1933,11 +2023,80 @@ pub fn merge_branches_with_metadata(
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<MergeInfo> {
-    let source_id = resolve_and_verify(db, source)?;
-    let target_id = resolve_and_verify(db, target)?;
+    Ok(
+        merge_branches_with_metadata_expected_detailed(
+            db, source, target, strategy, message, creator, None, None,
+        )?
+        .info,
+    )
+}
 
-    let merge_base = match compute_merge_base(db, source_id, target_id)? {
-        Some(mb) => mb,
+pub(crate) fn merge_branches_with_metadata_expected(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    strategy: MergeStrategy,
+    message: Option<&str>,
+    creator: Option<&str>,
+    expected_source_ref: Option<BranchRef>,
+    expected_target_ref: Option<BranchRef>,
+) -> StrataResult<MergeInfo> {
+    Ok(
+        merge_branches_with_metadata_expected_detailed(
+            db,
+            source,
+            target,
+            strategy,
+            message,
+            creator,
+            expected_source_ref,
+            expected_target_ref,
+        )?
+        .info,
+    )
+}
+
+pub(crate) fn merge_branches_with_metadata_expected_detailed(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    strategy: MergeStrategy,
+    message: Option<&str>,
+    creator: Option<&str>,
+    expected_source_ref: Option<BranchRef>,
+    expected_target_ref: Option<BranchRef>,
+) -> StrataResult<MergeExecutionResult> {
+    let source_id = resolve_and_verify_with_expected(db, source, expected_source_ref)?;
+    let target_id = resolve_and_verify_with_expected(db, target, expected_target_ref)?;
+
+    let merge_base_point = match match (expected_source_ref, expected_target_ref) {
+        (Some(source_ref), Some(target_ref)) => {
+            compute_merge_base_point_for_refs(db, source_ref, target_ref)?
+        }
+        _ => {
+            let store = BranchControlStore::new(db.clone());
+            let Some(source_gen) = store.active_generation_for_id(source_id)? else {
+                return Err(StrataError::invalid_input(format!(
+                    "Cannot merge '{}' into '{}': no fork or merge relationship found. \
+                     Branches must be related by fork or a previous merge.",
+                    source, target
+                )));
+            };
+            let Some(target_gen) = store.active_generation_for_id(target_id)? else {
+                return Err(StrataError::invalid_input(format!(
+                    "Cannot merge '{}' into '{}': no fork or merge relationship found. \
+                     Branches must be related by fork or a previous merge.",
+                    source, target
+                )));
+            };
+            compute_merge_base_point_for_refs(
+                db,
+                BranchRef::new(source_id, source_gen),
+                BranchRef::new(target_id, target_gen),
+            )?
+        }
+    } {
+        Some(point) => point,
         None => {
             return Err(StrataError::invalid_input(format!(
                 "Cannot merge '{}' into '{}': no fork or merge relationship found. \
@@ -1945,6 +2104,10 @@ pub fn merge_branches_with_metadata(
                 source, target
             )));
         }
+    };
+    let merge_base = MergeBase {
+        branch_id: merge_base_point.branch.id,
+        version: merge_base_point.commit_version,
     };
 
     // Collect spaces from both branches
@@ -2072,6 +2235,12 @@ pub fn merge_branches_with_metadata(
         // Apply in a single transaction, capturing the merge version.
         // Read each target key first to populate read_set for OCC (#1917).
         let ((), version) = db.transaction_with_version(target_id, |txn| {
+            if let Some(expected) = expected_source_ref {
+                verify_expected_active_ref_in_txn(txn, source, expected)?;
+            }
+            if let Some(expected) = expected_target_ref {
+                verify_expected_active_ref_in_txn(txn, target, expected)?;
+            }
             // Validate target hasn't changed since the diff snapshot (#1917).
             // txn.get() populates read_set, enabling OCC conflict detection.
             for (key, expected) in &expected_targets {
@@ -2142,7 +2311,10 @@ pub fn merge_branches_with_metadata(
 
     dispatch_merge_hook(db, &info, strategy, message, creator);
 
-    Ok(info)
+    Ok(MergeExecutionResult {
+        info,
+        merge_base_used: merge_base_point,
+    })
 }
 
 // =============================================================================
@@ -2739,6 +2911,18 @@ pub fn revert_version_range_with_metadata(
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<RevertInfo> {
+    revert_version_range_with_expected(db, branch, from_version, to_version, message, creator, None)
+}
+
+pub(crate) fn revert_version_range_with_expected(
+    db: &Arc<Database>,
+    branch: &str,
+    from_version: CommitVersion,
+    to_version: CommitVersion,
+    message: Option<&str>,
+    creator: Option<&str>,
+    expected_branch_ref: Option<BranchRef>,
+) -> StrataResult<RevertInfo> {
     // Validate range
     if from_version == CommitVersion::ZERO {
         return Err(StrataError::invalid_input("from_version must be > 0"));
@@ -2757,7 +2941,7 @@ pub fn revert_version_range_with_metadata(
         )));
     }
 
-    let branch_id = resolve_and_verify(db, branch)?;
+    let branch_id = resolve_and_verify_with_expected(db, branch, expected_branch_ref)?;
     let storage = db.storage();
 
     let mut puts: Vec<(Key, Value)> = Vec::new();
@@ -2825,6 +3009,9 @@ pub fn revert_version_range_with_metadata(
 
     if !puts.is_empty() || !deletes.is_empty() {
         let ((), version) = db.transaction_with_version(branch_id, |txn| {
+            if let Some(expected) = expected_branch_ref {
+                verify_expected_active_ref_in_txn(txn, branch, expected)?;
+            }
             for (key, value) in &puts {
                 txn.put(key.clone(), value.clone())?;
             }
@@ -2899,8 +3086,19 @@ pub fn cherry_pick_keys(
     target: &str,
     keys: &[(String, String)], // (space, key) pairs
 ) -> StrataResult<CherryPickInfo> {
-    let source_id = resolve_and_verify(db, source)?;
-    let target_id = resolve_and_verify(db, target)?;
+    cherry_pick_keys_expected(db, source, target, keys, None, None)
+}
+
+pub(crate) fn cherry_pick_keys_expected(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    keys: &[(String, String)],
+    expected_source_ref: Option<BranchRef>,
+    expected_target_ref: Option<BranchRef>,
+) -> StrataResult<CherryPickInfo> {
+    let source_id = resolve_and_verify_with_expected(db, source, expected_source_ref)?;
+    let target_id = resolve_and_verify_with_expected(db, target, expected_target_ref)?;
     let storage = db.storage();
     let space_index = SpaceIndex::new(db.clone());
 
@@ -2931,6 +3129,12 @@ pub fn cherry_pick_keys(
 
     if !puts.is_empty() {
         let ((), version) = db.transaction_with_version(target_id, |txn| {
+            if let Some(expected) = expected_source_ref {
+                verify_expected_active_ref_in_txn(txn, source, expected)?;
+            }
+            if let Some(expected) = expected_target_ref {
+                verify_expected_active_ref_in_txn(txn, target, expected)?;
+            }
             for (key, value) in &puts {
                 txn.put(key.clone(), value.clone())?;
             }
@@ -3073,10 +3277,26 @@ pub fn cherry_pick_from_diff(
     target: &str,
     filter: CherryPickFilter,
 ) -> StrataResult<CherryPickInfo> {
-    let source_id = resolve_and_verify(db, source)?;
-    let target_id = resolve_and_verify(db, target)?;
+    cherry_pick_from_diff_expected(db, source, target, filter, None, None)
+}
 
-    let merge_base = match compute_merge_base(db, source_id, target_id)? {
+pub(crate) fn cherry_pick_from_diff_expected(
+    db: &Arc<Database>,
+    source: &str,
+    target: &str,
+    filter: CherryPickFilter,
+    expected_source_ref: Option<BranchRef>,
+    expected_target_ref: Option<BranchRef>,
+) -> StrataResult<CherryPickInfo> {
+    let source_id = resolve_and_verify_with_expected(db, source, expected_source_ref)?;
+    let target_id = resolve_and_verify_with_expected(db, target, expected_target_ref)?;
+
+    let merge_base = match match (expected_source_ref, expected_target_ref) {
+        (Some(source_ref), Some(target_ref)) => {
+            compute_merge_base_for_refs(db, source_ref, target_ref)?
+        }
+        _ => compute_merge_base(db, source_id, target_id)?,
+    } {
         Some(mb) => mb,
         None => {
             return Err(StrataError::invalid_input(format!(
@@ -3237,6 +3457,12 @@ pub fn cherry_pick_from_diff(
 
     if !puts.is_empty() || !deletes.is_empty() {
         let ((), version) = db.transaction_with_version(target_id, |txn| {
+            if let Some(expected) = expected_source_ref {
+                verify_expected_active_ref_in_txn(txn, source, expected)?;
+            }
+            if let Some(expected) = expected_target_ref {
+                verify_expected_active_ref_in_txn(txn, target, expected)?;
+            }
             // Validate target hasn't changed since diff snapshot (#1917)
             for (key, expected) in &expected_targets {
                 let current = txn.get(key)?;
@@ -3622,8 +3848,7 @@ mod tests {
             Value::String("new".into()),
         );
 
-        let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert!(
             info.keys_applied >= 2,
             "shared (conflict resolved) + new_key"
@@ -3778,8 +4003,7 @@ mod tests {
         .unwrap();
 
         // Merge source into target
-        let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert_eq!(info.keys_applied, 1, "Binary key entry should be merged");
 
         // Verify the binary key data is in target
@@ -3812,8 +4036,7 @@ mod tests {
             Value::String("new".into()),
         );
 
-        let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
 
         // Should report the conflict even though LWW resolved it
         assert_eq!(info.conflicts.len(), 1, "Should report 1 conflict");
@@ -3832,8 +4055,7 @@ mod tests {
 
         write_kv(&db, "source", "default", "k1", Value::String("v1".into()));
 
-        let info =
-            merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_applied >= 1);
         assert_eq!(
             read_kv(&db, "target", "default", "k1"),
@@ -4914,8 +5136,7 @@ mod tests {
         delete_kv(&db, "child", "default", "b");
 
         // Merge child → parent
-        let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_deleted >= 1, "should have deleted at least 1 key");
 
         // Verify: "a" still exists, "b" is gone
@@ -4936,8 +5157,7 @@ mod tests {
         write_kv(&db, "parent", "default", "b", Value::Int(2));
 
         // Child does nothing. Merge child → parent.
-        let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert_eq!(info.keys_deleted, 0, "nothing should be deleted");
 
         // Verify: both "a" and "b" still exist on parent
@@ -4990,8 +5210,7 @@ mod tests {
         assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(10)));
 
         // LWW merge should succeed with source's value
-        let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(info.keys_applied >= 1);
         assert_eq!(read_kv(&db, "parent", "default", "a"), Some(Value::Int(20)));
     }
@@ -5004,8 +5223,7 @@ mod tests {
         fork_branch(&db, "parent", "child").unwrap();
         write_kv(&db, "child", "default", "b", Value::Int(2));
 
-        let info =
-            merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
+        let info = merge_branches(&db, "child", "parent", MergeStrategy::LastWriterWins).unwrap();
         assert!(
             info.merge_version.is_some(),
             "merge should return a version"
@@ -5616,8 +5834,7 @@ mod tests {
             });
 
             barrier.wait();
-            let result =
-                merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins);
+            let result = merge_branches(&db, "source", "target", MergeStrategy::LastWriterWins);
             writer.join().unwrap();
 
             // Both merge and concurrent write have committed at this point.
@@ -5709,21 +5926,11 @@ mod tests {
 
             let t1 = thread::spawn(move || {
                 b1.wait();
-                merge_branches(
-                    &db1,
-                    "source1",
-                    "target",
-                    MergeStrategy::LastWriterWins,
-                    )
+                merge_branches(&db1, "source1", "target", MergeStrategy::LastWriterWins)
             });
             let t2 = thread::spawn(move || {
                 b2.wait();
-                merge_branches(
-                    &db2,
-                    "source2",
-                    "target",
-                    MergeStrategy::LastWriterWins,
-                    )
+                merge_branches(&db2, "source2", "target", MergeStrategy::LastWriterWins)
             });
 
             let r1 = t1.join().unwrap();

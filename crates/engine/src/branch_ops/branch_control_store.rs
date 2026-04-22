@@ -41,7 +41,7 @@
 //! Tombstoned records (`lifecycle = Deleted`) remain in the store so the
 //! counter can be reconstructed after recovery.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 /// One-shot warn latch for follower legacy synthesis mode (AD5).
@@ -684,6 +684,20 @@ impl BranchControlStore {
         Ok(())
     }
 
+    /// Delete a lineage edge at the exact `(target, commit_version)` key.
+    ///
+    /// Used by `BranchMutation` rollback when a later DAG write fails after the
+    /// authoritative edge has already been persisted.
+    pub(crate) fn delete_edge(
+        &self,
+        target: BranchRef,
+        commit_version: CommitVersion,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<()> {
+        txn.delete(edge_key(target, commit_version))?;
+        Ok(())
+    }
+
     // =========================================================================
     // Read-path methods (open their own transaction)
     // =========================================================================
@@ -1138,43 +1152,43 @@ impl BranchControlStore {
     /// Rebuild the `_branch_dag` projection from the authoritative
     /// control-store snapshot.
     ///
-    /// Best-effort per AD3: rebuild failures are logged and do not fail
-    /// database open. B3.1 rebuilds the current read-side DAG projection
-    /// from control records + lineage edges; later B3 work re-keys the
-    /// live helpers to the canonical `BranchRef` node encoding.
-    pub(crate) fn rebuild_dag_projection(db: &Arc<Database>) {
-        let rebuild = || -> StrataResult<()> {
-            let hook = match db.dag_hook().get() {
-                Some(hook) => hook,
-                None => return Ok(()),
-            };
+    /// Best-effort per AD3 when called from open/recovery paths, but callers
+    /// may also use the returned `Err` to fail-closed after a DAG write
+    /// partially succeeded. If replay fails after `reset_projection()`, the
+    /// hook is reset a second time so callers do not keep a half-rebuilt DAG.
+    pub(crate) fn rebuild_dag_projection(db: &Arc<Database>) -> StrataResult<()> {
+        let hook = match db.dag_hook().get() {
+            Some(hook) => hook,
+            None => return Ok(()),
+        };
 
-            let records = db.transaction(global_branch_id(), |txn| {
-                let mut out = Vec::new();
-                for (_k, v) in txn.scan_prefix(&control_record_prefix_all())? {
-                    out.push(from_stored_value::<BranchControlRecord>(&v)?);
-                }
-                Ok::<_, StrataError>(out)
-            })?;
-            let edges = db.transaction(global_branch_id(), |txn| {
-                let prefix = Key::new(
-                    global_namespace(),
-                    TypeTag::Branch,
-                    CTL_EDGE_PREFIX.as_bytes().to_vec(),
-                );
-                let mut out = Vec::new();
-                for (_k, v) in txn.scan_prefix(&prefix)? {
-                    out.push(from_stored_value::<LineageEdgeRecord>(&v)?);
-                }
-                Ok::<_, StrataError>(out)
-            })?;
+        let records = db.transaction(global_branch_id(), |txn| {
+            let mut out = Vec::new();
+            for (_k, v) in txn.scan_prefix(&control_record_prefix_all())? {
+                out.push(from_stored_value::<BranchControlRecord>(&v)?);
+            }
+            Ok::<_, StrataError>(out)
+        })?;
+        let edges = db.transaction(global_branch_id(), |txn| {
+            let prefix = Key::new(
+                global_namespace(),
+                TypeTag::Branch,
+                CTL_EDGE_PREFIX.as_bytes().to_vec(),
+            );
+            let mut out = Vec::new();
+            for (_k, v) in txn.scan_prefix(&prefix)? {
+                out.push(from_stored_value::<LineageEdgeRecord>(&v)?);
+            }
+            Ok::<_, StrataError>(out)
+        })?;
 
-            hook.reset_projection().map_err(|e| {
-                StrataError::internal(format!(
-                    "failed to reset DAG projection before rebuild: {e}"
-                ))
-            })?;
+        hook.reset_projection().map_err(|e| {
+            StrataError::internal(format!(
+                "failed to reset DAG projection before rebuild: {e}"
+            ))
+        })?;
 
+        let replay = || -> StrataResult<()> {
             let mut names = HashMap::new();
             for rec in &records {
                 names.insert(rec.branch, rec.name.clone());
@@ -1324,13 +1338,18 @@ impl BranchControlStore {
             Ok(())
         };
 
-        if let Err(e) = rebuild() {
-            warn!(
-                target: "strata::branch::dag_rebuild",
-                error = %e,
-                "DAG projection rebuild failed; will retry on next open"
-            );
+        if let Err(replay_error) = replay() {
+            if let Err(reset_error) = hook.reset_projection() {
+                return Err(StrataError::corruption(format!(
+                    "failed to rebuild DAG projection ({replay_error}) and failed to reset partial projection ({reset_error})"
+                )));
+            }
+            return Err(StrataError::internal(format!(
+                "failed to rebuild DAG projection: {replay_error}"
+            )));
         }
+
+        Ok(())
     }
 
     /// Produce the ancestor chain for `branch`: every `BranchRef` whose
@@ -1342,44 +1361,45 @@ impl BranchControlStore {
     /// 2. The fork anchor of every walked ancestor — each fork parent
     ///    appears at `fork.point`, the version of the parent at which
     ///    the descendant was branched.
-    /// 3. Every merge source that ever landed on the walked chain,
-    ///    recorded at the merge commit version — the version of the
-    ///    source at which its state flowed into the target.
+    /// 3. Every merge source that landed on the walked chain *at or before the
+    ///    currently-visible point* for that branch, recorded at the merge
+    ///    commit version — the version of the source at which its state flowed
+    ///    into the target.
     ///
-    /// Cycle-safe: each `BranchRef` is walked at most once. Merge-edge
-    /// traversal is bounded by the lineage DAG already persisted in the
-    /// store, so every new point is either a fresh fork parent or a
-    /// fresh merge source.
+    /// Visibility-safe: the walk carries a `visible_until` bound for every
+    /// queued `BranchRef`. A merge that landed on `feature` at `v20` must not
+    /// become visible through `main` merely because `main` merged `feature` at
+    /// `v10`; only edges with `edge.commit_version <= visible_until` are
+    /// traversed. Repeated merges can expose *more* of the same ancestor, so we
+    /// revisit a `BranchRef` when a later path reaches it at a higher visible
+    /// version than any prior path.
     fn ancestor_chain(&self, branch: BranchRef) -> StrataResult<Vec<MergeBasePoint>> {
         let mut chain = vec![MergeBasePoint {
             branch,
             commit_version: CommitVersion::MAX,
         }];
-        let mut visited: HashSet<BranchRef> = HashSet::new();
-        visited.insert(branch);
+        let mut explored_until: HashMap<BranchRef, CommitVersion> = HashMap::new();
+        explored_until.insert(branch, CommitVersion::MAX);
 
-        // BFS over fork parents and merge sources. Starts at `branch`
-        // and expands through its fork anchor and every merge edge, then
-        // through those ancestors' own fork anchors and merge edges.
-        let mut queue: Vec<BranchRef> = vec![branch];
-        while let Some(current) = queue.pop() {
+        // DFS over fork parents and merge sources, carrying the maximum commit
+        // version of `current` that is actually visible on the original branch.
+        let mut queue: Vec<(BranchRef, CommitVersion)> = vec![(branch, CommitVersion::MAX)];
+        while let Some((current, visible_until)) = queue.pop() {
             // Fork anchor: the parent's version at the fork point.
             if let Some(rec) = self.get_record(current)? {
                 if let Some(anchor) = rec.fork {
-                    if visited.insert(anchor.parent) {
-                        chain.push(MergeBasePoint {
-                            branch: anchor.parent,
-                            commit_version: anchor.point,
-                        });
-                        queue.push(anchor.parent);
-                    } else {
-                        // Seen before — still record the point so a
-                        // later fork of the same ancestor at a different
-                        // version is visible in the chain.
-                        chain.push(MergeBasePoint {
-                            branch: anchor.parent,
-                            commit_version: anchor.point,
-                        });
+                    let parent_visible_until = visible_until.min(anchor.point);
+                    chain.push(MergeBasePoint {
+                        branch: anchor.parent,
+                        commit_version: parent_visible_until,
+                    });
+                    let should_enqueue = match explored_until.get(&anchor.parent) {
+                        Some(prev) if *prev >= parent_visible_until => false,
+                        _ => true,
+                    };
+                    if should_enqueue {
+                        explored_until.insert(anchor.parent, parent_visible_until);
+                        queue.push((anchor.parent, parent_visible_until));
                     }
                 }
             }
@@ -1394,6 +1414,9 @@ impl BranchControlStore {
                 if edge.kind != LineageEdgeKind::Merge {
                     continue;
                 }
+                if edge.commit_version > visible_until {
+                    continue;
+                }
                 let Some(source) = edge.source else {
                     continue;
                 };
@@ -1401,8 +1424,13 @@ impl BranchControlStore {
                     branch: source,
                     commit_version: edge.commit_version,
                 });
-                if visited.insert(source) {
-                    queue.push(source);
+                let should_enqueue = match explored_until.get(&source) {
+                    Some(prev) if *prev >= edge.commit_version => false,
+                    _ => true,
+                };
+                if should_enqueue {
+                    explored_until.insert(source, edge.commit_version);
+                    queue.push((source, edge.commit_version));
                 }
             }
         }
@@ -2026,6 +2054,90 @@ mod tests {
             base.commit_version,
             CommitVersion(5),
             "merge-base between main and feature must not advance from a merge involving an unrelated third branch"
+        );
+    }
+
+    #[test]
+    fn find_merge_base_does_not_leak_future_source_merges_into_target() {
+        let (db, store) = fresh_store();
+        let main = BranchRef::new(BranchId::from_user_name("main"), 0);
+        let feature = BranchRef::new(BranchId::from_user_name("feature"), 0);
+        let bugfix = BranchRef::new(BranchId::from_user_name("bugfix"), 0);
+
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: main,
+                    name: "main".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )?;
+            store.put_record(
+                &BranchControlRecord {
+                    branch: feature,
+                    name: "feature".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: Some(strata_core::ForkAnchor {
+                        parent: main,
+                        point: CommitVersion(5),
+                    }),
+                },
+                txn,
+            )?;
+            store.put_record(
+                &BranchControlRecord {
+                    branch: bugfix,
+                    name: "bugfix".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )?;
+            // main sees feature only through this merge at v10.
+            store.append_edge(
+                &LineageEdgeRecord {
+                    kind: LineageEdgeKind::Merge,
+                    target: main,
+                    source: Some(feature),
+                    commit_version: CommitVersion(10),
+                    merge_base: Some(MergeBasePoint {
+                        branch: feature,
+                        commit_version: CommitVersion(10),
+                    }),
+                },
+                txn,
+            )?;
+            // feature later merges bugfix at v20. main must NOT inherit
+            // bugfix@v20 through feature because feature was only visible on
+            // main through v10.
+            store.append_edge(
+                &LineageEdgeRecord {
+                    kind: LineageEdgeKind::Merge,
+                    target: feature,
+                    source: Some(bugfix),
+                    commit_version: CommitVersion(20),
+                    merge_base: Some(MergeBasePoint {
+                        branch: bugfix,
+                        commit_version: CommitVersion(20),
+                    }),
+                },
+                txn,
+            )
+        });
+
+        assert!(
+            store.find_merge_base(main, bugfix).unwrap().is_none(),
+            "main must not see bugfix through a later merge that only landed on feature after main merged feature"
+        );
+
+        let base = store.find_merge_base(main, feature).unwrap().unwrap();
+        assert_eq!(base.branch, feature);
+        assert_eq!(
+            base.commit_version,
+            CommitVersion(10),
+            "main sees feature only through the merge that landed on main"
         );
     }
 
@@ -2888,7 +3000,7 @@ mod tests {
             )
         });
 
-        BranchControlStore::rebuild_dag_projection(&db);
+        BranchControlStore::rebuild_dag_projection(&db).unwrap();
 
         assert_eq!(*hook.reset_count.lock().unwrap(), 1);
         let events = hook.events.lock().unwrap().clone();

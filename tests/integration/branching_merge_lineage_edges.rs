@@ -199,7 +199,10 @@ fn merge_base_does_not_cross_generations_after_recreate() {
         .control_record("feature_g")
         .unwrap()
         .unwrap();
-    assert_eq!(new_rec.branch.generation, 1, "recreate MUST bump generation");
+    assert_eq!(
+        new_rec.branch.generation, 1,
+        "recreate MUST bump generation"
+    );
 
     // Note: feature_g@gen1 is created without forking from parent_g, so
     // there is no shared lineage between feature_g@gen1 and parent_g.
