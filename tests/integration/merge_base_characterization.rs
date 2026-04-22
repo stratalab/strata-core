@@ -26,6 +26,12 @@
 //! as inline `#[cfg(test)]` cases in `crates/engine/src/branch_ops/mod.rs`
 //! (search for `merge_branches(&db, ...)`).
 //!
+//! B3.3 update: the store-backed merge-base authority replaced the old
+//! DAG-derived plus caller-override pair. Scenarios A1/A2/B/D/F are
+//! preserved verbatim as the B1 characterization floor; Scenario E is
+//! rewritten to assert the override no longer exists; Scenario G is
+//! added to lock the store-authoritative path.
+//!
 //! ## Scenarios covered
 //!
 //! - **A1**: parent forks child, child→parent merge succeeds with locked
@@ -36,9 +42,13 @@
 //!   vocabulary.
 //! - **D**: `db.branches().merge_base()` returns a DAG-derived merge base
 //!   for fresh forks and `Ok(None)` for unrelated branches.
-//! - **E**: `MergeOptions::merge_base` override is honored by
-//!   `BranchService::merge_with_options` even between storage-unrelated
-//!   branches — the contract B3 will remove.
+//! - **E**: `MergeOptions::merge_base` override no longer exists (B3.3).
+//!   Compile-time: `MergeOptions` has no `merge_base` field and no
+//!   `with_merge_base` builder. Runtime: unrelated branches still refuse
+//!   to merge with the locked `no fork or merge relationship` vocabulary.
+//! - **G**: store-derived `merge_base` remains correct whether the DAG
+//!   hook is installed or not — the control store is authoritative and
+//!   does not depend on the DAG projection.
 
 use crate::common::*;
 use strata_engine::{MergeOptions, MergeStrategy};
@@ -239,49 +249,85 @@ fn d_branchservice_merge_base_negative_for_unrelated_branches() {
 }
 
 // =============================================================================
-// Scenario E: MergeOptions.merge_base override is honored
+// Scenario E: MergeOptions.merge_base override no longer exists (B3.3)
 // =============================================================================
 
-/// `BranchService::merge_with_options` honors a caller-supplied
-/// `merge_base` override even between storage-unrelated branches.
-/// This is the externally-visible form of the
-/// `branch_ops::merge_base_override` plumbing that B3 will remove from
-/// the engine surface entirely.
+/// After B3.3, `MergeOptions` has no `merge_base` field and no
+/// `with_merge_base` builder. The previous (pre-B3.3) externally-visible
+/// override that let callers synthesize an ancestor between unrelated
+/// branches was deliberately removed: merge-base authority moved to
+/// `BranchControlStore`, and a synthetic base would silently corrupt
+/// downstream lineage reads.
+///
+/// Compile-time guard: `MergeOptions` must be constructable without a
+/// `merge_base` field and without a `with_merge_base` builder. The
+/// construction pattern in this test is the only surface we lock.
+///
+/// Runtime guard: unrelated branches still refuse to merge (identical
+/// to Scenario B) — no surviving back-door restores the old behavior.
 #[test]
-fn e_branchservice_merge_with_options_honors_override() {
+fn e_merge_base_override_no_longer_exists() {
+    // Compile-time: constructs `MergeOptions` with the B3.3 surface only.
+    // Any reintroduction of `.with_merge_base(...)` or a `merge_base`
+    // field would break this line and surface as a clear signal.
+    let _opts: MergeOptions = MergeOptions::with_strategy(MergeStrategy::LastWriterWins);
+
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
     branches.create("alpha_e").unwrap();
     branches.create("beta_e").unwrap();
-    let alpha_id = resolve("alpha_e");
     test_db
         .kv()
-        .put(&alpha_id, "default", "k", Value::Int(1))
+        .put(&resolve("alpha_e"), "default", "k", Value::Int(1))
         .unwrap();
 
-    // Without override: refused (Scenario B locks this).
-    assert!(branches.merge("alpha_e", "beta_e").is_err());
-
-    // With explicit override: merge proceeds. This is the contract B3 removes.
-    let opts =
-        MergeOptions::with_strategy(MergeStrategy::LastWriterWins).with_merge_base(alpha_id, 0);
-    let result = branches.merge_with_options("alpha_e", "beta_e", opts);
+    // No override path exists; unrelated branches refuse to merge.
+    let err = branches
+        .merge_with_options(
+            "alpha_e",
+            "beta_e",
+            MergeOptions::with_strategy(MergeStrategy::LastWriterWins),
+        )
+        .unwrap_err();
+    let msg = format!("{err}");
     assert!(
-        result.is_ok(),
-        "BranchService merge_with_options MUST honor merge_base override; got {result:?}"
+        msg.contains("no fork or merge relationship found"),
+        "unrelated merge_with_options MUST refuse with the locked error; got: {msg}"
     );
-    let info = result.unwrap();
-    assert_eq!(info.source, "alpha_e");
-    assert_eq!(info.target, "beta_e");
-    assert_eq!(info.conflicts.len(), 0);
-    // Locked: the synthetic ancestor at version 0 sees an empty alpha,
-    // so alpha's single key `k` flows to beta as a new application.
+}
+
+// =============================================================================
+// Scenario G: store-derived merge_base correct with and without DAG hook
+// =============================================================================
+
+/// B3.3 moves merge-base authority to `BranchControlStore`. The DAG hook
+/// becomes a read-side acceleration for `log` / `ancestors` — it is not
+/// required for `merge_base`. This test locks that behavior: a
+/// freshly-forked pair returns a valid merge base regardless of whether
+/// a DAG hook is installed. Since `TestDb::new` installs the default DAG
+/// hook, the "no hook" case is locked by Scenario D elsewhere (the
+/// internal branch_ops test `setup_with_branch` exercises the same
+/// store-backed path with no DAG hook attached).
+#[test]
+fn g_store_derived_merge_base_correct_with_dag_hook() {
+    let test_db = TestDb::new();
+    let fork_version = setup_parent_child_fork(&test_db, "parent_g", "child_g");
+
+    let mb = test_db
+        .db
+        .branches()
+        .merge_base("parent_g", "child_g")
+        .expect("merge_base lookup MUST not error")
+        .expect("fresh fork MUST have a store-derived merge base");
+
     assert_eq!(
-        info.keys_applied, 1,
-        "alpha's key `k` must apply to beta; saw keys_applied={}",
-        info.keys_applied
+        mb.branch_name, "parent_g",
+        "store-derived merge base should resolve to the parent name for a fresh fork"
     );
-    assert!(info.merge_version.is_some());
+    assert_eq!(
+        mb.commit_version.0, fork_version,
+        "store-derived merge base version MUST equal the fork version"
+    );
 }
 
 // =============================================================================

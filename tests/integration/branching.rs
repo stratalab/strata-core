@@ -1993,7 +1993,7 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
     test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", CherryPickFilter::default(), None)
+        .cherry_pick_from_diff("source", "target", CherryPickFilter::default())
         .expect("cherry-pick of disjoint graph divergences must succeed");
 
     // Target now has all four nodes, with bidirectional consistency on the
@@ -2085,7 +2085,7 @@ fn cherry_pick_graph_dangling_edge_rejected() {
     let err = test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", CherryPickFilter::default(), None)
+        .cherry_pick_from_diff("source", "target", CherryPickFilter::default())
         .expect_err("dangling-edge cherry-pick must be rejected");
     let msg = err.to_string();
     assert!(
@@ -2152,7 +2152,7 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
     let err = test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", filter, None)
+        .cherry_pick_from_diff("source", "target", filter)
         .expect_err("partial graph key filter must be rejected");
     let msg = err.to_string();
     assert!(
@@ -2218,7 +2218,7 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     let info = test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", filter, None)
+        .cherry_pick_from_diff("source", "target", filter)
         .expect("KV-only cherry-pick must succeed even with divergent graph");
     assert!(info.keys_applied >= 1, "expected the kv_only put to apply");
 
@@ -2298,7 +2298,7 @@ fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
     let info = test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", filter, None)
+        .cherry_pick_from_diff("source", "target", filter)
         .expect("filter that drops all graph actions atomically must NOT raise atomicity error");
     assert_eq!(info.keys_applied, 1, "only doc/bar should have applied");
 
@@ -2342,7 +2342,7 @@ fn cherry_pick_kv_only_no_graph_changes_works() {
     let info = test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", CherryPickFilter::default(), None)
+        .cherry_pick_from_diff("source", "target", CherryPickFilter::default())
         .expect("KV-only cherry-pick must succeed");
     assert!(info.keys_applied >= 1);
     assert_eq!(
@@ -4720,7 +4720,7 @@ fn vector_cherry_pick_refreshes_hnsw_backend() {
     test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", CherryPickFilter::default(), None)
+        .cherry_pick_from_diff("source", "target", CherryPickFilter::default())
         .expect("vector cherry-pick should succeed");
 
     // The cherry-picked vector must be visible AND searchable. The
@@ -5553,7 +5553,7 @@ fn json_merge_path_level_via_cherry_pick() {
     test_db
         .db
         .branches()
-        .cherry_pick_from_diff("source", "target", CherryPickFilter::default(), None)
+        .cherry_pick_from_diff("source", "target", CherryPickFilter::default())
         .expect("cherry-pick of a disjoint-path JSON edit should succeed");
 
     let merged = json
@@ -7169,7 +7169,6 @@ fn dag_records_cherry_pick() {
             "dag_cp_source",
             "dag_cp_target",
             CherryPickFilter::default(),
-            None,
         )
         .unwrap();
     assert_eq!(

@@ -4,7 +4,7 @@
   "shapes": {
     "branch_id_random_new_sites": 722,
     "branch_namespace_const_sites": 1,
-    "merge_base_override_occurrences": 12,
+    "merge_base_override_occurrences": 0,
     "merge_strategy_lastwriterwins_literals": 75
   }
 }

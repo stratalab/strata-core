@@ -62,7 +62,7 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{BranchControlRecord, StrataError, StrataResult, VersionedValue};
+use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult, VersionedValue};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};
@@ -111,6 +111,13 @@ enum RollbackAction {
         from_version: CommitVersion,
         /// Last version written by the failed mutation.
         to_version: CommitVersion,
+    },
+    /// Delete a control-store lineage edge written before a later failure.
+    DeleteLineageEdge {
+        /// Lifecycle instance that owns the edge.
+        target: BranchRef,
+        /// Commit version encoded into the edge key.
+        commit_version: CommitVersion,
     },
     /// Restore a branch snapshot captured before delete.
     RestoreBranchSnapshot(Box<BranchSnapshot>),
@@ -178,6 +185,22 @@ impl RollbackAction {
                     "Executing rollback: revert branch version range"
                 );
                 rollback_branch_range(db, &name, from_version, to_version)
+            }
+            Self::DeleteLineageEdge {
+                target,
+                commit_version,
+            } => {
+                info!(
+                    target: "strata::branch_mutation",
+                    branch_id = %target.id,
+                    generation = target.generation,
+                    commit_version = commit_version.as_u64(),
+                    "Executing rollback: delete lineage edge"
+                );
+                let control_store = BranchControlStore::new(db.clone());
+                db.transaction(global_branch_id(), |txn| {
+                    control_store.delete_edge(target, commit_version, txn)
+                })
             }
             Self::RestoreBranchSnapshot(snapshot) => {
                 info!(
@@ -537,6 +560,19 @@ impl<'a> BranchMutation<'a> {
             });
     }
 
+    /// Register a rollback action to delete a previously-written lineage edge.
+    pub fn on_rollback_delete_lineage_edge(
+        &mut self,
+        target: BranchRef,
+        commit_version: CommitVersion,
+    ) {
+        self.rollback_actions
+            .push(RollbackAction::DeleteLineageEdge {
+                target,
+                commit_version,
+            });
+    }
+
     /// Capture a branch snapshot and register it for restore-on-rollback.
     pub fn on_rollback_restore_branch(&mut self, name: &str) -> StrataResult<()> {
         let snapshot = BranchSnapshot::capture(self.db, name)?;
@@ -599,6 +635,18 @@ impl<'a> BranchMutation<'a> {
             return Err(StrataError::corruption(format!(
                 "rollback failed after DAG write failure: dag_error={}, rollback_error={}",
                 dag_error, rollback_error
+            )));
+        }
+
+        if let Err(rebuild_error) = BranchControlStore::rebuild_dag_projection(self.db) {
+            error!(
+                target: "strata::branch_mutation",
+                dag_error = %dag_error,
+                rebuild_error = %rebuild_error,
+                "CRITICAL: DAG rollback succeeded but projection rebuild failed"
+            );
+            return Err(StrataError::corruption(format!(
+                "rollback succeeded after DAG write failure ({dag_error}) but DAG projection rebuild failed: {rebuild_error}"
             )));
         }
 
