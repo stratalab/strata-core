@@ -6,40 +6,49 @@
 //!
 //! ## Authority model (post-B3)
 //!
-//! After B3 lands, this DAG is a **derived read-side projection** of
-//! `BranchControlStore`. It is no longer authoritative for branch
-//! lineage or merge-base queries; those go through the store. The DAG
-//! remains for fast `log` / `ancestors` traversals. B3.1 lands the
-//! `BranchRef`-keyed node helper, a `reset_projection` hook, and a
-//! store-driven rebuild entry point (`BranchControlStore::rebuild_dag_projection`).
-//! The rebuild is **not** wired into primary open yet: live write helpers
-//! still emit name-keyed events, so a wipe-and-replay on every open would
-//! drop events written between migration points. The B3.3 cutover moves
-//! live writes to the store and enables the rebuild on open.
+//! **The `_branch_dag` graph is not authoritative.** After B3 lands
+//! (`docs/design/branching/b3-phasing-plan.md`), it is a derived
+//! **read-side projection** of `BranchControlStore`:
 //!
-//! ## Node id encodings (transitional)
+//! - Branch lineage truth (control records, fork anchors, generation
+//!   counters) lives in `BranchControlStore`.
+//! - Lineage edges (merge / revert / cherry-pick) are persisted as
+//!   `LineageEdgeRecord` rows in the same store.
+//! - `find_merge_base` reads exclusively from the store with
+//!   point-semantics (`MergeBasePoint`) — this DAG is **not** consulted.
 //!
-//! - Legacy: [`dag_branch_node_id`] keys by branch *name*. Live write
-//!   helpers still use this until the B3.3 live-helper cutover.
-//! - Canonical: [`dag_branch_node_id_for_ref`] keys by `BranchRef`
-//!   (`<id_hex>/<generation>`). The later rebuild/cutover path uses this so
-//!   same-name recreated branches do not collide in the DAG.
+//! The DAG remains for fast `log` / `ancestors` traversals only. It is
+//! rebuilt from the store via
+//! `BranchControlStore::rebuild_dag_projection` on primary open, so a
+//! corrupted or stale DAG does not threaten correctness — the store can
+//! always regenerate the projection.
 //!
-//! During B3.1 the live DAG is still name-keyed. The canonical encoding is
-//! staged here so the later cutover can switch the graph in one pass.
+//! ## Node id encodings
+//!
+//! - [`dag_branch_node_id_for_ref`] keys by `BranchRef`
+//!   (`<id_hex>/<generation>`) and is the canonical encoding written by
+//!   the rebuild pass. Same-name recreated branches map to distinct
+//!   nodes.
+//! - [`dag_branch_node_id`] (legacy, name-keyed) is retained for live
+//!   write helpers that have not been cut over to `BranchRef`-keying.
+//!   These writes are best-effort; the next rebuild from the store
+//!   normalises the projection back to canonical encoding.
 //!
 //! ## Write helpers
 //!
 //! `dag_add_branch`, `dag_record_fork`, `dag_record_merge`,
 //! `dag_set_status`, `dag_mark_deleted`, `dag_set_message` are called
 //! best-effort from executor handlers — failures are logged, never
-//! propagated.
+//! propagated. Because the DAG is no longer the lineage authority, a
+//! lost write degrades only `log` / `ancestors` results until the next
+//! projection rebuild.
 //!
 //! ## Read helpers
 //!
 //! `dag_get_status`, `dag_get_branch_info`, `find_children` assemble
-//! branch lineage from the graph. These remain valid read paths; merge-
-//! base queries go through `BranchControlStore` instead.
+//! branch lineage from the graph for ordered-history queries. **Merge-
+//! base queries go through `BranchControlStore` instead** — readers
+//! must never use this DAG to compute a merge base.
 
 pub use strata_core::branch_dag::*;
 

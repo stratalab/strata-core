@@ -243,6 +243,7 @@ mod tests {
             closed_at: "2025-01-24T11:00:00Z".to_string(),
             parent_branch_id: None,
             error: None,
+            generation: 0,
         }
     }
 

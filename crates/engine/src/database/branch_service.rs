@@ -241,6 +241,11 @@ impl BranchService {
         }
 
         let index = BranchIndex::new(self.db.clone());
+        // Capture the generation allocated inside the txn so the observer
+        // event carries the new lifecycle instance's full `BranchRef`
+        // (B3.4) — the closure runs synchronously, so the mutex is purely
+        // a one-shot inside-out channel.
+        let allocated_gen: std::sync::Mutex<Option<u64>> = std::sync::Mutex::new(None);
         let versioned = with_branch_dag_hooks_suppressed(|| {
             index.create_branch_with_hook(name, |txn| {
                 let generation = store.next_generation(branch_id, txn)?;
@@ -250,9 +255,16 @@ impl BranchService {
                     lifecycle: BranchLifecycleStatus::Active,
                     fork: None,
                 };
-                store.put_record(&record, txn)
+                store.put_record(&record, txn)?;
+                *allocated_gen.lock().unwrap() = Some(generation);
+                Ok(())
             })
         })?;
+        let generation = allocated_gen.lock().unwrap().expect(
+            "create_branch_with_hook closure must run on the success path; \
+             allocated_gen would otherwise stay None",
+        );
+        let branch_ref = BranchRef::new(branch_id, generation);
 
         // B3.2: recreating a previously-deleted name must yield a
         // writable branch. `BranchIndex::delete_branch` intentionally
@@ -272,7 +284,7 @@ impl BranchService {
         mutation.record_dag_event(&event)?;
 
         // Commit: fires observers
-        mutation.commit(BranchOpEvent::create(branch_id, name));
+        mutation.commit(BranchOpEvent::create(branch_ref, name));
 
         Ok(versioned.value)
     }
@@ -310,10 +322,19 @@ impl BranchService {
         // A missing active record here is corruption: the legacy metadata
         // row exists (BranchIndex resolved it) but the authoritative
         // control store has no active lifecycle for the same branch name.
+        // Capture the deleted lifecycle instance's `BranchRef` so the
+        // observer event records the exact generation that was tombstoned
+        // (B3.4). The closure runs synchronously inside
+        // `delete_branch_with_hook`, so the mutex is just a one-shot
+        // inside-out channel.
+        let deleted_ref: std::sync::Mutex<Option<BranchRef>> = std::sync::Mutex::new(None);
         let delete_result = with_branch_dag_hooks_suppressed(|| {
             index.delete_branch_with_hook(name, |txn| {
                 match store.mark_deleted_by_name(name, txn)? {
-                    Some(_) => Ok(()),
+                    Some(branch_ref) => {
+                        *deleted_ref.lock().unwrap() = Some(branch_ref);
+                        Ok(())
+                    }
                     None => Err(StrataError::corruption(format!(
                         "live branch '{name}' has legacy metadata but no active control record"
                     ))),
@@ -325,13 +346,17 @@ impl BranchService {
             mutation.cancel();
             return Err(e);
         }
+        let branch_ref = deleted_ref.lock().unwrap().expect(
+            "delete_branch_with_hook closure must run on the success path; \
+             deleted_ref would otherwise stay None",
+        );
 
         // Record to DAG if hook installed (optional, not required)
         let event = DagEvent::delete(branch_id, name);
         mutation.record_dag_event(&event)?;
 
         // Commit: fires observers
-        mutation.commit(BranchOpEvent::delete(branch_id, name));
+        mutation.commit(BranchOpEvent::delete(branch_ref, name));
 
         Ok(())
     }
@@ -480,10 +505,34 @@ impl BranchService {
 
         // Commit: fires observers, clears rollback actions
         if let Some(fork_version) = info.fork_version {
+            // Read the freshly-written child control record so the
+            // observer event carries the exact source `BranchRef` recorded
+            // on its fork anchor (B3.4). This avoids a `find_active_by_name`
+            // race against a concurrent delete + recreate of `source`
+            // between the fork txn and the observer notification.
+            //
+            // Fallback path: if the fork anchor is somehow absent (the
+            // child record itself missing or carrying `fork: None`),
+            // resolve the source via `find_active_by_name` instead of
+            // assuming gen 0 — a recreated source could be at any
+            // generation, and reporting gen 0 in the observer event
+            // would silently mislabel the parent's lifecycle instance.
+            let dest_ref = BranchRef::new(dest_id, dest_gen);
+            let anchor_parent = store
+                .get_record(dest_ref)?
+                .and_then(|rec| rec.fork.map(|anchor| anchor.parent));
+            let source_ref = match anchor_parent {
+                Some(parent) => parent,
+                None => store
+                    .find_active_by_name(source)?
+                    .map(|rec| rec.branch)
+                    .unwrap_or_else(|| BranchRef::new(resolve_branch_name(source), 0)),
+            };
+
             let mut observer_event = BranchOpEvent::fork(
-                resolve_branch_name(destination),
+                dest_ref,
                 destination,
-                resolve_branch_name(source),
+                source_ref,
                 source,
                 CommitVersion(fork_version),
             );
@@ -615,9 +664,9 @@ impl BranchService {
                 crate::MergeStrategy::Strict => "strict",
             };
             let mut observer_event = BranchOpEvent::merge(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 strategy_str,
                 info.keys_applied,
@@ -693,7 +742,7 @@ impl BranchService {
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::revert(
-                branch_id,
+                branch_rec.branch,
                 branch,
                 from_version,
                 to_version,
@@ -779,9 +828,9 @@ impl BranchService {
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 info.keys_applied,
                 info.keys_deleted,
@@ -866,9 +915,9 @@ impl BranchService {
 
             // Commit: fires observers
             let observer_event = BranchOpEvent::cherry_pick(
-                target_id,
+                target_rec.branch,
                 target,
-                source_id,
+                source_rec.branch,
                 source,
                 info.keys_applied,
                 info.keys_deleted,
@@ -992,13 +1041,21 @@ impl BranchService {
         reject_system_branch(branch, "tag")?;
         let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
 
-        // Emit observer event
+        // Emit observer event with the tagged branch's generation-aware
+        // identity (B3.4). `create_tag` already verified the branch exists,
+        // so the active control record is the authoritative `BranchRef`.
         let branch_id = resolve_branch_name(branch);
+        let branch_ref = BranchControlStore::new(self.db.clone())
+            .find_active_by_name(branch)?
+            .map(|rec| rec.branch)
+            .unwrap_or_else(|| BranchRef::new(branch_id, 0));
         let event = BranchOpEvent {
             kind: BranchOpKind::Tag,
             branch_id,
+            branch_ref,
             branch_name: Some(branch.to_string()),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version: Some(CommitVersion(info.version)),
             tag_name: Some(name.to_string()),
@@ -1024,13 +1081,20 @@ impl BranchService {
         let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
 
         if deleted {
-            // Emit observer event
+            // Emit observer event with the branch's generation-aware
+            // identity (B3.4).
             let branch_id = resolve_branch_name(branch);
+            let branch_ref = BranchControlStore::new(self.db.clone())
+                .find_active_by_name(branch)?
+                .map(|rec| rec.branch)
+                .unwrap_or_else(|| BranchRef::new(branch_id, 0));
             let event = BranchOpEvent {
                 kind: BranchOpKind::Untag,
                 branch_id,
+                branch_ref,
                 branch_name: Some(branch.to_string()),
                 source_branch_id: None,
+                source_branch_ref: None,
                 source_branch_name: None,
                 commit_version: None,
                 tag_name: Some(name.to_string()),

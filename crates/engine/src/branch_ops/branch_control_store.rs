@@ -669,6 +669,34 @@ impl BranchControlStore {
         Ok(current)
     }
 
+    /// Seed the next-generation counter for `id` to `value` inside `txn`.
+    ///
+    /// Used by bundle import (B3.4 / AD7) when the target DB has no prior
+    /// history for a branch name and the bundle carries a non-default
+    /// generation: the imported control record lands at the bundle's
+    /// generation and the counter must be advanced past it so a later
+    /// recreate allocates a strictly-larger generation.
+    ///
+    /// Refuses to lower the counter — overwriting a higher persisted
+    /// value would risk re-issuing a generation that an earlier write
+    /// already claimed.
+    pub(crate) fn seed_next_generation(
+        &self,
+        id: BranchId,
+        value: u64,
+        txn: &mut TransactionContext,
+    ) -> StrataResult<()> {
+        let key = next_gen_key(id);
+        if let Some(current) = txn.get(&key)? {
+            let current = decode_u64_value(&current)?;
+            if current >= value {
+                return Ok(());
+            }
+        }
+        txn.put(key, encode_u64_value(value))?;
+        Ok(())
+    }
+
     /// Append a lineage edge record. Overwrites any existing edge at the
     /// same `(target, commit_version)` key — callers should treat edge
     /// writes as exactly-once per branch mutation.

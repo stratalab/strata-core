@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use strata_core::BranchGeneration;
 
 /// Current BranchBundle format version
 pub const BRANCHBUNDLE_FORMAT_VERSION: u32 = 2;
@@ -102,6 +103,18 @@ pub struct BundleContents {
 ///
 /// This file contains all metadata about the branch, designed to be
 /// readable with standard tools like `jq`.
+///
+/// ## B3.4 generation field (AD7)
+///
+/// `generation` records the source-DB lifecycle instance number. It is
+/// `#[serde(default)]` so older bundles (which never wrote the field)
+/// import as `generation: 0`. Per AD7, `branch_id` keeps its legacy
+/// random-UUID meaning; the engine resolves the canonical id via
+/// `BranchId::from_user_name(&self.name)` on import. On a name collision
+/// in the target DB, the engine allocates a fresh generation rather than
+/// honouring the bundle's value, so this field is informational on the
+/// import side and authoritative only when the target has no prior
+/// history for the name.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct BundleBranchInfo {
     /// Branch ID (UUID string)
@@ -126,6 +139,14 @@ pub struct BundleBranchInfo {
     /// Error message if branch failed
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+
+    /// Source-DB lifecycle generation (B3.4 / AD7).
+    ///
+    /// Older bundles serialized before B3.4 omit this field; serde
+    /// defaults to `0` for those. On import, the target DB may discard
+    /// the value if it already has any record for the same name (AD7).
+    #[serde(default)]
+    pub generation: BranchGeneration,
 }
 
 impl BundleBranchInfo {
@@ -323,6 +344,7 @@ mod tests {
             closed_at: "2025-01-24T01:00:00Z".to_string(),
             parent_branch_id: None,
             error: None,
+            generation: 0,
         };
 
         assert!(make_branch("completed").is_terminal_state());
@@ -344,12 +366,14 @@ mod tests {
             closed_at: "2025-01-24T11:30:00Z".to_string(),
             parent_branch_id: None,
             error: None,
+            generation: 3,
         };
 
         let json = serde_json::to_string_pretty(&branch_info).unwrap();
         let parsed: BundleBranchInfo = serde_json::from_str(&json).unwrap();
 
         assert_eq!(branch_info, parsed);
+        assert_eq!(parsed.generation, 3);
     }
 
     #[test]
@@ -362,11 +386,30 @@ mod tests {
             closed_at: "2025-01-24T10:05:00Z".to_string(),
             parent_branch_id: Some("parent-id".to_string()),
             error: Some("Connection timeout".to_string()),
+            generation: 0,
         };
 
         let json = serde_json::to_string(&branch_info).unwrap();
         assert!(json.contains("Connection timeout"));
         assert!(json.contains("parent-id"));
+    }
+
+    #[test]
+    fn test_branch_info_generation_defaults_when_missing() {
+        // A bundle written before B3.4 omits the `generation` field
+        // entirely; serde must default to 0 so legacy bundles continue to
+        // import cleanly.
+        let legacy_json = r#"{
+            "branch_id": "legacy-id",
+            "name": "legacy-branch",
+            "state": "active",
+            "created_at": "2025-01-24T10:00:00Z",
+            "closed_at": "2025-01-24T11:30:00Z"
+        }"#;
+
+        let parsed: BundleBranchInfo = serde_json::from_str(legacy_json).unwrap();
+        assert_eq!(parsed.generation, 0);
+        assert_eq!(parsed.name, "legacy-branch");
     }
 
     #[test]

@@ -1,15 +1,19 @@
 //! Per-database branch DAG hook.
 //!
-//! The `BranchDagHook` trait provides a fail-fast hook for branch DAG
-//! operations. Unlike observers (which are best-effort), DAG hooks are
-//! load-bearing: failures propagate and abort the branch operation.
+//! The `BranchDagHook` trait provides a hook for branch DAG operations.
+//! After the B3 cutover (`docs/design/branching/b3-phasing-plan.md`),
+//! `BranchControlStore` is the **authoritative** source for fork + merge
+//! lineage and `find_merge_base`; the DAG is a derived read-side
+//! projection used only for `log` and `ancestors` history traversals.
 //!
 //! ## Why This Exists
 //!
-//! The branch DAG (`_branch_dag` graph on `_system_` branch) records every
-//! fork, merge, revert, and cherry-pick. This data is required for
-//! `compute_merge_base` — without it, merge-base computation falls back to
-//! expensive engine-level fork-info lookup.
+//! The DAG (`_branch_dag` graph on `_system_` branch) records every fork,
+//! merge, revert, and cherry-pick as a node and edge so that
+//! `BranchService::log` and `BranchService::ancestors` can answer
+//! ordered-history queries without walking the control store on every
+//! call. It is **not** consulted for `merge_base`: that authority lives
+//! in `BranchControlStore::find_merge_base` (B3.3).
 //!
 //! The graph crate implements the actual DAG storage, but the engine cannot
 //! depend on the graph crate (cycle: graph depends on engine). This trait
@@ -18,9 +22,13 @@
 //!
 //! ## Failure Model
 //!
-//! DAG hooks are **fail-fast**: if a hook returns `Err`, the branch operation
-//! fails and rolls back. This is the opposite of observers, which swallow
-//! errors. The DAG is correctness-critical for merge-base computation.
+//! DAG hooks are **load-bearing for write provenance**: if a hook returns
+//! `Err` while recording a fork / merge / revert / cherry-pick event,
+//! `BranchMutation` rolls back the underlying operation so the DAG
+//! projection stays consistent with the authoritative control-store
+//! lineage. The store remains the source of truth for `merge_base`; the
+//! DAG is best-effort *for queries*, but write recording is still
+//! gated so the projection cannot diverge silently.
 //!
 //! ## Per-Database vs Global
 //!
@@ -34,14 +42,13 @@
 //! 2. `BranchService::fork()` calls `db.dag_hook().record_event(...)`
 //! 3. If no hook is installed, DAG-required operations return an error
 //!
-//! Operations that require a DAG hook:
-//! - `fork` - records parent → fork → child edges
-//! - `merge` - records source → merge → target edges
-//! - `revert` - records revert event
-//! - `cherry_pick` - records cherry-pick event
-//! - `merge_base` - queries DAG for common ancestor
-//! - `log` - queries DAG for branch history
-//! - `ancestors` - queries DAG for ancestry chain
+//! Operations that require a DAG hook (write-side provenance recording
+//! through the projection):
+//! - `fork`, `merge`, `revert`, `cherry_pick`
+//! - `log`, `ancestors` — read history from the projection
+//!
+//! Operations that no longer require a DAG hook (post-B3.3):
+//! - `merge_base` — answered by `BranchControlStore::find_merge_base`
 //!
 //! Operations that work without a DAG hook:
 //! - `create`, `delete`, `list`, `exists`, `info`, `diff`, `diff3`

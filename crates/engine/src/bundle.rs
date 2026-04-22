@@ -14,6 +14,7 @@
 //! Imports replay each `BranchlogPayload` as a transaction, writing puts
 //! and deletes into the target database.
 
+use crate::branch_ops::branch_control_store::BranchControlStore;
 use crate::database::Database;
 use crate::primitives::branch::BranchIndex;
 use std::path::{Path, PathBuf};
@@ -21,12 +22,13 @@ use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
+use strata_core::branch::BranchLifecycleStatus;
 use strata_core::types::{BranchId, Key, TypeTag};
-use strata_core::StrataError;
-use strata_core::StrataResult;
+use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult};
 use strata_durability::branch_bundle::{
     BranchBundleReader, BranchBundleWriter, BranchlogPayload, BundleBranchInfo, ExportOptions,
 };
+use tracing::info;
 
 // =============================================================================
 // Public result types
@@ -101,7 +103,16 @@ pub fn export_branch_with_options(
         .ok_or_else(|| StrataError::invalid_input(format!("Branch '{}' not found", branch_id)))?
         .value;
 
-    // 2. Build BundleBranchInfo from metadata
+    // 2. Build BundleBranchInfo from metadata.
+    //
+    // B3.4 (AD7): record the source-DB lifecycle generation so an import
+    // onto a fresh target can preserve it. If the active control record
+    // is unavailable (legacy follower-synthesis or pre-B3.1 state), fall
+    // back to gen 0 — the import side treats absent / 0 identically.
+    let generation = BranchControlStore::new(db.clone())
+        .find_active_by_name(&branch_meta.name)?
+        .map(|rec| rec.branch.generation)
+        .unwrap_or(0);
     let bundle_branch_info = BundleBranchInfo {
         branch_id: branch_meta.branch_id.clone(),
         name: branch_meta.name.clone(),
@@ -115,6 +126,7 @@ pub fn export_branch_with_options(
         ),
         parent_branch_id: branch_meta.parent_branch.clone(),
         error: branch_meta.error.clone(),
+        generation,
     };
 
     // 3. Scan storage for all branch data -> Vec<BranchlogPayload>
@@ -215,10 +227,24 @@ fn scan_branch_data(
 ///
 /// Creates the branch in the database and replays all transaction payloads.
 ///
+/// ## Generation handling (B3.4 / AD7)
+///
+/// - If the target DB has any record (active OR tombstoned) for the
+///   bundle's branch name, the import allocates a fresh generation from
+///   the target's `next_gen` counter and ignores the bundle's
+///   `generation`. The imported branch becomes a new lifecycle instance
+///   in the target.
+/// - Otherwise the bundle's `generation` is preserved verbatim and the
+///   target's `next_gen` is seeded to `generation + 1` so a later
+///   recreate allocates a strictly-larger generation.
+///
+/// In both cases the import always materialises a brand-new control
+/// record — source-DB identity is not reattached.
+///
 /// # Errors
 ///
 /// - Bundle is invalid or corrupt
-/// - Branch with same ID already exists
+/// - Branch with same name is currently active in the target
 /// - I/O errors reading the archive
 pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo> {
     // 1. Read and validate bundle
@@ -228,7 +254,9 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
     let branch_id_str = &contents.branch_info.name;
     let branch_index = BranchIndex::new(db.clone());
 
-    // 2. Check branch doesn't already exist
+    // 2. Check branch doesn't already exist (active legacy metadata).
+    //    Tombstones in the control store are not a hard collision —
+    //    they're handled by AD7's fresh-generation allocation below.
     if branch_index.exists(branch_id_str)? {
         return Err(StrataError::invalid_input(format!(
             "Branch '{}' already exists. Delete it first or use a different name.",
@@ -236,9 +264,62 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         )));
     }
 
-    // 3. Create branch through the canonical branch service so B3.2's
-    // control-record / generation model applies to imported branches too.
-    db.branches().create(branch_id_str)?;
+    // 3. Decide generation per AD7 atomically inside the create txn so
+    //    a concurrent create+delete on the same name (which would leave
+    //    a tombstone in the control store while purging the legacy
+    //    metadata) cannot race the import into overwriting the
+    //    tombstone with a fresh active record at the same `BranchRef`.
+    //
+    //    Using `next_generation` inside the txn is the ordering primitive:
+    //    - returns 0 only when the next-gen counter is absent (no record
+    //      ever existed for this name) → "fresh target", preserve bundle
+    //      generation;
+    //    - returns ≥1 when any prior lifecycle instance bumped the counter
+    //      (active record was deleted leaving a tombstone, or even an
+    //      earlier import) → allocate the fresh value, ignore bundle's.
+    let canonical_id = BranchId::from_user_name(branch_id_str);
+    let store = BranchControlStore::new(db.clone());
+    let bundle_generation = contents.branch_info.generation;
+    let bundle_seed_value = bundle_generation.checked_add(1).ok_or_else(|| {
+        StrataError::invalid_input(
+            "Bundle generation u64::MAX cannot be imported — would overflow next-gen counter",
+        )
+    })?;
+    // Capture which path the txn took so we can log outside the closure
+    // (the txn closure must stay tracing-quiet to keep aborted-retry
+    // attempts from spamming logs).
+    let collision = std::sync::Mutex::new(false);
+    branch_index.create_branch_with_hook(branch_id_str, |txn| {
+        let allocated = store.next_generation(canonical_id, txn)?;
+        let chosen_generation = if allocated == 0 {
+            // Fresh target: honour the bundle's generation. `next_generation`
+            // already wrote `1` to the counter; if the bundle's gen is
+            // higher we need to push the counter past it so a later
+            // recreate strictly advances.
+            if bundle_generation > 0 {
+                store.seed_next_generation(canonical_id, bundle_seed_value, txn)?;
+            }
+            bundle_generation
+        } else {
+            *collision.lock().unwrap() = true;
+            allocated
+        };
+        let record = BranchControlRecord {
+            branch: BranchRef::new(canonical_id, chosen_generation),
+            name: branch_id_str.to_string(),
+            lifecycle: BranchLifecycleStatus::Active,
+            fork: None,
+        };
+        store.put_record(&record, txn)
+    })?;
+    if *collision.lock().unwrap() {
+        info!(
+            target: "strata::bundle",
+            name = %branch_id_str,
+            bundle_generation,
+            "Bundle generation ignored; allocated fresh generation due to existing lineage in target"
+        );
+    }
 
     // 4. Resolve BranchId for namespace
     let branch_meta = branch_index
