@@ -1487,10 +1487,10 @@ impl BranchControlStore {
                         branch: anchor.parent,
                         commit_version: parent_visible_until,
                     });
-                    let should_enqueue = match explored_until.get(&anchor.parent) {
-                        Some(prev) if *prev >= parent_visible_until => false,
-                        _ => true,
-                    };
+                    let should_enqueue = !matches!(
+                        explored_until.get(&anchor.parent),
+                        Some(prev) if *prev >= parent_visible_until
+                    );
                     if should_enqueue {
                         explored_until.insert(anchor.parent, parent_visible_until);
                         queue.push((anchor.parent, parent_visible_until));
@@ -1518,10 +1518,10 @@ impl BranchControlStore {
                     branch: source,
                     commit_version: edge.commit_version,
                 });
-                let should_enqueue = match explored_until.get(&source) {
-                    Some(prev) if *prev >= edge.commit_version => false,
-                    _ => true,
-                };
+                let should_enqueue = !matches!(
+                    explored_until.get(&source),
+                    Some(prev) if *prev >= edge.commit_version
+                );
                 if should_enqueue {
                     explored_until.insert(source, edge.commit_version);
                     queue.push((source, edge.commit_version));
