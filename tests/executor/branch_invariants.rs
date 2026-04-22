@@ -351,23 +351,40 @@ fn dag_records_via_executor_api() {
     // Query the DAG via the GraphStore on the underlying Database. This is
     // exactly the same state the engine-direct integration test asserts on,
     // proving the executor path also funnels through the same hook.
+    //
+    // B3.4: branch nodes are keyed by `BranchRef`
+    // (`_branchref_<id>__gen__<generation>`), not by raw branch name.
+    // Resolve each name through the control store to get the right node
+    // id before hitting the GraphStore.
     let inner = db.database();
     let graph = GraphStore::new(inner.clone());
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
 
-    let read_node = |name: &str| -> Option<NodeData> {
+    let branch_node_id = |name: &str| -> String {
+        let rec = inner
+            .branches()
+            .control_record(name)
+            .unwrap()
+            .expect("branch has an active control record");
+        strata_graph::branch_dag::dag_branch_node_id_for_ref(rec.branch)
+    };
+
+    let read_node = |node_id: &str| -> Option<NodeData> {
         graph
-            .get_node(system_id, "_graph_", "_branch_dag", name)
+            .get_node(system_id, "_graph_", "_branch_dag", node_id)
             .unwrap()
     };
 
+    let default_id = branch_node_id("default");
+    let exec_fork_id = branch_node_id("exec_fork");
+
     // Both branches present in the DAG.
     assert!(
-        read_node("default").is_some(),
+        read_node(&default_id).is_some(),
         "default branch missing from DAG (was seeded at db init)"
     );
     assert!(
-        read_node("exec_fork").is_some(),
+        read_node(&exec_fork_id).is_some(),
         "executor-forked branch missing from DAG"
     );
 
@@ -378,7 +395,7 @@ fn dag_records_via_executor_api() {
             system_id,
             "_graph_",
             "_branch_dag",
-            "default",
+            &default_id,
             Direction::Outgoing,
             Some("parent"),
         )
@@ -408,7 +425,7 @@ fn dag_records_via_executor_api() {
             system_id,
             "_graph_",
             "_branch_dag",
-            "exec_fork",
+            &exec_fork_id,
             Direction::Outgoing,
             Some("source"),
         )

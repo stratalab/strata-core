@@ -6873,11 +6873,31 @@ fn cross_primitive_merge_rollback_via_reopen() {
 ///
 /// Returns `None` if the DAG node does not exist. Used by every DAG e2e
 /// test below to assert that hooks fired and produced the expected nodes.
-fn dag_query_node(p: &AllPrimitives, name: &str) -> Option<strata_graph::types::NodeData> {
+/// Resolve a lookup key into the actual DAG node id.
+///
+/// B3.4 keys branch nodes by `BranchRef` (`_branchref_<id>__gen__<generation>`),
+/// so callers who know a branch by name must resolve it through the
+/// control store first. For keys that are not branch names — event-node
+/// UUIDs, system branches with no control record — the raw string is
+/// passed through unchanged, matching the behavior the tests had before
+/// the cutover.
+fn dag_node_id_for_key(test_db: &TestDb, key: &str) -> String {
+    match test_db.db.branches().control_record(key) {
+        Ok(Some(rec)) => strata_graph::branch_dag::dag_branch_node_id_for_ref(rec.branch),
+        _ => key.to_string(),
+    }
+}
+
+fn dag_query_node(
+    test_db: &TestDb,
+    p: &AllPrimitives,
+    name: &str,
+) -> Option<strata_graph::types::NodeData> {
     use strata_core::branch_dag::SYSTEM_BRANCH;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    let node_id = dag_node_id_for_key(test_db, name);
     p.graph
-        .get_node(system_id, "_graph_", "_branch_dag", name)
+        .get_node(system_id, "_graph_", "_branch_dag", &node_id)
         .expect("DAG read failed")
 }
 
@@ -6893,6 +6913,7 @@ fn dag_list_nodes(p: &AllPrimitives) -> Vec<String> {
 /// Get outgoing neighbors of a DAG node (used to walk fork/merge/cherry-pick
 /// event edges from a branch node to its associated event nodes).
 fn dag_outgoing(
+    test_db: &TestDb,
     p: &AllPrimitives,
     name: &str,
     edge_type: &str,
@@ -6900,12 +6921,13 @@ fn dag_outgoing(
     use strata_core::branch_dag::SYSTEM_BRANCH;
     use strata_graph::types::Direction;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    let node_id = dag_node_id_for_key(test_db, name);
     p.graph
         .neighbors(
             system_id,
             "_graph_",
             "_branch_dag",
-            name,
+            &node_id,
             Direction::Outgoing,
             Some(edge_type),
         )
@@ -6931,16 +6953,16 @@ fn dag_records_fork_with_version() {
 
     // Both branch nodes should now exist in the DAG.
     assert!(
-        dag_query_node(&p, "dag_fork_src").is_some(),
+        dag_query_node(&test_db, &p, "dag_fork_src").is_some(),
         "source branch node missing from DAG after fork"
     );
     assert!(
-        dag_query_node(&p, "dag_fork_dst").is_some(),
+        dag_query_node(&test_db, &p, "dag_fork_dst").is_some(),
         "destination branch node missing from DAG after fork"
     );
 
     // The fork event node hangs off the source via a `parent` edge.
-    let fork_events = dag_outgoing(&p, "dag_fork_src", "parent");
+    let fork_events = dag_outgoing(&test_db, &p, "dag_fork_src", "parent");
     assert_eq!(
         fork_events.len(),
         1,
@@ -6950,7 +6972,7 @@ fn dag_records_fork_with_version() {
     let event_id = &fork_events[0].node_id;
 
     // Verify the event is a fork event with a populated fork_version.
-    let event = dag_query_node(&p, event_id).expect("fork event node missing");
+    let event = dag_query_node(&test_db, &p, event_id).expect("fork event node missing");
     assert_eq!(event.object_type.as_deref(), Some("fork"));
     let props = event.properties.expect("fork event has no properties");
     let fv = props
@@ -6962,15 +6984,16 @@ fn dag_records_fork_with_version() {
     // The fork event must have an outgoing `child` edge pointing at the
     // destination — without this assertion the test would pass even if the
     // event was created but the child link was wrong or missing.
-    let children = dag_outgoing(&p, event_id, "child");
+    let children = dag_outgoing(&test_db, &p, event_id, "child");
     assert_eq!(
         children.len(),
         1,
         "fork event should have exactly one child edge"
     );
     assert_eq!(
-        children[0].node_id, "dag_fork_dst",
-        "fork event's child edge must point at the destination branch"
+        children[0].node_id,
+        dag_node_id_for_key(&test_db, "dag_fork_dst"),
+        "fork event's child edge must point at the destination branch's BranchRef-keyed node"
     );
 }
 
@@ -7014,11 +7037,11 @@ fn dag_records_merge_with_version_and_keys() {
     );
 
     // The merge event hangs off the source via a `source` edge.
-    let merge_events = dag_outgoing(&p, "dag_merge_source", "source");
+    let merge_events = dag_outgoing(&test_db, &p, "dag_merge_source", "source");
     assert_eq!(merge_events.len(), 1, "expected one merge event");
     let event_id = &merge_events[0].node_id;
 
-    let event = dag_query_node(&p, event_id).expect("merge event node missing");
+    let event = dag_query_node(&test_db, &p, event_id).expect("merge event node missing");
     assert_eq!(event.object_type.as_deref(), Some("merge"));
     let props = event.properties.expect("merge event has no properties");
     assert_eq!(
@@ -7041,9 +7064,12 @@ fn dag_records_merge_with_version_and_keys() {
     assert!(mv > 0, "merge_version should be > 0, got {mv}");
 
     // The merge event must point at the target via a `target` edge.
-    let targets = dag_outgoing(&p, event_id, "target");
+    let targets = dag_outgoing(&test_db, &p, event_id, "target");
     assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0].node_id, "dag_merge_target");
+    assert_eq!(
+        targets[0].node_id,
+        dag_node_id_for_key(&test_db, "dag_merge_target")
+    );
 }
 
 #[test]
@@ -7098,7 +7124,7 @@ fn dag_records_revert() {
 
     // The revert event hangs off the branch via the `reverted` edge (single
     // direction — revert is a self-event, not a binary op between branches).
-    let revert_events = dag_outgoing(&p, "dag_revert_branch", "reverted");
+    let revert_events = dag_outgoing(&test_db, &p, "dag_revert_branch", "reverted");
     assert_eq!(
         revert_events.len(),
         1,
@@ -7107,7 +7133,7 @@ fn dag_records_revert() {
     );
     let event_id = &revert_events[0].node_id;
 
-    let event = dag_query_node(&p, event_id).expect("revert event node missing");
+    let event = dag_query_node(&test_db, &p, event_id).expect("revert event node missing");
     assert_eq!(event.object_type.as_deref(), Some("revert"));
     let props = event.properties.expect("revert event has no properties");
     assert_eq!(
@@ -7184,7 +7210,7 @@ fn dag_records_cherry_pick() {
     );
 
     // Cherry-pick uses its own edge type to be distinguishable from a full merge.
-    let cp_events = dag_outgoing(&p, "dag_cp_source", "cherry_pick_source");
+    let cp_events = dag_outgoing(&test_db, &p, "dag_cp_source", "cherry_pick_source");
     assert_eq!(
         cp_events.len(),
         1,
@@ -7193,7 +7219,7 @@ fn dag_records_cherry_pick() {
     );
     let event_id = &cp_events[0].node_id;
 
-    let event = dag_query_node(&p, event_id).expect("cherry-pick event node missing");
+    let event = dag_query_node(&test_db, &p, event_id).expect("cherry-pick event node missing");
     assert_eq!(event.object_type.as_deref(), Some("cherry_pick"));
     let props = event
         .properties
@@ -7210,14 +7236,17 @@ fn dag_records_cherry_pick() {
     );
 
     // The event points at the target via the cherry_pick_target edge type.
-    let targets = dag_outgoing(&p, event_id, "cherry_pick_target");
+    let targets = dag_outgoing(&test_db, &p, event_id, "cherry_pick_target");
     assert_eq!(targets.len(), 1);
-    assert_eq!(targets[0].node_id, "dag_cp_target");
+    assert_eq!(
+        targets[0].node_id,
+        dag_node_id_for_key(&test_db, "dag_cp_target")
+    );
 
     // The fork edge from the prior fork should NOT have produced a merge or
     // cherry-pick event by itself — verify there's exactly one cherry-pick
     // event and no merge events on this branch pair.
-    let merge_events_on_source = dag_outgoing(&p, "dag_cp_source", "source");
+    let merge_events_on_source = dag_outgoing(&test_db, &p, "dag_cp_source", "source");
     assert!(
         merge_events_on_source.is_empty(),
         "cherry-pick should not produce a merge event"
@@ -7232,9 +7261,22 @@ fn dag_records_branch_create_and_delete() {
     // Use BranchService for DAG-integrated branch operations
     test_db.db.branches().create("dag_lifecycle").unwrap();
 
+    // Capture the BranchRef while the record is still active so the
+    // post-delete query can resolve the right BranchRef-keyed node
+    // (control_record returns None for tombstoned branches).
+    let branch_ref = test_db
+        .db
+        .branches()
+        .control_record("dag_lifecycle")
+        .unwrap()
+        .unwrap()
+        .branch;
+    let deleted_node_id = strata_graph::branch_dag::dag_branch_node_id_for_ref(branch_ref);
+
     // After create, branch should exist in DAG with status=active and a
     // populated created_at timestamp.
-    let node = dag_query_node(&p, "dag_lifecycle").expect("branch node missing after create");
+    let node = dag_query_node(&test_db, &p, "dag_lifecycle")
+        .expect("branch node missing after create");
     assert_eq!(node.object_type.as_deref(), Some("branch"));
     let props = node.properties.expect("branch node has no properties");
     assert_eq!(props.get("status").and_then(|v| v.as_str()), Some("active"));
@@ -7247,8 +7289,17 @@ fn dag_records_branch_create_and_delete() {
     test_db.db.branches().delete("dag_lifecycle").unwrap();
 
     // After delete, the same node should still exist (lineage is preserved)
-    // but with status flipped to deleted and a deleted_at marker.
-    let node = dag_query_node(&p, "dag_lifecycle").expect("branch node missing after delete");
+    // but with status flipped to deleted and a deleted_at marker. Query
+    // by the captured BranchRef-keyed id because the control record is
+    // tombstoned and the name-based resolver would fall back to the raw
+    // name, which is no longer where the node lives.
+    use strata_core::branch_dag::SYSTEM_BRANCH;
+    let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
+    let node = p
+        .graph
+        .get_node(system_id, "_graph_", "_branch_dag", &deleted_node_id)
+        .expect("DAG read failed")
+        .expect("branch node missing after delete");
     let props = node.properties.expect("branch node has no properties");
     assert_eq!(
         props.get("status").and_then(|v| v.as_str()),
@@ -7341,7 +7392,7 @@ fn dag_repeated_merge_advances_merge_base() {
     // — not one (where the second merge somehow overwrote the first) and
     // not three (where some extra event leaked in).
     let p = test_db.all_primitives();
-    let merge_events = dag_outgoing(&p, "dag_rep_source", "source");
+    let merge_events = dag_outgoing(&test_db, &p, "dag_rep_source", "source");
     assert_eq!(
         merge_events.len(),
         2,
@@ -7364,7 +7415,7 @@ fn dag_skips_system_branch() {
     // graph itself exists. Without the guard, every db.open() would log a
     // "failed to record branch creation in DAG" warning.
     assert!(
-        dag_query_node(&p, SYSTEM_BRANCH).is_none(),
+        dag_query_node(&test_db, &p, SYSTEM_BRANCH).is_none(),
         "_system_ branch should never appear as a self-referential DAG node"
     );
 
@@ -7373,7 +7424,7 @@ fn dag_skips_system_branch() {
     // assertion would catch it.
     test_db.db.branches().create("dag_guard_check").unwrap();
     assert!(
-        dag_query_node(&p, "dag_guard_check").is_some(),
+        dag_query_node(&test_db, &p, "dag_guard_check").is_some(),
         "non-system branches must still be recorded in the DAG"
     );
 
@@ -7412,16 +7463,16 @@ fn dag_survives_database_reopen() {
     let p = test_db.all_primitives();
 
     assert!(
-        dag_query_node(&p, "dag_persist").is_some(),
+        dag_query_node(&test_db, &p, "dag_persist").is_some(),
         "branch node should survive reopen"
     );
     assert!(
-        dag_query_node(&p, "dag_persist_fork").is_some(),
+        dag_query_node(&test_db, &p, "dag_persist_fork").is_some(),
         "forked branch node should survive reopen"
     );
 
     // Fork event must also survive.
-    let fork_events = dag_outgoing(&p, "dag_persist", "parent");
+    let fork_events = dag_outgoing(&test_db, &p, "dag_persist", "parent");
     assert_eq!(
         fork_events.len(),
         1,
@@ -7433,7 +7484,7 @@ fn dag_survives_database_reopen() {
     // not just the node's existence. A bug that wrote the node header but
     // dropped properties on WAL replay would be caught here.
     let event_id = &fork_events[0].node_id;
-    let event = dag_query_node(&p, event_id).expect("fork event missing after reopen");
+    let event = dag_query_node(&test_db, &p, event_id).expect("fork event missing after reopen");
     let props = event
         .properties
         .expect("fork event lost properties on reopen");
@@ -7447,9 +7498,12 @@ fn dag_survives_database_reopen() {
     );
 
     // The fork event's child edge must also survive.
-    let children = dag_outgoing(&p, event_id, "child");
+    let children = dag_outgoing(&test_db, &p, event_id, "child");
     assert_eq!(children.len(), 1, "fork child edge missing after reopen");
-    assert_eq!(children[0].node_id, "dag_persist_fork");
+    assert_eq!(
+        children[0].node_id,
+        dag_node_id_for_key(&test_db, "dag_persist_fork")
+    );
 }
 
 #[test]
@@ -7480,9 +7534,9 @@ fn dag_records_fork_metadata_end_to_end() {
         )
         .unwrap();
 
-    let fork_events = dag_outgoing(&p, "dag_meta_src", "parent");
+    let fork_events = dag_outgoing(&test_db, &p, "dag_meta_src", "parent");
     assert_eq!(fork_events.len(), 1);
-    let event = dag_query_node(&p, &fork_events[0].node_id).unwrap();
+    let event = dag_query_node(&test_db, &p, &fork_events[0].node_id).unwrap();
     let props = event.properties.unwrap();
     assert_eq!(
         props.get("message").and_then(|v| v.as_str()),
@@ -7528,9 +7582,9 @@ fn dag_records_merge_metadata_end_to_end() {
         )
         .unwrap();
 
-    let merge_events = dag_outgoing(&p, "dag_meta_source", "source");
+    let merge_events = dag_outgoing(&test_db, &p, "dag_meta_source", "source");
     assert_eq!(merge_events.len(), 1);
-    let event = dag_query_node(&p, &merge_events[0].node_id).unwrap();
+    let event = dag_query_node(&test_db, &p, &merge_events[0].node_id).unwrap();
     let props = event.properties.unwrap();
     assert_eq!(
         props.get("message").and_then(|v| v.as_str()),

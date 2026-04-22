@@ -1222,22 +1222,70 @@ impl BranchControlStore {
                 names.insert(rec.branch, rec.name.clone());
             }
 
+            // Track which `(child_ref, source_ref, point)` fork anchors we
+            // emit from control records so we can suppress duplicate
+            // `LineageEdgeKind::Fork` edges further down (legacy migration
+            // writes both an anchor and a Fork edge for backfilled history,
+            // but rebuild must not double-emit the projection event).
+            let mut fork_anchors_emitted: std::collections::HashSet<(
+                BranchRef,
+                BranchRef,
+                CommitVersion,
+            )> = std::collections::HashSet::new();
             for rec in &records {
-                hook.record_event(&DagEvent::create(rec.branch.id, rec.name.clone()))
+                hook.record_event(
+                    &DagEvent::create(rec.branch.id, rec.name.clone()).with_branch_ref(rec.branch),
+                )
+                .map_err(|e| {
+                    StrataError::internal(format!(
+                        "failed to rebuild DAG create event for branch '{}': {e}",
+                        rec.name
+                    ))
+                })?;
+                if matches!(rec.lifecycle, BranchLifecycleStatus::Deleted) {
+                    hook.record_event(
+                        &DagEvent::delete(rec.branch.id, rec.name.clone())
+                            .with_branch_ref(rec.branch),
+                    )
                     .map_err(|e| {
                         StrataError::internal(format!(
-                            "failed to rebuild DAG create event for branch '{}': {e}",
+                            "failed to rebuild DAG delete event for branch '{}': {e}",
                             rec.name
                         ))
                     })?;
-                if matches!(rec.lifecycle, BranchLifecycleStatus::Deleted) {
-                    hook.record_event(&DagEvent::delete(rec.branch.id, rec.name.clone()))
-                        .map_err(|e| {
-                            StrataError::internal(format!(
-                                "failed to rebuild DAG delete event for branch '{}': {e}",
-                                rec.name
-                            ))
-                        })?;
+                }
+                // B3.4: emit the Fork projection event from the
+                // authoritative `ForkAnchor` on the child's control
+                // record. Live forks (B3.2+) do not write a separate
+                // `LineageEdgeRecord::Fork`; the anchor is the only
+                // place the parent → child relationship is recorded.
+                // Without this loop, rebuild would lose every fork
+                // event for branches forked after B3.2 landed.
+                if let Some(anchor) = rec.fork {
+                    let source_name = names.get(&anchor.parent).cloned().ok_or_else(|| {
+                        StrataError::corruption(format!(
+                            "cannot rebuild DAG projection: fork anchor on '{}' references missing parent BranchRef(id={}, gen={})",
+                            rec.name, anchor.parent.id, anchor.parent.generation
+                        ))
+                    })?;
+                    fork_anchors_emitted.insert((rec.branch, anchor.parent, anchor.point));
+                    hook.record_event(
+                        &DagEvent::fork(
+                            rec.branch.id,
+                            rec.name.clone(),
+                            anchor.parent.id,
+                            source_name,
+                            anchor.point,
+                        )
+                        .with_branch_ref(rec.branch)
+                        .with_source_branch_ref(anchor.parent),
+                    )
+                    .map_err(|e| {
+                        StrataError::internal(format!(
+                            "failed to rebuild DAG fork anchor event for branch '{}': {e}",
+                            rec.name
+                        ))
+                    })?;
                 }
             }
 
@@ -1258,6 +1306,13 @@ impl BranchControlStore {
                                 target_name
                             ))
                         })?;
+                        // Skip if the fork anchor already produced this
+                        // event — legacy migration writes both an anchor
+                        // and a Fork edge, and we only want one Fork node
+                        // in the projection per fork.
+                        if fork_anchors_emitted.contains(&(edge.target, source, edge.commit_version)) {
+                            continue;
+                        }
                         let source_name = names.get(&source).cloned().ok_or_else(|| {
                             StrataError::corruption(format!(
                                 "cannot rebuild DAG projection: missing source name for BranchRef(id={}, gen={})",
@@ -1271,6 +1326,8 @@ impl BranchControlStore {
                             source_name,
                             edge.commit_version,
                         )
+                        .with_branch_ref(edge.target)
+                        .with_source_branch_ref(source)
                     }
                     LineageEdgeKind::Merge => {
                         let source = edge.source.ok_or_else(|| {
@@ -1308,6 +1365,8 @@ impl BranchControlStore {
                             merge_info,
                             crate::branch_ops::MergeStrategy::Strict,
                         )
+                        .with_branch_ref(edge.target)
+                        .with_source_branch_ref(source)
                     }
                     LineageEdgeKind::Revert => {
                         let revert_info = crate::branch_ops::RevertInfo {
@@ -1323,6 +1382,7 @@ impl BranchControlStore {
                             edge.commit_version,
                             revert_info,
                         )
+                        .with_branch_ref(edge.target)
                     }
                     LineageEdgeKind::CherryPick => {
                         let source = edge.source.ok_or_else(|| {
@@ -1352,6 +1412,8 @@ impl BranchControlStore {
                             edge.commit_version,
                             info,
                         )
+                        .with_branch_ref(edge.target)
+                        .with_source_branch_ref(source)
                     }
                 };
 

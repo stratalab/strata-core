@@ -22,9 +22,8 @@ use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::types::{BranchId, Key, TypeTag};
-use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult};
+use strata_core::{StrataError, StrataResult};
 use strata_durability::branch_bundle::{
     BranchBundleReader, BranchBundleWriter, BranchlogPayload, BundleBranchInfo, ExportOptions,
 };
@@ -106,13 +105,18 @@ pub fn export_branch_with_options(
     // 2. Build BundleBranchInfo from metadata.
     //
     // B3.4 (AD7): record the source-DB lifecycle generation so an import
-    // onto a fresh target can preserve it. If the active control record
-    // is unavailable (legacy follower-synthesis or pre-B3.1 state), fall
-    // back to gen 0 — the import side treats absent / 0 identically.
+    // onto a fresh target can preserve it. Missing active control state
+    // here is corruption once B3 is landed; bundle export must not invent
+    // `gen 0` and silently mislabel the lifecycle instance.
     let generation = BranchControlStore::new(db.clone())
         .find_active_by_name(&branch_meta.name)?
         .map(|rec| rec.branch.generation)
-        .unwrap_or(0);
+        .ok_or_else(|| {
+            StrataError::corruption(format!(
+                "branch '{}' has legacy metadata but no active control record during export",
+                branch_meta.name
+            ))
+        })?;
     let bundle_branch_info = BundleBranchInfo {
         branch_id: branch_meta.branch_id.clone(),
         name: branch_meta.name.clone(),
@@ -252,67 +256,16 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         .map_err(|e| StrataError::storage(format!("Failed to read bundle: {}", e)))?;
 
     let branch_id_str = &contents.branch_info.name;
-    let branch_index = BranchIndex::new(db.clone());
-
-    // 2. Check branch doesn't already exist (active legacy metadata).
-    //    Tombstones in the control store are not a hard collision —
-    //    they're handled by AD7's fresh-generation allocation below.
-    if branch_index.exists(branch_id_str)? {
-        return Err(StrataError::invalid_input(format!(
-            "Branch '{}' already exists. Delete it first or use a different name.",
-            branch_id_str
-        )));
-    }
-
-    // 3. Decide generation per AD7 atomically inside the create txn so
-    //    a concurrent create+delete on the same name (which would leave
-    //    a tombstone in the control store while purging the legacy
-    //    metadata) cannot race the import into overwriting the
-    //    tombstone with a fresh active record at the same `BranchRef`.
-    //
-    //    Using `next_generation` inside the txn is the ordering primitive:
-    //    - returns 0 only when the next-gen counter is absent (no record
-    //      ever existed for this name) → "fresh target", preserve bundle
-    //      generation;
-    //    - returns ≥1 when any prior lifecycle instance bumped the counter
-    //      (active record was deleted leaving a tombstone, or even an
-    //      earlier import) → allocate the fresh value, ignore bundle's.
+    // 2. Create the imported branch through the canonical branch-service
+    //    mutation boundary. This keeps import on the same control-store,
+    //    rollback, DAG, and observer path as ordinary branch creation while
+    //    still honoring AD7's generation-allocation rules.
     let canonical_id = BranchId::from_user_name(branch_id_str);
-    let store = BranchControlStore::new(db.clone());
     let bundle_generation = contents.branch_info.generation;
-    let bundle_seed_value = bundle_generation.checked_add(1).ok_or_else(|| {
-        StrataError::invalid_input(
-            "Bundle generation u64::MAX cannot be imported — would overflow next-gen counter",
-        )
-    })?;
-    // Capture which path the txn took so we can log outside the closure
-    // (the txn closure must stay tracing-quiet to keep aborted-retry
-    // attempts from spamming logs).
-    let collision = std::sync::Mutex::new(false);
-    branch_index.create_branch_with_hook(branch_id_str, |txn| {
-        let allocated = store.next_generation(canonical_id, txn)?;
-        let chosen_generation = if allocated == 0 {
-            // Fresh target: honour the bundle's generation. `next_generation`
-            // already wrote `1` to the counter; if the bundle's gen is
-            // higher we need to push the counter past it so a later
-            // recreate strictly advances.
-            if bundle_generation > 0 {
-                store.seed_next_generation(canonical_id, bundle_seed_value, txn)?;
-            }
-            bundle_generation
-        } else {
-            *collision.lock().unwrap() = true;
-            allocated
-        };
-        let record = BranchControlRecord {
-            branch: BranchRef::new(canonical_id, chosen_generation),
-            name: branch_id_str.to_string(),
-            lifecycle: BranchLifecycleStatus::Active,
-            fork: None,
-        };
-        store.put_record(&record, txn)
-    })?;
-    if *collision.lock().unwrap() {
+    let (_branch_meta, _branch_ref, collision) = db
+        .branches()
+        .create_imported_branch(branch_id_str, bundle_generation)?;
+    if collision {
         info!(
             target: "strata::bundle",
             name = %branch_id_str,
@@ -321,20 +274,10 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
         );
     }
 
-    // 4. Resolve BranchId for namespace
-    let branch_meta = branch_index
-        .get_branch(branch_id_str)?
-        .ok_or_else(|| {
-            StrataError::internal(format!(
-                "Branch '{}' was just created but cannot be found",
-                branch_id_str
-            ))
-        })?
-        .value;
+    // 3. Resolve BranchId for namespace
+    let core_branch_id = canonical_id;
 
-    let core_branch_id = crate::primitives::branch::resolve_branch_name(&branch_meta.name);
-
-    // 5. Replay each payload as a transaction
+    // 4. Replay each payload as a transaction
     let mut transactions_applied = 0u64;
     let mut keys_written = 0u64;
 
@@ -360,8 +303,8 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
     }
 
     // Note: the DAG create event already fired from inside
-    // `BranchService::create(branch_id_str)` above (step 3). We do NOT fire
-    // it again here — doing so would upsert the branch node and clobber the
+    // `BranchService::create_imported_branch(...)` above. We do NOT fire it
+    // again here — doing so would upsert the branch node and clobber the
     // timestamps from the first fire. Branch import shows up in the lineage
     // graph as a freshly-created branch automatically.
 
@@ -406,9 +349,51 @@ fn format_micros(micros: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::branch_ops::branch_control_store::{active_ptr_key, control_record_key};
+    use crate::database::dag_hook::{
+        AncestryEntry, BranchDagError, BranchDagHook, DagEvent, DagEventKind, MergeBaseResult,
+    };
     use std::sync::Arc;
     use strata_core::types::Namespace;
     use tempfile::TempDir;
+
+    #[derive(Default)]
+    struct RecordingDagHook {
+        events: parking_lot::Mutex<Vec<DagEvent>>,
+    }
+
+    impl RecordingDagHook {
+        fn events(&self) -> Vec<DagEvent> {
+            self.events.lock().clone()
+        }
+    }
+
+    impl BranchDagHook for RecordingDagHook {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
+            self.events.lock().push(event.clone());
+            Ok(())
+        }
+
+        fn find_merge_base(
+            &self,
+            _branch_a: &str,
+            _branch_b: &str,
+        ) -> Result<Option<MergeBaseResult>, BranchDagError> {
+            Ok(None)
+        }
+
+        fn log(&self, _branch: &str, _limit: usize) -> Result<Vec<DagEvent>, BranchDagError> {
+            Ok(self.events())
+        }
+
+        fn ancestors(&self, _branch: &str) -> Result<Vec<AncestryEntry>, BranchDagError> {
+            Ok(Vec::new())
+        }
+    }
 
     fn setup() -> (TempDir, Arc<Database>) {
         let temp_dir = TempDir::new().unwrap();
@@ -530,6 +515,8 @@ mod tests {
         // Import into a fresh database
         let import_dir = TempDir::new().unwrap();
         let import_db = Database::open(import_dir.path()).unwrap();
+        let hook = Arc::new(RecordingDagHook::default());
+        import_db.dag_hook().install(hook.clone()).unwrap();
 
         let import_info = import_branch(&import_db, &bundle_path).unwrap();
         assert_eq!(import_info.branch_id, "export-branch");
@@ -540,6 +527,17 @@ mod tests {
             .unwrap()
             .expect("imported branch should have a control record");
         assert_eq!(control.branch.generation, 0);
+
+        let events = hook.events();
+        let create = events
+            .iter()
+            .find(|event| event.kind == DagEventKind::BranchCreate)
+            .expect("imported branch should emit a canonical create event");
+        assert_eq!(
+            create.branch_ref.map(|branch| branch.generation),
+            Some(0),
+            "import must record the imported lifecycle generation through the canonical DAG path"
+        );
     }
 
     #[test]
@@ -573,6 +571,72 @@ mod tests {
         // Importing into same db should fail (branch already exists)
         let result = import_branch(&db, &path);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_import_rejects_active_control_record_without_metadata() {
+        let (temp_dir, db) = setup_with_branch("split-brain");
+        let path = temp_dir.path().join("split.branchbundle.tar.zst");
+        export_branch(&db, "split-brain", &path).unwrap();
+
+        let branch_ref = db
+            .branches()
+            .control_record("split-brain")
+            .unwrap()
+            .unwrap()
+            .branch;
+        let metadata_key = Key::new_branch_with_id(
+            Arc::new(Namespace::for_branch(BranchId::from_bytes([0; 16]))),
+            "split-brain",
+        );
+        db.transaction(BranchId::from_bytes([0; 16]), |txn| {
+            txn.set_allow_cross_branch(true);
+            txn.delete(metadata_key.clone())?;
+            Ok(())
+        })
+        .unwrap();
+
+        let err = import_branch(&db, &path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("active control record but no legacy metadata"),
+            "unexpected error: {err}"
+        );
+
+        // The authoritative active lifecycle must remain untouched.
+        let rec = db
+            .branches()
+            .control_record("split-brain")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.branch, branch_ref);
+    }
+
+    #[test]
+    fn test_export_rejects_metadata_without_active_control_record() {
+        let (temp_dir, db) = setup_with_branch("broken-export");
+        let path = temp_dir.path().join("broken.branchbundle.tar.zst");
+
+        let branch_ref = db
+            .branches()
+            .control_record("broken-export")
+            .unwrap()
+            .unwrap()
+            .branch;
+        db.transaction(BranchId::from_bytes([0; 16]), |txn| {
+            txn.set_allow_cross_branch(true);
+            txn.delete(control_record_key(branch_ref))?;
+            txn.delete(active_ptr_key(branch_ref.id))?;
+            Ok(())
+        })
+        .unwrap();
+
+        let err = export_branch(&db, "broken-export", &path).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("legacy metadata but no active control record during export"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

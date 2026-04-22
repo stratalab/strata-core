@@ -183,8 +183,7 @@ fn merge_lineage_edge_survives_reopen() {
         .unwrap()
         .expect("merge edge persists, so merge_base still resolves after reopen");
     assert_eq!(
-        mb_after.commit_version,
-        mb_before.commit_version,
+        mb_after.commit_version, mb_before.commit_version,
         "merge_base point semantics must survive reopen"
     );
     assert_eq!(mb_after.branch_id, mb_before.branch_id);
@@ -361,5 +360,57 @@ fn log_history_is_stable_across_reopens() {
         log_after_first.len(),
         log_before.len(),
         "rebuilt projection must contain the same number of events"
+    );
+}
+
+#[test]
+fn recreated_branch_log_and_ancestors_do_not_inherit_old_generation_history() {
+    let mut test_db = TestDb::new();
+    let branches = test_db.db.branches();
+    branches.create("main").unwrap();
+    seed(&test_db, "main", "_seed_", 1);
+    branches.fork("main", "feature").unwrap();
+
+    let feature_gen0 = branches.control_record("feature").unwrap().unwrap().branch;
+    let log_before = branches.log("feature", 100).unwrap();
+    assert!(
+        log_before.iter().any(|event| matches!(
+            event.kind,
+            strata_engine::database::dag_hook::DagEventKind::Fork
+        )),
+        "forked lifecycle should show its fork event"
+    );
+
+    branches.delete("feature").unwrap();
+    branches.create("feature").unwrap();
+    let feature_gen1 = branches.control_record("feature").unwrap().unwrap().branch;
+    assert_ne!(feature_gen1, feature_gen0);
+
+    let log_after = branches.log("feature", 100).unwrap();
+    assert!(
+        log_after.iter().all(|event| !matches!(
+            event.kind,
+            strata_engine::database::dag_hook::DagEventKind::Fork
+        )),
+        "recreated lifecycle must not inherit the old generation's fork history"
+    );
+    assert!(
+        branches.ancestors("feature").unwrap().is_empty(),
+        "recreated lifecycle must not inherit the old generation's parent chain"
+    );
+
+    test_db.reopen();
+    let branches = test_db.db.branches();
+    let log_after_reopen = branches.log("feature", 100).unwrap();
+    assert!(
+        log_after_reopen.iter().all(|event| !matches!(
+            event.kind,
+            strata_engine::database::dag_hook::DagEventKind::Fork
+        )),
+        "reopen + projection rebuild must preserve generation-isolated history"
+    );
+    assert!(
+        branches.ancestors("feature").unwrap().is_empty(),
+        "reopen + projection rebuild must preserve generation-isolated ancestry"
     );
 }

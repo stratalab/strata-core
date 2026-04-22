@@ -57,7 +57,9 @@ fn seed(test_db: &TestDb, name: &str) {
 
 fn export_bundle(test_db: &TestDb, branch: &str) -> (TempDir, PathBuf) {
     let bundle_dir = TempDir::new().unwrap();
-    let path = bundle_dir.path().join(format!("{branch}.branchbundle.tar.zst"));
+    let path = bundle_dir
+        .path()
+        .join(format!("{branch}.branchbundle.tar.zst"));
     bundle::export_branch(&test_db.db, branch, &path).expect("export succeeds");
     (bundle_dir, path)
 }

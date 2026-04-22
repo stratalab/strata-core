@@ -861,13 +861,7 @@ mod tests {
         assert_eq!(create.branch_ref, branch_ref);
         assert!(create.source_branch_ref.is_none());
 
-        let fork = BranchOpEvent::fork(
-            branch_ref,
-            "feature",
-            source_ref,
-            "main",
-            CommitVersion(7),
-        );
+        let fork = BranchOpEvent::fork(branch_ref, "feature", source_ref, "main", CommitVersion(7));
         assert_eq!(fork.branch_id, branch_ref.id);
         assert_eq!(fork.source_branch_id, Some(source_ref.id));
         assert_eq!(fork.source_branch_ref, Some(source_ref));

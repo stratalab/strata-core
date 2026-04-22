@@ -60,6 +60,7 @@ use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
+use strata_core::BranchRef;
 
 use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
 
@@ -204,10 +205,20 @@ pub struct DagEvent {
     pub kind: DagEventKind,
     /// The primary branch affected.
     pub branch_id: BranchId,
+    /// Generation-aware identity of the primary branch when known.
+    ///
+    /// B3.4 threads `BranchRef` through the DAG write path so the graph
+    /// projection can key nodes by lifecycle instance instead of by
+    /// branch name alone. Legacy callers may still leave this unset; the
+    /// graph layer falls back to the older name-keyed behavior in that
+    /// case.
+    pub branch_ref: Option<BranchRef>,
     /// The branch name.
     pub branch_name: String,
     /// Source branch for fork/merge/cherry-pick.
     pub source_branch_id: Option<BranchId>,
+    /// Generation-aware source identity when known.
+    pub source_branch_ref: Option<BranchRef>,
     /// Source branch name.
     pub source_branch_name: Option<String>,
     /// The commit version at which the event occurred.
@@ -238,8 +249,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::BranchCreate,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version,
             message: None,
@@ -269,8 +282,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::BranchDelete,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: None,
             commit_version,
             message: None,
@@ -300,8 +315,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Fork,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -330,8 +347,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Merge,
             branch_id: target_branch_id,
+            branch_ref: None,
             branch_name: target_branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -353,8 +372,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::Revert,
             branch_id,
+            branch_ref: None,
             branch_name: branch_name.into(),
             source_branch_id: None,
+            source_branch_ref: None,
             source_branch_name: Some(format!("v{}..v{}", info.from_version.0, info.to_version.0)),
             commit_version,
             message: None,
@@ -378,8 +399,10 @@ impl DagEvent {
         Self {
             kind: DagEventKind::CherryPick,
             branch_id: target_branch_id,
+            branch_ref: None,
             branch_name: target_branch_name.into(),
             source_branch_id: Some(source_branch_id),
+            source_branch_ref: None,
             source_branch_name: Some(source_branch_name.into()),
             commit_version,
             message: None,
@@ -400,6 +423,20 @@ impl DagEvent {
     /// Set the creator.
     pub fn with_creator(mut self, creator: impl Into<String>) -> Self {
         self.creator = Some(creator.into());
+        self
+    }
+
+    /// Attach the generation-aware primary branch identity.
+    pub fn with_branch_ref(mut self, branch_ref: BranchRef) -> Self {
+        self.branch_id = branch_ref.id;
+        self.branch_ref = Some(branch_ref);
+        self
+    }
+
+    /// Attach the generation-aware source branch identity.
+    pub fn with_source_branch_ref(mut self, source_branch_ref: BranchRef) -> Self {
+        self.source_branch_id = Some(source_branch_ref.id);
+        self.source_branch_ref = Some(source_branch_ref);
         self
     }
 }

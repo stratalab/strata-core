@@ -1179,14 +1179,15 @@ impl Database {
                     crate::branch_ops::branch_control_store::BranchControlStore::ensure_migrated(
                         db,
                     )?;
-                    // B3.1 defers the DAG projection rebuild: live write
-                    // helpers still record name-keyed events, so a wipe-
-                    // and-replay from the store on every open would drop
-                    // live-session events written between migration
-                    // points. `BranchControlStore::rebuild_dag_projection`
-                    // remains available for explicit invocation; the
-                    // B3.3 cutover will wire it into open once live
-                    // helpers also emit from the store.
+                    if let Err(e) =
+                        crate::branch_ops::branch_control_store::BranchControlStore::rebuild_dag_projection(db)
+                    {
+                        warn!(
+                            target: "strata::branch::migration",
+                            error = %e,
+                            "failed to rebuild _branch_dag projection from BranchControlStore during open"
+                        );
+                    }
                     Ok(())
                 })
             }
