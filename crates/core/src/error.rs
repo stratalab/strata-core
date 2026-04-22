@@ -483,6 +483,28 @@ pub enum StrataError {
         branch_id: BranchId,
     },
 
+    /// Branch is archived
+    ///
+    /// The specified branch exists but is in the `Archived` lifecycle state and
+    /// does not accept writes. Read operations against the branch still
+    /// succeed; this error is raised at the `BranchService` write gate when a
+    /// mutation targets an archived lifecycle instance.
+    ///
+    /// Surfaced by `BranchControlStore::require_writable_by_name` (B4).
+    ///
+    /// Wire code: `ConstraintViolation` — the caller attempted a mutation that
+    /// violates the archived-branch read-only contract.
+    #[error("branch is archived: {name}")]
+    BranchArchived {
+        /// User-facing name of the archived branch.
+        ///
+        /// Carries the name rather than a `BranchId` because the typed error
+        /// is intended to be operator-usable end to end (CLI / executor
+        /// error responses); callers already have the name in hand when the
+        /// gate rejects them.
+        name: String,
+    },
+
     // =========================================================================
     // Type Errors
     // =========================================================================
@@ -1068,6 +1090,17 @@ impl StrataError {
         StrataError::BranchNotFound { branch_id }
     }
 
+    /// Create a `BranchArchived` error for the given user-facing name.
+    ///
+    /// ## Example
+    /// ```no_run
+    /// # use strata_core::StrataError;
+    /// StrataError::branch_archived("release/2026-03");
+    /// ```
+    pub fn branch_archived(name: impl Into<String>) -> Self {
+        StrataError::BranchArchived { name: name.into() }
+    }
+
     /// Create a VersionConflict error
     ///
     /// ## Example
@@ -1508,6 +1541,9 @@ impl StrataError {
             StrataError::NotFound { .. } => ErrorCode::NotFound,
             StrataError::BranchNotFound { .. } => ErrorCode::NotFound,
 
+            // Lifecycle-state errors (B4): branch exists but is not writable.
+            StrataError::BranchArchived { .. } => ErrorCode::ConstraintViolation,
+
             // WrongType errors
             StrataError::WrongType { .. } => ErrorCode::WrongType,
 
@@ -1572,6 +1608,7 @@ impl StrataError {
             StrataError::BranchNotFound { branch_id } => {
                 ErrorDetails::new().with_string("branch_id", branch_id.to_string())
             }
+            StrataError::BranchArchived { name } => ErrorDetails::new().with_string("branch", name),
             StrataError::WrongType { expected, actual } => ErrorDetails::new()
                 .with_string("expected", expected)
                 .with_string("actual", actual),
@@ -1702,7 +1739,8 @@ impl StrataError {
             | StrataError::BranchNotFound { .. }
             | StrataError::PathNotFound { .. } => true,
 
-            StrataError::Conflict { .. }
+            StrataError::BranchArchived { .. }
+            | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
             | StrataError::WriteConflict { .. }
             | StrataError::WrongType { .. }
@@ -1754,6 +1792,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::WrongType { .. }
             | StrataError::TransactionAborted { .. }
@@ -1793,6 +1832,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -1845,6 +1885,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -1898,6 +1939,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -1949,6 +1991,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -2008,6 +2051,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::WrongType { .. }
             | StrataError::TransactionTimeout { .. }
@@ -2063,6 +2107,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -2110,6 +2155,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
             | StrataError::VersionConflict { .. }
@@ -2279,6 +2325,27 @@ mod strata_error_tests {
         assert!(!e.is_conflict());
         assert_eq!(e.branch_id(), Some(branch_id));
         assert!(e.entity_ref().is_none());
+    }
+
+    #[test]
+    fn test_branch_archived_classifier() {
+        // B4: archived is a distinct lifecycle-state error, not a
+        // not-found, not a conflict, not retryable, not serious. Wire
+        // code is `ConstraintViolation` — the caller violated the
+        // archived-branch read-only contract.
+        let e = StrataError::branch_archived("release/2026-03");
+
+        assert!(!e.is_not_found());
+        assert!(!e.is_conflict());
+        assert!(!e.is_wrong_type());
+        assert!(!e.is_transaction_error());
+        assert!(!e.is_validation_error());
+        assert!(!e.is_storage_error());
+        assert!(!e.is_retryable());
+        assert!(!e.is_serious());
+        assert!(!e.is_resource_error());
+        assert_eq!(e.code(), ErrorCode::ConstraintViolation);
+        assert!(format!("{e}").contains("release/2026-03"));
     }
 
     #[test]

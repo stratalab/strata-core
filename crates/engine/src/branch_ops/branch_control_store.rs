@@ -22,8 +22,11 @@
 //!
 //! - `__ctl__/<id_hex>/<generation>` — `BranchControlRecord` (JSON)
 //! - `__ctl__next_gen__/<id_hex>` — `u64` next-unused generation
-//! - `__ctl__active__/<id_hex>` — `u64` currently-active generation (absent
-//!   if no active lifecycle instance)
+//! - `__ctl__active__/<id_hex>` — `u64` pointer at the **live** (non-Deleted)
+//!   lifecycle generation. Set for `Active` and `Archived` records; cleared
+//!   when the record transitions to `Deleted` (B4 widened this from
+//!   Active-only so the lifecycle write gate can distinguish
+//!   `BranchArchived` from `BranchNotFound`).
 //! - `__ctl__edge__/<id_hex>/<generation>/<commit_version_padded>` —
 //!   `LineageEdgeRecord` (JSON). Commit version is zero-padded decimal
 //!   (20 digits, covering `u64::MAX`) so lexical order on the key
@@ -561,10 +564,19 @@ impl BranchControlStore {
 
     /// Write or overwrite a control record.
     ///
-    /// Also updates the `__ctl__active__/<id>` pointer:
-    /// - if `rec.lifecycle == Active`: pointer is set to `rec.branch.generation`
-    /// - if Archived / Deleted: pointer is cleared when it matches this
-    ///   generation (we never stomp on a different active generation).
+    /// Also updates the `__ctl__active__/<id>` pointer, which addresses the
+    /// **live** (non-Deleted) lifecycle generation:
+    ///
+    /// - `Active` / `Archived`: pointer is set to `rec.branch.generation`.
+    ///   Archived branches remain findable by name so the B4 lifecycle write
+    ///   gate can return `BranchArchived` instead of `BranchNotFound`.
+    /// - `Deleted` (or any future non-live variant): pointer is cleared only
+    ///   when it still points at *this* generation; we never stomp on a
+    ///   different live generation.
+    ///
+    /// `BranchLifecycleStatus` is `#[non_exhaustive]`; unknown future
+    /// variants fall through to the Deleted arm because, by definition,
+    /// they are not currently-live lifecycle instances.
     pub(crate) fn put_record(
         &self,
         rec: &BranchControlRecord,
@@ -573,15 +585,9 @@ impl BranchControlStore {
         txn.put(control_record_key(rec.branch), to_stored_value(rec)?)?;
         let ap_key = active_ptr_key(rec.branch.id);
         match rec.lifecycle {
-            BranchLifecycleStatus::Active => {
+            BranchLifecycleStatus::Active | BranchLifecycleStatus::Archived => {
                 txn.put(ap_key, encode_u64_value(rec.branch.generation))?;
             }
-            // Archived / Deleted / future non-live variants: clear the
-            // active pointer only when it still points at *this* generation.
-            // `BranchLifecycleStatus` is `#[non_exhaustive]` — unknown future
-            // variants fall through to the same clear-if-matches path
-            // because they are by definition not the currently-writable
-            // lifecycle instance.
             _ => {
                 if let Some(v) = txn.get(&ap_key)? {
                     if decode_u64_value(&v)? == rec.branch.generation {
@@ -743,8 +749,12 @@ impl BranchControlStore {
             })
     }
 
-    /// Look up the currently-active record for a branch name. Uses the
-    /// O(1) active-pointer index row (AD4).
+    /// Look up the currently-live (non-Deleted) record for a branch name.
+    /// Uses the O(1) active-pointer index row (AD4).
+    ///
+    /// Returns the record for both `Active` and `Archived` lifecycle states
+    /// (the pointer tracks live generations per B4/KD1). Callers who need a
+    /// writability guarantee should use [`require_writable_by_name`] instead.
     ///
     /// On an unmigrated follower (AD5), falls back to synthesizing a
     /// gen-0 [`BranchControlRecord`] from legacy `BranchMetadata` + fork
@@ -761,7 +771,7 @@ impl BranchControlStore {
                 let mut has_live_record = false;
                 for (_k, v) in txn.scan_prefix(&control_record_prefix_for_id(id))? {
                     let rec: BranchControlRecord = from_stored_value(&v)?;
-                    if matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                    if rec.lifecycle.is_visible() {
                         has_live_record = true;
                         break;
                     }
@@ -778,9 +788,9 @@ impl BranchControlStore {
             match txn.get(&rec_key)? {
                 Some(rv) => {
                     let rec: BranchControlRecord = from_stored_value(&rv)?;
-                    if !matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                    if !rec.lifecycle.is_visible() {
                         return Err(StrataError::corruption(format!(
-                            "control-store active pointer for branch '{name}' (id={id}, gen={gen}) points to a non-active record"
+                            "control-store active pointer for branch '{name}' (id={id}, gen={gen}) points to a non-live record"
                         )));
                     }
                     Ok(Some(rec))
@@ -797,6 +807,46 @@ impl BranchControlStore {
             return Ok(None);
         }
         self.synthesize_from_legacy(name, id)
+    }
+
+    /// Require a **writable** (lifecycle = `Active`) control record for `name`.
+    ///
+    /// Maps onto the lifecycle write gate installed at every `BranchService`
+    /// mutation entry point (B4):
+    ///
+    /// - `Active` → `Ok(record)`.
+    /// - `Archived` → `Err(StrataError::BranchArchived { name })`.
+    /// - `Deleted` or missing → `Err(StrataError::BranchNotFound { .. })`.
+    /// - Follower-synthesis refusal (AD5) → propagates
+    ///   `BranchLineageUnavailable`.
+    pub(crate) fn require_writable_by_name(&self, name: &str) -> StrataResult<BranchControlRecord> {
+        let record = self
+            .find_active_by_name(name)?
+            .ok_or_else(|| StrataError::branch_not_found(BranchId::from_user_name(name)))?;
+        if record.lifecycle.allows_writes() {
+            Ok(record)
+        } else {
+            // The only non-writable live variant that `find_active_by_name`
+            // can return is `Archived`; `Deleted` clears the pointer and is
+            // handled by the `ok_or_else` arm above. Future non-live
+            // variants would have to add their own arm before landing.
+            Err(StrataError::branch_archived(name))
+        }
+    }
+
+    /// Require a **visible** (lifecycle = `Active` or `Archived`) control
+    /// record for `name`.
+    ///
+    /// Used for source-side checks on fork / merge / cherry-pick where the
+    /// source is read, not written:
+    ///
+    /// - `Active` or `Archived` → `Ok(record)`.
+    /// - `Deleted` or missing → `Err(StrataError::BranchNotFound { .. })`.
+    /// - Follower-synthesis refusal (AD5) → propagates
+    ///   `BranchLineageUnavailable`.
+    pub(crate) fn require_visible_by_name(&self, name: &str) -> StrataResult<BranchControlRecord> {
+        self.find_active_by_name(name)?
+            .ok_or_else(|| StrataError::branch_not_found(BranchId::from_user_name(name)))
     }
 
     /// Return the currently-active generation for `id`, if any.
@@ -819,9 +869,9 @@ impl BranchControlStore {
                     .scan_prefix(&control_record_prefix_for_id(id), CommitVersion::MAX)?
                 {
                     let rec: BranchControlRecord = from_stored_value(&v.value)?;
-                    if matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                    if rec.lifecycle.is_visible() {
                         return Err(StrataError::corruption(format!(
-                            "control-store active pointer missing for branch id={id} with active record present"
+                            "control-store active pointer missing for branch id={id} with live record present"
                         )));
                     }
                 }
@@ -3141,5 +3191,190 @@ mod tests {
             )
         });
         assert!(store.find_merge_base(a, b).unwrap().is_none());
+    }
+
+    // =========================================================================
+    // B4.1: lifecycle write gate helpers
+    // =========================================================================
+
+    /// Build an `Archived` record for `name@generation` directly through
+    /// `put_record`. No public engine path produces `Archived` today (B4
+    /// explicitly deferred the archive operation); tests synthesize it to
+    /// exercise the gate.
+    fn seed_archived_record(
+        db: &Arc<Database>,
+        store: &BranchControlStore,
+        name: &str,
+    ) -> BranchRef {
+        let id = BranchId::from_user_name(name);
+        let branch = BranchRef::new(id, 0);
+        write(db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: name.to_string(),
+                    lifecycle: BranchLifecycleStatus::Archived,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        branch
+    }
+
+    #[test]
+    fn put_archived_record_sets_active_pointer() {
+        // KD1: Archived keeps the pointer set so lifecycle gates can
+        // distinguish `BranchArchived` from `BranchNotFound`.
+        let (db, store) = fresh_store();
+        let branch = seed_archived_record(&db, &store, "retired");
+        let found = store
+            .find_active_by_name("retired")
+            .unwrap()
+            .expect("archived record must remain findable by name");
+        assert_eq!(found.branch, branch);
+        assert_eq!(found.lifecycle, BranchLifecycleStatus::Archived);
+    }
+
+    #[test]
+    fn transitioning_active_to_archived_keeps_pointer_at_same_generation() {
+        let (db, store) = fresh_store();
+        let id = BranchId::from_user_name("promote-demote");
+        let branch = BranchRef::new(id, 7);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "promote-demote".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "promote-demote".to_string(),
+                    lifecycle: BranchLifecycleStatus::Archived,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        assert_eq!(store.active_generation_for_id(id).unwrap(), Some(7));
+        let rec = store
+            .find_active_by_name("promote-demote")
+            .unwrap()
+            .expect("archived record stays findable by name");
+        assert_eq!(rec.lifecycle, BranchLifecycleStatus::Archived);
+    }
+
+    #[test]
+    fn require_writable_accepts_active() {
+        let (db, store) = fresh_store();
+        let branch = BranchRef::new(BranchId::from_user_name("writable"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "writable".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        let rec = store.require_writable_by_name("writable").unwrap();
+        assert_eq!(rec.branch, branch);
+        assert!(rec.lifecycle.allows_writes());
+    }
+
+    #[test]
+    fn require_writable_rejects_archived_with_branch_archived() {
+        let (db, store) = fresh_store();
+        seed_archived_record(&db, &store, "frozen");
+        let err = store.require_writable_by_name("frozen").unwrap_err();
+        match err {
+            StrataError::BranchArchived { name } => assert_eq!(name, "frozen"),
+            other => panic!("expected BranchArchived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_writable_rejects_deleted_with_branch_not_found() {
+        let (db, store) = fresh_store();
+        let branch = BranchRef::new(BranchId::from_user_name("tombstone"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "tombstone".to_string(),
+                    lifecycle: BranchLifecycleStatus::Deleted,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        let err = store.require_writable_by_name("tombstone").unwrap_err();
+        assert!(
+            matches!(err, StrataError::BranchNotFound { .. }),
+            "deleted record must surface as BranchNotFound, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn require_writable_rejects_missing_with_branch_not_found() {
+        let (_db, store) = fresh_store();
+        let err = store.require_writable_by_name("never-existed").unwrap_err();
+        assert!(matches!(err, StrataError::BranchNotFound { .. }));
+    }
+
+    #[test]
+    fn require_visible_accepts_active_and_archived() {
+        let (db, store) = fresh_store();
+        let active = BranchRef::new(BranchId::from_user_name("live"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch: active,
+                    name: "live".to_string(),
+                    lifecycle: BranchLifecycleStatus::Active,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+        seed_archived_record(&db, &store, "frozen");
+
+        let live_rec = store.require_visible_by_name("live").unwrap();
+        assert_eq!(live_rec.lifecycle, BranchLifecycleStatus::Active);
+
+        let frozen_rec = store.require_visible_by_name("frozen").unwrap();
+        assert_eq!(frozen_rec.lifecycle, BranchLifecycleStatus::Archived);
+    }
+
+    #[test]
+    fn require_visible_rejects_deleted_and_missing_with_branch_not_found() {
+        let (db, store) = fresh_store();
+        let branch = BranchRef::new(BranchId::from_user_name("gone"), 0);
+        write(&db, |txn| {
+            store.put_record(
+                &BranchControlRecord {
+                    branch,
+                    name: "gone".to_string(),
+                    lifecycle: BranchLifecycleStatus::Deleted,
+                    fork: None,
+                },
+                txn,
+            )
+        });
+
+        let err_deleted = store.require_visible_by_name("gone").unwrap_err();
+        assert!(matches!(err_deleted, StrataError::BranchNotFound { .. }));
+
+        let err_missing = store.require_visible_by_name("never").unwrap_err();
+        assert!(matches!(err_missing, StrataError::BranchNotFound { .. }));
     }
 }

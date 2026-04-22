@@ -194,6 +194,24 @@ pub enum Error {
         branch: String,
     },
 
+    /// Branch is archived (read-only lifecycle state)
+    ///
+    /// The branch exists and is visible to reads, but its lifecycle has been
+    /// set to `Archived` and writes are refused at the engine's
+    /// lifecycle write gate (B4).
+    ///
+    /// Distinct from `BranchClosed` — this is the typed state error for
+    /// B3's canonical `BranchLifecycleStatus::Archived`, not a legacy
+    /// event-stream-closure failure.
+    #[error("branch is archived: {branch}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    BranchArchived {
+        /// The archived branch identifier.
+        branch: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
     /// Collection already exists
     #[error("collection already exists: {collection}")]
     CollectionExists {
