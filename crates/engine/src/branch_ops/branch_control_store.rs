@@ -816,13 +816,13 @@ impl BranchControlStore {
     ///
     /// - `Active` → `Ok(record)`.
     /// - `Archived` → `Err(StrataError::BranchArchived { name })`.
-    /// - `Deleted` or missing → `Err(StrataError::BranchNotFound { .. })`.
+    /// - `Deleted` or missing → `Err(StrataError::BranchNotFoundByName { .. })`.
     /// - Follower-synthesis refusal (AD5) → propagates
     ///   `BranchLineageUnavailable`.
     pub(crate) fn require_writable_by_name(&self, name: &str) -> StrataResult<BranchControlRecord> {
         let record = self
             .find_active_by_name(name)?
-            .ok_or_else(|| StrataError::branch_not_found(BranchId::from_user_name(name)))?;
+            .ok_or_else(|| StrataError::branch_not_found_by_name(name))?;
         if record.lifecycle.allows_writes() {
             Ok(record)
         } else {
@@ -841,12 +841,12 @@ impl BranchControlStore {
     /// source is read, not written:
     ///
     /// - `Active` or `Archived` → `Ok(record)`.
-    /// - `Deleted` or missing → `Err(StrataError::BranchNotFound { .. })`.
+    /// - `Deleted` or missing → `Err(StrataError::BranchNotFoundByName { .. })`.
     /// - Follower-synthesis refusal (AD5) → propagates
     ///   `BranchLineageUnavailable`.
     pub(crate) fn require_visible_by_name(&self, name: &str) -> StrataResult<BranchControlRecord> {
         self.find_active_by_name(name)?
-            .ok_or_else(|| StrataError::branch_not_found(BranchId::from_user_name(name)))
+            .ok_or_else(|| StrataError::branch_not_found_by_name(name))
     }
 
     /// Return the currently-active generation for `id`, if any.
@@ -3318,17 +3318,24 @@ mod tests {
             )
         });
         let err = store.require_writable_by_name("tombstone").unwrap_err();
-        assert!(
-            matches!(err, StrataError::BranchNotFound { .. }),
-            "deleted record must surface as BranchNotFound, got {err:?}"
-        );
+        match err {
+            StrataError::BranchNotFoundByName { name, .. } => assert_eq!(name, "tombstone"),
+            other => panic!(
+                "deleted record must surface as name-preserving BranchNotFound, got {other:?}"
+            ),
+        }
     }
 
     #[test]
     fn require_writable_rejects_missing_with_branch_not_found() {
         let (_db, store) = fresh_store();
         let err = store.require_writable_by_name("never-existed").unwrap_err();
-        assert!(matches!(err, StrataError::BranchNotFound { .. }));
+        match err {
+            StrataError::BranchNotFoundByName { name, .. } => assert_eq!(name, "never-existed"),
+            other => panic!(
+                "missing branch must surface as name-preserving BranchNotFound, got {other:?}"
+            ),
+        }
     }
 
     #[test]
@@ -3372,9 +3379,19 @@ mod tests {
         });
 
         let err_deleted = store.require_visible_by_name("gone").unwrap_err();
-        assert!(matches!(err_deleted, StrataError::BranchNotFound { .. }));
+        match err_deleted {
+            StrataError::BranchNotFoundByName { name, .. } => assert_eq!(name, "gone"),
+            other => panic!(
+                "deleted branch must surface as name-preserving BranchNotFound, got {other:?}"
+            ),
+        }
 
         let err_missing = store.require_visible_by_name("never").unwrap_err();
-        assert!(matches!(err_missing, StrataError::BranchNotFound { .. }));
+        match err_missing {
+            StrataError::BranchNotFoundByName { name, .. } => assert_eq!(name, "never"),
+            other => panic!(
+                "missing branch must surface as name-preserving BranchNotFound, got {other:?}"
+            ),
+        }
     }
 }

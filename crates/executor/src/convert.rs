@@ -45,6 +45,11 @@ impl From<StrataError> for Error {
                 hint: None,
             },
 
+            StrataError::BranchNotFoundByName { name, .. } => Error::BranchNotFound {
+                branch: name,
+                hint: None,
+            },
+
             // Archived lifecycle: distinct operator-visible state (B4).
             // Never flattened into InvalidInput / ConstraintViolation /
             // Internal — the whole point of the typed variant is that the
@@ -334,6 +339,19 @@ mod tests {
                 assert!(hint.is_none());
             }
             other => panic!("expected Error::BranchArchived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn branch_not_found_by_name_maps_to_typed_variant_with_user_name() {
+        let err = StrataError::branch_not_found_by_name("release/2026-03");
+        let converted: Error = err.into();
+        match converted {
+            Error::BranchNotFound { branch, hint } => {
+                assert_eq!(branch, "release/2026-03");
+                assert!(hint.is_none());
+            }
+            other => panic!("expected Error::BranchNotFound, got {other:?}"),
         }
     }
 }

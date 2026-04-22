@@ -1076,10 +1076,10 @@ impl BranchService {
 
         let a_rec = store
             .find_active_by_name(branch_a)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_a)))?;
+            .ok_or_else(|| StrataError::branch_not_found_by_name(branch_a))?;
         let b_rec = store
             .find_active_by_name(branch_b)?
-            .ok_or_else(|| StrataError::branch_not_found(resolve_branch_name(branch_b)))?;
+            .ok_or_else(|| StrataError::branch_not_found_by_name(branch_b))?;
 
         let Some(point) = store.find_merge_base(a_rec.branch, b_rec.branch)? else {
             return Ok(None);
@@ -1120,7 +1120,7 @@ impl BranchService {
                         branch
                     )));
                 }
-                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+                return Err(StrataError::branch_not_found_by_name(branch));
             }
         }
         let hook = self.dag_hook().require("log").map_err(dag_to_strata)?;
@@ -1143,7 +1143,7 @@ impl BranchService {
                         branch
                     )));
                 }
-                return Err(StrataError::branch_not_found(resolve_branch_name(branch)));
+                return Err(StrataError::branch_not_found_by_name(branch));
             }
         }
         let hook = self
@@ -1177,7 +1177,15 @@ impl BranchService {
         let branch_rec = store.require_writable_by_name(branch)?;
         let branch_ref = branch_rec.branch;
 
-        let info = branch_ops::create_tag(&self.db, branch, name, version, message, creator)?;
+        let info = branch_ops::create_tag_with_expected(
+            &self.db,
+            branch,
+            name,
+            version,
+            message,
+            creator,
+            Some(branch_ref),
+        )?;
 
         let branch_id = branch_rec.branch.id;
         let event = BranchOpEvent {
@@ -1216,7 +1224,8 @@ impl BranchService {
         let store = BranchControlStore::new(self.db.clone());
         let branch_rec = store.require_writable_by_name(branch)?;
 
-        let deleted = branch_ops::delete_tag(&self.db, branch, name)?;
+        let deleted =
+            branch_ops::delete_tag_with_expected(&self.db, branch, name, Some(branch_rec.branch))?;
 
         if deleted {
             let branch_id = branch_rec.branch.id;
@@ -1279,14 +1288,31 @@ impl BranchService {
         reject_system_branch(branch, "add note to")?;
 
         // B4/KD4: notes are branch-scoped writes; same gate as tags.
-        BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
+        let branch_rec =
+            BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
 
-        let note = branch_ops::add_note(&self.db, branch, version, message, author, metadata)?;
+        let note = branch_ops::add_note_with_expected(
+            &self.db,
+            branch,
+            version,
+            message,
+            author,
+            metadata,
+            Some(branch_rec.branch),
+        )?;
 
         let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
         let payload = strata_core::value::Value::object(
             [
                 ("branch".to_string(), branch.into()),
+                (
+                    "branch_id".to_string(),
+                    branch_rec.branch.id.to_string().into(),
+                ),
+                (
+                    "branch_generation".to_string(),
+                    strata_core::Value::Int(branch_rec.branch.generation as i64),
+                ),
                 (
                     "version".to_string(),
                     strata_core::Value::Int(version.0 as i64),
@@ -1326,9 +1352,10 @@ impl BranchService {
         reject_system_branch(branch, "delete note from")?;
 
         // B4/KD4: note deletion follows the same gate as creation.
-        BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
+        let branch_rec =
+            BranchControlStore::new(self.db.clone()).require_writable_by_name(branch)?;
 
-        branch_ops::delete_note(&self.db, branch, version)
+        branch_ops::delete_note_with_expected(&self.db, branch, version, Some(branch_rec.branch))
     }
 
     // =========================================================================
@@ -1652,6 +1679,32 @@ mod tests {
     }
 
     #[test]
+    fn test_history_reads_preserve_missing_branch_name_in_not_found() {
+        let db = Database::cache().unwrap();
+
+        let merge_err = db
+            .branches()
+            .merge_base("missing-a", "missing-b")
+            .unwrap_err();
+        assert!(
+            matches!(merge_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-a"),
+            "merge_base should preserve the user branch name, got {merge_err:?}"
+        );
+
+        let log_err = db.branches().log("missing-log", 10).unwrap_err();
+        assert!(
+            matches!(log_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-log"),
+            "log should preserve the user branch name, got {log_err:?}"
+        );
+
+        let ancestors_err = db.branches().ancestors("missing-ancestors").unwrap_err();
+        assert!(
+            matches!(ancestors_err, StrataError::BranchNotFoundByName { ref name, .. } if name == "missing-ancestors"),
+            "ancestors should preserve the user branch name, got {ancestors_err:?}"
+        );
+    }
+
+    #[test]
     fn test_merge_dag_failure_rolls_back_prewritten_lineage_edge() {
         let temp_dir = TempDir::new().unwrap();
         let db = Database::open_runtime(
@@ -1839,6 +1892,55 @@ mod tests {
         assert!(
             matches!(err, StrataError::BranchArchived { ref name } if name == "release"),
             "expected BranchArchived on archived branch tag, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn test_branch_note_audit_payload_carries_generation() {
+        let db = Database::cache().unwrap();
+        db.branches().create("release").unwrap();
+        db.branches()
+            .add_note("release", CommitVersion(1), "gen0", None, None)
+            .unwrap();
+
+        db.branches().delete("release").unwrap();
+        db.branches().create("release").unwrap();
+        db.branches()
+            .add_note("release", CommitVersion(2), "gen1", None, None)
+            .unwrap();
+
+        let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
+        let events = EventLog::new(db.clone())
+            .get_by_type(&system_branch_id, "default", "branch.note", None, None)
+            .unwrap();
+        assert_eq!(events.len(), 2, "expected one audit event per note write");
+
+        let payload0 = events[0]
+            .value
+            .payload
+            .as_object()
+            .expect("branch.note payload must be an object");
+        assert_eq!(
+            payload0.get("branch").and_then(|v| v.as_str()),
+            Some("release")
+        );
+        assert_eq!(
+            payload0.get("branch_generation").and_then(|v| v.as_int()),
+            Some(0)
+        );
+        assert!(payload0
+            .get("branch_id")
+            .and_then(|v| v.as_str())
+            .is_some_and(|id| !id.is_empty()));
+
+        let payload1 = events[1]
+            .value
+            .payload
+            .as_object()
+            .expect("branch.note payload must be an object");
+        assert_eq!(
+            payload1.get("branch_generation").and_then(|v| v.as_int()),
+            Some(1)
         );
     }
 

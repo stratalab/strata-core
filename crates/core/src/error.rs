@@ -483,6 +483,24 @@ pub enum StrataError {
         branch_id: BranchId,
     },
 
+    /// Branch not found (user-facing name preserved)
+    ///
+    /// The specified branch does not exist, and the caller supplied a
+    /// user-facing branch name that should survive error conversion.
+    ///
+    /// This is used by branch lifecycle gates that operate on names but still
+    /// want the canonical `BranchId` attached for diagnostics and internal
+    /// classification.
+    ///
+    /// Wire code: `NotFound`
+    #[error("branch not found: {name}")]
+    BranchNotFoundByName {
+        /// User-facing branch name that was not found.
+        name: String,
+        /// Canonical branch id derived from the provided name.
+        branch_id: BranchId,
+    },
+
     /// Branch is archived
     ///
     /// The specified branch exists but is in the `Archived` lifecycle state and
@@ -1090,6 +1108,14 @@ impl StrataError {
         StrataError::BranchNotFound { branch_id }
     }
 
+    /// Create a BranchNotFound error that preserves the user-facing branch
+    /// name while still carrying the canonical `BranchId`.
+    pub fn branch_not_found_by_name(name: impl Into<String>) -> Self {
+        let name = name.into();
+        let branch_id = BranchId::from_user_name(&name);
+        StrataError::BranchNotFoundByName { name, branch_id }
+    }
+
     /// Create a `BranchArchived` error for the given user-facing name.
     ///
     /// ## Example
@@ -1539,7 +1565,9 @@ impl StrataError {
         match self {
             // NotFound errors
             StrataError::NotFound { .. } => ErrorCode::NotFound,
-            StrataError::BranchNotFound { .. } => ErrorCode::NotFound,
+            StrataError::BranchNotFound { .. } | StrataError::BranchNotFoundByName { .. } => {
+                ErrorCode::NotFound
+            }
 
             // Lifecycle-state errors (B4): branch exists but is not writable.
             StrataError::BranchArchived { .. } => ErrorCode::ConstraintViolation,
@@ -1608,6 +1636,9 @@ impl StrataError {
             StrataError::BranchNotFound { branch_id } => {
                 ErrorDetails::new().with_string("branch_id", branch_id.to_string())
             }
+            StrataError::BranchNotFoundByName { name, branch_id } => ErrorDetails::new()
+                .with_string("branch", name)
+                .with_string("branch_id", branch_id.to_string()),
             StrataError::BranchArchived { name } => ErrorDetails::new().with_string("branch", name),
             StrataError::WrongType { expected, actual } => ErrorDetails::new()
                 .with_string("expected", expected)
@@ -1737,6 +1768,7 @@ impl StrataError {
         match self {
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::PathNotFound { .. } => true,
 
             StrataError::BranchArchived { .. }
@@ -1792,6 +1824,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::WrongType { .. }
@@ -1832,6 +1865,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -1885,6 +1919,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -1939,6 +1974,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -1991,6 +2027,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -2051,6 +2088,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::WrongType { .. }
@@ -2107,6 +2145,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -2155,6 +2194,7 @@ impl StrataError {
 
             StrataError::NotFound { .. }
             | StrataError::BranchNotFound { .. }
+            | StrataError::BranchNotFoundByName { .. }
             | StrataError::BranchArchived { .. }
             | StrataError::PathNotFound { .. }
             | StrataError::Conflict { .. }
@@ -2237,7 +2277,8 @@ impl StrataError {
     /// ```
     pub fn branch_id(&self) -> Option<BranchId> {
         match self {
-            StrataError::BranchNotFound { branch_id } => Some(*branch_id),
+            StrataError::BranchNotFound { branch_id }
+            | StrataError::BranchNotFoundByName { branch_id, .. } => Some(*branch_id),
             _ => self.entity_ref().map(|e| e.branch_id()),
         }
     }
@@ -2325,6 +2366,20 @@ mod strata_error_tests {
         assert!(!e.is_conflict());
         assert_eq!(e.branch_id(), Some(branch_id));
         assert!(e.entity_ref().is_none());
+    }
+
+    #[test]
+    fn test_branch_not_found_by_name_constructor() {
+        let e = StrataError::branch_not_found_by_name("release/2026-03");
+
+        assert!(e.is_not_found());
+        assert!(!e.is_conflict());
+        assert_eq!(
+            e.branch_id(),
+            Some(BranchId::from_user_name("release/2026-03"))
+        );
+        assert!(e.entity_ref().is_none());
+        assert_eq!(e.to_string(), "branch not found: release/2026-03");
     }
 
     #[test]
@@ -2831,6 +2886,12 @@ mod strata_error_tests {
     #[test]
     fn test_error_code_mapping_branch_not_found() {
         let e = StrataError::branch_not_found(BranchId::new());
+        assert_eq!(e.code(), ErrorCode::NotFound);
+    }
+
+    #[test]
+    fn test_error_code_mapping_branch_not_found_by_name() {
+        let e = StrataError::branch_not_found_by_name("release/2026-03");
         assert_eq!(e.code(), ErrorCode::NotFound);
     }
 
