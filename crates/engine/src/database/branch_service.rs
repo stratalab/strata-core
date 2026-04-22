@@ -1394,6 +1394,7 @@ impl BranchService {
     /// `BranchService::delete` for Deleted state in realistic flows;
     /// reserve this helper for `Archived` (or round-tripping back to
     /// `Active` in tests that need idempotency).
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
     pub fn set_lifecycle_for_test(
         &self,
@@ -1420,13 +1421,14 @@ impl BranchService {
     /// Returns `Ok(0)` when `name` has no live record. Used by the B4.2
     /// coverage matrix to assert that a lifecycle-refused mutation
     /// appends no lineage edge to the target.
+    #[cfg(any(test, feature = "test-support"))]
     #[doc(hidden)]
-    pub fn lineage_edge_count_for_test(&self, name: &str) -> StrataResult<usize> {
+    pub fn lineage_edge_count_for_branch_ref_for_test(
+        &self,
+        branch: BranchRef,
+    ) -> StrataResult<usize> {
         let store = BranchControlStore::new(self.db.clone());
-        let Some(record) = store.find_active_by_name(name)? else {
-            return Ok(0);
-        };
-        Ok(store.edges_for(record.branch)?.len())
+        Ok(store.edges_for(branch)?.len())
     }
 
     // =========================================================================

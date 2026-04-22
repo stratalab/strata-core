@@ -21,11 +21,10 @@
 //! ## State synthesis
 //!
 //! No production path produces the `Archived` lifecycle. The matrix
-//! uses `common::branching::set_lifecycle_for_test` (a
-//! `#[doc(hidden)] pub` hook on `BranchService`) to flip a live
-//! record's `lifecycle` field in place. `Deleted` state uses the
-//! production `BranchService::delete` path. `Missing` is "never
-//! created".
+//! uses `common::branching::set_lifecycle_for_test` (a feature-gated
+//! engine test-support hook) to flip a live record's `lifecycle`
+//! field in place. `Deleted` state uses the production
+//! `BranchService::delete` path. `Missing` is "never created".
 //!
 //! Single-branch ops (`materialize`) exercise all four states as
 //! truly distinct setups: `Missing` skips creation entirely.
@@ -53,7 +52,7 @@ use std::sync::Arc;
 use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
-use strata_core::StrataError;
+use strata_core::{BranchRef, StrataError};
 use strata_engine::{bundle, CherryPickFilter, Database, MergeOptions};
 
 // =============================================================================
@@ -91,24 +90,28 @@ impl TargetState {
 /// Build `name` into `state` on `db`. For `Active`, seeds a single KV
 /// write so the storage layer materialises the branch (fork COW needs
 /// a memtable on the source).
-fn materialize(db: &Arc<Database>, name: &str, state: TargetState) {
+fn materialize(db: &Arc<Database>, name: &str, state: TargetState) -> Option<BranchRef> {
     match state {
         TargetState::Active => {
             db.branches().create(name).unwrap();
             seed(db, name);
+            Some(db.branches().control_record(name).unwrap().unwrap().branch)
         }
         TargetState::Archived => {
             db.branches().create(name).unwrap();
             seed(db, name);
-            archive_branch_for_test(db, name);
+            Some(archive_branch_for_test(db, name))
         }
         TargetState::Deleted => {
             db.branches().create(name).unwrap();
             seed(db, name);
+            let deleted_ref = db.branches().control_record(name).unwrap().unwrap().branch;
             db.branches().delete(name).unwrap();
+            Some(deleted_ref)
         }
         TargetState::Missing => {
             // Intentionally no-op — the name must have no record at all.
+            None
         }
     }
 }
@@ -165,7 +168,9 @@ fn assert_invalid_input_contains(
             );
         }
         Err(e) => panic!("[{scenario}] expected InvalidInput containing {fragment:?}, got: {e:?}"),
-        Ok(v) => panic!("[{scenario}] expected InvalidInput containing {fragment:?}, got Ok({v:?})"),
+        Ok(v) => {
+            panic!("[{scenario}] expected InvalidInput containing {fragment:?}, got Ok({v:?})")
+        }
     }
 }
 
@@ -184,8 +189,9 @@ fn checkpoint(
     db: &Arc<Database>,
     observer: &CapturingBranchObserver,
     target: &str,
+    target_ref: Option<BranchRef>,
 ) -> BranchSideEffectCheckpoint {
-    BranchSideEffectCheckpoint::capture(db, observer, target)
+    BranchSideEffectCheckpoint::capture(db, observer, target, target_ref)
 }
 
 // =============================================================================
@@ -203,10 +209,10 @@ fn create_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("create[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db.branches().create(name);
         match state {
@@ -215,14 +221,24 @@ fn create_matrix() {
                 assert_no_side_effects_since(&db, &obs, &before, &scenario);
             }
             TargetState::Deleted => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] create after delete must succeed: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] create after delete must succeed: {e:?}")
+                });
                 let rec = db.branches().control_record(name).unwrap().unwrap();
-                assert_eq!(rec.branch.generation, 1, "[{scenario}] recreate advances generation");
+                assert_eq!(
+                    rec.branch.generation, 1,
+                    "[{scenario}] recreate advances generation"
+                );
             }
             TargetState::Missing => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] create on missing must succeed: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] create on missing must succeed: {e:?}")
+                });
                 let rec = db.branches().control_record(name).unwrap().unwrap();
-                assert_eq!(rec.branch.generation, 0, "[{scenario}] first create is gen 0");
+                assert_eq!(
+                    rec.branch.generation, 0,
+                    "[{scenario}] first create is gen 0"
+                );
             }
         }
     }
@@ -241,15 +257,17 @@ fn delete_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("delete[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db.branches().delete(name);
         match state {
             TargetState::Active | TargetState::Archived => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] delete visible branch must succeed: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] delete visible branch must succeed: {e:?}")
+                });
                 assert!(
                     db.branches().control_record(name).unwrap().is_none(),
                     "[{scenario}] post-delete live record is absent"
@@ -281,21 +299,21 @@ fn fork_matrix() {
             // Source / dest must be distinct names.
             let source = "src";
             let dest = "dst";
-            materialize(&db, source, source_state);
-            materialize(&db, dest, dest_state);
+            let _source_ref = materialize(&db, source, source_state);
+            let dest_ref = materialize(&db, dest, dest_state);
 
-            let scenario =
-                format!("fork[src={}, dst={}]", source_state.label(), dest_state.label());
-            let before = checkpoint(&db, &obs, dest);
+            let scenario = format!(
+                "fork[src={}, dst={}]",
+                source_state.label(),
+                dest_state.label()
+            );
+            let before = checkpoint(&db, &obs, dest, dest_ref);
 
             let result = db.branches().fork(source, dest);
 
-            let source_visible = matches!(
-                source_state,
-                TargetState::Active | TargetState::Archived
-            );
-            let dest_has_live =
-                matches!(dest_state, TargetState::Active | TargetState::Archived);
+            let source_visible =
+                matches!(source_state, TargetState::Active | TargetState::Archived);
+            let dest_has_live = matches!(dest_state, TargetState::Active | TargetState::Archived);
 
             if !source_visible {
                 assert_not_found(result, source, &scenario);
@@ -304,8 +322,11 @@ fn fork_matrix() {
                 assert_invalid_input_contains(result, "already exists", &scenario);
                 assert_no_side_effects_since(&db, &obs, &before, &scenario);
             } else {
-                result
-                    .unwrap_or_else(|e| panic!("[{scenario}] fork with visible source and free dest must succeed: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!(
+                        "[{scenario}] fork with visible source and free dest must succeed: {e:?}"
+                    )
+                });
                 let rec = db.branches().control_record(dest).unwrap().unwrap();
                 assert!(rec.fork.is_some(), "[{scenario}] fork anchor populated");
             }
@@ -350,24 +371,22 @@ fn merge_matrix() {
                 )
                 .unwrap();
 
-            reshape(&db, source_name, source_state);
-            reshape(&db, target_name, target_state);
+            let _source_ref = reshape(&db, source_name, source_state);
+            let target_ref = reshape(&db, target_name, target_state);
 
             let scenario = format!(
                 "merge[src={}, tgt={}]",
                 source_state.label(),
                 target_state.label()
             );
-            let before = checkpoint(&db, &obs, target_name);
+            let before = checkpoint(&db, &obs, target_name, target_ref);
 
-            let result = db
-                .branches()
-                .merge_with_options(source_name, target_name, MergeOptions::default());
+            let result =
+                db.branches()
+                    .merge_with_options(source_name, target_name, MergeOptions::default());
 
-            let source_visible = matches!(
-                source_state,
-                TargetState::Active | TargetState::Archived
-            );
+            let source_visible =
+                matches!(source_state, TargetState::Active | TargetState::Archived);
 
             match (source_visible, target_state) {
                 (false, _) => {
@@ -383,7 +402,9 @@ fn merge_matrix() {
                     assert_no_side_effects_since(&db, &obs, &before, &scenario);
                 }
                 (true, TargetState::Active) => {
-                    result.unwrap_or_else(|e| panic!("[{scenario}] merge Active → Active must succeed: {e:?}"));
+                    result.unwrap_or_else(|e| {
+                        panic!("[{scenario}] merge Active → Active must succeed: {e:?}")
+                    });
                 }
             }
         }
@@ -400,10 +421,10 @@ fn revert_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("revert[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db
             .branches()
@@ -467,15 +488,15 @@ fn cherry_pick_matrix() {
                 )
                 .unwrap();
 
-            reshape(&db, source, source_state);
-            reshape(&db, target, target_state);
+            let _source_ref = reshape(&db, source, source_state);
+            let target_ref = reshape(&db, target, target_state);
 
             let scenario = format!(
                 "cherry_pick[src={}, tgt={}]",
                 source_state.label(),
                 target_state.label()
             );
-            let before = checkpoint(&db, &obs, target);
+            let before = checkpoint(&db, &obs, target, target_ref);
 
             let result = db.branches().cherry_pick(
                 source,
@@ -483,10 +504,8 @@ fn cherry_pick_matrix() {
                 &[("default".to_string(), "pickable".to_string())],
             );
 
-            let source_visible = matches!(
-                source_state,
-                TargetState::Active | TargetState::Archived
-            );
+            let source_visible =
+                matches!(source_state, TargetState::Active | TargetState::Archived);
 
             match (source_visible, target_state) {
                 (false, _) => {
@@ -502,7 +521,9 @@ fn cherry_pick_matrix() {
                     assert_no_side_effects_since(&db, &obs, &before, &scenario);
                 }
                 (true, TargetState::Active) => {
-                    result.unwrap_or_else(|e| panic!("[{scenario}] cherry_pick Active → Active must succeed: {e:?}"));
+                    result.unwrap_or_else(|e| {
+                        panic!("[{scenario}] cherry_pick Active → Active must succeed: {e:?}")
+                    });
                 }
             }
         }
@@ -535,26 +556,22 @@ fn cherry_pick_from_diff_matrix() {
                 )
                 .unwrap();
 
-            reshape(&db, source, source_state);
-            reshape(&db, target, target_state);
+            let _source_ref = reshape(&db, source, source_state);
+            let target_ref = reshape(&db, target, target_state);
 
             let scenario = format!(
                 "cherry_pick_from_diff[src={}, tgt={}]",
                 source_state.label(),
                 target_state.label()
             );
-            let before = checkpoint(&db, &obs, target);
+            let before = checkpoint(&db, &obs, target, target_ref);
 
-            let result = db.branches().cherry_pick_from_diff(
-                source,
-                target,
-                CherryPickFilter::default(),
-            );
+            let result =
+                db.branches()
+                    .cherry_pick_from_diff(source, target, CherryPickFilter::default());
 
-            let source_visible = matches!(
-                source_state,
-                TargetState::Active | TargetState::Archived
-            );
+            let source_visible =
+                matches!(source_state, TargetState::Active | TargetState::Archived);
 
             match (source_visible, target_state) {
                 (false, _) => {
@@ -587,10 +604,10 @@ fn tag_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("tag[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db.branches().tag(name, "v1", None, None, None);
         match state {
@@ -615,7 +632,7 @@ fn untag_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         // Lay down a tag on Active only so untag has something to hit.
         if matches!(state, TargetState::Active) {
@@ -623,7 +640,7 @@ fn untag_matrix() {
         }
 
         let scenario = format!("untag[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db.branches().untag(name, "v1");
         match state {
@@ -654,10 +671,10 @@ fn add_note_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("add_note[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db
             .branches()
@@ -672,7 +689,9 @@ fn add_note_matrix() {
                 assert_no_side_effects_since(&db, &obs, &before, &scenario);
             }
             TargetState::Active => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] add_note on Active must succeed: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] add_note on Active must succeed: {e:?}")
+                });
             }
         }
     }
@@ -684,7 +703,7 @@ fn delete_note_matrix() {
         let (test_db, obs) = setup();
         let db = test_db.db.clone();
         let name = "target";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         if matches!(state, TargetState::Active) {
             db.branches()
@@ -693,7 +712,7 @@ fn delete_note_matrix() {
         }
 
         let scenario = format!("delete_note[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = db.branches().delete_note(name, CommitVersion(1));
         match state {
@@ -706,8 +725,9 @@ fn delete_note_matrix() {
                 assert_no_side_effects_since(&db, &obs, &before, &scenario);
             }
             TargetState::Active => {
-                let removed = result
-                    .unwrap_or_else(|e| panic!("[{scenario}] delete_note on Active must succeed: {e:?}"));
+                let removed = result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] delete_note on Active must succeed: {e:?}")
+                });
                 assert!(removed, "[{scenario}] pre-seeded note must be removed");
             }
         }
@@ -739,10 +759,10 @@ fn bundle_import_matrix() {
         // The bundle carries name "payload"; target state is on the
         // same name in the target DB.
         let name = "payload";
-        materialize(&db, name, state);
+        let target_ref = materialize(&db, name, state);
 
         let scenario = format!("bundle_import[target={}]", state.label());
-        let before = checkpoint(&db, &obs, name);
+        let before = checkpoint(&db, &obs, name, target_ref);
 
         let result = bundle::import_branch(&db, &bundle_path);
 
@@ -752,7 +772,9 @@ fn bundle_import_matrix() {
                 assert_no_side_effects_since(&db, &obs, &before, &scenario);
             }
             TargetState::Missing => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] bundle import must succeed on Missing target: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] bundle import must succeed on Missing target: {e:?}")
+                });
                 let rec = db.branches().control_record(name).unwrap().unwrap();
                 // Bundle carries generation 0 and target has no prior
                 // lineage → AD7 preserves the bundle's generation.
@@ -762,7 +784,9 @@ fn bundle_import_matrix() {
                 );
             }
             TargetState::Deleted => {
-                result.unwrap_or_else(|e| panic!("[{scenario}] bundle import must succeed on Deleted target: {e:?}"));
+                result.unwrap_or_else(|e| {
+                    panic!("[{scenario}] bundle import must succeed on Deleted target: {e:?}")
+                });
                 let rec = db.branches().control_record(name).unwrap().unwrap();
                 // Tombstoned target → AD7 fresh-gen fallback. Target's
                 // next-gen counter was advanced to 1 by the prior
@@ -794,8 +818,15 @@ fn refused_calls_are_side_effect_free_and_do_not_deadlock() {
     db.branches().create("target").unwrap();
     seed(&db, "target");
     archive_branch_for_test(&db, "target");
+    let target_ref = Some(
+        db.branches()
+            .control_record("target")
+            .unwrap()
+            .unwrap()
+            .branch,
+    );
 
-    let before = checkpoint(&db, &obs, "target");
+    let before = checkpoint(&db, &obs, "target", target_ref);
 
     for _ in 0..64 {
         let result = db.branches().tag("target", "v1", None, None, None);
@@ -808,9 +839,9 @@ fn refused_calls_are_side_effect_free_and_do_not_deadlock() {
         assert_archived(result, "target", "loop-archived-revert");
     }
     for _ in 0..64 {
-        let result = db
-            .branches()
-            .merge_with_options("target", "nonexistent", MergeOptions::default());
+        let result =
+            db.branches()
+                .merge_with_options("target", "nonexistent", MergeOptions::default());
         // source `target` is Archived-visible; target `nonexistent` is
         // Missing — so the failure surfaces on the target-side gate.
         assert_not_found(result, "nonexistent", "loop-missing-merge-target");
@@ -828,12 +859,18 @@ fn refused_calls_are_side_effect_free_and_do_not_deadlock() {
 // `Missing` is produced by calling `delete` twice so the fork+seed
 // setup is unwound cleanly.
 
-fn reshape(db: &Arc<Database>, name: &str, state: TargetState) {
+fn reshape(db: &Arc<Database>, name: &str, state: TargetState) -> Option<BranchRef> {
     match state {
-        TargetState::Active => { /* already active */ }
-        TargetState::Archived => {
-            set_lifecycle_for_test(db, name, BranchLifecycleStatus::Archived);
-        }
+        TargetState::Active => db
+            .branches()
+            .control_record(name)
+            .unwrap()
+            .map(|rec| rec.branch),
+        TargetState::Archived => Some(set_lifecycle_for_test(
+            db,
+            name,
+            BranchLifecycleStatus::Archived,
+        )),
         TargetState::Deleted | TargetState::Missing => {
             // Cross-matrix setup needs a live fork-parent pair for the
             // Active × Active success cell, so we tear down with
@@ -842,7 +879,9 @@ fn reshape(db: &Arc<Database>, name: &str, state: TargetState) {
             // — so the assertion vocabulary matches. The truly
             // never-created `Missing` state is exercised by the
             // single-branch matrix cells (`materialize`).
+            let deleted_ref = db.branches().control_record(name).unwrap().unwrap().branch;
             db.branches().delete(name).unwrap();
+            Some(deleted_ref)
         }
     }
 }

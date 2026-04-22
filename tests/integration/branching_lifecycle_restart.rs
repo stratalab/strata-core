@@ -62,7 +62,10 @@ fn archived_lifecycle_persists_across_reopen() {
         .expect("archived record persists across reopen");
     assert_eq!(rec.branch, archived_ref, "reopen preserves BranchRef");
     assert!(
-        matches!(rec.lifecycle, strata_core::branch::BranchLifecycleStatus::Archived),
+        matches!(
+            rec.lifecycle,
+            strata_core::branch::BranchLifecycleStatus::Archived
+        ),
         "reopen preserves Archived lifecycle"
     );
 }
@@ -136,7 +139,12 @@ fn post_reopen_archived_branch_is_still_deletable() {
         .delete("frozen")
         .expect("Archived branch must be deletable after reopen");
     assert!(
-        test_db.db.branches().control_record("frozen").unwrap().is_none(),
+        test_db
+            .db
+            .branches()
+            .control_record("frozen")
+            .unwrap()
+            .is_none(),
         "post-delete record is absent"
     );
 }
@@ -226,11 +234,7 @@ fn merge_base_does_not_surface_tombstoned_generation_after_reopen() {
 
     // The new feature@gen1 was created as a fresh root (no fork), so
     // it has no lineage relationship to main. Merge base MUST be None.
-    let mb = test_db
-        .db
-        .branches()
-        .merge_base("main", "feature")
-        .unwrap();
+    let mb = test_db.db.branches().merge_base("main", "feature").unwrap();
     assert!(
         mb.is_none(),
         "recreated branch without fork inherits no lineage — merge_base must be None, got {mb:?}"
@@ -324,7 +328,10 @@ fn bundle_import_after_reopen_preserves_fresh_generation() {
         .unwrap()
         .unwrap()
         .branch;
-    assert_eq!(after_import.generation, 1, "AD7: fresh gen ignores bundle's gen");
+    assert_eq!(
+        after_import.generation, 1,
+        "AD7: fresh gen ignores bundle's gen"
+    );
 
     // Reopen and assert the fresh generation persists, the bundle's
     // generation has not silently resurfaced, and a subsequent
@@ -391,6 +398,9 @@ fn archived_branch_after_delete_and_reopen_allows_recreate() {
         .unwrap()
         .unwrap()
         .branch;
-    assert_ne!(gen0, gen1, "post-reopen recreate must not reuse prior BranchRef");
+    assert_ne!(
+        gen0, gen1,
+        "post-reopen recreate must not reuse prior BranchRef"
+    );
     assert_eq!(gen1.generation, 1);
 }
