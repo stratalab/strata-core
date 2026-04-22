@@ -1213,10 +1213,10 @@ fn append_cherry_pick_edge(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::sync::Mutex;
 
     use crate::database::dag_hook::{AncestryEntry, BranchDagHook, DagEventKind};
     use crate::database::dag_hook::{BranchDagError, MergeBaseResult as DagMergeBaseResult};
@@ -1509,7 +1509,8 @@ mod tests {
             "failed merge must not leave a partial merge event visible in branch history"
         );
         assert!(
-            log.iter().any(|event| event.kind == DagEventKind::BranchCreate),
+            log.iter()
+                .any(|event| event.kind == DagEventKind::BranchCreate),
             "projection rebuild should preserve authoritative pre-existing history"
         );
     }

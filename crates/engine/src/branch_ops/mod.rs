@@ -2023,12 +2023,10 @@ pub fn merge_branches_with_metadata(
     message: Option<&str>,
     creator: Option<&str>,
 ) -> StrataResult<MergeInfo> {
-    Ok(
-        merge_branches_with_metadata_expected_detailed(
-            db, source, target, strategy, message, creator, None, None,
-        )?
-        .info,
-    )
+    Ok(merge_branches_with_metadata_expected_detailed(
+        db, source, target, strategy, message, creator, None, None,
+    )?
+    .info)
 }
 
 pub(crate) fn merge_branches_with_metadata_expected(
@@ -2041,19 +2039,17 @@ pub(crate) fn merge_branches_with_metadata_expected(
     expected_source_ref: Option<BranchRef>,
     expected_target_ref: Option<BranchRef>,
 ) -> StrataResult<MergeInfo> {
-    Ok(
-        merge_branches_with_metadata_expected_detailed(
-            db,
-            source,
-            target,
-            strategy,
-            message,
-            creator,
-            expected_source_ref,
-            expected_target_ref,
-        )?
-        .info,
-    )
+    Ok(merge_branches_with_metadata_expected_detailed(
+        db,
+        source,
+        target,
+        strategy,
+        message,
+        creator,
+        expected_source_ref,
+        expected_target_ref,
+    )?
+    .info)
 }
 
 pub(crate) fn merge_branches_with_metadata_expected_detailed(
