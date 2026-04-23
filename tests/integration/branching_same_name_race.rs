@@ -208,11 +208,10 @@ fn scenario_delete_vs_create_never_leaves_half_state() {
                     ),
                     "[iter {iter}] delete-loser must fail with typed error; got {e:?}"
                 );
-                let rec = db
-                    .branches()
-                    .control_record("hotseat")
-                    .unwrap()
-                    .expect("[iter] delete-loser implies create won: a live record must remain");
+                let rec =
+                    db.branches().control_record("hotseat").unwrap().expect(
+                        "[iter] delete-loser implies create won: a live record must remain",
+                    );
                 assert!(rec.branch.generation >= before_gen);
                 in_race_create_wins += 1;
             }
@@ -290,12 +289,7 @@ fn scenario_delete_then_create_preserves_generation_monotonicity() {
         // Ensure a clean `rolling` at a known starting point. Use the
         // actual counter advance across iterations as the monotonicity
         // oracle.
-        if db
-            .branches()
-            .control_record("rolling")
-            .unwrap()
-            .is_some()
-        {
+        if db.branches().control_record("rolling").unwrap().is_some() {
             db.branches().delete("rolling").unwrap();
         }
         db.branches().create("rolling").unwrap();
@@ -457,8 +451,7 @@ fn scenario_fork_vs_delete_of_destination_is_serialised() {
                 assert!(
                     matches!(
                         d_err,
-                        StrataError::BranchNotFoundByName { .. }
-                            | StrataError::Conflict { .. }
+                        StrataError::BranchNotFoundByName { .. } | StrataError::Conflict { .. }
                     ),
                     "[iter {iter}] delete-after-fork-win error not typed: {d_err:?}"
                 );
@@ -492,8 +485,7 @@ fn scenario_fork_vs_delete_of_destination_is_serialised() {
                 assert!(
                     matches!(
                         d_err,
-                        StrataError::BranchNotFoundByName { .. }
-                            | StrataError::Conflict { .. }
+                        StrataError::BranchNotFoundByName { .. } | StrataError::Conflict { .. }
                     ),
                     "[iter {iter}] delete error not typed: {d_err:?}"
                 );
@@ -558,7 +550,8 @@ fn scenario_double_fork_to_same_destination_yields_single_winner() {
             .filter(|w| **w)
             .count();
         assert_eq!(
-            wins, 1,
+            wins,
+            1,
             "[iter {iter}] exactly one fork must win: a={:?}, b={:?}",
             a_res.as_ref().map(|_| "Ok"),
             b_res.as_ref().map(|_| "Ok"),
@@ -646,12 +639,7 @@ fn scenario_merge_vs_delete_of_target_never_writes_to_tombstone() {
             )
             .unwrap();
 
-        let target_ref_before = db
-            .branches()
-            .control_record("tgt")
-            .unwrap()
-            .unwrap()
-            .branch;
+        let target_ref_before = db.branches().control_record("tgt").unwrap().unwrap().branch;
 
         let barrier = Arc::new(Barrier::new(2));
 
@@ -689,8 +677,7 @@ fn scenario_merge_vs_delete_of_target_never_writes_to_tombstone() {
                 assert!(
                     matches!(
                         d_err,
-                        StrataError::BranchNotFoundByName { .. }
-                            | StrataError::Conflict { .. }
+                        StrataError::BranchNotFoundByName { .. } | StrataError::Conflict { .. }
                     ),
                     "[iter {iter}] delete-after-merge-win error not typed: {d_err:?}"
                 );
@@ -779,12 +766,7 @@ fn rejected_race_paths_do_not_fire_branch_op_observer() {
     let mut total_successes: usize = 0;
 
     for _ in 0..OBSERVER_ITERS {
-        if db
-            .branches()
-            .control_record("observed")
-            .unwrap()
-            .is_some()
-        {
+        if db.branches().control_record("observed").unwrap().is_some() {
             db.branches().delete("observed").unwrap();
             total_successes += 1;
         }
