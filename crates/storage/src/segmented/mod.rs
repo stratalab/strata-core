@@ -308,7 +308,7 @@ impl SegmentVersion {
 
 /// Status of an inherited layer during materialization.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LayerStatus {
+pub(crate) enum LayerStatus {
     /// Layer is active — reads fall through to parent segments.
     Active,
     /// Materialization in progress (reset to Active on crash recovery).
@@ -1419,19 +1419,25 @@ impl SegmentedStore {
     /// (`BarrierKind::PhysicalRetention`).
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
         if let Some((_, branch)) = self.branches.remove(branch_id) {
-            // 1. Clean up the branch's own segments.
-            // Check refcount before deleting — a child branch may still
-            // reference these segments through inherited layers (#1702).
-            // Lock Level 3 (exclusive): prevent TOCTOU with fork (#1682).
+            // 1. Route the branch's own segments through the B5.2 reclaim
+            //    protocol. Each segment that is no longer referenced by a
+            //    descendant inherited layer is quarantined (rename +
+            //    durable publish). Shared segments are left in place;
+            //    refusal under degraded recovery is logged as retention
+            //    debt, not propagated.
             let ver = branch.version.load();
-            {
-                let _deletion_guard = self.ref_registry.deletion_write_guard();
-                for level in &ver.levels {
-                    for seg in level {
-                        crate::block_cache::global_cache().invalidate_file(seg.file_id());
-                        if !self.ref_registry.is_referenced(seg.file_id()) {
-                            let _ = std::fs::remove_file(seg.file_path());
-                        }
+            for level in &ver.levels {
+                for seg in level {
+                    if let Err(e) =
+                        self.quarantine_segment_if_unreferenced(seg.file_path(), seg.file_id())
+                    {
+                        tracing::warn!(
+                            target: "strata::storage::gc",
+                            branch_id = %hex_encode_branch(branch_id),
+                            segment = %seg.file_path().display(),
+                            error = %e,
+                            "clear_branch: reclaim refused; retention debt accumulated"
+                        );
                     }
                 }
             }
@@ -1545,22 +1551,22 @@ impl SegmentedStore {
     /// process-local approximation of `BarrierKind::PhysicalRetention`
     /// (the live-set check).
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
-        match &**self.last_recovery_health.load() {
-            // Healthy and Telemetry-only degradation (rebuildable-cache errors)
-            // do not compromise deletion safety, so GC proceeds normally.
-            RecoveryHealth::Healthy
-            | RecoveryHealth::Degraded {
-                class: DegradationClass::Telemetry,
-                ..
-            } => {}
-            RecoveryHealth::Degraded { class, .. } => {
-                return Err(StorageError::GcRefusedDegradedRecovery { class: *class });
-            }
-        }
+        // Gate — the B5.2 quarantine protocol uses this same gate before
+        // any filesystem mutation. Telemetry-class degradation does not
+        // compromise deletion safety.
+        self.check_reclaim_allowed()?;
 
         let Some(segments_dir) = &self.segments_dir else {
             return Ok(GcReport { files_deleted: 0 });
         };
+
+        let mut files_deleted = 0usize;
+
+        // Stage 5 — drain quarantined inventories first. A crashed prior
+        // reclaim may have left files in `__quarantine__/` from a
+        // previous call; purge what has been durably published.
+        let purge = self.purge_all_quarantines()?;
+        files_deleted += purge.files_purged;
 
         // Build the set of all segment file_id values currently live in any
         // branch. file_id is a hash of the file path (see block_cache::file_path_hash).
@@ -1581,11 +1587,13 @@ impl SegmentedStore {
             }
         }
 
-        let mut deleted = 0usize;
-
-        // Scan all branch directories.
+        // Stages 2–4 — scan for orphan `.sst` candidates and route each
+        // one through the quarantine protocol. Files inside
+        // `__quarantine__/` are skipped: they are already in flight and
+        // handled by the purge step above.
+        let mut newly_quarantined: Vec<PathBuf> = Vec::new();
         let Ok(entries) = std::fs::read_dir(segments_dir) else {
-            return Ok(GcReport { files_deleted: 0 });
+            return Ok(GcReport { files_deleted });
         };
         for entry in entries.flatten() {
             let path = entry.path();
@@ -1598,26 +1606,41 @@ impl SegmentedStore {
             };
             for sst_entry in sst_entries.flatten() {
                 let sst_path = sst_entry.path();
+                // Skip subdirectories (in particular `__quarantine__/`,
+                // whose contents were drained by `purge_all_quarantines`
+                // above — this loop only classifies top-level orphan
+                // `.sst` files).
+                if sst_path.is_dir() {
+                    continue;
+                }
                 if sst_path.extension().and_then(|e| e.to_str()) != Some("sst") {
                     continue;
                 }
-                // file_id is a hash of the full path, matching KVSegment::file_id().
                 let file_id = crate::block_cache::file_path_hash(&sst_path);
                 if !live_ids.contains(&file_id) {
-                    // Lock Level 3 (exclusive): prevent TOCTOU with fork (#1682).
-                    let _deletion_guard = self.ref_registry.deletion_write_guard();
-                    if !self.ref_registry.is_referenced(file_id) {
-                        crate::block_cache::global_cache().invalidate_file(file_id);
-                        let _ = std::fs::remove_file(&sst_path);
-                        deleted += 1;
+                    match self.quarantine_segment_if_unreferenced(&sst_path, file_id) {
+                        Ok(true) => newly_quarantined.push(sst_path),
+                        Ok(false) => {} // still referenced by runtime accelerator
+                        Err(e) => {
+                            // Degraded gate fired mid-scan, or publish failed —
+                            // propagate so callers see retention debt.
+                            return Err(e);
+                        }
                     }
                 }
             }
         }
 
-        Ok(GcReport {
-            files_deleted: deleted,
-        })
+        // Finish purging the freshly-quarantined entries within this
+        // call when health still permits — contract §"Stage 5. Final
+        // purge" allows this because the inventory publish at Stage 4
+        // is the durable-publish precondition.
+        if !newly_quarantined.is_empty() {
+            let purge2 = self.purge_all_quarantines()?;
+            files_deleted += purge2.files_purged;
+        }
+
+        Ok(GcReport { files_deleted })
     }
 
     /// Number of inherited layers for a branch.
@@ -3905,6 +3928,37 @@ impl SegmentedStore {
         segments_loaded += inherited_stats.segments_loaded;
         let branches_recovered = recovered_branches.len();
 
+        // B5.2 — quarantine reconciliation. Build a per-branch-dir set
+        // of filenames still referenced by a recovery-trusted manifest
+        // (own-segment + inherited-layer), then reconcile against each
+        // branch's `quarantine.manifest`. Disagreement degrades recovery
+        // health per §"Quarantine reconciliation" (prefer retention).
+        let mut manifest_live_filenames: HashMap<BranchId, HashSet<String>> = HashMap::new();
+        for branch in self.branches.iter() {
+            let branch_id = *branch.key();
+            let ver = branch.version.load();
+            let entry = manifest_live_filenames.entry(branch_id).or_default();
+            for level in &ver.levels {
+                for seg in level {
+                    if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
+                        entry.insert(name.to_string());
+                    }
+                }
+            }
+            for layer in &branch.inherited_layers {
+                let source = layer.source_branch_id;
+                let source_entry = manifest_live_filenames.entry(source).or_default();
+                for level in &layer.segments.levels {
+                    for seg in level {
+                        if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
+                            source_entry.insert(name.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        self.reconcile_quarantine_on_recovery(segments_dir, &manifest_live_filenames, &mut faults);
+
         let health = RecoveryHealth::from_faults(faults);
         self.last_recovery_health.store(Arc::new(health.clone()));
         invocation.commit();
@@ -5474,7 +5528,7 @@ impl Storage for SegmentedStore {
 // ---------------------------------------------------------------------------
 
 /// Hex-encode a BranchId's 16 bytes to a 32-char lowercase hex string.
-fn hex_encode_branch(branch_id: &BranchId) -> String {
+pub(crate) fn hex_encode_branch(branch_id: &BranchId) -> String {
     let bytes = branch_id.as_bytes();
     let mut s = String::with_capacity(32);
     for &b in bytes.iter() {
@@ -5486,7 +5540,7 @@ fn hex_encode_branch(branch_id: &BranchId) -> String {
 
 /// Decode a 32-char hex string back to a BranchId.
 /// Returns `None` if the string is not exactly 32 hex chars.
-fn hex_decode_branch(hex: &str) -> Option<BranchId> {
+pub(crate) fn hex_decode_branch(hex: &str) -> Option<BranchId> {
     if hex.len() != 32 || !hex.is_ascii() {
         return None;
     }
@@ -5596,9 +5650,11 @@ fn check_corruption(flags: &[Arc<AtomicBool>]) -> StrataResult<()> {
 }
 
 mod compaction;
+mod quarantine_protocol;
 mod recovery;
 mod ref_registry;
 
+pub use quarantine_protocol::{PurgeReport, StorageBranchRetention, StorageInheritedLayerInfo};
 pub use recovery::{DegradationClass, RecoveredState, RecoveryFault, RecoveryHealth};
 
 #[cfg(test)]

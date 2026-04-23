@@ -149,6 +149,10 @@ architecture scope documents. The current allowed surface:
 `AdvanceError`, `UnblockError`, `LossyRecoveryReport`, `LossyErrorKind`,
 `RecoveryHealth`, `DegradationClass`
 
+**Retention (B5.2):** `Database::retention_report()`, `RetentionReport`,
+`BranchRetentionEntry`, `RetentionBlocker`, `RetentionTotals`, `OrphanStorageEntry`,
+`OrphanReason`, `ReclaimStatus`
+
 **Product:** `SystemBranchCapability` (`pub` type, `pub(crate)` constructor), `Provider`,
 `ControlRegistry`, `ControlEntry`, `ControlOwner`, `BehaviorClass`, `PersistenceClass`
 
@@ -159,7 +163,8 @@ architecture scope documents. The current allowed surface:
 
 **Errors:** `StrataError`, `executor::Error`, `ErrorSeverity`, `BranchDagError`/`Kind`,
 `ObserverError`/`Kind`, `RefreshHookError`, `AdvanceError`, `UnblockError`,
-`InferenceError`, `BranchBundleError`, `CompactionError`, `ManifestError`
+`InferenceError`, `BranchBundleError`, `CompactionError`, `ManifestError`,
+`StrataError::RetentionReportUnavailable` (B5.2)
 
 ---
 

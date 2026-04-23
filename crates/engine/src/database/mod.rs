@@ -30,6 +30,7 @@ pub mod profile;
 pub(crate) mod recovery;
 mod recovery_error;
 mod registry;
+pub mod retention_report;
 pub mod spec;
 
 #[cfg(test)]
@@ -55,6 +56,10 @@ pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{
     AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,
     UnblockError,
+};
+pub use retention_report::{
+    BranchRetentionEntry, OrphanReason, OrphanStorageEntry, ReclaimStatus, RetentionBlocker,
+    RetentionReport, RetentionTotals,
 };
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,

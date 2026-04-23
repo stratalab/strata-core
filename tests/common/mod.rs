@@ -160,6 +160,28 @@ impl TestDb {
             .expect("Failed to reopen database");
     }
 
+    /// Reopen the database in a lossy-tolerant configuration.
+    ///
+    /// Sets `allow_missing_manifest = true` so a `DegradationClass::PolicyDowngrade`
+    /// recovery (e.g. B5.2 `QuarantineInventoryMismatch`, legacy no-manifest
+    /// fallback) succeeds instead of refusing the open. Used by the B5.2
+    /// quarantine-reopen / retention-report suites that deliberately stage
+    /// degraded states and assert engine behavior after the open.
+    pub fn reopen_allowing_policy_downgrade(&mut self) {
+        let path = self.dir.path().to_path_buf();
+        drop(std::mem::replace(
+            &mut self.db,
+            Database::open_runtime(test_open_spec_cache()).expect("temporary cache for swap"),
+        ));
+        let cfg = StrataConfig {
+            allow_missing_manifest: true,
+            ..StrataConfig::default()
+        };
+        let spec = test_open_spec_primary(&path).with_config(cfg);
+        self.db = Database::open_runtime(spec)
+            .expect("Failed to reopen database in policy-downgrade-tolerant mode");
+    }
+
     /// Create a new branch ID for this test.
     pub fn new_branch(&mut self) -> BranchId {
         self.branch_id = BranchId::new();

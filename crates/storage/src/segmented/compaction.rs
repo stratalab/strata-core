@@ -96,18 +96,31 @@ pub(super) fn recalculate_level_targets(
 /// Checks if the segment is shared (referenced by child branches via COW
 /// inherited layers). Shared segments are skipped — their files are only
 impl SegmentedStore {
-    /// Delete a segment file if it is not referenced by any inherited layer.
+    /// Route a segment file through the B5.2 reclaim protocol.
     ///
-    /// Checks if the segment is shared (referenced by child branches via COW
-    /// inherited layers). Shared segments are skipped — their files are only
-    /// deleted when the last child releases via `decrement` (in `clear_branch`
-    /// or `materialize_layer`). Untracked segments (not shared) are deleted
-    /// immediately.
+    /// Calls [`SegmentedStore::quarantine_segment_if_unreferenced`] which
+    /// performs the Stage-2 manifest-proof (runtime-accelerator check),
+    /// the Stage-3 rename into `<branch_dir>/__quarantine__/`, and the
+    /// Stage-4 `quarantine.manifest` publish — all under the B5 retention
+    /// contract's `BarrierKind::RecoveryHealthGate`. Final purge
+    /// (Stage 5) happens on a later [`SegmentedStore::gc_orphan_segments`]
+    /// pass via [`SegmentedStore::purge_all_quarantines`].
+    ///
+    /// Shared segments (positive refcount from inherited layers) are
+    /// left in place. Refusal under degraded recovery is logged as
+    /// retention debt but not propagated — the caller path is best-
+    /// effort cleanup after compaction publish.
     fn delete_segment_if_unreferenced(&self, seg: &KVSegment) {
-        let _guard = self.ref_registry.deletion_write_guard();
-        if !self.ref_registry.is_referenced(seg.file_id()) {
-            crate::block_cache::global_cache().invalidate_file(seg.file_id());
-            let _ = std::fs::remove_file(seg.file_path());
+        match self.quarantine_segment_if_unreferenced(seg.file_path(), seg.file_id()) {
+            Ok(true) | Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(
+                    target: "strata::storage::gc",
+                    segment = %seg.file_path().display(),
+                    error = %e,
+                    "reclaim refused; retention debt accumulated"
+                );
+            }
         }
     }
 
