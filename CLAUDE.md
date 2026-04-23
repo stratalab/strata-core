@@ -45,6 +45,12 @@ Planning:
 - `docs/design/architecture-cleanup/master-execution-plan-framework.md`
 - `docs/design/post-cleanup/post-cleanup-closeout-framework.md`
 
+Branching tranche (B5 retention / GC corpus — normative for B5.1+):
+- `docs/design/branching/branching-gc/b5-phasing-plan.md`
+- `docs/design/branching/branching-gc/branching-retention-contract.md`
+- `docs/design/branching/branching-gc/branching-b5-verification-spec.md`
+- `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+
 ---
 
 ## Active Tranche

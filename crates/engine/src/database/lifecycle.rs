@@ -400,6 +400,22 @@ impl Database {
     /// - `applied_watermark` is always truthful
     /// - Secondary indexes never silently fall behind
     /// - Operators can diagnose and skip blocked records explicitly
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// This is the staged-publication spine for branch-visible
+    /// derived state per
+    /// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Convergence classes" / "Staged-publish". Search, vector,
+    /// and graph-search refresh hooks classify as
+    /// `ConvergenceClass::StagedPublish` (see
+    /// `branch_retention` crate-internal vocabulary): they validate
+    /// and stage updates, block publication on hook
+    /// failure, and advance visibility together with the underlying
+    /// branch-visible storage version. The "block on any failure"
+    /// rule above is the contract guarantee that no follower-visible
+    /// publication occurs before the underlying branch version is
+    /// visible.
     pub fn refresh(&self) -> RefreshOutcome {
         if !self.follower || self.persistence_mode == PersistenceMode::Ephemeral {
             return RefreshOutcome::CaughtUp {

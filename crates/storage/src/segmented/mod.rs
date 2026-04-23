@@ -962,6 +962,17 @@ impl SegmentedStore {
     /// public `recovery_health()` accessor. The returned `Arc` is a snapshot
     /// — subsequent recovery calls replace the stored value but do not
     /// invalidate this handle.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Surfaces the §"Recovery-health contract" classification of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// This is the `BarrierKind::RecoveryHealthGate` value the
+    /// reclaim path consults: `Healthy` and
+    /// `Degraded { class: Telemetry, .. }` permit reclaim;
+    /// `DataLoss` and `PolicyDowngrade` block reclaim per Invariant
+    /// 5 + KD8. Promoted from storage-local behavior to branch-layer
+    /// contract — non-negotiable.
     pub fn last_recovery_health(&self) -> Arc<RecoveryHealth> {
         self.last_recovery_health.load_full()
     }
@@ -1391,6 +1402,21 @@ impl SegmentedStore {
     /// Inherited segment files are NOT deleted — their refcounts are decremented
     /// and lazy cleanup happens during parent compaction.
     /// Returns true if the branch existed.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Implements §"Parent compaction and parent delete" / "Parent
+    /// delete" of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// Parent delete must not invalidate descendant inherited-layer
+    /// manifests and must not force descendant materialization (KD4
+    /// in `b5-phasing-plan.md`). Per Invariant 1 + §"Reclaimability
+    /// rule", segments still referenced by a descendant
+    /// inherited-layer manifest are retained — the refcount check
+    /// here implements that retention as a runtime accelerator
+    /// (`BarrierKind::RuntimeAccelerator`); the durable proof remains
+    /// the descendant's manifest entries
+    /// (`BarrierKind::PhysicalRetention`).
     pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
         if let Some((_, branch)) = self.branches.remove(branch_id) {
             // 1. Clean up the branch's own segments.
@@ -1501,6 +1527,21 @@ impl SegmentedStore {
     /// cleared in-place via [`SegmentedStore::reset_recovery_health`] after a
     /// successful recovery; `DataLoss` requires a fresh reopen because the
     /// current store instance cannot reload later-restored files.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Implements §"Reclaim protocol" stages 2 (manifest proof) and
+    /// the §"Recovery-health contract" gate of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// Today this function performs an immediate-unlink reclaim,
+    /// which Invariant 4 forbids; the B5.2 cutover replaces the unlink
+    /// with the full quarantine protocol (stages 3–5) and a
+    /// per-branch `quarantine.manifest` durable publish — see KD3,
+    /// KD8, KD9 in `b5-phasing-plan.md`. The degraded-recovery
+    /// refusal already in place satisfies Invariants 2 and 5: space
+    /// leaks are acceptable, false reclaim is not. Barrier role:
+    /// `BarrierKind::RecoveryHealthGate` (the refusal) +
+    /// `BarrierKind::PhysicalRetention` (the live-set check).
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
         match &**self.last_recovery_health.load() {
             // Healthy and Telemetry-only degradation (rebuildable-cache errors)
@@ -1622,6 +1663,21 @@ impl SegmentedStore {
     /// snapshot → release → I/O → re-acquire pattern as `flush_oldest_frozen`.
     ///
     /// Returns `Err` on I/O failure, `Ok(result)` on success.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Implements §"Materialization contract" of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// Materialization rewrites ownership, not meaning (Invariant 6,
+    /// KD4): the child's visible result set, tombstone semantics,
+    /// TTL semantics, timestamps, and fork-frontier visibility are
+    /// all preserved; only manifest ownership and inherited-layer
+    /// membership change. The shadow check at the entry-copy stage
+    /// is the conservative path the contract requires (assume
+    /// shadowed on corruption rather than risk stale-data
+    /// resurrection). Crash-safety: the `Materializing` status flag
+    /// in the manifest plus the `Materializing → Active` reset on
+    /// reopen satisfy the §"Crash / reopen rule".
     pub fn materialize_layer(
         &self,
         child_branch_id: &BranchId,
@@ -2072,6 +2128,21 @@ impl SegmentedStore {
     ///
     /// Flushes source memtables, snapshots segments, attaches as inherited
     /// layer on dest, increments refcounts. Returns `(fork_version, segments_shared)`.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Implements §"Fork-frontier semantics" of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// The captured `fork_version` and the inherited-layer entry
+    /// installed on the destination together form the durable
+    /// fork-frontier barrier (`BarrierKind::ForkFrontier`): they
+    /// bound the descendant's inherited reads (read-time clamp to
+    /// `commit_id <= fork_version`) and keep the parent's snapshot
+    /// segments reachable for the descendant even after subsequent
+    /// parent compaction or parent delete. The refcount increments
+    /// on shared segments are runtime accelerators only
+    /// (`BarrierKind::RuntimeAccelerator`); the durable retention
+    /// proof is the destination's manifest entry.
     pub fn fork_branch(
         &self,
         source_id: &BranchId,
@@ -3487,6 +3558,20 @@ impl SegmentedStore {
     /// `TransactionCoordinator::apply_storage_recovery` rather than reading
     /// individual fields: that entry point owns version-floor adoption and
     /// future per-branch version wiring.
+    ///
+    /// ## B5.1 retention contract
+    ///
+    /// Implements §"Recovery rebuild protocol" of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
+    /// Per-branch manifests (own + inherited-layer entries) are the
+    /// rebuild source of truth; runtime accelerator state
+    /// (`BarrierKind::RuntimeAccelerator`) is rebuilt from them.
+    /// `RecoveryHealth` is published before return so subsequent
+    /// reclaim respects the rebuild trust rule and the
+    /// degraded-recovery refusal gate
+    /// (`BarrierKind::RecoveryHealthGate`, KD8). B5.2 extends this
+    /// path with the §"Quarantine reconciliation" step
+    /// (per-branch `quarantine.manifest` reconciliation, KD9).
     pub fn recover_segments(&self) -> StorageResult<RecoveredState> {
         let mut invocation = RecoveryInvocationGuard::begin(&self.recovery_applied)?;
         let segments_dir = match &self.segments_dir {

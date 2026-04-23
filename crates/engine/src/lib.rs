@@ -59,6 +59,7 @@ pub use transaction::{ScopedTransaction, Transaction, TransactionPool, MAX_POOL_
 pub use transaction_ops::TransactionOps;
 
 mod branch_ops;
+pub(crate) mod branch_retention;
 pub mod bundle;
 pub mod primitives;
 pub mod recipe_store;
