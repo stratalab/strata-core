@@ -1234,6 +1234,45 @@ impl strata_engine::Subsystem for GraphSubsystem {
     ) -> strata_core::StrataResult<()> {
         bootstrap_system_branch(db)
     }
+
+    /// Cleanup hook for graph-owned sidecar state on branch delete.
+    ///
+    /// ## Ownership split (B5.3 `ConvergenceClass` citations)
+    ///
+    /// - `BranchStatusCache` (this crate) — cleared here. The cache is
+    ///   keyed by branch name, so without an explicit removal a
+    ///   same-name recreate would observe the prior lifecycle
+    ///   instance's cached entry. That violates §"Rule 6. Same-name
+    ///   recreate must not leak old derived state" in
+    ///   `branching-b5-convergence-and-observability.md`. Even though
+    ///   `ConvergenceClass::AdvisoryOnly` keeps the cache out of
+    ///   correctness decisions, leaking stale advisory state across
+    ///   lifecycle boundaries is still a contract violation.
+    /// - Graph adjacency rows (packed fwd/rev lists under `_graph/`) —
+    ///   **not** cleared here. They are `ConvergenceClass::StorageCoupled`
+    ///   and ride ordinary storage clear via `clear_branch_storage()`
+    ///   which the engine already invokes as part of the post-commit
+    ///   branch-cleanup path (B5.2 KD11 boundary).
+    /// - Graph-node BM25 projection — **not** cleared here. That is
+    ///   `ConvergenceClass::StagedPublish` and is owned by
+    ///   `SearchSubsystem::cleanup_deleted_branch` (shared BM25 index
+    ///   across all document sources).
+    ///
+    /// ## Idempotence
+    ///
+    /// `DashMap::remove` on an absent key is a no-op, so re-running
+    /// this hook after partial cleanup is safe.
+    fn cleanup_deleted_branch(
+        &self,
+        db: &std::sync::Arc<strata_engine::Database>,
+        _branch_id: &strata_core::types::BranchId,
+        branch_name: &str,
+    ) -> strata_core::StrataResult<()> {
+        if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
+            cache.remove(branch_name);
+        }
+        Ok(())
+    }
 }
 
 // =============================================================================
