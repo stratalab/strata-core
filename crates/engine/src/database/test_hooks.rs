@@ -24,6 +24,18 @@ fn flush_thread_spawn_failure_slot() -> &'static Mutex<HashSet<PathBuf>> {
     FLUSH_THREAD_SPAWN_FAILURE.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+fn clear_branch_storage_failure_slot() -> &'static Mutex<HashMap<PathBuf, io::ErrorKind>> {
+    static CLEAR_BRANCH_STORAGE_FAILURE: OnceLock<Mutex<HashMap<PathBuf, io::ErrorKind>>> =
+        OnceLock::new();
+    CLEAR_BRANCH_STORAGE_FAILURE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn clear_default_branch_marker_failure_slot() -> &'static Mutex<HashMap<PathBuf, io::ErrorKind>> {
+    static CLEAR_DEFAULT_BRANCH_MARKER_FAILURE: OnceLock<Mutex<HashMap<PathBuf, io::ErrorKind>>> =
+        OnceLock::new();
+    CLEAR_DEFAULT_BRANCH_MARKER_FAILURE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
 #[derive(Default)]
 struct HaltPublishPauseState {
     reached: bool,
@@ -85,6 +97,34 @@ pub(super) fn clear_flush_thread_spawn_failure(path: &Path) {
         .remove(path);
 }
 
+pub(super) fn inject_clear_branch_storage_failure(path: &Path, kind: io::ErrorKind) {
+    clear_branch_storage_failure_slot()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), kind);
+}
+
+pub(super) fn clear_clear_branch_storage_failure(path: &Path) {
+    clear_branch_storage_failure_slot()
+        .lock()
+        .unwrap()
+        .remove(path);
+}
+
+pub(super) fn inject_clear_default_branch_marker_failure(path: &Path, kind: io::ErrorKind) {
+    clear_default_branch_marker_failure_slot()
+        .lock()
+        .unwrap()
+        .insert(path.to_path_buf(), kind);
+}
+
+pub(super) fn clear_clear_default_branch_marker_failure(path: &Path) {
+    clear_default_branch_marker_failure_slot()
+        .lock()
+        .unwrap()
+        .remove(path);
+}
+
 pub(super) fn install_halt_publish_pause(path: &Path) {
     halt_publish_pause_slot().lock().unwrap().insert(
         path.to_path_buf(),
@@ -131,6 +171,22 @@ pub(super) fn take_flush_thread_spawn_failure(path: &Path) -> bool {
         .lock()
         .unwrap()
         .remove(path)
+}
+
+pub(super) fn maybe_inject_clear_branch_storage_failure(path: &Path) -> Option<io::Error> {
+    clear_branch_storage_failure_slot()
+        .lock()
+        .unwrap()
+        .remove(path)
+        .map(|kind| io::Error::new(kind, "injected clear_branch_storage failure"))
+}
+
+pub(super) fn maybe_inject_clear_default_branch_marker_failure(path: &Path) -> Option<io::Error> {
+    clear_default_branch_marker_failure_slot()
+        .lock()
+        .unwrap()
+        .remove(path)
+        .map(|kind| io::Error::new(kind, "injected clear_default_branch_marker failure"))
 }
 
 pub(super) fn maybe_pause_after_halt_health_publish(path: &Path) {
@@ -217,6 +273,46 @@ mod tests {
         );
         assert!(take_flush_thread_spawn_failure(path));
         assert!(!take_flush_thread_spawn_failure(path));
+    }
+
+    #[test]
+    fn test_clear_branch_storage_failure_hook_consumes_one_failure() {
+        let path = Path::new("/tmp/test-clear-branch-storage-failure");
+        let other_path = Path::new("/tmp/test-clear-branch-storage-failure-other");
+        clear_clear_branch_storage_failure(path);
+        clear_clear_branch_storage_failure(other_path);
+        assert!(maybe_inject_clear_branch_storage_failure(path).is_none());
+        assert!(maybe_inject_clear_branch_storage_failure(other_path).is_none());
+
+        inject_clear_branch_storage_failure(path, io::ErrorKind::Other);
+        assert!(
+            maybe_inject_clear_branch_storage_failure(other_path).is_none(),
+            "hook must be scoped by path"
+        );
+        let err =
+            maybe_inject_clear_branch_storage_failure(path).expect("expected injected failure");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(maybe_inject_clear_branch_storage_failure(path).is_none());
+    }
+
+    #[test]
+    fn test_clear_default_branch_marker_failure_hook_consumes_one_failure() {
+        let path = Path::new("/tmp/test-clear-default-branch-marker-failure");
+        let other_path = Path::new("/tmp/test-clear-default-branch-marker-failure-other");
+        clear_clear_default_branch_marker_failure(path);
+        clear_clear_default_branch_marker_failure(other_path);
+        assert!(maybe_inject_clear_default_branch_marker_failure(path).is_none());
+        assert!(maybe_inject_clear_default_branch_marker_failure(other_path).is_none());
+
+        inject_clear_default_branch_marker_failure(path, io::ErrorKind::Other);
+        assert!(
+            maybe_inject_clear_default_branch_marker_failure(other_path).is_none(),
+            "hook must be scoped by path"
+        );
+        let err = maybe_inject_clear_default_branch_marker_failure(path)
+            .expect("expected injected failure");
+        assert_eq!(err.kind(), io::ErrorKind::Other);
+        assert!(maybe_inject_clear_default_branch_marker_failure(path).is_none());
     }
 
     #[test]

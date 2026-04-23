@@ -980,6 +980,7 @@ impl BranchControlStore {
     /// Returns `Err(BranchLineageUnavailable)` on an unmigrated follower
     /// (AD5) — listing is a lineage-aware read and must not silently
     /// return empty when the authoritative state is inaccessible.
+    #[allow(dead_code)]
     pub(crate) fn list_active(&self) -> StrataResult<Vec<BranchControlRecord>> {
         self.guard_lineage_read()?;
         self.db.transaction(global_branch_id(), |txn| {
@@ -995,6 +996,36 @@ impl BranchControlStore {
                 if let Some(rv) = txn.get(&rec_key)? {
                     let rec: BranchControlRecord = from_stored_value(&rv)?;
                     if matches!(rec.lifecycle, BranchLifecycleStatus::Active) {
+                        out.push(rec);
+                    }
+                }
+            }
+            Ok(out)
+        })
+    }
+
+    /// List every currently-visible record in the store.
+    ///
+    /// Includes both `Active` and `Archived` lifecycle states because both are
+    /// backed by the active-pointer row and remain branch-visible per B4/KD1.
+    ///
+    /// Returns `Err(BranchLineageUnavailable)` on an unmigrated follower
+    /// (AD5).
+    pub(crate) fn list_visible(&self) -> StrataResult<Vec<BranchControlRecord>> {
+        self.guard_lineage_read()?;
+        self.db.transaction(global_branch_id(), |txn| {
+            let prefix = active_ptr_prefix_all();
+            let pointers = txn.scan_prefix(&prefix)?;
+            let mut out = Vec::with_capacity(pointers.len());
+            for (ap_key, v) in pointers {
+                let Some(id) = parse_active_ptr_key(&ap_key.user_key) else {
+                    continue;
+                };
+                let gen = decode_u64_value(&v)?;
+                let rec_key = control_record_key(BranchRef::new(id, gen));
+                if let Some(rv) = txn.get(&rec_key)? {
+                    let rec: BranchControlRecord = from_stored_value(&rv)?;
+                    if rec.lifecycle.is_visible() {
                         out.push(rec);
                     }
                 }

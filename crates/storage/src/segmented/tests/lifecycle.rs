@@ -4,9 +4,10 @@ use super::*;
 // Bug-fix regression tests (#1662, #1663, #1664)
 // =====================================================================
 
-/// #1663: clear_branch() must delete own segment files, manifest, and branch dir.
+/// #1663 / B5.2 step 3: clear_branch() removes top-level ownership
+/// immediately, but final purge is explicit GC work.
 #[test]
-fn clear_branch_deletes_own_segments_and_manifest() {
+fn clear_branch_quarantines_own_segments_and_leaves_purge_to_gc() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
@@ -38,34 +39,59 @@ fn clear_branch_deletes_own_segments_and_manifest() {
     assert!(manifest_path.exists(), "manifest should exist before clear");
 
     // Clear the branch
-    assert!(store.clear_branch(&child_branch()));
+    assert!(store.clear_branch(&child_branch()).unwrap());
 
-    // Own segment files must be deleted
+    // Top-level own segment files must disappear from their original paths.
+    // B5.2 stages them into quarantine rather than unlinking synchronously.
     for path in &own_paths {
         assert!(
             !path.exists(),
-            "Own segment {:?} should be deleted by clear_branch",
+            "Own segment {:?} should be removed from its original path by clear_branch",
             path
         );
     }
 
-    // Manifest must be deleted
+    // Once no top-level `.sst` files remain, the empty-manifest barrier can be
+    // removed even though quarantine debt still exists.
     assert!(
         !manifest_path.exists(),
-        "manifest should be deleted by clear_branch"
+        "empty-manifest barrier should be removed once only quarantine state remains"
     );
 
-    // Branch directory should be removed (was empty after file cleanup)
+    let quarantine_manifest = branch_dir.join(crate::quarantine::QUARANTINE_FILENAME);
+    let quarantine_dir = branch_dir.join(crate::quarantine::QUARANTINE_DIR);
     assert!(
-        !branch_dir.exists(),
-        "branch directory should be removed by clear_branch"
+        quarantine_manifest.exists(),
+        "clear_branch should leave quarantine inventory behind for GC to drain"
+    );
+    assert!(
+        quarantine_dir.exists(),
+        "clear_branch should leave the quarantine directory behind until GC purges it"
+    );
+
+    let report = store
+        .gc_orphan_segments()
+        .expect("healthy recovery; GC should purge the staged quarantine");
+    assert!(
+        report.files_deleted >= own_paths.len(),
+        "GC should purge the quarantined own segments"
+    );
+
+    assert!(
+        !quarantine_manifest.exists(),
+        "quarantine inventory should be removed after purge"
+    );
+    assert!(
+        !quarantine_dir.exists(),
+        "quarantine directory should be removed after purge"
     );
 }
 
-/// #1663: clear_branch() must clean up inherited segment refcounts AND own segments.
-/// Inherited segment files must NOT be deleted when the parent still owns them.
+/// #1663 / B5.2 step 3: clear_branch() must release inherited refcounts and
+/// quarantine its own segments. Inherited segment files must NOT be deleted
+/// when the parent still owns them.
 #[test]
-fn clear_branch_cleans_up_inherited_and_own_segments() {
+fn clear_branch_releases_inherited_and_quarantines_own_segments() {
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
 
@@ -116,11 +142,15 @@ fn clear_branch_cleans_up_inherited_and_own_segments() {
 
     // Clear child — parent has NOT compacted, so inherited segment files
     // must survive (parent still owns them in its version.levels).
-    assert!(store.clear_branch(&child_branch()));
+    assert!(store.clear_branch(&child_branch()).unwrap());
 
-    // Own segments must be gone
+    // Own segments must be gone from their original top-level paths.
     for path in &own_paths {
-        assert!(!path.exists(), "Own segment {:?} should be deleted", path);
+        assert!(
+            !path.exists(),
+            "Own segment {:?} should be removed from its original path",
+            path
+        );
     }
 
     // Inherited segment files must still exist (parent owns them)
@@ -902,7 +932,7 @@ fn clear_branch_preserves_referenced_own_segments() {
     assert!(!own_paths.is_empty());
 
     // Clear (delete) parent — child still references parent's segments
-    assert!(store.clear_branch(&parent_branch()));
+    assert!(store.clear_branch(&parent_branch()).unwrap());
 
     // Parent's own segment files should still exist (child references them)
     for path in &own_paths {
@@ -989,16 +1019,32 @@ fn gc_orphan_segments_cleans_leaked_files() {
         );
     }
 
-    // Child releases (clear_branch). refcount → 0.
-    // clear_branch runs gc_orphan_segments internally, which should clean up
-    // the orphaned files (parent already compacted them away, no references remain).
-    store.clear_branch(&child_branch());
+    // Child releases (clear_branch). refcount → 0, but explicit GC still owns
+    // final purge of the orphaned parent files.
+    store.clear_branch(&child_branch()).unwrap();
 
-    // Orphaned segments should be deleted (GC ran as part of clear_branch).
+    // The orphaned segments are still on disk until GC runs.
+    for path in &inherited_paths {
+        assert!(
+            path.exists(),
+            "orphaned segment {:?} should remain until explicit GC drains it",
+            path
+        );
+    }
+
+    let report = store
+        .gc_orphan_segments()
+        .expect("clean recovery; gc must succeed");
+    assert!(
+        report.files_deleted >= inherited_paths.len(),
+        "GC should delete the orphaned segments after clear_branch releases them"
+    );
+
+    // Orphaned segments should be deleted after explicit GC.
     for path in &inherited_paths {
         assert!(
             !path.exists(),
-            "orphaned segment {:?} should be deleted by GC after clear_branch",
+            "orphaned segment {:?} should be deleted by explicit GC after clear_branch",
             path
         );
     }
@@ -1009,7 +1055,7 @@ fn gc_orphan_segments_cleans_leaked_files() {
         .expect("clean recovery; gc must succeed");
     assert_eq!(
         report.files_deleted, 0,
-        "no orphans should remain after clear_branch GC"
+        "no orphans should remain after explicit GC"
     );
 }
 

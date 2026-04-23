@@ -12,13 +12,13 @@
 //!    [`strata_storage::SegmentedStore::retention_snapshot`]. Storage
 //!    does not know which `BranchRef` a given `BranchId` currently
 //!    maps to.
-//! 2. **Engine layer** — joins storage facts with `BranchControlStore`
-//!    so bytes are attributed to live `BranchRef` lifecycle instances.
-//!    When a storage directory has no live control record (e.g. a
-//!    tombstoned parent whose segments are still referenced by a
-//!    descendant's inherited layer), the entry appears in
-//!    [`RetentionReport::orphan_storage`] rather than being fabricated
-//!    into some live lifecycle.
+//! 2. **Engine layer** — joins storage facts with visible
+//!    (`Active | Archived`) `BranchControlStore` records so bytes are
+//!    attributed to live `BranchRef` lifecycle instances. When a storage
+//!    directory has no visible control record (e.g. a tombstoned parent
+//!    whose segments are still referenced by a descendant's inherited
+//!    layer), the entry appears in [`RetentionReport::orphan_storage`]
+//!    rather than being fabricated into some live lifecycle.
 //!
 //! Per the convergence doc's §"Rule 2. Stale-visible and unavailable
 //! are not the same." plus the surface matrix's hard-fail-degraded
@@ -39,7 +39,8 @@ use strata_core::{
     BranchControlRecord, BranchLifecycleStatus, BranchRef, StrataError, StrataResult,
 };
 use strata_storage::{
-    DegradationClass, RecoveryHealth, StorageBranchRetention, StorageInheritedLayerInfo,
+    DegradationClass, RecoveryHealth, StorageBranchRetention, StorageError,
+    StorageInheritedLayerInfo,
 };
 
 use crate::branch_ops::branch_control_store::BranchControlStore;
@@ -223,6 +224,9 @@ impl Database {
     /// §"Surface matrix" hard-fail rule. `PolicyDowngrade` with a
     /// `QuarantineInventoryMismatch` fault also routes here because
     /// the disagreement blocks trustworthy quarantine attribution.
+    /// Unmigrated-follower lineage unavailability (AD5) also routes here:
+    /// storage bytes may be known, but generation-aware `BranchRef`
+    /// attribution is not.
     /// Other `PolicyDowngrade` cases (e.g. no-manifest fallback) are
     /// reported as [`ReclaimStatus::BlockedDegradedRecovery`] inside a
     /// successful report: reclaim is paused but attribution remains
@@ -254,22 +258,28 @@ impl Database {
         };
 
         // Storage layer — manifest-derived per-directory facts.
-        let storage_snapshot = self.storage.retention_snapshot()?;
+        let storage_snapshot = match self.storage.retention_snapshot() {
+            Ok(snapshot) => snapshot,
+            Err(e) => {
+                return Err(StrataError::retention_report_unavailable(
+                    retention_snapshot_unavailable_class(&e),
+                ))
+            }
+        };
         let snapshot_by_id: HashMap<BranchId, StorageBranchRetention> = storage_snapshot
             .into_iter()
             .map(|s| (s.branch_id, s))
             .collect();
 
-        // Engine layer — live BranchRef + name per BranchId via
-        // BranchControlStore. Follower-synthesis / unmigrated-primary
-        // paths fall through with an empty map (attribution becomes
-        // OrphanStorageEntry::UntrackedLifecycle), which is safe.
-        // Uses the typed `is_branch_lineage_unavailable()` predicate
-        // rather than a string match so follower mode is classified by
-        // the same contract that guards lineage reads elsewhere.
-        let live_records = match BranchControlStore::new(self.clone()).list_active() {
+        // Engine layer — visible (`Active | Archived`) BranchRef + name per
+        // BranchId via BranchControlStore. If lifecycle identity is
+        // unavailable (e.g. unmigrated follower AD5), fail closed rather than
+        // fabricating every storage row into `orphan_storage`.
+        let live_records = match BranchControlStore::new(self.clone()).list_visible() {
             Ok(records) => records,
-            Err(e) if e.is_branch_lineage_unavailable() => Vec::new(),
+            Err(e) if e.is_branch_lineage_unavailable() => {
+                return Err(StrataError::retention_report_unavailable("PolicyDowngrade"))
+            }
             Err(e) => return Err(e),
         };
         let live_by_id: HashMap<BranchId, BranchControlRecord> =
@@ -431,5 +441,18 @@ fn class_name(class: DegradationClass) -> &'static str {
         // `DegradationClass` is `#[non_exhaustive]`; unknown variants
         // stringify to a sentinel the caller can still discriminate.
         _ => "Unknown",
+    }
+}
+
+fn retention_snapshot_unavailable_class(err: &StorageError) -> &'static str {
+    match err {
+        StorageError::QuarantineReconciliationFailed { .. } => "PolicyDowngrade",
+        StorageError::RecoveryFault(
+            strata_storage::RecoveryFault::QuarantineInventoryMismatch { .. },
+        ) => "PolicyDowngrade",
+        // Any other inability to read storage truth means the report cannot
+        // safely attribute retained bytes. Surface the typed hard-fail
+        // contract rather than leaking raw storage errors through this API.
+        _ => "DataLoss",
     }
 }

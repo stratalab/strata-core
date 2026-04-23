@@ -6,13 +6,14 @@
 //! `docs/design/branching/branching-gc/branching-retention-contract.md`
 //! §"Reclaim protocol":
 //!
-//! 1. **Stage 2 — manifest proof.** The caller's runtime accelerator check
-//!    (`SegmentRefRegistry::is_referenced` plus the live-set scan in
-//!    `gc_orphan_segments`) serves as the manifest proof, under the
-//!    degraded-recovery refusal gate (`BarrierKind::RecoveryHealthGate`).
-//!    When recovery health is `DataLoss`, `PolicyDowngrade`, or any
-//!    non-`Telemetry` degradation, reclaim refuses **before** any
-//!    filesystem mutation — addressing the B5.2 review Finding 1.
+//! 1. **Stage 2 — manifest proof.** Candidate selection still starts from
+//!    the runtime accelerator (`SegmentRefRegistry::is_referenced` plus
+//!    the live-set scan in `gc_orphan_segments`), but the authoritative
+//!    reclaim proof is a walk of recovery-trusted `segments.manifest`
+//!    own entries and inherited-layer entries across the on-disk branch
+//!    directories. When recovery health is `DataLoss`,
+//!    `PolicyDowngrade`, or any non-`Telemetry` degradation, reclaim
+//!    refuses **before** any filesystem mutation.
 //! 2. **Stage 3 — quarantine rename.** After the proof succeeds, the
 //!    segment file is renamed into `<branch_dir>/__quarantine__/` on the
 //!    same filesystem namespace. Before Stage 4 publishes the inventory,
@@ -63,6 +64,41 @@ use crate::quarantine::{
 use crate::segmented::{DegradationClass, RecoveryFault, RecoveryHealth, SegmentedStore};
 use crate::{StorageError, StorageResult};
 
+fn manifest_entry_matches_segment(
+    entry: &crate::manifest::ManifestEntry,
+    file_id: u64,
+    filename: &str,
+) -> bool {
+    entry.filename == filename
+        || entry.filename == format!("{file_id}.sst")
+        || entry
+            .filename
+            .strip_suffix(".sst")
+            .and_then(|stem| stem.parse::<u64>().ok())
+            == Some(file_id)
+}
+
+#[derive(Debug, Clone)]
+struct RetentionTopLevelSegment {
+    filename: String,
+    size: u64,
+}
+
+#[derive(Debug, Clone)]
+struct BranchQuarantineState {
+    manifest: Option<crate::quarantine::QuarantineManifest>,
+    files_on_disk: HashMap<String, u64>,
+}
+
+#[derive(Debug, Clone)]
+struct RetentionBranchDirView {
+    branch_id: BranchId,
+    branch_dir: PathBuf,
+    manifest: Option<crate::manifest::SegmentManifest>,
+    top_level_segments: HashMap<String, RetentionTopLevelSegment>,
+    quarantine: Option<BranchQuarantineState>,
+}
+
 /// Summary of a [`SegmentedStore::purge_all_quarantines`] call.
 #[derive(Debug, Clone, Copy, Default)]
 #[non_exhaustive]
@@ -77,16 +113,19 @@ pub struct PurgeReport {
 ///
 /// Produced by [`SegmentedStore::retention_snapshot`] and consumed by the
 /// engine-layer `retention_report()` to attribute bytes to
-/// `BranchRef` lifecycle instances. The snapshot is manifest-derived;
-/// runtime accelerators (the segment ref registry) are used only to
-/// classify own-segment bytes as exclusive vs shared.
+/// `BranchRef` lifecycle instances. The snapshot is manifest-derived
+/// except for the explicit B5.2 legacy `NoManifestFallbackUsed`
+/// recovery path, where the last recovery health already recorded that
+/// top-level segments were promoted as the visible branch state.
+/// Own-segment shared/exclusive classification comes from
+/// inherited-layer reachability rather than runtime refcounts.
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct StorageBranchRetention {
     /// Directory identity — matches the on-disk `<segments_dir>/<hex>` name.
     pub branch_id: BranchId,
     /// Own-segment file bytes that no descendant's inherited-layer
-    /// manifest currently references (ref registry zero).
+    /// manifest currently references.
     pub exclusive_bytes: u64,
     /// Own-segment file bytes that at least one descendant's
     /// inherited-layer manifest references. Retained until the
@@ -155,6 +194,42 @@ impl SegmentedStore {
         }
     }
 
+    fn manifest_proof_allows_reclaim(
+        &self,
+        file_id: u64,
+        filename: &str,
+        exclude_branch_dir: Option<&Path>,
+    ) -> StorageResult<bool> {
+        for view in self.retention_branch_dir_views(false)? {
+            if exclude_branch_dir.is_some_and(|excluded| excluded == view.branch_dir.as_path()) {
+                continue;
+            }
+            let Some(manifest) = view.manifest.as_ref() else {
+                continue;
+            };
+
+            if manifest
+                .entries
+                .iter()
+                .any(|entry| manifest_entry_matches_segment(entry, file_id, filename))
+            {
+                return Ok(false);
+            }
+
+            if manifest.inherited_layers.iter().any(|layer| {
+                layer.status != 2
+                    && layer
+                        .entries
+                        .iter()
+                        .any(|entry| manifest_entry_matches_segment(entry, file_id, filename))
+            }) {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     /// Stages 2–4 of the reclaim protocol: prove manifest unreachability,
     /// publish the quarantine inventory entry, and rename the segment
     /// file into `<branch_dir>/__quarantine__/`.
@@ -177,6 +252,23 @@ impl SegmentedStore {
         seg_path: &Path,
         file_id: u64,
     ) -> StorageResult<bool> {
+        self.quarantine_segment_if_unreferenced_inner(seg_path, file_id, None)
+    }
+
+    pub(crate) fn quarantine_segment_if_unreferenced_for_cleared_branch(
+        &self,
+        seg_path: &Path,
+        file_id: u64,
+    ) -> StorageResult<bool> {
+        self.quarantine_segment_if_unreferenced_inner(seg_path, file_id, seg_path.parent())
+    }
+
+    fn quarantine_segment_if_unreferenced_inner(
+        &self,
+        seg_path: &Path,
+        file_id: u64,
+        exclude_branch_dir: Option<&Path>,
+    ) -> StorageResult<bool> {
         // Gate — must refuse before any filesystem mutation.
         self.check_reclaim_allowed()?;
 
@@ -196,13 +288,18 @@ impl SegmentedStore {
             return Ok(false);
         }
 
-        // Stage 2 manifest proof (runtime accelerator, degraded-gate above
-        // ensures the accelerator is trustworthy) + Stages 3/4. The
-        // deletion barrier prevents a concurrent fork from incrementing
-        // the refcount between the check and the rename.
+        // Stage 2 candidate-selection + manifest proof. The deletion barrier
+        // prevents a concurrent fork from incrementing the runtime refcount
+        // between the fast-path candidate screen and the authoritative
+        // manifest walk.
         let _guard = self.ref_registry.deletion_write_guard();
         if self.ref_registry.is_referenced(file_id) {
             return Ok(false);
+        }
+        if !self.manifest_proof_allows_reclaim(file_id, &filename, exclude_branch_dir)? {
+            return Err(StorageError::ReclaimRefusedManifestProof {
+                segment_id: file_id,
+            });
         }
         crate::block_cache::global_cache().invalidate_file(file_id);
 
@@ -246,10 +343,11 @@ impl SegmentedStore {
             });
         }
 
-        // Fsync branch_dir so the rename is durable before any purge step.
-        if let Ok(dir_fd) = std::fs::File::open(&branch_dir) {
-            let _ = dir_fd.sync_all();
-        }
+        // Cross-directory rename durability: the file moved from
+        // `branch_dir` into `branch_dir/__quarantine__/`. Both namespace
+        // parents must be durably published before we report success.
+        sync_dir_for_quarantine(&quarantine_dir)?;
+        sync_dir_for_quarantine(&branch_dir)?;
 
         Ok(true)
     }
@@ -369,58 +467,138 @@ impl SegmentedStore {
     ///
     /// Manifest-derived own-segment + inherited-layer byte totals plus
     /// `__quarantine__/` inventory, classified into exclusive vs shared
-    /// using the runtime ref registry. Used by the engine-layer
+    /// from inherited-layer reachability. The same branch-directory ledger
+    /// also feeds Stage-2 manifest proof so reclaim and reporting do not
+    /// drift. Used by the engine-layer
     /// `retention_report()` as the storage half of the attribution
     /// join. Safe to call under degraded recovery (it reports what is
     /// retained — it does not attempt reclaim).
     pub fn retention_snapshot(&self) -> StorageResult<Vec<StorageBranchRetention>> {
-        let mut out: Vec<StorageBranchRetention> = Vec::with_capacity(self.branches.len());
+        let mut out: Vec<StorageBranchRetention> = Vec::new();
 
-        for branch in &self.branches {
-            let branch_id = *branch.key();
-            let state = branch.value();
-            let ver = state.version.load();
+        let views = self.retention_branch_dir_views(true)?;
+        let views_by_id: HashMap<BranchId, &RetentionBranchDirView> =
+            views.iter().map(|view| (view.branch_id, view)).collect();
+        let descendant_held = descendant_held_filenames_by_source(&views);
+        let recovery_health = self.last_recovery_health.load();
+        let legacy_fallback_branches = branches_with_legacy_no_manifest_fallback(&recovery_health);
 
+        for view in &views {
+            let mut accounted_top_level: HashSet<String> = HashSet::new();
             let mut exclusive_bytes = 0u64;
             let mut shared_bytes = 0u64;
-            for level in &ver.levels {
-                for seg in level {
-                    let size = seg.file_size();
-                    if self.ref_registry.is_referenced(seg.file_id()) {
-                        shared_bytes += size;
+            let shared_filenames = descendant_held.get(&view.branch_id);
+
+            if let Some(manifest) = view.manifest.as_ref() {
+                for entry in &manifest.entries {
+                    accounted_top_level.insert(entry.filename.clone());
+                    if let Some(file) = view.top_level_segments.get(&entry.filename) {
+                        if shared_filenames
+                            .is_some_and(|filenames| filenames.contains(&entry.filename))
+                        {
+                            shared_bytes += file.size;
+                        } else {
+                            exclusive_bytes += file.size;
+                        }
+                    }
+                }
+            } else if legacy_fallback_branches.contains(&view.branch_id) {
+                // Explicit legacy fallback: the last recovery admitted this
+                // branch by promoting every discovered top-level `.sst` into
+                // visible own state under `PolicyDowngrade`.
+                for file in view.top_level_segments.values() {
+                    if shared_filenames.is_some_and(|filenames| filenames.contains(&file.filename))
+                    {
+                        shared_bytes += file.size;
                     } else {
-                        exclusive_bytes += size;
+                        exclusive_bytes += file.size;
                     }
+                }
+            } else if !view.top_level_segments.is_empty() {
+                // Missing manifest truth is only attribution-safe when the
+                // last recovery explicitly admitted the legacy fallback for
+                // this branch. Otherwise a live branch directory with own
+                // segment files but no manifest is untrusted and the engine
+                // must refuse `retention_report()`.
+                return Err(StorageError::RecoveryFault(
+                    RecoveryFault::CorruptManifest {
+                        branch_id: view.branch_id,
+                        inner: io::Error::new(
+                            io::ErrorKind::NotFound,
+                            format!(
+                                "segments.manifest missing for branch {} during retention snapshot",
+                                view.branch_dir.display()
+                            ),
+                        ),
+                    },
+                ));
+            }
+
+            for file in view.top_level_segments.values() {
+                if accounted_top_level.contains(&file.filename) {
+                    continue;
+                }
+
+                // Report only manifest-reachable truth.
+                //
+                // Top-level `.sst` files that are not listed in the branch's
+                // own manifest and are not held by any descendant inherited
+                // layer are post-publish reclaim debt, not live retention.
+                // Compaction intentionally publishes the new manifest before
+                // it routes old files through reclaim, so raw disk presence
+                // alone must not inflate `exclusive_bytes` / `shared_bytes`.
+                if shared_filenames.is_some_and(|filenames| filenames.contains(&file.filename)) {
+                    shared_bytes += file.size;
                 }
             }
 
-            let mut inherited_layers: Vec<StorageInheritedLayerInfo> =
-                Vec::with_capacity(state.inherited_layers.len());
+            let mut inherited_layers: Vec<StorageInheritedLayerInfo> = Vec::new();
             let mut inherited_layer_bytes = 0u64;
-            for layer in &state.inherited_layers {
-                let mut bytes = 0u64;
-                for level in &layer.segments.levels {
-                    for seg in level {
-                        bytes += seg.file_size();
+            if let Some(manifest) = view.manifest.as_ref() {
+                for layer in &manifest.inherited_layers {
+                    if layer.status == 2 {
+                        continue;
                     }
+                    let bytes = views_by_id
+                        .get(&layer.source_branch_id)
+                        .map(|source_view| {
+                            layer
+                                .entries
+                                .iter()
+                                .filter_map(|entry| {
+                                    source_view
+                                        .top_level_segments
+                                        .get(&entry.filename)
+                                        .map(|file| file.size)
+                                })
+                                .sum()
+                        })
+                        .unwrap_or(0);
+                    inherited_layer_bytes += bytes;
+                    inherited_layers.push(StorageInheritedLayerInfo {
+                        source_branch_id: layer.source_branch_id,
+                        fork_version: layer.fork_version,
+                        bytes,
+                        is_materialized: layer.status == 2,
+                    });
                 }
-                inherited_layer_bytes += bytes;
-                inherited_layers.push(StorageInheritedLayerInfo {
-                    source_branch_id: layer.source_branch_id,
-                    fork_version: layer.fork_version,
-                    bytes,
-                    is_materialized: matches!(
-                        layer.status,
-                        crate::segmented::LayerStatus::Materialized
-                    ),
-                });
             }
 
-            let (quarantined_bytes, quarantined_segment_count) =
-                self.branch_quarantine_bytes(branch_id).unwrap_or((0, 0));
+            let (quarantined_bytes, quarantined_segment_count) = quarantine_stats_from_state(
+                view.branch_id,
+                view.quarantine.as_ref().expect("quarantine loaded"),
+            )?;
+
+            if exclusive_bytes == 0
+                && shared_bytes == 0
+                && inherited_layer_bytes == 0
+                && quarantined_bytes == 0
+            {
+                continue;
+            }
 
             out.push(StorageBranchRetention {
-                branch_id,
+                branch_id: view.branch_id,
                 exclusive_bytes,
                 shared_bytes,
                 inherited_layer_bytes,
@@ -431,25 +609,6 @@ impl SegmentedStore {
         }
 
         Ok(out)
-    }
-
-    /// Read quarantine inventory for a single branch and compute the total
-    /// bytes + segment count. Returns `None` if there is no `segments_dir`
-    /// or no inventory file. Errors during I/O are swallowed — retention
-    /// reporting is best-effort.
-    fn branch_quarantine_bytes(&self, branch_id: BranchId) -> Option<(u64, usize)> {
-        let segments_dir = self.segments_dir.as_ref()?;
-        let branch_dir = segments_dir.join(crate::segmented::hex_encode_branch(&branch_id));
-        let manifest = read_quarantine_manifest(&branch_dir).ok().flatten()?;
-        let quarantine_dir = branch_dir.join(QUARANTINE_DIR);
-        let mut total = 0u64;
-        for entry in &manifest.entries {
-            let path = quarantine_dir.join(&entry.filename);
-            if let Ok(meta) = std::fs::metadata(&path) {
-                total += meta.len();
-            }
-        }
-        Some((total, manifest.entries.len()))
     }
 
     /// Reopen-time reconciliation of per-branch quarantine state.
@@ -466,35 +625,71 @@ impl SegmentedStore {
     /// implementation does not touch `self` because reconciliation is
     /// purely filesystem-driven.
     #[allow(clippy::unused_self)]
-    pub(crate) fn reconcile_quarantine_on_recovery(
-        &self,
-        segments_dir: &Path,
-        manifest_live_filenames: &HashMap<BranchId, HashSet<String>>,
-        faults: &mut Vec<RecoveryFault>,
-    ) {
-        let Ok(entries) = std::fs::read_dir(segments_dir) else {
-            return;
-        };
-
-        for dir_entry in entries.flatten() {
-            let branch_path = dir_entry.path();
-            if !branch_path.is_dir() {
-                continue;
-            }
-            let Some(dir_name) = dir_entry.file_name().to_str().map(String::from) else {
-                continue;
-            };
-            let Some(branch_id) = crate::segmented::hex_decode_branch(&dir_name) else {
-                continue;
-            };
-
+    pub(crate) fn reconcile_quarantine_on_recovery(&self, faults: &mut Vec<RecoveryFault>) {
+        let views = self.retention_branch_dir_views_for_recovery(faults);
+        let manifest_live_filenames = manifest_live_filenames_from_views(&views);
+        for view in &views {
             let live = manifest_live_filenames
-                .get(&branch_id)
+                .get(&view.branch_id)
                 .cloned()
                 .unwrap_or_default();
-            reconcile_single_branch(&branch_path, branch_id, &live, faults);
+            reconcile_single_branch(&view.branch_dir, view.branch_id, &live, faults);
         }
     }
+}
+
+fn sync_dir_for_quarantine(dir: &Path) -> StorageResult<()> {
+    let dir_fd =
+        std::fs::File::open(dir).map_err(|inner| StorageError::QuarantinePublishFailed {
+            dir: dir.to_path_buf(),
+            inner,
+        })?;
+    dir_fd
+        .sync_all()
+        .map_err(|inner| StorageError::QuarantinePublishFailed {
+            dir: dir.to_path_buf(),
+            inner,
+        })
+}
+
+fn load_branch_quarantine_state(
+    branch_dir: &Path,
+    branch_id: BranchId,
+) -> StorageResult<BranchQuarantineState> {
+    let quarantine_dir = branch_dir.join(QUARANTINE_DIR);
+    let files_on_disk: HashMap<String, u64> = if quarantine_dir.is_dir() {
+        let mut files = HashMap::new();
+        for entry in std::fs::read_dir(&quarantine_dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if !path.is_file() {
+                continue;
+            }
+            let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+                return Err(StorageError::QuarantineReconciliationFailed {
+                    branch_id,
+                    reason: "non-utf8 filename in __quarantine__".to_string(),
+                });
+            };
+            let size = entry.metadata()?.len();
+            files.insert(filename, size);
+        }
+        files
+    } else {
+        HashMap::new()
+    };
+
+    let manifest = read_quarantine_manifest(branch_dir).map_err(|inner| {
+        StorageError::QuarantineReconciliationFailed {
+            branch_id,
+            reason: format!("failed to read quarantine inventory: {inner}"),
+        }
+    })?;
+
+    Ok(BranchQuarantineState {
+        manifest,
+        files_on_disk,
+    })
 }
 
 fn reconcile_single_branch(
@@ -504,14 +699,16 @@ fn reconcile_single_branch(
     faults: &mut Vec<RecoveryFault>,
 ) {
     let quarantine_dir = branch_path.join(QUARANTINE_DIR);
-    let quarantine_dir_exists = quarantine_dir.is_dir();
-
-    let manifest = match read_quarantine_manifest(branch_path) {
-        Ok(m) => m,
+    let state = match load_branch_quarantine_state(branch_path, branch_id) {
+        Ok(state) => state,
+        Err(StorageError::QuarantineReconciliationFailed { reason, .. }) => {
+            faults.push(RecoveryFault::QuarantineInventoryMismatch { branch_id, reason });
+            return;
+        }
         Err(e) => {
             faults.push(RecoveryFault::QuarantineInventoryMismatch {
                 branch_id,
-                reason: format!("failed to read quarantine.manifest: {e}"),
+                reason: e.to_string(),
             });
             return;
         }
@@ -519,33 +716,19 @@ fn reconcile_single_branch(
 
     // Case: no inventory but __quarantine__/ holds files — pure mismatch,
     // prefer retention and degrade trust.
-    if manifest.is_none() {
-        if quarantine_dir_exists {
-            if let Ok(mut qentries) = std::fs::read_dir(&quarantine_dir) {
-                if qentries.any(|e| e.as_ref().is_ok_and(|e| e.path().is_file())) {
-                    faults.push(RecoveryFault::QuarantineInventoryMismatch {
-                        branch_id,
-                        reason: "__quarantine__/ contains files but no quarantine.manifest"
-                            .to_string(),
-                    });
-                }
-            }
+    if state.manifest.is_none() {
+        if !state.files_on_disk.is_empty() {
+            faults.push(RecoveryFault::QuarantineInventoryMismatch {
+                branch_id,
+                reason: "__quarantine__/ contains files but no quarantine.manifest".to_string(),
+            });
         }
         return;
     }
-    let manifest = manifest.unwrap();
+    let manifest = state.manifest.unwrap();
 
     // Collect on-disk quarantine filenames.
-    let mut on_disk: HashSet<String> = HashSet::new();
-    if let Ok(q_entries) = std::fs::read_dir(&quarantine_dir) {
-        for q in q_entries.flatten() {
-            if q.path().is_file() {
-                if let Some(name) = q.file_name().to_str() {
-                    on_disk.insert(name.to_string());
-                }
-            }
-        }
-    }
+    let on_disk: HashSet<String> = state.files_on_disk.keys().cloned().collect();
 
     let inventory_filenames: HashSet<String> = manifest
         .entries
@@ -620,4 +803,251 @@ fn reconcile_single_branch(
     // Silence unused warning in release builds with tracing disabled.
     let _ = Arc::<()>::default();
     let _: &PathBuf = &quarantine_dir;
+}
+
+impl SegmentedStore {
+    fn retention_branch_dir_views(
+        &self,
+        load_quarantine: bool,
+    ) -> StorageResult<Vec<RetentionBranchDirView>> {
+        let Some(segments_dir) = self.segments_dir.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let entries = match std::fs::read_dir(segments_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(StorageError::Io(e)),
+        };
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = entry.map_err(StorageError::Io)?;
+            let branch_dir = entry.path();
+            if !branch_dir.is_dir() {
+                continue;
+            }
+            let Some(branch_id) = entry
+                .file_name()
+                .to_str()
+                .and_then(crate::segmented::hex_decode_branch)
+            else {
+                continue;
+            };
+            out.push(scan_branch_dir_view(
+                &branch_dir,
+                branch_id,
+                load_quarantine,
+            )?);
+        }
+
+        Ok(out)
+    }
+
+    fn retention_branch_dir_views_for_recovery(
+        &self,
+        faults: &mut Vec<RecoveryFault>,
+    ) -> Vec<RetentionBranchDirView> {
+        let Some(segments_dir) = self.segments_dir.as_ref() else {
+            return Vec::new();
+        };
+        let entries = match std::fs::read_dir(segments_dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Vec::new(),
+            Err(e) => {
+                faults.push(RecoveryFault::Io(e));
+                return Vec::new();
+            }
+        };
+
+        let mut out = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    faults.push(RecoveryFault::Io(e));
+                    continue;
+                }
+            };
+            let branch_dir = entry.path();
+            if !branch_dir.is_dir() {
+                continue;
+            }
+            let Some(branch_id) = entry
+                .file_name()
+                .to_str()
+                .and_then(crate::segmented::hex_decode_branch)
+            else {
+                continue;
+            };
+            match scan_branch_dir_view(&branch_dir, branch_id, false) {
+                Ok(view) => out.push(view),
+                Err(StorageError::RecoveryFault(fault)) => faults.push(fault),
+                Err(StorageError::Io(e)) => faults.push(RecoveryFault::Io(e)),
+                Err(StorageError::QuarantineReconciliationFailed { branch_id, reason }) => {
+                    faults.push(RecoveryFault::QuarantineInventoryMismatch { branch_id, reason })
+                }
+                Err(other) => faults.push(RecoveryFault::Io(io::Error::other(other.to_string()))),
+            }
+        }
+
+        out
+    }
+}
+
+fn scan_branch_dir_view(
+    branch_dir: &Path,
+    branch_id: BranchId,
+    load_quarantine: bool,
+) -> StorageResult<RetentionBranchDirView> {
+    let manifest = match crate::manifest::read_manifest(branch_dir) {
+        Ok(manifest) => manifest,
+        Err(inner) => {
+            return Err(StorageError::RecoveryFault(
+                RecoveryFault::CorruptManifest { branch_id, inner },
+            ));
+        }
+    };
+
+    let mut top_level_segments = HashMap::new();
+    for entry in std::fs::read_dir(branch_dir).map_err(StorageError::Io)? {
+        let entry = entry.map_err(StorageError::Io)?;
+        let path = entry.path();
+        if !path.is_file() || path.extension().and_then(|x| x.to_str()) != Some("sst") {
+            continue;
+        }
+        let Some(filename) = entry.file_name().to_str().map(str::to_owned) else {
+            return Err(StorageError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("non-utf8 segment filename in {}", branch_dir.display()),
+            )));
+        };
+        let size = entry.metadata().map_err(StorageError::Io)?.len();
+        top_level_segments.insert(
+            filename.clone(),
+            RetentionTopLevelSegment { filename, size },
+        );
+    }
+
+    let quarantine = if load_quarantine {
+        Some(load_branch_quarantine_state(branch_dir, branch_id)?)
+    } else {
+        None
+    };
+
+    Ok(RetentionBranchDirView {
+        branch_id,
+        branch_dir: branch_dir.to_path_buf(),
+        manifest,
+        top_level_segments,
+        quarantine,
+    })
+}
+
+fn descendant_held_filenames_by_source(
+    views: &[RetentionBranchDirView],
+) -> HashMap<BranchId, HashSet<String>> {
+    let mut out: HashMap<BranchId, HashSet<String>> = HashMap::new();
+
+    for view in views {
+        let Some(manifest) = view.manifest.as_ref() else {
+            continue;
+        };
+        for layer in &manifest.inherited_layers {
+            if layer.status == 2 {
+                continue;
+            }
+            let entry = out.entry(layer.source_branch_id).or_default();
+            for manifest_entry in &layer.entries {
+                entry.insert(manifest_entry.filename.clone());
+            }
+        }
+    }
+
+    out
+}
+
+fn manifest_live_filenames_from_views(
+    views: &[RetentionBranchDirView],
+) -> HashMap<BranchId, HashSet<String>> {
+    let mut out: HashMap<BranchId, HashSet<String>> = HashMap::new();
+
+    for view in views {
+        let Some(manifest) = view.manifest.as_ref() else {
+            continue;
+        };
+
+        let own = out.entry(view.branch_id).or_default();
+        for entry in &manifest.entries {
+            own.insert(entry.filename.clone());
+        }
+
+        for layer in &manifest.inherited_layers {
+            if layer.status == 2 {
+                continue;
+            }
+            let source = out.entry(layer.source_branch_id).or_default();
+            for entry in &layer.entries {
+                source.insert(entry.filename.clone());
+            }
+        }
+    }
+
+    out
+}
+
+fn branches_with_legacy_no_manifest_fallback(health: &RecoveryHealth) -> HashSet<BranchId> {
+    let mut out = HashSet::new();
+    if let RecoveryHealth::Degraded { faults, .. } = health {
+        for fault in faults.iter() {
+            if let RecoveryFault::NoManifestFallbackUsed { branch_id, .. } = fault {
+                out.insert(*branch_id);
+            }
+        }
+    }
+    out
+}
+
+fn quarantine_stats_from_state(
+    branch_id: BranchId,
+    state: &BranchQuarantineState,
+) -> StorageResult<(u64, usize)> {
+    match &state.manifest {
+        None => {
+            if state.files_on_disk.is_empty() {
+                Ok((0, 0))
+            } else {
+                Err(StorageError::QuarantineReconciliationFailed {
+                    branch_id,
+                    reason: "files present in __quarantine__ with no inventory".to_string(),
+                })
+            }
+        }
+        Some(manifest) => {
+            let inventory_filenames: HashSet<String> = manifest
+                .entries
+                .iter()
+                .map(|entry| entry.filename.clone())
+                .collect();
+            let files_present: HashSet<String> = state.files_on_disk.keys().cloned().collect();
+            if inventory_filenames != files_present {
+                return Err(StorageError::QuarantineReconciliationFailed {
+                    branch_id,
+                    reason: "inventory does not match on-disk quarantine contents".to_string(),
+                });
+            }
+
+            let total = manifest
+                .entries
+                .iter()
+                .map(|entry| {
+                    state
+                        .files_on_disk
+                        .get(&entry.filename)
+                        .copied()
+                        .unwrap_or(0)
+                })
+                .sum();
+            Ok((total, manifest.entries.len()))
+        }
+    }
 }

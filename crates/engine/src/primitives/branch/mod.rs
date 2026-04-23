@@ -9,7 +9,8 @@ mod index;
 
 pub use handle::{BranchHandle, EventHandle, JsonHandle, KvHandle};
 pub(crate) use index::{
-    aliases_default_branch_sentinel, read_default_branch_marker, validate_reserved_branch_aliases,
-    write_default_branch_marker, BranchIndex,
+    aliases_default_branch_sentinel, default_branch_marker_key, read_default_branch_marker,
+    validate_reserved_branch_aliases, write_default_branch_marker, BranchIndex,
+    DeleteBranchCommitted, DeleteBranchCompletion, DeletePostCommitOptions,
 };
 pub use index::{resolve_branch_name, BranchMetadata, BranchStatus};

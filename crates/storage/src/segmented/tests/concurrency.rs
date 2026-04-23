@@ -297,7 +297,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount() {
         .unwrap();
 
     // Clear child1 → refcounts back to 0.
-    store.clear_branch(&child_branch());
+    store.clear_branch(&child_branch()).unwrap();
 
     // Now race: fork a new child (child2) + compact parent concurrently.
     // Without the deletion barrier, compaction can see refcount=0 and
@@ -391,7 +391,7 @@ fn test_issue_1682_segment_deletion_races_fork_refcount_concurrent() {
         store
             .fork_branch(&parent_branch(), &child_branch())
             .unwrap();
-        store.clear_branch(&child_branch());
+        store.clear_branch(&child_branch()).unwrap();
 
         // Race fork child2 + compact.
         let child2 = BranchId::from_bytes([40; 16]);

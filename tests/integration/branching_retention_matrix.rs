@@ -20,8 +20,10 @@
 
 #![cfg(not(miri))]
 
+use crate::common::branching::archive_branch_for_test;
 use crate::common::*;
 use std::sync::Arc;
+use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
 use strata_core::BranchId;
 use strata_engine::{ReclaimStatus, RetentionBlocker};
@@ -166,6 +168,38 @@ fn delete_after_fork_retains_parent_segments_for_child() {
     assert_eq!(
         kv.get(&resolve("feature"), "default", "k29").unwrap(),
         Some(Value::Int(29)),
+    );
+}
+
+#[test]
+fn delete_after_fork_reopen_does_not_resurrect_deleted_parent_storage() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..20 {
+        seed(&test_db.db, "main", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+    test_db.db.branches().fork("main", "feature").unwrap();
+
+    test_db.db.branches().delete("main").unwrap();
+    test_db
+        .db
+        .storage()
+        .gc_orphan_segments()
+        .expect("healthy; gc succeeds");
+
+    test_db.reopen();
+
+    let kv = KVStore::new(test_db.db.clone());
+    assert_eq!(
+        kv.get(&resolve("main"), "default", "k0").unwrap(),
+        None,
+        "deleted parent storage must not resurrect on reopen",
+    );
+    assert_eq!(
+        kv.get(&resolve("feature"), "default", "k0").unwrap(),
+        Some(Value::Int(0)),
+        "descendant inherited-layer visibility must survive reopen",
     );
 }
 
@@ -519,10 +553,17 @@ fn retention_report_attributes_bytes_to_live_branch_refs() {
     let main_entry = by_name.get("main").expect("main present in report");
     let feature_entry = by_name.get("feature").expect("feature present in report");
 
-    // Main has own bytes (shared, because feature inherits) + zero inherited.
+    // Main's bytes are shared because feature inherits them.
     assert!(
-        main_entry.shared_bytes > 0 || main_entry.exclusive_bytes > 0,
-        "main must report own-segment bytes",
+        main_entry.shared_bytes > 0,
+        "main must report shared retained bytes"
+    );
+    assert!(
+        main_entry
+            .blockers
+            .iter()
+            .any(|b| matches!(b, RetentionBlocker::DescendantHolds { .. })),
+        "main must report DescendantHolds when a live descendant still inherits its bytes",
     );
     assert_eq!(main_entry.inherited_layer_bytes, 0);
 
@@ -601,5 +642,133 @@ fn retention_report_canonical_blocker_points_at_live_descendant_after_parent_del
         feature_entry.inherited_layer_bytes > 0,
         "feature must account for inherited bytes; got {}",
         feature_entry.inherited_layer_bytes,
+    );
+
+    let orphan_main = report
+        .orphan_storage
+        .iter()
+        .find(|entry| entry.branch_id == main_id)
+        .expect("deleted parent storage directory must be reported as orphaned retention");
+    assert!(
+        orphan_main.bytes > 0,
+        "deleted parent orphan entry must account for retained bytes",
+    );
+    assert_eq!(
+        orphan_main.reason,
+        strata_engine::OrphanReason::DescendantInheritance,
+        "deleted parent bytes are retained by the live descendant, not fabricated as untracked storage",
+    );
+}
+
+// =============================================================================
+// Schedule extension: live-branch top-level orphan `.sst` files that are no
+// longer manifest-owned are cleanup debt, not branch-visible retained bytes.
+//
+// Pins the convergence contract's "manifest-derived truth" rule for
+// retention_report(): raw disk debris must not inflate exclusive/shared totals.
+// =============================================================================
+
+#[test]
+fn retention_report_ignores_live_branch_top_level_orphan_files() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..10 {
+        seed(&test_db.db, "main", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+
+    let before = test_db
+        .db
+        .retention_report()
+        .expect("baseline retention_report succeeds");
+    let before_main = before
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main present before orphan write");
+
+    let main_dir = branch_dir(&test_db.db, "main");
+    std::fs::write(main_dir.join("99999.sst"), vec![0u8; 4096]).unwrap();
+
+    let after = test_db
+        .db
+        .retention_report()
+        .expect("report should ignore live-branch orphan cleanup debt");
+    let after_main = after
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("main present after orphan write");
+
+    assert_eq!(
+        after_main.exclusive_bytes, before_main.exclusive_bytes,
+        "top-level orphan bytes must not inflate manifest-derived exclusive retention",
+    );
+    assert_eq!(
+        after_main.shared_bytes, before_main.shared_bytes,
+        "top-level orphan bytes must not inflate manifest-derived shared retention",
+    );
+}
+
+#[test]
+fn retention_report_includes_archived_branch_as_live_lifecycle() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("frozen").unwrap();
+    for i in 0..4 {
+        seed(&test_db.db, "frozen", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "frozen");
+    test_db.db.branches().fork("frozen", "child").unwrap();
+    let archived_ref = archive_branch_for_test(&test_db.db, "frozen");
+
+    let report = test_db
+        .db
+        .retention_report()
+        .expect("archived branch remains visible to retention_report");
+
+    let frozen = report
+        .branches
+        .iter()
+        .find(|entry| entry.name == "frozen")
+        .expect("archived branch must appear as a branch entry");
+    assert_eq!(frozen.branch, archived_ref);
+    assert_eq!(frozen.lifecycle, BranchLifecycleStatus::Archived);
+    assert!(
+        frozen.exclusive_bytes > 0 || frozen.shared_bytes > 0,
+        "archived branch should still account for retained bytes",
+    );
+    assert!(
+        !report
+            .orphan_storage
+            .iter()
+            .any(|entry| entry.branch_id == resolve("frozen")),
+        "archived branch storage must not be demoted to orphan storage",
+    );
+
+    let child = report
+        .branches
+        .iter()
+        .find(|entry| entry.name == "child")
+        .expect("child must appear in retention_report");
+    let blocker = child
+        .blockers
+        .iter()
+        .find_map(|blocker| match blocker {
+            RetentionBlocker::InheritedLayerRetention {
+                source_branch,
+                removable_by_materialization,
+                ..
+            } => Some((source_branch, removable_by_materialization)),
+            _ => None,
+        })
+        .expect("child must report an inherited-layer blocker against the archived source");
+    assert_eq!(
+        blocker.0.as_ref(),
+        Some(&archived_ref),
+        "archived source should still resolve to a live BranchRef in blocker attribution",
+    );
+    assert!(
+        !*blocker.1,
+        "archived source is still a live lifecycle; child blocker is not removable by materialization",
     );
 }

@@ -299,7 +299,8 @@ fn clear_branch_succeeds_under_degraded_recovery() {
     store.flush_oldest_frozen(&branch()).unwrap();
 
     // Simulate a degraded recovery state without actually corrupting
-    // anything — exercises the log-and-continue path inside clear_branch.
+    // anything — exercises the reclaim-refusal log-and-continue path inside
+    // clear_branch.
     store.set_recovery_health_for_test(RecoveryHealth::Degraded {
         faults: std::sync::Arc::from(vec![RecoveryFault::InheritedLayerLost {
             child: branch(),
@@ -310,7 +311,7 @@ fn clear_branch_succeeds_under_degraded_recovery() {
     });
 
     assert!(
-        store.clear_branch(&branch()),
+        store.clear_branch(&branch()).unwrap(),
         "clear_branch must succeed even when gc refuses under degraded recovery"
     );
     assert!(
@@ -368,7 +369,7 @@ fn clear_branch_under_degraded_recovery_preserves_skipped_branch_files() {
     assert!(reopened.branches.get(&skipped).is_none());
     assert!(reopened.branches.get(&cleared).is_some());
 
-    assert!(reopened.clear_branch(&cleared));
+    assert!(reopened.clear_branch(&cleared).unwrap());
     assert!(reopened.branches.get(&cleared).is_none());
     assert!(matches!(
         &*reopened.last_recovery_health(),

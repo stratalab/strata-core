@@ -128,7 +128,7 @@ fn compact_branch_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.compact_branch(&b, CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -165,7 +165,7 @@ fn compact_l0_to_l1_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.compact_l0_to_l1(&b, CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -194,7 +194,7 @@ fn compact_level_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.compact_level(&b, 0, CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -228,7 +228,7 @@ fn compact_level_trivial_move_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.compact_level(&b, 1, CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -256,7 +256,7 @@ fn compact_tier_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.compact_tier(&b, &[0, 1], CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -310,7 +310,7 @@ fn materialize_layer_does_not_resurrect_cleared_branch() {
     let handle = std::thread::spawn(move || s.materialize_layer(&child, 0));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&child));
+    assert!(store.clear_branch(&child).unwrap());
     release(&pause);
 
     let result = handle.join().unwrap();
@@ -415,7 +415,7 @@ fn clear_branch_interleaved_with_compaction_reopens_clean() {
     let handle = std::thread::spawn(move || s.compact_branch(&b_clone, CommitVersion(0)));
 
     wait_until_entered(&pause);
-    assert!(store.clear_branch(&b));
+    assert!(store.clear_branch(&b).unwrap());
     release(&pause);
 
     let race_result = handle.join().unwrap();

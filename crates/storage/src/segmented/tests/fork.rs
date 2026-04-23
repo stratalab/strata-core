@@ -1144,7 +1144,7 @@ fn fork_refcounts_on_clear() {
     }
 
     // Clear child — refcounts should be decremented
-    store.clear_branch(&child_branch());
+    store.clear_branch(&child_branch()).unwrap();
 
     for &id in &seg_ids {
         assert!(

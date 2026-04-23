@@ -963,7 +963,7 @@ impl SegmentedStore {
     /// — subsequent recovery calls replace the stored value but do not
     /// invalidate this handle.
     ///
-    /// ## B5.1 retention contract
+    /// ## B5 retention contract
     ///
     /// Surfaces the §"Recovery-health contract" classification of
     /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
@@ -1417,8 +1417,22 @@ impl SegmentedStore {
     /// (`BarrierKind::RuntimeAccelerator`); the durable proof remains
     /// the descendant's manifest entries
     /// (`BarrierKind::PhysicalRetention`).
-    pub fn clear_branch(&self, branch_id: &BranchId) -> bool {
+    pub fn clear_branch(&self, branch_id: &BranchId) -> StorageResult<bool> {
+        let branch_dir_to_cleanup = self.segments_dir.as_ref().map(|segments_dir| {
+            let branch_hex = hex_encode_branch(branch_id);
+            segments_dir.join(&branch_hex)
+        });
         if let Some((_, branch)) = self.branches.remove(branch_id) {
+            if let Some(branch_dir) = branch_dir_to_cleanup.as_ref() {
+                if branch_dir.exists() {
+                    // Publish the empty-manifest barrier before any
+                    // storage-local mutation. If this fails, callers see a
+                    // hard error rather than a partially-cleared branch that
+                    // can resurrect on reopen.
+                    crate::manifest::write_manifest(branch_dir, &[], &[])?;
+                }
+            }
+
             // 1. Route the branch's own segments through the B5.2 reclaim
             //    protocol. Each segment that is no longer referenced by a
             //    descendant inherited layer is quarantined (rename +
@@ -1428,9 +1442,10 @@ impl SegmentedStore {
             let ver = branch.version.load();
             for level in &ver.levels {
                 for seg in level {
-                    if let Err(e) =
-                        self.quarantine_segment_if_unreferenced(seg.file_path(), seg.file_id())
-                    {
+                    if let Err(e) = self.quarantine_segment_if_unreferenced_for_cleared_branch(
+                        seg.file_path(),
+                        seg.file_id(),
+                    ) {
                         tracing::warn!(
                             target: "strata::storage::gc",
                             branch_id = %hex_encode_branch(branch_id),
@@ -1454,62 +1469,112 @@ impl SegmentedStore {
                 }
             }
 
-            // 3. Remove manifest file and branch directory from disk.
+            // 3. Best-effort branch-dir cleanup.
             //
             // In-flight compaction for this branch may still be writing
-            // .tmp/.sst files to this directory even though we've already
-            // removed the branch from `self.branches`. gc_orphan_segments
-            // (step 4) will pick up any .sst files we missed, so we retry
-            // remove_dir AFTER gc runs. remove_dir (not remove_dir_all)
-            // keeps the original safety guarantee: if we somehow missed
-            // tracking a file, we leave it in place rather than nuking it.
-            let branch_dir_to_remove = self.segments_dir.as_ref().map(|segments_dir| {
-                let branch_hex = hex_encode_branch(branch_id);
-                let branch_dir = segments_dir.join(&branch_hex);
-                let _ = std::fs::remove_file(branch_dir.join("segments.manifest"));
-                let _ = std::fs::remove_dir(&branch_dir); // first attempt
-                branch_dir
-            });
-
-            // 4. Garbage-collect orphan segment files (#1705).
-            // Refcount decrements above may have released the last reference to
-            // segments whose parent already compacted them away. GC deletes
-            // any .sst on disk not referenced by a live branch or the refcount
-            // registry. A degraded recovery (SE3) makes GC refuse; branch
-            // clearing still succeeds, but the retention debt accumulates
-            // until a safe reset or fresh reopen re-establishes GC trust.
-            if let Err(e) = self.gc_orphan_segments() {
-                tracing::warn!(
-                    target: "strata::storage::gc",
-                    branch_id = %hex_encode_branch(branch_id),
-                    op = "clear_branch",
-                    error = %e,
-                    "gc_orphan_segments refused; retention debt accumulated",
-                );
+            // `.tmp` / `.sst` files to this directory even though we've
+            // already removed the branch from `self.branches`. `clear_branch`
+            // is post-commit cleanup only: it may quarantine candidates and
+            // leave cleanup debt behind, but it must not synchronously drain
+            // global orphan GC or Stage-5 purge. `remove_dir` (not
+            // `remove_dir_all`) preserves the original safety guarantee: if
+            // we somehow missed tracking a file, we leak it rather than
+            // deleting it.
+            if let Some(branch_dir) = branch_dir_to_cleanup.as_deref() {
+                self.finish_cleared_branch_dir(branch_id, branch_dir, false)?;
             }
 
-            // 5. Retry directory removal after gc — gc may have deleted
-            // .sst files from in-flight compaction that landed between
-            // our step 1 and step 3. Still uses remove_dir (not recursive)
-            // to preserve the safety guarantee: if unknown files remain
-            // we leave them and log, rather than silently deleting.
-            if let Some(branch_dir) = branch_dir_to_remove {
+            Ok(true)
+        } else {
+            if let Some(branch_dir) = branch_dir_to_cleanup.as_deref() {
                 if branch_dir.exists() {
-                    if let Err(e) = std::fs::remove_dir(&branch_dir) {
-                        tracing::warn!(
-                            target: "strata::branch",
-                            branch_dir = %branch_dir.display(),
-                            error = %e,
-                            "Branch directory not empty after clear_branch; leaving leftover files in place",
-                        );
-                    }
+                    self.finish_cleared_branch_dir(branch_id, branch_dir, true)?;
+                    return Ok(true);
                 }
             }
 
-            true
-        } else {
-            false
+            Ok(false)
         }
+    }
+
+    fn finish_cleared_branch_dir(
+        &self,
+        branch_id: &BranchId,
+        branch_dir: &std::path::Path,
+        republish_barrier_if_needed: bool,
+    ) -> StorageResult<()> {
+        if !branch_dir.exists() {
+            return Ok(());
+        }
+
+        let mut top_level_ssts: Vec<std::path::PathBuf> = std::fs::read_dir(branch_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| path.extension().and_then(|x| x.to_str()) == Some("sst"))
+            .collect();
+
+        if republish_barrier_if_needed && !top_level_ssts.is_empty() {
+            // Retry path: the branch is already absent from memory but
+            // top-level files remain on disk. Re-publish the empty-manifest
+            // barrier so the directory stays non-live across reopen while we
+            // continue branch-local cleanup.
+            crate::manifest::write_manifest(branch_dir, &[], &[])?;
+        }
+
+        for seg_path in &top_level_ssts {
+            let file_id = crate::block_cache::file_path_hash(seg_path);
+            if let Err(e) =
+                self.quarantine_segment_if_unreferenced_for_cleared_branch(seg_path, file_id)
+            {
+                tracing::warn!(
+                    target: "strata::storage::gc",
+                    branch_id = %hex_encode_branch(branch_id),
+                    segment = %seg_path.display(),
+                    error = %e,
+                    "clear_branch retry: reclaim refused; retention debt accumulated"
+                );
+            }
+        }
+
+        top_level_ssts = std::fs::read_dir(branch_dir)?
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .filter(|path| path.extension().and_then(|x| x.to_str()) == Some("sst"))
+            .collect();
+
+        // Any directory that remains on disk is already protected from
+        // stale-manifest or no-manifest fallback on reopen. If no top-level
+        // `.sst` files remain we can best-effort remove the empty manifest
+        // itself before retrying `remove_dir`; otherwise we intentionally keep
+        // the empty manifest so deleted-parent orphan storage stays non-live
+        // across reopen. `remove_dir` stays non-recursive to preserve the
+        // original safety guarantee: unknown files are leaked, not deleted.
+        if top_level_ssts.is_empty() {
+            match std::fs::remove_file(branch_dir.join("segments.manifest")) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    tracing::warn!(
+                        target: "strata::branch",
+                        branch_dir = %branch_dir.display(),
+                        error = %e,
+                        "Failed to remove empty manifest after branch clear; leaving directory in place",
+                    );
+                }
+            }
+        }
+        if let Err(e) = std::fs::remove_dir(branch_dir) {
+            tracing::warn!(
+                target: "strata::branch",
+                branch_dir = %branch_dir.display(),
+                error = %e,
+                "Branch directory not empty after clear_branch; leaving leftover files in place",
+            );
+        }
+
+        Ok(())
     }
 
     /// Garbage-collect orphaned segment files (#1705).
@@ -1538,18 +1603,14 @@ impl SegmentedStore {
     ///
     /// Implements the §"Recovery-health contract" gate of
     /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
-    /// Today this function still performs an immediate-unlink reclaim
-    /// using a process-local live-set check built from `self.branches`
-    /// plus inherited layers. That is a storage-local approximation of
-    /// physical retention, not the future B5.2 Stage-2 manifest proof.
-    /// The B5.2 cutover strengthens this path to walk recovery-trusted
-    /// manifests and route deletion through the full quarantine
-    /// protocol with persisted quarantine inventory. The degraded-
-    /// recovery refusal already in place satisfies Invariants 2 and 5:
-    /// space leaks are acceptable, false reclaim is not. Barrier role:
-    /// `BarrierKind::RecoveryHealthGate` (the refusal) + current
-    /// process-local approximation of `BarrierKind::PhysicalRetention`
-    /// (the live-set check).
+    /// This path now runs the B5.2 quarantine protocol: purge any
+    /// durably published quarantine inventory first, then nominate
+    /// top-level orphan `.sst` files from the runtime live-set scan and
+    /// route each candidate through Stage-2 manifest proof plus
+    /// quarantine. The degraded-recovery refusal satisfies Invariants 2
+    /// and 5: space leaks are acceptable, false reclaim is not. Barrier
+    /// role: `BarrierKind::RecoveryHealthGate` (the refusal) +
+    /// manifest-derived `BarrierKind::PhysicalRetention` (the proof).
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
         // Gate — the B5.2 quarantine protocol uses this same gate before
         // any filesystem mutation. Telemetry-class degradation does not
@@ -3769,11 +3830,10 @@ impl SegmentedStore {
                 }
             }
 
-            // Skip branches with no segments and no inherited layers
             let has_inherited = manifest
                 .as_ref()
                 .is_some_and(|m| !m.inherited_layers.is_empty());
-            if branch_segments.is_empty() && !has_inherited {
+            if manifest.is_none() && branch_segments.is_empty() && !has_inherited {
                 continue;
             }
 
@@ -3846,6 +3906,17 @@ impl SegmentedStore {
                 });
             }
 
+            let own_segments_loaded = level_segs.iter().map(|l| l.len()).sum::<usize>();
+            // A branch directory with an explicit manifest but zero own
+            // segments loaded is retained orphan storage, not a live branch.
+            // This is the deleted-parent-with-live-descendants shape: the
+            // empty manifest suppresses legacy no-manifest fallback while
+            // descendant inherited layers keep the top-level `.sst` files
+            // reachable.
+            if own_segments_loaded == 0 && !has_inherited {
+                continue;
+            }
+
             // L0: sorted by commit_max descending (newest first)
             level_segs[0].sort_by(|a, b| b.commit_range().1.cmp(&a.commit_range().1));
             // L1+: sorted by key_range min ascending
@@ -3858,7 +3929,6 @@ impl SegmentedStore {
                 .entry(branch_id)
                 .or_insert_with(BranchState::new);
 
-            let own_segments_loaded = level_segs.iter().map(|l| l.len()).sum::<usize>();
             segments_loaded += own_segments_loaded;
             if own_segments_loaded > 0 {
                 recovered_branches.insert(branch_id);
@@ -3928,36 +3998,11 @@ impl SegmentedStore {
         segments_loaded += inherited_stats.segments_loaded;
         let branches_recovered = recovered_branches.len();
 
-        // B5.2 — quarantine reconciliation. Build a per-branch-dir set
-        // of filenames still referenced by a recovery-trusted manifest
-        // (own-segment + inherited-layer), then reconcile against each
-        // branch's `quarantine.manifest`. Disagreement degrades recovery
-        // health per §"Quarantine reconciliation" (prefer retention).
-        let mut manifest_live_filenames: HashMap<BranchId, HashSet<String>> = HashMap::new();
-        for branch in self.branches.iter() {
-            let branch_id = *branch.key();
-            let ver = branch.version.load();
-            let entry = manifest_live_filenames.entry(branch_id).or_default();
-            for level in &ver.levels {
-                for seg in level {
-                    if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
-                        entry.insert(name.to_string());
-                    }
-                }
-            }
-            for layer in &branch.inherited_layers {
-                let source = layer.source_branch_id;
-                let source_entry = manifest_live_filenames.entry(source).or_default();
-                for level in &layer.segments.levels {
-                    for seg in level {
-                        if let Some(name) = seg.file_path().file_name().and_then(|n| n.to_str()) {
-                            source_entry.insert(name.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        self.reconcile_quarantine_on_recovery(segments_dir, &manifest_live_filenames, &mut faults);
+        // B5.2 — quarantine reconciliation. Reuse the same branch-dir
+        // ledger shape that Stage-2 manifest proof and retention reporting
+        // consume rather than reconstructing a second live-filename map
+        // from self.branches.
+        self.reconcile_quarantine_on_recovery(&mut faults);
 
         let health = RecoveryHealth::from_faults(faults);
         self.last_recovery_health.store(Arc::new(health.clone()));

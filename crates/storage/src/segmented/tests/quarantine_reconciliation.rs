@@ -181,9 +181,11 @@ fn reopen_after_full_reclaim_leaves_no_quarantine_artifacts() {
     store.flush_oldest_frozen(&branch()).unwrap();
 
     // clear_branch drives the branch's own segments through the
-    // quarantine protocol and then calls gc_orphan_segments to drain
-    // them via Stage 5 in the same call.
-    store.clear_branch(&branch());
+    // quarantine protocol; the explicit GC call below drains Stage 5.
+    store.clear_branch(&branch()).unwrap();
+    store
+        .gc_orphan_segments()
+        .expect("healthy recovery; explicit GC should drain quarantine");
 
     let b_dir = branch_dir_for(dir.path(), branch());
     assert!(!b_dir.join(QUARANTINE_FILENAME).exists());
@@ -196,6 +198,124 @@ fn reopen_after_full_reclaim_leaves_no_quarantine_artifacts() {
     assert!(matches!(outcome.health, RecoveryHealth::Healthy));
     assert!(!b_dir.join(QUARANTINE_FILENAME).exists());
     assert!(!b_dir.join(QUARANTINE_DIR).exists());
+}
+
+/// Retrying `clear_branch()` on a branch dir that only has quarantine debt
+/// must not recreate `segments.manifest`; the retry should remain a pure
+/// cleanup pass for on-disk debt after the branch is already absent.
+#[test]
+fn clear_branch_retry_on_quarantine_only_dir_does_not_recreate_manifest() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let b_dir = branch_dir_for(dir.path(), branch());
+    store.clear_branch(&branch()).unwrap();
+
+    assert!(
+        b_dir.join(QUARANTINE_FILENAME).exists(),
+        "first clear should leave quarantine inventory behind"
+    );
+    assert!(
+        !b_dir.join("segments.manifest").exists(),
+        "quarantine-only branch dir should not retain an empty manifest"
+    );
+
+    assert!(
+        store.clear_branch(&branch()).unwrap(),
+        "retry should keep cleaning an on-disk debt dir even after the branch is absent"
+    );
+    assert!(
+        b_dir.join(QUARANTINE_FILENAME).exists(),
+        "retry should not discard quarantine debt before GC drains it"
+    );
+    assert!(
+        !b_dir.join("segments.manifest").exists(),
+        "retry must not recreate segments.manifest for a quarantine-only dir"
+    );
+}
+
+/// After Stage-5 drains the quarantine inventory, a retry of `clear_branch()`
+/// should converge the leftover empty branch dir instead of returning false
+/// and recreating empty-manifest state.
+#[test]
+fn clear_branch_retry_removes_empty_leftover_dir_after_gc() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let b_dir = branch_dir_for(dir.path(), branch());
+    store.clear_branch(&branch()).unwrap();
+    store
+        .gc_orphan_segments()
+        .expect("healthy recovery; explicit GC should drain quarantine");
+
+    assert!(
+        b_dir.exists(),
+        "GC drains quarantine state but may still leave an empty branch dir behind"
+    );
+    assert!(
+        std::fs::read_dir(&b_dir).unwrap().next().is_none(),
+        "setup expects only empty-dir cleanup debt to remain"
+    );
+
+    assert!(
+        store.clear_branch(&branch()).unwrap(),
+        "retry should converge the empty leftover dir"
+    );
+    assert!(
+        !b_dir.exists(),
+        "retry should remove the empty leftover dir once cleanup debt is gone"
+    );
+    assert!(
+        !store.clear_branch(&branch()).unwrap(),
+        "once both branch state and leftover dir are gone, clear_branch should report false"
+    );
+}
+
+/// Top-level `.sst` files that are no longer listed in the branch's own
+/// manifest and are not held by any descendant inherited layer are cleanup
+/// debt, not manifest-reachable retention. The storage snapshot must not count
+/// them into `exclusive_bytes` / `shared_bytes`.
+#[test]
+fn retention_snapshot_ignores_live_branch_top_level_orphan_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let before = store
+        .retention_snapshot()
+        .expect("baseline snapshot succeeds");
+    let before_entry = before
+        .iter()
+        .find(|entry| entry.branch_id == branch())
+        .expect("live branch must appear in retention snapshot");
+
+    let b_dir = branch_dir_for(dir.path(), branch());
+    std::fs::write(b_dir.join("99999.sst"), vec![0u8; 4096]).unwrap();
+
+    let after = store
+        .retention_snapshot()
+        .expect("snapshot with live-branch orphan succeeds");
+    let after_entry = after
+        .iter()
+        .find(|entry| entry.branch_id == branch())
+        .expect("live branch must still appear in retention snapshot");
+
+    assert_eq!(
+        after_entry.exclusive_bytes, before_entry.exclusive_bytes,
+        "non-manifest top-level orphan bytes must not inflate exclusive retention",
+    );
+    assert_eq!(
+        after_entry.shared_bytes, before_entry.shared_bytes,
+        "non-manifest top-level orphan bytes must not inflate shared retention",
+    );
 }
 
 /// Accelerator disagreement — the runtime ref registry says a file is
@@ -239,6 +359,162 @@ fn accelerator_disagreement_blocks_reclaim() {
         victim_path.exists(),
         "victim file must remain on disk when accelerator disagrees with reclaim plan",
     );
+}
+
+/// The runtime accelerator is only candidate selection. If it says
+/// "zero refs" but a recovery-trusted inherited-layer manifest still
+/// lists the segment, Stage 2 manifest proof must win and refuse
+/// quarantine.
+#[test]
+fn manifest_proof_beats_false_negative_runtime_refcount() {
+    let (_dir, store) = setup_parent_with_segments(&[("k", 1, 1)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    let (victim_id, victim_path) = {
+        let parent = store.branches.get(&parent_branch()).unwrap();
+        let ver = parent.version.load();
+        let seg = ver.levels[0]
+            .first()
+            .cloned()
+            .expect("setup produced at least one parent segment");
+        (seg.file_id(), seg.file_path().to_path_buf())
+    };
+
+    // Child inherited-layer attach increments the runtime refcount. Force a
+    // false-negative accelerator state; manifest proof must still refuse.
+    store.ref_registry.decrement(victim_id);
+
+    let snapshot = store
+        .retention_snapshot()
+        .expect("storage-local retention snapshot must be derivable from the same manifests");
+    let parent_entry = snapshot
+        .iter()
+        .find(|entry| entry.branch_id == parent_branch())
+        .expect("parent branch must appear in retention snapshot");
+    let child_entry = snapshot
+        .iter()
+        .find(|entry| entry.branch_id == child_branch())
+        .expect("child branch must appear in retention snapshot");
+    assert!(
+        parent_entry.shared_bytes > 0,
+        "shared-byte classification must come from inherited-layer manifests, not the runtime accelerator",
+    );
+    assert_eq!(
+        parent_entry.exclusive_bytes, 0,
+        "all parent bytes are still held by the child inherited layer in this setup",
+    );
+    assert!(
+        parent_entry.exclusive_bytes + parent_entry.shared_bytes > 0,
+        "the parent's retained bytes must still appear in the snapshot even when the accelerator lies",
+    );
+    assert!(
+        child_entry.inherited_layer_bytes > 0,
+        "the child's inherited-layer bytes must be derived from the same manifest ledger",
+    );
+
+    match store.quarantine_segment_if_unreferenced(&victim_path, victim_id) {
+        Err(StorageError::ReclaimRefusedManifestProof { segment_id }) => {
+            assert_eq!(segment_id, victim_id);
+        }
+        other => panic!("expected ReclaimRefusedManifestProof; got {other:?}"),
+    }
+    assert!(
+        victim_path.exists(),
+        "manifest-protected segment must remain on disk when Stage 2 refuses reclaim",
+    );
+}
+
+/// A persisted `status = Materialized` inherited layer does not retain source
+/// bytes. Retention reporting and shared/exclusive classification must follow
+/// the same rule as normal read paths, which skip materialized layers.
+#[test]
+fn materialized_inherited_layer_does_not_retain_source_bytes() {
+    let (dir, store) = setup_parent_with_segments(&[("k", 1, 1)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    store.write_branch_manifest(&parent_branch()).unwrap();
+    store.write_branch_manifest(&child_branch()).unwrap();
+
+    let child_dir = branch_dir_for(dir.path(), child_branch());
+    let mut child_manifest = crate::manifest::read_manifest(&child_dir)
+        .unwrap()
+        .expect("child manifest must exist");
+    assert_eq!(child_manifest.inherited_layers.len(), 1);
+    child_manifest.inherited_layers[0].status = 2; // Materialized
+    crate::manifest::write_manifest(
+        &child_dir,
+        &child_manifest.entries,
+        &child_manifest.inherited_layers,
+    )
+    .unwrap();
+
+    let snapshot = store
+        .retention_snapshot()
+        .expect("retention snapshot should follow persisted manifest state");
+    let parent_entry = snapshot
+        .iter()
+        .find(|entry| entry.branch_id == parent_branch())
+        .expect("parent branch must still report own bytes");
+
+    assert!(
+        parent_entry.exclusive_bytes > 0,
+        "parent bytes should be exclusive once the child manifest marks the layer materialized",
+    );
+    assert_eq!(
+        parent_entry.shared_bytes, 0,
+        "materialized layers must not keep source bytes in shared retention",
+    );
+    assert!(
+        snapshot
+            .iter()
+            .all(|entry| entry.branch_id != child_branch()),
+        "child should not report inherited retention from a materialized layer",
+    );
+}
+
+/// If deleted-parent orphan storage still exists after clear and the empty
+/// manifest publish fails, `clear_branch()` must surface the failure instead
+/// of silently reporting success. Otherwise reopen can fall back to the
+/// legacy no-manifest path and resurrect the deleted parent.
+#[test]
+fn clear_branch_refuses_silent_success_when_empty_manifest_publish_fails() {
+    crate::test_hooks::clear_manifest_dir_fsync_failure();
+
+    let (_dir, store) = setup_parent_with_segments(&[("k", 1, 1)]);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+
+    crate::test_hooks::inject_manifest_dir_fsync_failure(std::io::ErrorKind::Other);
+    let err = store
+        .clear_branch(&parent_branch())
+        .expect_err("delete must not report success when the empty manifest publish fails");
+    assert!(
+        matches!(err, StorageError::DirFsync { .. }),
+        "expected empty-manifest durable-publish failure, got {err:?}",
+    );
+
+    let parent_dir = branch_dir_for(store.segments_dir().unwrap(), parent_branch());
+    let has_top_level_sst = std::fs::read_dir(&parent_dir)
+        .unwrap()
+        .flatten()
+        .any(|entry| {
+            entry.path().is_file()
+                && entry.path().extension().and_then(|x| x.to_str()) == Some("sst")
+        });
+    assert!(
+        has_top_level_sst,
+        "setup must leave descendant-pinned top-level parent segments in place",
+    );
+    assert!(
+        parent_dir.join("segments.manifest").exists(),
+        "clear_branch must not delete the old manifest before the empty-manifest barrier is durably published",
+    );
+
+    crate::test_hooks::clear_manifest_dir_fsync_failure();
 }
 
 /// Concurrent quarantine publish vs. purge must be serialized by the

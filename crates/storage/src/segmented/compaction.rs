@@ -99,7 +99,8 @@ impl SegmentedStore {
     /// Route a segment file through the B5.2 reclaim protocol.
     ///
     /// Calls [`SegmentedStore::quarantine_segment_if_unreferenced`] which
-    /// performs the Stage-2 manifest-proof (runtime-accelerator check),
+    /// performs Stage-2 manifest proof (runtime candidate screen followed
+    /// by an on-disk manifest walk),
     /// the Stage-3 rename into `<branch_dir>/__quarantine__/`, and the
     /// Stage-4 `quarantine.manifest` publish — all under the B5 retention
     /// contract's `BarrierKind::RecoveryHealthGate`. Final purge
@@ -344,7 +345,7 @@ impl SegmentedStore {
         self.write_branch_manifest(branch_id)?;
 
         // Old segment files become reclaim candidates after manifest publish.
-        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
+        // Reclaim now routes through Stage-2 manifest proof plus quarantine.
         for seg in &old_segments {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -510,7 +511,7 @@ impl SegmentedStore {
         self.write_branch_manifest(branch_id)?;
 
         // Old segment files become reclaim candidates after manifest publish.
-        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
+        // Reclaim now routes through Stage-2 manifest proof plus quarantine.
         for seg in &selected_segments {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -749,7 +750,7 @@ impl SegmentedStore {
         self.write_branch_manifest(branch_id)?;
 
         // Old segment files become reclaim candidates after manifest publish.
-        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
+        // Reclaim now routes through Stage-2 manifest proof plus quarantine.
         for seg in &l0_segs {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -1090,7 +1091,7 @@ impl SegmentedStore {
         self.write_branch_manifest(branch_id)?;
 
         // Old segment files become reclaim candidates after manifest publish.
-        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
+        // Reclaim now routes through Stage-2 manifest proof plus quarantine.
         for seg in &input_segs {
             self.delete_segment_if_unreferenced(seg);
         }

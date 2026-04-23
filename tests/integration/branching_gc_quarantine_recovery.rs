@@ -280,6 +280,112 @@ fn crash_with_orphan_quarantine_dir_and_no_inventory_degrades_reopen() {
     );
 }
 
+#[test]
+fn retention_report_refuses_when_quarantine_inventory_is_unreadable_in_session() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..4 {
+        seed(&test_db.db, "main", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+
+    let main_dir = branch_dir(&test_db.db, "main");
+    std::fs::write(
+        main_dir.join(strata_storage::QUARANTINE_FILENAME),
+        b"corrupt",
+    )
+    .unwrap();
+
+    let err = test_db
+        .db
+        .retention_report()
+        .expect_err("unreadable quarantine inventory must refuse retention_report");
+    assert!(
+        matches!(
+            err,
+            strata_core::StrataError::RetentionReportUnavailable { .. }
+        ),
+        "retention_report must fail closed on unreadable quarantine inventory; got {err:?}",
+    );
+}
+
+#[test]
+fn retention_report_refuses_when_manifest_truth_is_unreadable_in_session() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..4 {
+        seed(&test_db.db, "main", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+
+    let main_dir = branch_dir(&test_db.db, "main");
+    let manifest_path = main_dir.join("segments.manifest");
+    let mut bytes = std::fs::read(&manifest_path).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(&manifest_path, &bytes).unwrap();
+
+    let err = test_db
+        .db
+        .retention_report()
+        .expect_err("corrupt manifest truth must refuse retention_report");
+    assert!(
+        matches!(
+            err,
+            strata_core::StrataError::RetentionReportUnavailable { .. }
+        ),
+        "retention_report must fail closed on unreadable manifest truth; got {err:?}",
+    );
+}
+
+#[test]
+fn retention_report_accounts_for_recovery_admitted_no_manifest_fallback() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("legacy").unwrap();
+    for i in 0..6 {
+        seed(&test_db.db, "legacy", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "legacy");
+
+    let legacy_dir = branch_dir(&test_db.db, "legacy");
+    std::fs::remove_file(legacy_dir.join("segments.manifest")).unwrap();
+
+    test_db.reopen_allowing_policy_downgrade();
+
+    assert!(
+        matches!(
+            test_db.db.recovery_health(),
+            strata_storage::RecoveryHealth::Degraded {
+                class: strata_storage::DegradationClass::PolicyDowngrade,
+                ..
+            }
+        ),
+        "missing manifest fallback must reopen as PolicyDowngrade",
+    );
+
+    let report = test_db
+        .db
+        .retention_report()
+        .expect("recovery-admitted no-manifest fallback must still produce retention attribution");
+    assert!(
+        matches!(
+            report.reclaim_status,
+            strata_engine::ReclaimStatus::BlockedDegradedRecovery { ref class }
+                if class == "PolicyDowngrade"
+        ),
+        "legacy fallback keeps reclaim blocked but attribution available",
+    );
+    let legacy = report
+        .branches
+        .iter()
+        .find(|entry| entry.name == "legacy")
+        .expect("fallback branch must appear in retention_report");
+    assert!(
+        legacy.exclusive_bytes > 0 || legacy.shared_bytes > 0,
+        "fallback branch must still report retained own bytes",
+    );
+}
+
 // =============================================================================
 // Crash boundary: normal quarantine→purge cycle completes, reopen is a
 // no-op. Pins idempotency / repeat-reopen.

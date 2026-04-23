@@ -248,9 +248,9 @@ fn branch_ids_and_clear() {
     let store = SegmentedStore::new();
     seed(&store, kv_key("k"), Value::Int(1), 1);
     assert_eq!(store.branch_ids().len(), 1);
-    assert!(store.clear_branch(&branch()));
+    assert!(store.clear_branch(&branch()).unwrap());
     assert!(store.branch_ids().is_empty());
-    assert!(!store.clear_branch(&branch())); // already cleared
+    assert!(!store.clear_branch(&branch()).unwrap()); // already cleared
 }
 
 #[test]

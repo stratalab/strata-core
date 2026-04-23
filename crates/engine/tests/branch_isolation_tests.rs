@@ -366,25 +366,70 @@ fn test_issue_1702_delete_branch_cleans_up_segment_files() {
     // Logical data should be gone.
     assert!(kv.get(&branch_id, "default", "key0").unwrap().is_none());
 
-    // Storage-layer files should ALSO be gone.
-    let sst_after: Vec<_> = std::fs::read_dir(&branch_dir)
+    // B5.2 two-phase delete: the logical delete commits and the branch's own
+    // segments are quarantined via Stage-3 rename into `__quarantine__/`, but
+    // Stage-5 final purge is left to explicit GC / reopen reconciliation.
+    // The top-level branch directory therefore has no `.sst` files
+    // immediately after `delete()` even though `__quarantine__/` still holds
+    // the inventory + renamed files as retention debt.
+    let sst_after_delete: Vec<_> = std::fs::read_dir(&branch_dir)
         .into_iter()
         .flatten()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+        .filter(|e| {
+            let path = e.path();
+            path.is_file() && path.extension().is_some_and(|ext| ext == "sst")
+        })
         .collect();
     assert!(
-        sst_after.is_empty(),
-        "Expected all .sst files to be cleaned up after branch delete, \
-         but found {} files: {:?}",
-        sst_after.len(),
-        sst_after.iter().map(|e| e.path()).collect::<Vec<_>>(),
+        sst_after_delete.is_empty(),
+        "Expected no top-level `.sst` files after branch delete (Stage-3 moved them into __quarantine__), \
+         found {} files: {:?}",
+        sst_after_delete.len(),
+        sst_after_delete.iter().map(|e| e.path()).collect::<Vec<_>>(),
     );
 
-    // Branch directory should also be removed.
+    // Drive Stage-5 final purge explicitly. GC drains the inventory but
+    // leaves the empty branch directory as post-commit debt until a retry
+    // converges it — per the B5.2 two-phase delete design.
+    db.storage().gc_orphan_segments().unwrap();
+
+    if branch_dir.exists() {
+        let recursive_ssts: Vec<_> = walk_dir_ssts(&branch_dir).collect();
+        assert!(
+            recursive_ssts.is_empty(),
+            "Stage-5 purge should drain every `.sst` under {:?}, still have {:?}",
+            branch_dir,
+            recursive_ssts,
+        );
+    }
+
+    // Retry via the storage-level clear_branch — this is the idempotent
+    // convergence step that removes the leftover empty dir.
+    db.storage().clear_branch(&branch_id).unwrap();
+
     assert!(
         !branch_dir.exists(),
-        "Branch directory {:?} should be removed after delete_branch()",
+        "Branch directory {:?} should be removed after Stage-5 purge + clear_branch retry",
         branch_dir,
     );
+}
+
+fn walk_dir_ssts(root: &std::path::Path) -> impl Iterator<Item = std::path::PathBuf> {
+    let mut stack: Vec<std::path::PathBuf> = vec![root.to_path_buf()];
+    std::iter::from_fn(move || {
+        while let Some(dir) = stack.pop() {
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if path.extension().is_some_and(|ext| ext == "sst") {
+                        return Some(path);
+                    }
+                }
+            }
+        }
+        None
+    })
 }

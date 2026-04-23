@@ -232,7 +232,8 @@ impl Database {
     /// Returns `true` if removed (or didn't exist), `false` if skipped
     /// because a concurrent commit is in-flight.
     ///
-    /// Should be called after `BranchIndex::delete_branch()` succeeds.
+    /// Should be called from the post-commit cleanup phase after a logical
+    /// branch delete has already committed.
     pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
         self.coordinator.remove_branch_lock(branch_id)
     }
