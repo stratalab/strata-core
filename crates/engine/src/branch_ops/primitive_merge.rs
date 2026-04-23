@@ -277,6 +277,20 @@ impl PrimitiveMergeHandler for KvMergeHandler {
     fn precheck(&self, _ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
         Ok(())
     }
+
+    /// KV BM25 convergence contract (B5.3):
+    ///
+    /// - ordinary writes: `ConvergenceClass::StagedPublish` via inline
+    ///   `InvertedIndex` update inside `KVStore::put` / `KVStore::delete`
+    ///   and the `SearchRefreshHook` staged-publish path on followers.
+    /// - merge-time: **explicitly `ConvergenceClass::ReopenHealed`**.
+    ///   Merge apply writes target rows via raw `txn.put()`, which
+    ///   bypasses the inline indexing path in `KVStore::put`, so the
+    ///   in-memory BM25 projection for merged KV rows lags until
+    ///   `SearchSubsystem::recover` → `reconcile_index` reruns on the
+    ///   next database open. Same-session BM25 queries against the
+    ///   merge target may miss merged rows until reopen. See
+    ///   `branching_convergence_differential.rs::kv_merge_bm25_reopen_heals_stale_index`.
     fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         Ok(())
     }
@@ -498,6 +512,22 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
         Ok(PrimitiveMergePlan { actions, conflicts })
     }
 
+    /// JSON BM25 convergence contract (B5.3):
+    ///
+    /// - ordinary writes: `ConvergenceClass::StagedPublish` via inline
+    ///   `InvertedIndex` update inside `JsonStore::create`/`put`/`delete`.
+    /// - merge-time: **immediate refresh** via this `post_commit`.
+    ///   The affected-doc list is populated by `plan` and drained
+    ///   here to re-index the post-merge doc value. Secondary KV
+    ///   indexes (`_idx/{space}/{name}`) ride `StorageCoupled` via
+    ///   `MergeAction`s emitted in `plan` (they commit atomically
+    ///   inside the merge transaction). The best-effort swallow
+    ///   below keeps this hook from aborting an already-committed
+    ///   merge; on failure, `SearchSubsystem::recover` →
+    ///   `reconcile_index` heals stale entries at the next reopen
+    ///   (`ConvergenceClass::ReopenHealed` fallback). See
+    ///   `branching_convergence_differential.rs::json_merge_bm25_refreshed_immediately_no_reopen_needed`
+    ///   and `::json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost`.
     fn post_commit(&self, ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         // No actions applied → nothing to refresh.
         if ctx.merge_version.is_none() {
@@ -851,6 +881,22 @@ impl PrimitiveMergeHandler for EventMergeHandler {
         Ok(())
     }
 
+    /// Event BM25 convergence contract (B5.3):
+    ///
+    /// - ordinary writes: `ConvergenceClass::StagedPublish` via inline
+    ///   `InvertedIndex` update inside `EventLog::append` and the
+    ///   `SearchRefreshHook` staged-publish path on followers.
+    /// - merge-time: **explicitly `ConvergenceClass::ReopenHealed`**.
+    ///   Merge apply writes event rows via raw `txn.put()`, which
+    ///   bypasses the inline indexing path in `EventLog::append`, so
+    ///   the in-memory BM25 projection for merged events lags until
+    ///   `SearchSubsystem::recover` → `reconcile_index` reruns on the
+    ///   next database open. See
+    ///   `branching_convergence_differential.rs::event_merge_bm25_reopen_heals_stale_index`.
+    ///
+    /// Hash-chain divergence is caught earlier by `precheck`; once
+    /// the precheck passes, `post_commit` has no event-specific work
+    /// beyond the shared reopen-heal contract.
     fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         Ok(())
     }
@@ -991,6 +1037,23 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
         Ok(PrimitiveMergePlan { actions, conflicts })
     }
 
+    /// Vector HNSW convergence contract (B5.3):
+    ///
+    /// - ordinary writes: `ConvergenceClass::StagedPublish` via
+    ///   `VectorCommitObserver` (staged backend ops applied
+    ///   post-commit) and `VectorLifecycleHook` on followers.
+    /// - merge-time: **immediate refresh** via the registered
+    ///   per-database callback below. The callback walks only the
+    ///   `(space, collection)` pairs actually touched by merge
+    ///   actions and re-runs `rebuild_collection_after_merge` for
+    ///   each. Untouched collections are left alone.
+    /// - unregistered callback (engine-only unit tests): falls back
+    ///   to `ConvergenceClass::ReopenHealed` — vectors are still
+    ///   KV-correct, but the in-memory HNSW backends rebuild on the
+    ///   next `Database::open` via `recover_vector_state`. Production
+    ///   subsystem composition always registers the callback; this
+    ///   fallback is test-infrastructure-only. See
+    ///   `branching_convergence_differential.rs::vector_merge_hnsw_refreshed_immediately_no_reopen_needed`.
     fn post_commit(&self, ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         // If no merge happened (no actions applied), there's nothing to
         // rebuild. The merge_branches caller signals this via merge_version
@@ -1088,6 +1151,24 @@ impl PrimitiveMergeHandler for GraphMergeHandler {
         Ok(PrimitiveMergePlan { actions, conflicts })
     }
 
+    /// Graph convergence contract (B5.3):
+    ///
+    /// - packed adjacency rows (fwd/rev lists): `ConvergenceClass::StorageCoupled`.
+    ///   The semantic merge in `plan` emits `MergeAction`s that
+    ///   commit atomically inside the merge transaction, and
+    ///   `AdjacencyIndex` is built on demand from those rows — no
+    ///   separate cache to refresh.
+    /// - graph-node BM25 search projection: **explicitly
+    ///   `ConvergenceClass::ReopenHealed`**. Merge apply writes graph
+    ///   rows via raw `txn.put()`, which bypasses the inline
+    ///   `InvertedIndex` update path that `GraphStore::put` performs
+    ///   for ordinary writes. The in-memory BM25 projection for
+    ///   merged graph nodes lags until `SearchSubsystem::recover` →
+    ///   `reconcile_index` reruns on the next database open. See
+    ///   `branching_convergence_differential.rs::graph_merge_bm25_reopen_heals_stale_index`.
+    /// - `BranchStatusCache` is `ConvergenceClass::AdvisoryOnly` and
+    ///   is not touched by merge (see `GraphSubsystem::cleanup_deleted_branch`
+    ///   for its delete-time cleanup).
     fn post_commit(&self, _ctx: &MergePostCommitCtx<'_>) -> StrataResult<()> {
         // Nothing to refresh post-commit. The packed adjacency lists ARE
         // the storage; there's no in-memory cache to rebuild
