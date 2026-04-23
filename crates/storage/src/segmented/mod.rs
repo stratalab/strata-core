@@ -1530,18 +1530,20 @@ impl SegmentedStore {
     ///
     /// ## B5.1 retention contract
     ///
-    /// Implements §"Reclaim protocol" stages 2 (manifest proof) and
-    /// the §"Recovery-health contract" gate of
+    /// Implements the §"Recovery-health contract" gate of
     /// `docs/design/branching/branching-gc/branching-retention-contract.md`.
-    /// Today this function performs an immediate-unlink reclaim,
-    /// which Invariant 4 forbids; the B5.2 cutover replaces the unlink
-    /// with the full quarantine protocol (stages 3–5) and a
-    /// per-branch `quarantine.manifest` durable publish — see KD3,
-    /// KD8, KD9 in `b5-phasing-plan.md`. The degraded-recovery
-    /// refusal already in place satisfies Invariants 2 and 5: space
-    /// leaks are acceptable, false reclaim is not. Barrier role:
-    /// `BarrierKind::RecoveryHealthGate` (the refusal) +
-    /// `BarrierKind::PhysicalRetention` (the live-set check).
+    /// Today this function still performs an immediate-unlink reclaim
+    /// using a process-local live-set check built from `self.branches`
+    /// plus inherited layers. That is a storage-local approximation of
+    /// physical retention, not the future B5.2 Stage-2 manifest proof.
+    /// The B5.2 cutover strengthens this path to walk recovery-trusted
+    /// manifests and route deletion through the full quarantine
+    /// protocol with persisted quarantine inventory. The degraded-
+    /// recovery refusal already in place satisfies Invariants 2 and 5:
+    /// space leaks are acceptable, false reclaim is not. Barrier role:
+    /// `BarrierKind::RecoveryHealthGate` (the refusal) + current
+    /// process-local approximation of `BarrierKind::PhysicalRetention`
+    /// (the live-set check).
     pub fn gc_orphan_segments(&self) -> StorageResult<GcReport> {
         match &**self.last_recovery_health.load() {
             // Healthy and Telemetry-only degradation (rebuildable-cache errors)
@@ -3570,8 +3572,8 @@ impl SegmentedStore {
     /// reclaim respects the rebuild trust rule and the
     /// degraded-recovery refusal gate
     /// (`BarrierKind::RecoveryHealthGate`, KD8). B5.2 extends this
-    /// path with the §"Quarantine reconciliation" step
-    /// (per-branch `quarantine.manifest` reconciliation, KD9).
+    /// path with the §"Quarantine reconciliation" step against the
+    /// chosen persisted quarantine inventory (KD9).
     pub fn recover_segments(&self) -> StorageResult<RecoveredState> {
         let mut invocation = RecoveryInvocationGuard::begin(&self.recovery_applied)?;
         let segments_dir = match &self.segments_dir {

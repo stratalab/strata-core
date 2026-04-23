@@ -330,7 +330,8 @@ impl SegmentedStore {
         // find the new compacted segment.
         self.write_branch_manifest(branch_id)?;
 
-        // Now safe to delete old segment files (refcount-guarded).
+        // Old segment files become reclaim candidates after manifest publish.
+        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
         for seg in &old_segments {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -495,7 +496,8 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id)?;
 
-        // Delete old segment files (refcount-guarded).
+        // Old segment files become reclaim candidates after manifest publish.
+        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
         for seg in &selected_segments {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -733,7 +735,8 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id)?;
 
-        // Now safe to delete old files (refcount-guarded).
+        // Old segment files become reclaim candidates after manifest publish.
+        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
         for seg in &l0_segs {
             self.delete_segment_if_unreferenced(seg);
         }
@@ -1073,7 +1076,8 @@ impl SegmentedStore {
         // Persist manifest BEFORE deleting old files (crash safety).
         self.write_branch_manifest(branch_id)?;
 
-        // Delete old segment files (refcount-guarded).
+        // Old segment files become reclaim candidates after manifest publish.
+        // Today deletion is still runtime-refcount gated, not B5.2 manifest proof.
         for seg in &input_segs {
             self.delete_segment_if_unreferenced(seg);
         }

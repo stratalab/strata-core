@@ -1,7 +1,9 @@
 //! Reference counting registry for shared segments (COW branching).
 //!
 //! Tracks how many branches reference each segment file. When a segment's
-//! refcount drops to zero (or was never tracked), it is safe to delete.
+//! refcount drops to zero (or was never tracked), the segment has no
+//! remaining *runtime-registry* references. That is candidate-selection
+//! input, not a durable deletion proof.
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
@@ -12,10 +14,12 @@ pub(crate) type SegmentId = u64;
 
 /// Thread-safe reference count registry for shared segments.
 ///
-/// Untracked segments (never `increment`ed) are treated as unreferenced —
-/// `decrement` returns `true`, so existing non-COW compaction deletes files
-/// normally. In Epic C, shared segments will be `increment`ed; only then
-/// does the guard become load-bearing.
+/// Untracked segments (never `increment`ed) are treated as having no
+/// registry-managed shared references — `decrement` returns `true`,
+/// which is enough for today's narrow callers to treat the segment as a
+/// deletion candidate. Per the B5 retention contract, that still is not
+/// a durable reclaim proof. In Epic C, shared segments will be
+/// `increment`ed; only then does the guard become load-bearing.
 ///
 /// The `deletion_barrier` RwLock prevents a TOCTOU race between
 /// `is_referenced()` + file deletion (compaction) and `increment()`
@@ -89,16 +93,20 @@ impl SegmentRefRegistry {
 
     /// Decrement the reference count for `id`.
     ///
-    /// Returns `true` if the segment is safe to delete:
+    /// Returns `true` if the registry now sees no remaining shared
+    /// references for this segment:
     /// - count reached zero after decrement, OR
-    /// - the segment was never tracked (untracked = owned by one branch).
+    /// - the segment was never tracked.
+    ///
+    /// This is a runtime-accelerator result only. Callers still need a
+    /// stronger reclaim proof before permanent deletion.
     ///
     /// Uses `fetch_update` to prevent underflow (wrapping to `usize::MAX`)
     /// and `DashMap::remove_if` to atomically clean up zero-count entries.
     pub(crate) fn decrement(&self, id: SegmentId) -> bool {
         let entry = match self.refs.get(&id) {
             Some(e) => e,
-            None => return true, // untracked → safe to delete
+            None => return true, // untracked → no runtime shared refs remain
         };
 
         // Atomically subtract 1 only if count > 0, preventing underflow.
@@ -181,7 +189,8 @@ mod tests {
     #[test]
     fn ref_registry_decrement_untracked() {
         let reg = SegmentRefRegistry::new();
-        // Decrement on a never-incremented ID should return true (safe to delete)
+        // Decrement on a never-incremented ID should report no remaining
+        // runtime shared refs.
         assert!(reg.decrement(42));
         assert!(!reg.is_referenced(42));
     }
@@ -190,10 +199,10 @@ mod tests {
     fn ref_registry_over_decrement_does_not_corrupt() {
         let reg = SegmentRefRegistry::new();
         reg.increment(1);
-        assert!(reg.decrement(1)); // 1 → 0, safe to delete
+        assert!(reg.decrement(1)); // 1 → 0, no runtime shared refs remain
 
         // Over-decrement: count is already 0, should not wrap to usize::MAX
-        assert!(reg.decrement(1)); // already 0, returns true (safe)
+        assert!(reg.decrement(1)); // already 0, still reports no runtime refs
         assert_eq!(reg.ref_count(1), 0);
         assert!(!reg.is_referenced(1));
 
@@ -213,7 +222,7 @@ mod tests {
 
         assert!(!reg.decrement(1)); // 3 → 2, still referenced
         assert!(!reg.decrement(1)); // 2 → 1, still referenced
-        assert!(reg.decrement(1)); // 1 → 0, safe to delete
+        assert!(reg.decrement(1)); // 1 → 0, no runtime shared refs remain
         assert!(!reg.is_referenced(1));
     }
 
@@ -326,12 +335,12 @@ mod tests {
             assert!(reg.is_referenced(1));
 
             // KEY INVARIANT: if the segment is still referenced,
-            // at most one decrement may have returned "safe to delete".
+            // at most one decrement may have reported "no runtime refs remain".
             // With the bug, both decrements could return true.
             let safe_count = d1 as usize + d2 as usize;
             assert!(
                 safe_count <= 1,
-                "at most one decrement should return safe-to-delete when segment is still referenced, got {}",
+                "at most one decrement should report no runtime refs remain when segment is still referenced, got {}",
                 safe_count,
             );
         }
