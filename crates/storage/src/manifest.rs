@@ -47,6 +47,19 @@ pub struct ManifestEntry {
 }
 
 /// An inherited layer entry in the manifest (COW branching).
+///
+/// ## B5.1 retention contract
+///
+/// One of the two durable retention barriers per
+/// `docs/design/branching/branching-gc/branching-retention-contract.md`
+/// §"Fork-frontier semantics" + §"Authoritative for reclaim
+/// safety". Encodes `BarrierKind::ForkFrontier`
+/// (`fork_version`-bounded descendant visibility) and
+/// `BarrierKind::PhysicalRetention` (the segment list keeps shared
+/// bytes reachable). Reclaim's manifest-proof step (Stage 2) walks
+/// these entries; recovery rebuilds runtime accelerator state from
+/// them. Per Invariant 3, this is one of the two durable liveness
+/// proofs — runtime caches never replace it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ManifestInheritedLayer {
     /// Branch ID of the source (parent) branch.

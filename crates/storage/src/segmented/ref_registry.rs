@@ -20,6 +20,19 @@ pub(crate) type SegmentId = u64;
 /// The `deletion_barrier` RwLock prevents a TOCTOU race between
 /// `is_referenced()` + file deletion (compaction) and `increment()`
 /// (fork_branch). See issue #1682.
+///
+/// ## B5.1 retention contract
+///
+/// `BarrierKind::RuntimeAccelerator` per
+/// `docs/design/branching/branching-gc/branching-retention-contract.md`
+/// §"Authoritative and non-authoritative state". This registry is
+/// **not** authoritative for reclaim safety: refcount zero alone is
+/// not a deletion proof (Invariant 3, KD1). The reclaim protocol
+/// (§"Reclaim protocol") uses this registry only as candidate-
+/// selection input and TOCTOU guard; the durable proof remains
+/// own-segment + inherited-layer manifest reachability. Disagreement
+/// between this registry and manifest evidence must block reclaim
+/// (KD10, §"Accelerator disagreement rule").
 pub(crate) struct SegmentRefRegistry {
     refs: DashMap<SegmentId, AtomicUsize>,
     /// Fork increments hold a **read** guard (concurrent forks OK).
