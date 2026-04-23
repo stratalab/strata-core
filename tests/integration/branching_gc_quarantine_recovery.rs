@@ -242,6 +242,122 @@ fn crash_after_publish_with_no_on_disk_file_drops_stale_inventory_without_degrad
 }
 
 // =============================================================================
+// Crash boundary: after purge-eligibility publish, before final unlink
+//
+// Use real delete-path quarantine state: the file is already in
+// `__quarantine__/` and listed in `quarantine.manifest`, but Stage-5 purge has
+// not started yet. Reopen must keep health healthy, retain the file, and allow
+// a later GC pass to purge it.
+// =============================================================================
+
+#[test]
+fn crash_after_purge_eligibility_publish_before_final_unlink_keeps_quarantine_intact() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("solo").unwrap();
+    for i in 0..6 {
+        seed(&test_db.db, "solo", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "solo");
+
+    test_db.db.branches().delete("solo").unwrap();
+    let solo_dir = branch_dir(&test_db.db, "solo");
+    let staged = list_quarantine(&solo_dir);
+    assert!(
+        !staged.is_empty(),
+        "delete must stage at least one quarantined file before Stage-5 purge",
+    );
+    assert!(
+        solo_dir.join(strata_storage::QUARANTINE_FILENAME).exists(),
+        "delete must publish quarantine inventory before purge runs",
+    );
+
+    test_db.reopen();
+
+    assert!(matches!(
+        test_db.db.recovery_health(),
+        strata_storage::RecoveryHealth::Healthy
+    ));
+    let after = list_quarantine(&solo_dir);
+    assert_eq!(
+        after.iter().collect::<std::collections::HashSet<_>>(),
+        staged.iter().collect::<std::collections::HashSet<_>>(),
+        "boundary-6 reopen must preserve quarantined files until a later purge",
+    );
+
+    test_db
+        .db
+        .storage()
+        .gc_orphan_segments()
+        .expect("healthy gc after boundary-6 reopen must purge staged files");
+    assert!(
+        list_quarantine(&solo_dir).is_empty(),
+        "later gc should drain the preserved quarantine state",
+    );
+    assert!(
+        !solo_dir.join(strata_storage::QUARANTINE_FILENAME).exists(),
+        "inventory should be removed after the eventual purge",
+    );
+}
+
+// =============================================================================
+// Crash boundary: after final unlink, before final bookkeeping / report update
+//
+// Start from a real quarantine state, then remove the quarantined file but
+// leave the inventory entry behind. Reopen must treat that as the benign
+// "already unlinked before bookkeeping rewrite" case: silently drop the stale
+// entry, stay healthy, and leave GC idempotent.
+// =============================================================================
+
+#[test]
+fn crash_after_final_unlink_before_bookkeeping_drops_real_stale_inventory() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("solo").unwrap();
+    for i in 0..6 {
+        seed(&test_db.db, "solo", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "solo");
+
+    test_db.db.branches().delete("solo").unwrap();
+    let solo_dir = branch_dir(&test_db.db, "solo");
+    let staged = list_quarantine(&solo_dir);
+    assert!(
+        !staged.is_empty(),
+        "delete must stage at least one quarantined file before bookkeeping can lag",
+    );
+    for path in &staged {
+        std::fs::remove_file(path).unwrap();
+    }
+    assert!(
+        solo_dir.join(strata_storage::QUARANTINE_FILENAME).exists(),
+        "simulated boundary-7 crash must leave stale quarantine inventory behind",
+    );
+
+    test_db.reopen();
+
+    assert!(matches!(
+        test_db.db.recovery_health(),
+        strata_storage::RecoveryHealth::Healthy
+    ));
+    let reconciled = strata_storage::read_quarantine_manifest(&solo_dir)
+        .expect("read reconciled manifest")
+        .unwrap_or_default();
+    assert!(
+        reconciled.entries.is_empty(),
+        "boundary-7 reopen must drop the stale inventory entry after the file is already gone",
+    );
+    assert!(
+        list_quarantine(&solo_dir).is_empty(),
+        "no quarantined files should remain after the stale entry is reconciled",
+    );
+
+    test_db
+        .db
+        .storage()
+        .gc_orphan_segments()
+        .expect("healthy gc after boundary-7 reconcile is idempotent");
+}
+
+// =============================================================================
 // Crash boundary: quarantine dir with files but quarantine.manifest missing
 // (no inventory at all).
 //

@@ -1065,10 +1065,25 @@ impl TransactionContext {
     /// into the WAL and preserved through recovery. A `ttl_ms` of 0 means
     /// no TTL (equivalent to `put()`).
     pub fn put_with_ttl(&mut self, key: Key, value: Value, ttl_ms: u64) -> StrataResult<()> {
+        self.guard(&key)?;
+        if self.read_only {
+            return Err(StrataError::invalid_input(
+                "Cannot write in a read-only transaction",
+            ));
+        }
+        self.check_write_limit(Some(&key))?;
+
+        self.validate_no_cas_conflict(&key)?;
+
+        self.delete_set.remove(&key);
         if ttl_ms > 0 {
             self.ttl_map.insert(key.clone(), ttl_ms);
+        } else {
+            self.ttl_map.remove(&key);
         }
-        self.put(key, value)
+
+        self.write_set.insert(key, value);
+        Ok(())
     }
 
     /// Buffer a write with a single-version retention hint.
@@ -2243,6 +2258,21 @@ mod tests {
         let vv = result.unwrap();
         assert_eq!(vv.value, Value::String("written".into()));
         assert_eq!(vv.version, Version::Txn(0)); // placeholder
+    }
+
+    #[test]
+    fn test_put_with_ttl_preserves_ttl_map_entry() {
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_key(&ns, "ttl");
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
+
+        txn.put_with_ttl(key.clone(), Value::Int(7), 60_000)
+            .unwrap();
+
+        assert_eq!(txn.ttl_map.get(&key), Some(&60_000));
+        assert_eq!(txn.write_set.get(&key), Some(&Value::Int(7)));
     }
 
     #[test]

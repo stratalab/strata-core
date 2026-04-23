@@ -25,7 +25,7 @@ use crate::common::*;
 use std::sync::Arc;
 use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
-use strata_core::BranchId;
+use strata_core::{BranchId, Key, Namespace};
 use strata_engine::{ReclaimStatus, RetentionBlocker};
 
 fn resolve(name: &str) -> BranchId {
@@ -36,6 +36,18 @@ fn seed(db: &Arc<Database>, name: &str, key: &str, v: i64) {
     KVStore::new(db.clone())
         .put(&resolve(name), "default", key, Value::Int(v))
         .expect("seed write succeeds");
+}
+
+fn seed_with_ttl(db: &Arc<Database>, name: &str, key: &str, v: i64, ttl_ms: u64) {
+    let branch_id = resolve(name);
+    let storage_key = Key::new_kv(
+        Arc::new(Namespace::new(branch_id, "default".to_string())),
+        key,
+    );
+    db.transaction(branch_id, |txn| {
+        txn.put_with_ttl(storage_key.clone(), Value::Int(v), ttl_ms)
+    })
+    .expect("ttl write succeeds");
 }
 
 fn flush_branch(db: &Arc<Database>, name: &str) {
@@ -354,6 +366,53 @@ fn materialize_after_reopen_preserves_visible_result_set() {
 }
 
 // =============================================================================
+// Schedule: TTL across materialize + reopen
+//
+// A TTL-bearing inherited value must keep its expiry barrier after
+// materialization rewrites ownership and a subsequent reopen rebuilds the
+// runtime state. Pins A4 + A6.
+// =============================================================================
+
+#[test]
+fn ttl_across_materialize_and_reopen_preserves_expiry_barrier() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+
+    seed(&test_db.db, "main", "ttl_key", 1);
+    seed_with_ttl(&test_db.db, "main", "ttl_key", 2, 60_000);
+    flush_branch(&test_db.db, "main");
+    test_db.db.branches().fork("main", "feature").unwrap();
+
+    let latest = KVStore::new(test_db.db.clone())
+        .get_versioned_direct(&resolve("main"), "default", "ttl_key")
+        .unwrap()
+        .expect("latest ttl-bearing version exists");
+    let expiry_before = latest.timestamp.as_micros() + 60_000 * 1_000 - 1;
+    let expiry_after = latest.timestamp.as_micros() + 60_000 * 1_000 + 1;
+
+    test_db
+        .db
+        .storage()
+        .materialize_layer(&resolve("feature"), 0)
+        .expect("materialize succeeds");
+    test_db.reopen();
+
+    let kv = KVStore::new(test_db.db.clone());
+    assert_eq!(
+        kv.get_at(&resolve("feature"), "default", "ttl_key", expiry_before)
+            .unwrap(),
+        Some(Value::Int(2)),
+        "materialize + reopen must preserve the TTL-bearing value before expiry",
+    );
+    assert_eq!(
+        kv.get_at(&resolve("feature"), "default", "ttl_key", expiry_after)
+            .unwrap(),
+        None,
+        "after TTL expiry, the expired parent version must continue to shadow older history through the materialized child state",
+    );
+}
+
+// =============================================================================
 // Schedule: same-name recreate with old descendants alive
 //
 // main@gen0 → fork(feature) → delete(main) → create(main)@gen1.
@@ -428,6 +487,87 @@ fn same_name_recreate_does_not_reclaim_descendant_inherited_segments() {
     assert_eq!(
         kv.get(&resolve("main"), "default", "new0").unwrap(),
         Some(Value::Int(1000)),
+    );
+}
+
+// =============================================================================
+// Schedule: delete + recreate + compaction
+//
+// Same-name recreate remains safe even after the recreated lifecycle publishes
+// new compaction output and GC runs again. Old descendant-held bytes must stay
+// live because proof is segment-ID keyed, not current-name keyed.
+// =============================================================================
+
+#[test]
+fn delete_recreate_then_compact_does_not_reclaim_descendant_gen0_segments() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..20 {
+        seed(&test_db.db, "main", &format!("old{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+    test_db.db.branches().fork("main", "feature").unwrap();
+
+    let parent_dir = branch_dir(&test_db.db, "main");
+    let gen0_ssts = list_ssts(&parent_dir);
+    assert!(
+        !gen0_ssts.is_empty(),
+        "setup must produce gen0 segments before delete",
+    );
+
+    test_db.db.branches().delete("main").unwrap();
+    test_db
+        .db
+        .storage()
+        .gc_orphan_segments()
+        .expect("gc after delete succeeds");
+
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..10 {
+        seed(&test_db.db, "main", &format!("new_a{i}"), i + 1000);
+    }
+    flush_branch(&test_db.db, "main");
+    for i in 0..10 {
+        seed(&test_db.db, "main", &format!("new_b{i}"), i + 2000);
+    }
+    flush_branch(&test_db.db, "main");
+    test_db
+        .db
+        .storage()
+        .compact_branch(&resolve("main"), strata_core::id::CommitVersion(0))
+        .expect("compaction on recreated main succeeds");
+    test_db
+        .db
+        .storage()
+        .gc_orphan_segments()
+        .expect("gc after recreate + compaction succeeds");
+
+    for path in &gen0_ssts {
+        assert!(
+            path.exists(),
+            "gen0 segment {:?} must survive recreated-main compaction while feature still holds the old snapshot",
+            path,
+        );
+    }
+
+    let kv = KVStore::new(test_db.db.clone());
+    assert_eq!(
+        kv.get(&resolve("feature"), "default", "old0").unwrap(),
+        Some(Value::Int(0)),
+        "feature must still read gen0 inherited data after recreate + compaction",
+    );
+    assert_eq!(
+        kv.get(&resolve("main"), "default", "old0").unwrap(),
+        None,
+        "recreated main must not regain gen0 visibility after compaction",
+    );
+    assert_eq!(
+        kv.get(&resolve("main"), "default", "new_a0").unwrap(),
+        Some(Value::Int(1000)),
+    );
+    assert_eq!(
+        kv.get(&resolve("main"), "default", "new_b0").unwrap(),
+        Some(Value::Int(2000)),
     );
 }
 
