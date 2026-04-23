@@ -70,7 +70,10 @@ use super::observers::BranchOpEvent;
 use super::Database;
 use crate::branch_ops::branch_control_store::BranchControlStore;
 use crate::branch_ops::{is_user_visible_space, with_branch_dag_hooks_suppressed, DATA_TYPE_TAGS};
-use crate::primitives::branch::{resolve_branch_name, BranchIndex, BranchMetadata};
+use crate::primitives::branch::{
+    default_branch_marker_key, read_default_branch_marker, resolve_branch_name, BranchIndex,
+    BranchMetadata, DeletePostCommitOptions,
+};
 use crate::SpaceIndex;
 
 // =============================================================================
@@ -145,14 +148,31 @@ impl RollbackAction {
 
                 if metadata_exists {
                     if let Err(e) = with_branch_dag_hooks_suppressed(|| {
-                        branch_index.delete_branch_with_hook(&name, |txn| {
+                        let committed = branch_index.delete_branch_with_hook(&name, |txn| {
                             match control_store.mark_deleted_by_name(&name, txn)? {
                                 Some(_) => Ok(()),
                                 None => Err(StrataError::corruption(format!(
                                     "rollback delete for branch '{name}' found legacy metadata without an active control record"
                                 ))),
                             }
-                        })
+                        })?;
+                        let completion = branch_index.complete_delete_post_commit(
+                            &name,
+                            &committed,
+                            DeletePostCommitOptions {
+                                clear_storage,
+                                dispatch_best_effort_delete_hook: false,
+                            },
+                        );
+                        match completion {
+                            crate::primitives::branch::DeleteBranchCompletion::Clean
+                            | crate::primitives::branch::DeleteBranchCompletion::Warning(_) => {
+                                Ok(())
+                            }
+                            crate::primitives::branch::DeleteBranchCompletion::PostCommitError(
+                                err,
+                            ) => Err(err),
+                        }
                     }) {
                         warn!(
                             target: "strata::branch_mutation",
@@ -160,13 +180,14 @@ impl RollbackAction {
                             error = %e,
                             "Rollback delete_branch failed"
                         );
+                        return Err(e);
                     }
                 } else if let Some(rec) = control_store.find_active_by_name(&name)? {
                     db.transaction(global_branch_id(), |txn| {
                         control_store.mark_deleted(rec.branch, txn)
                     })?;
                     if clear_storage {
-                        db.clear_branch_storage(&branch_id);
+                        db.clear_branch_storage(&branch_id)?;
                     }
                 }
 
@@ -220,6 +241,7 @@ struct BranchSnapshot {
     name: String,
     metadata: BranchMetadata,
     control_record: BranchControlRecord,
+    default_branch_marker: Option<String>,
     executor_branch_id: BranchId,
     metadata_branch_id: Option<BranchId>,
     entries: Vec<(Key, Value)>,
@@ -240,6 +262,7 @@ impl BranchSnapshot {
                 name
             ))
         })?;
+        let default_branch_marker = read_default_branch_marker(db.as_ref())?;
 
         let executor_branch_id = resolve_branch_name(name);
         let metadata_branch_id = BranchId::from_string(&metadata.branch_id)
@@ -259,6 +282,7 @@ impl BranchSnapshot {
             name: name.to_string(),
             metadata,
             control_record,
+            default_branch_marker,
             executor_branch_id,
             metadata_branch_id,
             entries,
@@ -274,6 +298,11 @@ impl BranchSnapshot {
         db.transaction(global_branch_id(), |txn| {
             txn.set_allow_cross_branch(true);
             txn.put(meta_key.clone(), metadata_value.clone())?;
+            let marker_key = default_branch_marker_key();
+            match &self.default_branch_marker {
+                Some(name) => txn.put(marker_key, Value::String(name.clone()))?,
+                None => txn.delete(marker_key)?,
+            }
             control_store.put_record(&self.control_record, txn)?;
             for (key, value) in &self.entries {
                 txn.put(key.clone(), value.clone())?;
@@ -287,6 +316,7 @@ impl BranchSnapshot {
         }
 
         db.unmark_branch_deleting(&self.executor_branch_id);
+        db.remove_branch_lock(&self.executor_branch_id);
         if let Some(meta_id) = self.metadata_branch_id {
             db.unmark_branch_deleting(&meta_id);
         }
@@ -537,7 +567,10 @@ impl<'a> BranchMutation<'a> {
     /// # Arguments
     ///
     /// * `name` — Branch name to delete on rollback.
-    /// * `clear_storage` — Whether to clear storage-layer data (segments, manifests).
+    /// * `clear_storage` — Whether to run post-commit storage cleanup
+    ///   (segment/manifests/refcount release) after the rollback delete
+    ///   transaction commits. Lock removal and other logical housekeeping still
+    ///   run regardless.
     pub fn on_rollback_delete_branch(&mut self, name: impl Into<String>, clear_storage: bool) {
         self.rollback_actions.push(RollbackAction::DeleteBranch {
             name: name.into(),
@@ -786,10 +819,12 @@ impl Drop for BranchMutation<'_> {
 mod tests {
     use super::*;
     use crate::database::dag_hook::{AncestryEntry, MergeBaseResult};
+    use crate::database::OpenSpec;
     use crate::Database;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use strata_core::id::CommitVersion;
     use strata_core::types::BranchId;
+    use tempfile::TempDir;
 
     /// Test DAG hook that can be configured to fail.
     struct TestDagHook {
@@ -1009,6 +1044,68 @@ mod tests {
     }
 
     #[test]
+    fn test_rollback_delete_false_skips_storage_cleanup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        db.branches().create("abort-no-storage").unwrap();
+
+        crate::database::test_hooks::inject_clear_branch_storage_failure(
+            temp_dir.path(),
+            std::io::ErrorKind::Other,
+        );
+
+        let mut mutation = BranchMutation::new(&db);
+        mutation.on_rollback_delete_branch("abort-no-storage", false);
+        mutation.abort().unwrap();
+
+        assert!(
+            crate::database::test_hooks::maybe_inject_clear_branch_storage_failure(temp_dir.path())
+                .is_some(),
+            "clear_storage=false rollback must not consume the storage-cleanup hook"
+        );
+
+        let branch_index = BranchIndex::new(db.clone());
+        assert!(!branch_index.exists("abort-no-storage").unwrap());
+    }
+
+    #[test]
+    fn test_rollback_delete_true_surfaces_storage_cleanup_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        db.branches().create("abort-with-storage").unwrap();
+
+        crate::database::test_hooks::inject_clear_branch_storage_failure(
+            temp_dir.path(),
+            std::io::ErrorKind::Other,
+        );
+
+        let mut mutation = BranchMutation::new(&db);
+        mutation.on_rollback_delete_branch("abort-with-storage", true);
+        let err = mutation
+            .abort()
+            .expect_err("cleanup debt during rollback delete must surface from abort()");
+        assert!(
+            error_chain_contains(&err, "clear_branch_storage")
+                || error_chain_contains(&err, "injected"),
+            "expected storage cleanup failure in error chain, got {err}",
+        );
+
+        let branch_index = BranchIndex::new(db.clone());
+        assert!(!branch_index.exists("abort-with-storage").unwrap());
+    }
+
+    fn error_chain_contains(err: &StrataError, needle: &str) -> bool {
+        let mut current: Option<&dyn std::error::Error> = Some(err);
+        while let Some(e) = current {
+            if e.to_string().contains(needle) {
+                return true;
+            }
+            current = e.source();
+        }
+        false
+    }
+
+    #[test]
     fn test_mutation_drop_without_commit_triggers_rollback() {
         let db = Database::cache().unwrap();
 
@@ -1072,6 +1169,34 @@ mod tests {
             strata_core::branch::BranchLifecycleStatus::Active
         ));
         assert_eq!(restored.branch.generation, 0);
+    }
+
+    #[test]
+    fn test_rollback_restore_branch_restores_default_branch_marker() {
+        let db = Database::cache().unwrap();
+        db.branches().create("restore-test").unwrap();
+        crate::primitives::branch::write_default_branch_marker(&db, "restore-test").unwrap();
+
+        let mut mutation = BranchMutation::new(&db);
+        mutation.on_rollback_restore_branch("restore-test").unwrap();
+
+        let branch_index = BranchIndex::new(db.clone());
+        let store = BranchControlStore::new(db.clone());
+        branch_index
+            .delete_branch_with_hook("restore-test", |txn| {
+                match store.mark_deleted_by_name("restore-test", txn)? {
+                    Some(_) => Ok(()),
+                    None => Err(StrataError::corruption(
+                        "test setup deleted branch without active control record".to_string(),
+                    )),
+                }
+            })
+            .unwrap();
+
+        mutation.abort().unwrap();
+
+        let restored_marker = read_default_branch_marker(db.as_ref()).unwrap();
+        assert_eq!(restored_marker.as_deref(), Some("restore-test"));
     }
 
     #[test]

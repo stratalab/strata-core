@@ -145,6 +145,53 @@ pub enum StorageError {
         /// Identifies which storage op observed the deletion, for diagnostics.
         op: BranchOp,
     },
+
+    /// The B5.2 reclaim protocol refused to quarantine a segment because
+    /// its candidate reachability walk found it still referenced by a
+    /// recovery-trusted own-segment or inherited-layer manifest.
+    ///
+    /// Candidate selection is the runtime accelerator
+    /// (`BarrierKind::RuntimeAccelerator`); the manifest proof
+    /// (`BarrierKind::PhysicalRetention`) is authoritative and wins on
+    /// disagreement (KD10 / §"Accelerator disagreement rule" of
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`).
+    /// Callers treat this as retention debt, not a hard error — space
+    /// leaks instead of permanent loss, per Invariant 2.
+    #[error(
+        "reclaim refused: segment {segment_id} still referenced by a recovery-trusted manifest"
+    )]
+    ReclaimRefusedManifestProof {
+        /// Stable segment identity for the refused candidate.
+        segment_id: u64,
+    },
+
+    /// A quarantine-manifest publish step (temp write, fsync, or rename)
+    /// failed mid-protocol. Callers log retention debt and retry on the
+    /// next reclaim opportunity; the on-disk file stays wherever the
+    /// interrupted step last left it and reopen reconciliation picks
+    /// up the pieces.
+    #[error("quarantine publish failed for directory {dir:?}: {inner}")]
+    QuarantinePublishFailed {
+        /// Directory whose `quarantine.manifest` could not be published.
+        dir: PathBuf,
+        /// Underlying filesystem error from temp-file write, sync, or rename.
+        #[source]
+        inner: io::Error,
+    },
+
+    /// Reopen quarantine reconciliation observed disagreement between
+    /// the `quarantine.manifest` inventory and on-disk `__quarantine__/`
+    /// contents, or between inventory state and current manifest
+    /// reachability. Per §"Quarantine reconciliation" of the retention
+    /// contract, reclaim trust is degraded and reclaim remains blocked
+    /// until a full rebuild-equivalent reconciliation completes.
+    #[error("quarantine reconciliation failed for branch {branch_id}: {reason}")]
+    QuarantineReconciliationFailed {
+        /// Branch whose quarantine state could not be reconciled.
+        branch_id: BranchId,
+        /// Human-readable description of the disagreement observed.
+        reason: String,
+    },
 }
 
 impl StorageError {
@@ -159,11 +206,14 @@ impl StorageError {
             StorageError::ManifestPublish { inner, .. } => inner.kind(),
             StorageError::DirFsync { inner, .. } => inner.kind(),
             StorageError::RecoveryFault(fault) => recovery_fault_kind(fault),
+            StorageError::QuarantinePublishFailed { inner, .. } => inner.kind(),
             StorageError::RecoveryAlreadyApplied
             | StorageError::RecoveryHealthResetRequiresSuccessfulRecovery
             | StorageError::GcRefusedDegradedRecovery { .. }
             | StorageError::RecoveryHealthResetRequiresReopen { .. }
-            | StorageError::BranchDeletedDuringOp { .. } => io::ErrorKind::Other,
+            | StorageError::BranchDeletedDuringOp { .. }
+            | StorageError::ReclaimRefusedManifestProof { .. }
+            | StorageError::QuarantineReconciliationFailed { .. } => io::ErrorKind::Other,
         }
     }
 }
@@ -175,7 +225,8 @@ fn recovery_fault_kind(fault: &RecoveryFault) -> io::ErrorKind {
         | RecoveryFault::Io(inner) => inner.kind(),
         RecoveryFault::MissingManifestListed { .. }
         | RecoveryFault::InheritedLayerLost { .. }
-        | RecoveryFault::NoManifestFallbackUsed { .. } => io::ErrorKind::Other,
+        | RecoveryFault::NoManifestFallbackUsed { .. }
+        | RecoveryFault::QuarantineInventoryMismatch { .. } => io::ErrorKind::Other,
     }
 }
 
@@ -213,6 +264,16 @@ impl From<StorageError> for StrataError {
             }
             StorageError::BranchDeletedDuringOp { branch_id, op } => StrataError::storage(
                 format!("branch {branch_id} was deleted during {op}; operation refused to resurrect"),
+            ),
+            StorageError::ReclaimRefusedManifestProof { segment_id } => StrataError::storage(
+                format!("reclaim refused: segment {segment_id} still referenced by a recovery-trusted manifest"),
+            ),
+            StorageError::QuarantinePublishFailed { dir, inner } => StrataError::storage_with_source(
+                format!("quarantine publish failed for directory {}", dir.display()),
+                inner,
+            ),
+            StorageError::QuarantineReconciliationFailed { branch_id, reason } => StrataError::storage(
+                format!("quarantine reconciliation failed for branch {branch_id}: {reason}"),
             ),
         }
     }

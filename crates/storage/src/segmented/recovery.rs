@@ -206,6 +206,19 @@ pub enum RecoveryFault {
     /// failures are returned as `Err(StorageError)` instead.
     #[error("recovery I/O error: {0}")]
     Io(#[source] io::Error),
+    /// Reopen quarantine reconciliation observed disagreement between
+    /// the branch's `quarantine.manifest` inventory and the on-disk
+    /// `__quarantine__/` contents. Per the B5 retention contract
+    /// §"Quarantine reconciliation", the implementation prefers
+    /// retention and degrades reclaim trust until a full
+    /// rebuild-equivalent reconciliation completes.
+    #[error("quarantine inventory mismatch for branch {branch_id}: {reason}")]
+    QuarantineInventoryMismatch {
+        /// Branch whose quarantine state could not be reconciled.
+        branch_id: BranchId,
+        /// Short description of the disagreement observed.
+        reason: String,
+    },
 }
 
 impl RecoveryFault {
@@ -217,7 +230,10 @@ impl RecoveryFault {
             | RecoveryFault::MissingManifestListed { .. }
             | RecoveryFault::InheritedLayerLost { .. }
             | RecoveryFault::Io(_) => DegradationClass::DataLoss,
-            RecoveryFault::NoManifestFallbackUsed { .. } => DegradationClass::PolicyDowngrade,
+            RecoveryFault::NoManifestFallbackUsed { .. }
+            | RecoveryFault::QuarantineInventoryMismatch { .. } => {
+                DegradationClass::PolicyDowngrade
+            }
         }
     }
 }

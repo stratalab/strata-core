@@ -107,4 +107,5 @@ mod lifecycle;
 mod materialize;
 mod post_restart_branch;
 mod publish_failures;
+mod quarantine_reconciliation;
 mod resurrection;

@@ -30,9 +30,10 @@ pub mod profile;
 pub(crate) mod recovery;
 mod recovery_error;
 mod registry;
+pub mod retention_report;
 pub mod spec;
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 mod test_hooks;
 
 pub use branch_mutation::{BranchMutation, FailurePoint};
@@ -55,6 +56,10 @@ pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{
     AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,
     UnblockError,
+};
+pub use retention_report::{
+    BranchRetentionEntry, OrphanReason, OrphanStorageEntry, ReclaimStatus, RetentionBlocker,
+    RetentionReport, RetentionTotals,
 };
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
@@ -83,7 +88,7 @@ use strata_core::types::{BranchId, Key};
 use strata_core::{StrataError, StrataResult, VersionedValue};
 use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_durability::wal::{DurabilityMode, WalWriter};
-use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator};
+use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator, StorageResult};
 
 // ============================================================================
 // Persistence Mode (Storage/Durability Split)
@@ -789,13 +794,54 @@ impl Database {
         self.refresh_publish_barrier.write()
     }
 
-    /// Clean up storage-layer segments for a deleted branch (#1702).
+    /// Post-commit storage cleanup for a logically deleted branch (#1702).
     ///
-    /// Removes the branch's memtables, segment files, and decrements
-    /// inherited layer refcounts. Should be called after logical
-    /// deletion succeeds.
-    pub fn clear_branch_storage(&self, branch_id: &BranchId) {
-        self.storage.clear_branch(branch_id);
+    /// Performs post-commit storage cleanup for the branch, including
+    /// branch-local manifest publication, quarantine of reclaimable own
+    /// segments, and inherited-layer refcount release. Final purge is left to
+    /// explicit GC / reopen reconciliation, so cleanup debt may remain on
+    /// disk after this call.
+    ///
+    /// This is a storage cleanup primitive, not part of the rollbackable
+    /// logical delete transaction.
+    ///
+    /// Callers must invoke it only after the logical branch mutation has
+    /// committed successfully.
+    pub fn clear_branch_storage(&self, branch_id: &BranchId) -> StrataResult<()> {
+        self.clear_branch_storage_result(branch_id)?;
+        Ok(())
+    }
+
+    pub(crate) fn clear_branch_storage_result(&self, branch_id: &BranchId) -> StorageResult<()> {
+        #[cfg(any(test, feature = "test-support"))]
+        if let Some(inner) =
+            crate::database::test_hooks::maybe_inject_clear_branch_storage_failure(&self.data_dir)
+        {
+            return Err(strata_storage::StorageError::Io(inner));
+        }
+
+        self.storage.clear_branch(branch_id)?;
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn inject_clear_default_branch_marker_failure_for_test(
+        path: &Path,
+        kind: std::io::ErrorKind,
+    ) {
+        crate::database::test_hooks::inject_clear_default_branch_marker_failure(path, kind);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn clear_clear_default_branch_marker_failure_for_test(path: &Path) {
+        crate::database::test_hooks::clear_clear_default_branch_marker_failure(path);
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn take_clear_default_branch_marker_failure_for_test(
+        path: &Path,
+    ) -> Option<std::io::Error> {
+        crate::database::test_hooks::maybe_inject_clear_default_branch_marker_failure(path)
     }
 
     /// Mark a branch as being deleted (#1916).

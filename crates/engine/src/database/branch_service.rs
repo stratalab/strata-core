@@ -114,6 +114,7 @@ use crate::database::observers::{BranchOpEvent, BranchOpKind};
 use crate::database::Database;
 use crate::primitives::branch::{
     aliases_default_branch_sentinel, resolve_branch_name, BranchIndex, BranchMetadata,
+    DeleteBranchCommitted, DeleteBranchCompletion, DeletePostCommitOptions,
 };
 use crate::primitives::event::EventLog;
 use crate::SYSTEM_BRANCH;
@@ -504,24 +505,29 @@ impl BranchService {
         // `delete_branch_with_hook`, so the mutex is just a one-shot
         // inside-out channel.
         let deleted_ref: std::sync::Mutex<Option<BranchRef>> = std::sync::Mutex::new(None);
-        let delete_result = with_branch_dag_hooks_suppressed(|| {
-            index.delete_branch_with_hook(name, |txn| {
-                match store.mark_deleted_by_name(name, txn)? {
-                    Some(branch_ref) => {
-                        *deleted_ref.lock().unwrap() = Some(branch_ref);
-                        Ok(())
+        let delete_result: StrataResult<DeleteBranchCommitted> =
+            with_branch_dag_hooks_suppressed(|| {
+                index.delete_branch_with_hook(name, |txn| {
+                    match store.mark_deleted_by_name(name, txn)? {
+                        Some(branch_ref) => {
+                            *deleted_ref.lock().unwrap() = Some(branch_ref);
+                            Ok(())
+                        }
+                        None => Err(StrataError::corruption(format!(
+                            "live branch '{name}' has legacy metadata but no active control record"
+                        ))),
                     }
-                    None => Err(StrataError::corruption(format!(
-                        "live branch '{name}' has legacy metadata but no active control record"
-                    ))),
-                }
-            })
-        });
+                })
+            });
 
-        if let Err(e) = delete_result {
-            mutation.cancel();
-            return Err(e);
-        }
+        let delete_committed = match delete_result {
+            Ok(committed) => committed,
+            Err(e) => {
+                mutation.cancel();
+                return Err(e);
+            }
+        };
+
         let branch_ref = deleted_ref.lock().unwrap().expect(
             "delete_branch_with_hook closure must run on the success path; \
              deleted_ref would otherwise stay None",
@@ -533,6 +539,33 @@ impl BranchService {
 
         // Commit: fires observers
         mutation.commit(BranchOpEvent::delete(branch_ref, name));
+
+        match index.complete_delete_post_commit(
+            name,
+            &delete_committed,
+            DeletePostCommitOptions {
+                clear_storage: true,
+                dispatch_best_effort_delete_hook: false,
+            },
+        ) {
+            DeleteBranchCompletion::Clean => {}
+            DeleteBranchCompletion::Warning(warning) => {
+                tracing::warn!(
+                    target: "strata::branch",
+                    branch = name,
+                    error = %warning,
+                    "Branch delete completed, but storage cleanup reported retention debt"
+                );
+            }
+            DeleteBranchCompletion::PostCommitError(err) => {
+                tracing::warn!(
+                    target: "strata::branch",
+                    branch = name,
+                    error = %err,
+                    "Branch delete committed, but post-commit cleanup left retention debt"
+                );
+            }
+        }
 
         Ok(())
     }
@@ -1827,6 +1860,21 @@ mod tests {
     }
 
     #[test]
+    fn test_retention_report_refuses_on_unmigrated_follower() {
+        let db = Database::cache().unwrap();
+        force_follower_mode(&db);
+        seed_legacy_branch_metadata(&db, "legacy");
+
+        let err = db.retention_report().unwrap_err();
+        match err {
+            StrataError::RetentionReportUnavailable { class } => {
+                assert_eq!(class, "PolicyDowngrade");
+            }
+            other => panic!("expected RetentionReportUnavailable, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_branch_service_history_reads_fail_closed_on_metadata_without_control_record() {
         let db = Database::cache().unwrap();
         seed_legacy_branch_metadata(&db, "legacy");
@@ -2128,6 +2176,112 @@ mod tests {
         assert!(
             store.find_active_by_name("retired").unwrap().is_none(),
             "delete of archived branch must clear the active pointer"
+        );
+    }
+
+    #[test]
+    fn test_delete_dag_failure_restores_branch_before_post_commit_cleanup() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook.clone()).unwrap();
+
+        db.branches().create("victim").unwrap();
+        let kv = KVStore::new(db.clone());
+        let victim_id = BranchId::from_user_name("victim");
+        kv.put(&victim_id, "default", "seed", Value::Int(7))
+            .unwrap();
+
+        hook.set_fail_writes(true);
+        let err = db.branches().delete("victim").unwrap_err();
+        assert!(
+            err.to_string().contains("DAG") || err.to_string().contains("write"),
+            "expected DAG failure, got {err}"
+        );
+
+        let branch_index = BranchIndex::new(db.clone());
+        assert!(
+            branch_index.exists("victim").unwrap(),
+            "delete must roll back the logical branch mutation when DAG recording fails"
+        );
+
+        let restored = kv
+            .get(&victim_id, "default", "seed")
+            .unwrap()
+            .expect("post-commit storage cleanup must not run before DAG success");
+        assert_eq!(restored, Value::Int(7));
+
+        let store = BranchControlStore::new(db.clone());
+        let active = store
+            .find_active_by_name("victim")
+            .unwrap()
+            .expect("control record must be restored on DAG failure");
+        assert_eq!(active.branch.generation, 0);
+    }
+
+    #[test]
+    fn test_delete_post_commit_cleanup_failure_keeps_branch_deleted() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(OpenSpec::primary(temp_dir.path())).unwrap();
+        let hook = Arc::new(ToggleFailDagHook::new());
+        db.install_dag_hook(hook.clone()).unwrap();
+
+        db.branches().create("cleanup-debt").unwrap();
+        let kv = KVStore::new(db.clone());
+        let branch_id = BranchId::from_user_name("cleanup-debt");
+        kv.put(&branch_id, "default", "seed", Value::Int(11))
+            .unwrap();
+        db.storage().rotate_memtable(&branch_id);
+        db.storage()
+            .flush_oldest_frozen(&branch_id)
+            .expect("setup flush succeeds");
+
+        crate::database::test_hooks::clear_clear_branch_storage_failure(temp_dir.path());
+        crate::database::test_hooks::inject_clear_branch_storage_failure(
+            temp_dir.path(),
+            std::io::ErrorKind::Other,
+        );
+
+        db.branches()
+            .delete("cleanup-debt")
+            .expect("logical delete must stay committed even if post-commit cleanup fails");
+        crate::database::test_hooks::clear_clear_branch_storage_failure(temp_dir.path());
+
+        let branch_index = BranchIndex::new(db.clone());
+        assert!(
+            !branch_index.exists("cleanup-debt").unwrap(),
+            "branch must remain logically deleted after cleanup debt"
+        );
+
+        let store = BranchControlStore::new(db.clone());
+        assert!(
+            store.find_active_by_name("cleanup-debt").unwrap().is_none(),
+            "active control record must stay cleared after committed delete"
+        );
+
+        let report = db
+            .retention_report()
+            .expect("cleanup debt after committed delete must surface as orphan storage");
+        let orphan = report
+            .orphan_storage
+            .iter()
+            .find(|entry| entry.branch_id == branch_id)
+            .expect("cleanup failure should leave orphaned storage debt behind");
+        assert!(
+            orphan.bytes > 0 || orphan.quarantined_bytes > 0,
+            "cleanup debt must keep retained bytes visible to retention reporting",
+        );
+
+        let dag_events = hook.events.lock().unwrap().clone();
+        let delete_events = dag_events
+            .iter()
+            .filter(|event| {
+                event.kind == DagEventKind::BranchDelete && event.branch_name == "cleanup-debt"
+            })
+            .count();
+        assert_eq!(
+            delete_events, 1,
+            "committed delete with cleanup debt must still record exactly one delete event"
         );
     }
 

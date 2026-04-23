@@ -30,6 +30,7 @@ use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::StrataError;
 use strata_core::StrataResult;
+use strata_storage::StorageError;
 use tracing::{info, warn};
 
 /// Internal metadata key storing the effective default branch name for
@@ -136,7 +137,7 @@ fn admin_transaction_branch_id(target_branch_id: BranchId) -> BranchId {
     }
 }
 
-fn default_branch_marker_key() -> Key {
+pub(crate) fn default_branch_marker_key() -> Key {
     Key::new_branch_with_id(global_namespace(), DEFAULT_BRANCH_MARKER_KEY)
 }
 
@@ -172,6 +173,12 @@ pub(crate) fn clear_default_branch_marker_if(
     db: &Arc<Database>,
     branch_name: &str,
 ) -> StrataResult<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(inner) = Database::take_clear_default_branch_marker_failure_for_test(db.data_dir())
+    {
+        return Err(StrataError::from(strata_storage::StorageError::Io(inner)));
+    }
+
     db.transaction(global_branch_id(), |txn| {
         let key = default_branch_marker_key();
         let should_clear =
@@ -489,23 +496,37 @@ impl BranchIndex {
     ///
     /// USE WITH CAUTION - this is irreversible!
     pub(crate) fn delete_branch(&self, branch_id: &str) -> StrataResult<()> {
-        self.delete_branch_with_hook(branch_id, |_| Ok(()))
+        let committed = self.delete_branch_with_hook(branch_id, |_| Ok(()))?;
+        match self.complete_delete_post_commit(
+            branch_id,
+            &committed,
+            DeletePostCommitOptions {
+                clear_storage: true,
+                dispatch_best_effort_delete_hook: true,
+            },
+        ) {
+            DeleteBranchCompletion::Clean | DeleteBranchCompletion::Warning(_) => Ok(()),
+            DeleteBranchCompletion::PostCommitError(err) => Err(err),
+        }
     }
 
-    /// Delete a branch and ALL its data, running `pre_commit` inside the
-    /// same KV transaction that purges the legacy metadata + namespace
-    /// data.
+    /// Delete a branch logically, running `pre_commit` inside the same KV
+    /// transaction that purges the legacy metadata + namespace data.
     ///
     /// Used by `BranchService::delete` (B3.2) to atomically mark the
     /// corresponding `BranchControlRecord` as `Deleted` alongside the
     /// legacy purge. The hook runs after namespace data is staged for
     /// removal and before the metadata row is dropped; if it errors the
     /// entire delete transaction rolls back and the branch remains live.
+    ///
+    /// This method stops at the committed logical-delete boundary. Any
+    /// storage cleanup, subsystem cleanup, or best-effort delete-hook
+    /// dispatch must run later through [`BranchIndex::complete_delete_post_commit`].
     pub(crate) fn delete_branch_with_hook<F>(
         &self,
         branch_id: &str,
         pre_commit: F,
-    ) -> StrataResult<()>
+    ) -> StrataResult<DeleteBranchCommitted>
     where
         F: FnOnce(&mut TransactionContext) -> StrataResult<()>,
     {
@@ -531,8 +552,8 @@ impl BranchIndex {
         //    commit can start (the mark rejects them after they acquire
         //    the lock, so the lock is released immediately).
         // 3. Run the delete transaction (on global_branch_id, cross-branch).
-        // 4. Clear storage.
-        // 5. Clean up the mark and commit lock entry.
+        // 4. Hand the committed delete to the post-commit cleanup phase.
+        // 5. Post-commit cleanup clears storage and releases the lock entry.
         self.db.mark_branch_deleting(&executor_branch_id);
         if let Some(meta_id) = metadata_branch_id {
             if meta_id != executor_branch_id {
@@ -586,61 +607,106 @@ impl BranchIndex {
             return Err(e);
         }
 
-        if let Err(e) = clear_default_branch_marker_if(&self.db, branch_id) {
-            warn!(
-                target: "strata::branch",
-                branch = branch_id,
-                error = %e,
-                "Failed to clear persisted default-branch marker after delete"
-            );
-        }
-
         // Evict cached namespaces for the deleted branch to prevent unbounded
         // growth of the global NS_CACHE (SCALE-001).
         crate::primitives::kv::invalidate_kv_namespace_cache(&executor_branch_id);
         crate::system_space::invalidate_cache(&executor_branch_id);
 
-        // Drain background tasks before clearing storage. The delete
-        // transaction above commits writes that schedule flush/compaction
-        // via `schedule_flush_if_needed`. If compaction runs concurrently
-        // with clear_branch_storage, it can leave `.tmp` files mid-write
-        // or create new `.sst` files that our cleanup enumeration missed.
-        //
-        // Limitation: drain() waits for all scheduled tasks, not just
-        // tasks for this branch. In a busy multi-branch deployment with
-        // continuous writes, delete_branch may block while other branches
-        // finish their own compaction rounds. Acceptable for an admin
-        // operation; if it becomes a concern, add a drain_with_timeout API.
-        self.db.scheduler().drain();
+        Ok(DeleteBranchCommitted { executor_branch_id })
+    }
 
-        // Clean up storage-layer segments, manifest, and refcounts (#1702).
-        // Must happen after logical deletion so in-progress reads see the
-        // deletion before files disappear.
-        //
-        // Literal `"default"` is special: its canonical BranchId is the same
-        // nil branch id used by global branch-index/control-store metadata.
-        // The delete transaction above already tombstones user primitive rows
-        // in that namespace. A physical `clear_branch_storage(nil)` would also
-        // wipe the branch-control ledger itself (next-generation counters,
-        // active pointers, metadata rows for other branches), breaking
-        // generation-safe recreate. Keep nil/default deletion logical-only at
-        // the storage layer; later compaction/GC will reclaim the user data.
-        if executor_branch_id != global_branch_id() {
-            self.db.clear_branch_storage(&executor_branch_id);
+    /// Complete the post-commit cleanup phase for a logically deleted branch.
+    ///
+    /// This runs after the delete transaction has committed and therefore must
+    /// not be treated as rollbackable logical state. It may report cleanup
+    /// debt via [`DeleteBranchCompletion::Warning`] or
+    /// [`DeleteBranchCompletion::PostCommitError`], but the branch is already
+    /// logically deleted at this point.
+    pub(crate) fn complete_delete_post_commit(
+        &self,
+        branch_id: &str,
+        committed: &DeleteBranchCommitted,
+        options: DeletePostCommitOptions,
+    ) -> DeleteBranchCompletion {
+        let executor_branch_id = committed.executor_branch_id;
+        let mut completion = DeleteBranchCompletion::Clean;
+
+        if let Err(err) = clear_default_branch_marker_if(&self.db, branch_id) {
+            warn!(
+                target: "strata::branch",
+                branch = branch_id,
+                error = %err,
+                "Failed to clear persisted default-branch marker after committed delete"
+            );
+            completion.record_error(err);
+        }
+
+        if options.clear_storage {
+            // Drain background tasks before clearing storage. The delete
+            // transaction above commits writes that schedule flush/compaction
+            // via `schedule_flush_if_needed`. If compaction runs concurrently
+            // with clear_branch_storage, it can leave `.tmp` files mid-write
+            // or create new `.sst` files that our cleanup enumeration missed.
+            //
+            // Limitation: drain() waits for all scheduled tasks, not just
+            // tasks for this branch. In a busy multi-branch deployment with
+            // continuous writes, delete_branch may block while other branches
+            // finish their own compaction rounds. Acceptable for an admin
+            // operation; if it becomes a concern, add a drain_with_timeout API.
+            self.db.scheduler().drain();
+
+            // Clean up storage-layer segments, manifest, and refcounts (#1702).
+            // Must happen after logical deletion so in-progress reads see the
+            // deletion before files disappear.
+            //
+            // Literal `"default"` is special: its canonical BranchId is the same
+            // nil branch id used by global branch-index/control-store metadata.
+            // The delete transaction above already tombstones user primitive rows
+            // in that namespace. A physical `clear_branch_storage(nil)` would also
+            // wipe the branch-control ledger itself (next-generation counters,
+            // active pointers, metadata rows for other branches), breaking
+            // generation-safe recreate. Keep nil/default deletion logical-only at
+            // the storage layer; later compaction/GC will reclaim the user data.
+            if executor_branch_id != global_branch_id() {
+                match self.db.clear_branch_storage_result(&executor_branch_id) {
+                    Ok(_) => {}
+                    Err(StorageError::DirFsync { dir, inner }) => {
+                        let warning = StrataError::from(StorageError::DirFsync { dir, inner });
+                        warn!(
+                            target: "strata::branch",
+                            branch = branch_id,
+                            error = %warning,
+                            "Logical delete committed; storage cleanup completed with unconfirmed manifest durability",
+                        );
+                        completion.record_warning(warning);
+                    }
+                    Err(storage_err) => {
+                        let err = StrataError::from(storage_err);
+                        warn!(
+                            target: "strata::branch",
+                            branch = branch_id,
+                            error = %err,
+                            "Logical delete committed, but storage cleanup failed after commit",
+                        );
+                        completion.record_error(err);
+                    }
+                }
+            }
         }
 
         let subsystems = self.db.installed_subsystems();
         for subsystem in subsystems.iter() {
-            if let Err(e) =
+            if let Err(err) =
                 subsystem.cleanup_deleted_branch(&self.db, &executor_branch_id, branch_id)
             {
                 warn!(
                     target: "strata::branch",
                     subsystem = subsystem.name(),
                     branch = branch_id,
-                    error = %e,
+                    error = %err,
                     "Subsystem branch cleanup failed after delete"
                 );
+                completion.record_error(err);
             }
         }
 
@@ -649,11 +715,11 @@ impl BranchIndex {
         // this branch after deletion will be rejected (#1916).
         self.db.remove_branch_lock(&executor_branch_id);
 
-        // BranchService.delete() suppresses this best-effort dispatch so it can
-        // record through the load-bearing BranchMutation boundary instead.
-        dispatch_delete_hook(&self.db, branch_id);
+        if options.dispatch_best_effort_delete_hook {
+            dispatch_delete_hook(&self.db, branch_id);
+        }
 
-        Ok(())
+        completion
     }
 
     /// Delete all branch-scoped data within an existing transaction context.
@@ -682,6 +748,38 @@ impl BranchIndex {
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct DeleteBranchCommitted {
+    pub(crate) executor_branch_id: BranchId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DeletePostCommitOptions {
+    pub(crate) clear_storage: bool,
+    pub(crate) dispatch_best_effort_delete_hook: bool,
+}
+
+#[derive(Debug)]
+pub(crate) enum DeleteBranchCompletion {
+    Clean,
+    Warning(StrataError),
+    PostCommitError(StrataError),
+}
+
+impl DeleteBranchCompletion {
+    fn record_warning(&mut self, warning: StrataError) {
+        if matches!(self, Self::Clean) {
+            *self = Self::Warning(warning);
+        }
+    }
+
+    fn record_error(&mut self, err: StrataError) {
+        if !matches!(self, Self::PostCommitError(_)) {
+            *self = Self::PostCommitError(err);
+        }
+    }
+}
+
 // ========== Searchable Trait Implementation ==========
 //
 // Search is handled by the intelligence layer.
@@ -706,6 +804,8 @@ impl crate::search::Searchable for BranchIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::OpenSpec;
+    use crate::Subsystem;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>, BranchIndex) {
@@ -713,6 +813,29 @@ mod tests {
         let db = Database::open(temp_dir.path()).unwrap();
         let ri = BranchIndex::new(db.clone());
         (temp_dir, db, ri)
+    }
+
+    struct FailingCleanupSubsystem;
+
+    impl Subsystem for FailingCleanupSubsystem {
+        fn name(&self) -> &'static str {
+            "failing-cleanup"
+        }
+
+        fn recover(&self, _db: &Arc<Database>) -> StrataResult<()> {
+            Ok(())
+        }
+
+        fn cleanup_deleted_branch(
+            &self,
+            _db: &Arc<Database>,
+            _branch_id: &BranchId,
+            _branch_name: &str,
+        ) -> StrataResult<()> {
+            Err(StrataError::internal(
+                "injected cleanup_deleted_branch failure".to_string(),
+            ))
+        }
     }
 
     #[test]
@@ -848,6 +971,112 @@ mod tests {
 
         let result = ri.delete_branch("nonexistent");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_complete_delete_post_commit_classifies_default_marker_clear_failure() {
+        let (temp_dir, db, ri) = setup();
+        ri.create_branch("marker-victim").unwrap();
+        write_default_branch_marker(&db, "marker-victim").unwrap();
+
+        Database::clear_clear_default_branch_marker_failure_for_test(temp_dir.path());
+        Database::inject_clear_default_branch_marker_failure_for_test(
+            temp_dir.path(),
+            std::io::ErrorKind::Other,
+        );
+
+        let committed = ri
+            .delete_branch_with_hook("marker-victim", |_| Ok(()))
+            .expect("logical delete must commit");
+        let completion = ri.complete_delete_post_commit(
+            "marker-victim",
+            &committed,
+            DeletePostCommitOptions {
+                clear_storage: false,
+                dispatch_best_effort_delete_hook: false,
+            },
+        );
+        Database::clear_clear_default_branch_marker_failure_for_test(temp_dir.path());
+
+        match completion {
+            DeleteBranchCompletion::PostCommitError(err) => {
+                assert!(
+                    error_chain_contains(&err, "clear_default_branch_marker")
+                        || error_chain_contains(&err, "injected"),
+                    "expected marker clear failure in error chain, got {err}",
+                );
+            }
+            other => panic!("expected PostCommitError, got {other:?}"),
+        }
+    }
+
+    fn error_chain_contains(err: &StrataError, needle: &str) -> bool {
+        let mut current: Option<&dyn std::error::Error> = Some(err);
+        while let Some(e) = current {
+            if e.to_string().contains(needle) {
+                return true;
+            }
+            current = e.source();
+        }
+        false
+    }
+
+    #[test]
+    fn test_complete_delete_post_commit_classifies_subsystem_cleanup_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(
+            OpenSpec::primary(temp_dir.path()).with_subsystem(FailingCleanupSubsystem),
+        )
+        .unwrap();
+        let ri = BranchIndex::new(db.clone());
+        ri.create_branch("subsystem-victim").unwrap();
+
+        let committed = ri
+            .delete_branch_with_hook("subsystem-victim", |_| Ok(()))
+            .expect("logical delete must commit");
+        let completion = ri.complete_delete_post_commit(
+            "subsystem-victim",
+            &committed,
+            DeletePostCommitOptions {
+                clear_storage: false,
+                dispatch_best_effort_delete_hook: false,
+            },
+        );
+
+        match completion {
+            DeleteBranchCompletion::PostCommitError(err) => {
+                assert!(
+                    err.to_string().contains("cleanup_deleted_branch")
+                        || err
+                            .to_string()
+                            .contains("injected cleanup_deleted_branch failure"),
+                    "expected subsystem cleanup failure, got {err}"
+                );
+            }
+            other => panic!("expected PostCommitError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_delete_branch_surfaces_post_commit_cleanup_error() {
+        let temp_dir = TempDir::new().unwrap();
+        let db = Database::open_runtime(
+            OpenSpec::primary(temp_dir.path()).with_subsystem(FailingCleanupSubsystem),
+        )
+        .unwrap();
+        let ri = BranchIndex::new(db.clone());
+        ri.create_branch("helper-contract").unwrap();
+
+        let err = ri
+            .delete_branch("helper-contract")
+            .expect_err("delete_branch helper must not flatten post-commit cleanup failure");
+        assert!(
+            err.to_string().contains("cleanup_deleted_branch")
+                || err
+                    .to_string()
+                    .contains("injected cleanup_deleted_branch failure"),
+            "expected subsystem cleanup failure, got {err}"
+        );
     }
 
     #[test]

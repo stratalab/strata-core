@@ -1038,6 +1038,29 @@ pub enum StrataError {
         commit_version: u64,
     },
 
+    /// `retention_report()` refused because recovery health cannot
+    /// sustain trustworthy manifest-derived attribution.
+    ///
+    /// Per the B5 convergence contract at
+    /// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Surface matrix", `retention_report` is a hard-fail-degraded
+    /// surface: when manifest-derived truth or recovery health is
+    /// insufficient, the engine returns this typed error rather than
+    /// a fabricated report (§"retention report contract"). Reclaim
+    /// blockers that are *attribution-safe* (e.g. blocked but
+    /// attribution is still correct) surface in the report body
+    /// instead.
+    ///
+    /// Wire code: `StorageError`
+    #[error("retention_report unavailable: recovery degraded ({class})")]
+    RetentionReportUnavailable {
+        /// Textual form of the recovery degradation class
+        /// (e.g. `"DataLoss"`, `"PolicyDowngrade"`). Kept as a string
+        /// so `strata-core` does not need to depend on
+        /// `strata-storage`.
+        class: String,
+    },
+
     /// Shutdown timeout
     ///
     /// The database shutdown timed out waiting for active transactions to complete.
@@ -1376,6 +1399,19 @@ impl StrataError {
         }
     }
 
+    /// Create a [`StrataError::RetentionReportUnavailable`] with a textual
+    /// degradation class.
+    ///
+    /// The class is the `Debug` form of the underlying recovery
+    /// degradation class (e.g. `"DataLoss"`, `"PolicyDowngrade"`), kept
+    /// as a string so `strata-core` does not depend on
+    /// `strata-storage`.
+    pub fn retention_report_unavailable(class: impl Into<String>) -> Self {
+        StrataError::RetentionReportUnavailable {
+            class: class.into(),
+        }
+    }
+
     /// Create a Corruption error
     ///
     /// ## Example
@@ -1604,6 +1640,7 @@ impl StrataError {
             StrataError::Corruption { .. } => ErrorCode::StorageError,
             StrataError::CodecDecode { .. } => ErrorCode::StorageError,
             StrataError::LegacyFormat { .. } => ErrorCode::StorageError,
+            StrataError::RetentionReportUnavailable { .. } => ErrorCode::StorageError,
 
             // Internal errors
             StrataError::Internal { .. } => ErrorCode::InternalError,

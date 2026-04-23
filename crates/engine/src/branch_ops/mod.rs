@@ -892,7 +892,14 @@ pub(crate) fn fork_branch_with_metadata(
         control_store.put_record(&control_record, txn)
     });
     if let Err(e) = kv_result {
-        storage.clear_branch(&dest_id);
+        if let Err(clear_err) = storage.clear_branch(&dest_id) {
+            tracing::warn!(
+                target: "strata::branch",
+                branch_id = %dest_id,
+                error = %clear_err,
+                "fork rollback failed to clear destination storage cleanly",
+            );
+        }
         return Err(e);
     }
 

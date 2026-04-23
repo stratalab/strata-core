@@ -98,7 +98,7 @@ fn clear_branch_only_affects_target_branch() {
     }
 
     // Clear branch1
-    store.clear_branch(&branch1);
+    store.clear_branch(&branch1).unwrap();
 
     // Branch1 should be empty
     for i in 0..5 {
@@ -376,7 +376,7 @@ fn clear_nonexistent_branch_succeeds() {
     let branch_id = BranchId::new();
 
     // Should not panic
-    store.clear_branch(&branch_id);
+    store.clear_branch(&branch_id).unwrap();
 }
 
 #[test]
