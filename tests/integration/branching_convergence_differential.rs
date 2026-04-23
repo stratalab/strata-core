@@ -19,13 +19,12 @@
 //!   next open).
 //! - `§3` — JSON BM25 / Vector HNSW: `StagedPublish` with immediate
 //!   post-merge refresh via `PrimitiveMergeHandler::post_commit`.
-//! - `§4` — Follower-refresh / publish-clamp — blocked hooks do not
-//!   leak stale derived state and blocked state persists across
-//!   follower reopen. (Covered by the crate-local hook-failure tests
-//!   in `crates/engine/tests/follower_tests.rs`,
-//!   `crates/vector/src/recovery.rs`, and `crates/graph/src/store.rs`;
-//!   this suite asserts the B5.3 invariant at the branch-layer
-//!   integration level.)
+//! - `§4` — Follower-refresh / publish-clamp branch-layer smoke check:
+//!   this suite proves the canonical query guard is reachable from the
+//!   branch read path, while the actual blocked-refresh / reopen proofs
+//!   remain in the crate-local hook-failure suites in
+//!   `crates/engine/tests/follower_tests.rs`,
+//!   `crates/vector/src/recovery.rs`, and `crates/graph/src/store.rs`.
 //! - `§5` — Search / vector on-disk caches: `ReopenHealed` — valid
 //!   caches fast-path reload and reconcile; invalid / missing caches
 //!   trigger rebuild from KV truth.
@@ -45,7 +44,7 @@ use strata_core::branch::BranchLifecycleStatus;
 use strata_core::branch_dag::DagBranchStatus;
 use strata_core::value::Value;
 use strata_core::{BranchId, StrataError};
-use strata_engine::Searchable;
+use strata_engine::{SearchSubsystem, Searchable, Subsystem};
 use strata_graph::branch_status_cache::BranchStatusCache;
 use strata_graph::types::NodeData;
 
@@ -162,9 +161,7 @@ fn cache_stale_entry_does_not_override_authoritative_gate() {
         Err(StrataError::BranchArchived { name }) => {
             assert_eq!(name, "frozen");
         }
-        other => panic!(
-            "expected BranchArchived despite stale-Active cache entry, got {other:?}",
-        ),
+        other => panic!("expected BranchArchived despite stale-Active cache entry, got {other:?}",),
     }
 }
 
@@ -224,10 +221,38 @@ fn recreate_after_delete_does_not_inherit_old_cache_entry() {
         .control_record("phoenix")
         .unwrap()
         .expect("live record after recreate");
-    assert!(matches!(
-        rec.lifecycle,
-        BranchLifecycleStatus::Active
-    ));
+    assert!(matches!(rec.lifecycle, BranchLifecycleStatus::Active));
+}
+
+#[test]
+fn reopen_after_many_recreates_hydrates_latest_generation_cache_status() {
+    let mut test_db = TestDb::new();
+
+    // Drive the generation into double digits so lexical node-id ordering
+    // diverges from numeric generation ordering (`gen10` sorts before `gen9`).
+    for _ in 0..10 {
+        test_db.db.branches().create("phoenix").unwrap();
+        test_db.db.branches().delete("phoenix").unwrap();
+    }
+    test_db.db.branches().create("phoenix").unwrap();
+
+    let live_ref = test_db
+        .db
+        .branches()
+        .control_record("phoenix")
+        .unwrap()
+        .expect("live record after recreate chain")
+        .branch;
+    assert_eq!(live_ref.generation, 10);
+
+    test_db.reopen();
+
+    let cache = test_db.db.extension::<BranchStatusCache>().unwrap();
+    assert_eq!(
+        cache.is_writable_hint("phoenix"),
+        Some(true),
+        "reopen hydration must prefer the newest numeric generation",
+    );
 }
 
 #[test]
@@ -315,7 +340,12 @@ fn event_merge_bm25_reopen_heals_stale_index() {
     seed_event(&test_db.db, "main", "baseline_event", "alpha baseline");
 
     test_db.db.branches().fork("main", "feature").unwrap();
-    seed_event(&test_db.db, "feature", "rocket_event", "rocket telemetry payload");
+    seed_event(
+        &test_db.db,
+        "feature",
+        "rocket_event",
+        "rocket telemetry payload",
+    );
 
     assert_eq!(bm25_event_hit_count(&test_db.db, "main", "rocket"), 0);
 
@@ -437,7 +467,14 @@ fn vector_merge_hnsw_refreshed_immediately_no_reopen_needed() {
         .create_collection(resolve("main"), "default", "c", config_small())
         .unwrap();
     vector
-        .insert(resolve("main"), "default", "c", "m1", &[1.0, 0.0, 0.0], None)
+        .insert(
+            resolve("main"),
+            "default",
+            "c",
+            "m1",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
         .unwrap();
 
     test_db.db.branches().fork("main", "feature").unwrap();
@@ -463,14 +500,7 @@ fn vector_merge_hnsw_refreshed_immediately_no_reopen_needed() {
 
     // Query close to f1: must surface f1 on main without reopen.
     let matches = vector
-        .search(
-            resolve("main"),
-            "default",
-            "c",
-            &[0.0, 1.0, 0.0],
-            5,
-            None,
-        )
+        .search(resolve("main"), "default", "c", &[0.0, 1.0, 0.0], 5, None)
         .unwrap();
     let keys: Vec<&str> = matches.iter().map(|m| m.key.as_str()).collect();
     assert!(
@@ -515,8 +545,7 @@ fn json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost() {
 
     test_db.db.branches().merge("feature", "main").unwrap();
 
-    let req_pre =
-        strata_engine::SearchRequest::new(resolve("main"), "rocket").with_k(10);
+    let req_pre = strata_engine::SearchRequest::new(resolve("main"), "rocket").with_k(10);
     assert!(
         !json.search(&req_pre).unwrap().hits.is_empty(),
         "merge post_commit must immediately index the merged JSON doc",
@@ -536,8 +565,7 @@ fn json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost() {
     test_db.reopen();
 
     let json_after = test_db.json();
-    let req_post =
-        strata_engine::SearchRequest::new(resolve("main"), "rocket").with_k(10);
+    let req_post = strata_engine::SearchRequest::new(resolve("main"), "rocket").with_k(10);
     assert!(
         !json_after.search(&req_post).unwrap().hits.is_empty(),
         "post-reopen slow-path KV rebuild must restore merged JSON BM25",
@@ -545,14 +573,13 @@ fn json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost() {
 }
 
 // =============================================================================
-// §4 — Follower publish-clamp invariant (branch-layer).
+// §4 — Follower publish-clamp branch-layer smoke check.
 //
-// Crate-local hook-failure tests already cover fail-once / clamp /
-// retry semantics (see `follower_tests.rs`, `crates/graph/src/store.rs`
-// tests, `crates/vector/src/recovery.rs` tests). This integration
-// section locks the branch-layer consequence: the refresh publish
-// guard exists and is reachable via the canonical path, and queries
-// taken under that guard do not observe partially-staged state.
+// Crate-local hook-failure tests cover the actual blocked-refresh and reopen
+// semantics (see `follower_tests.rs`, `crates/graph/src/store.rs`,
+// `crates/vector/src/recovery.rs`). This integration section only locks the
+// branch-layer consequence that the canonical query guard is reachable from
+// the read path.
 // =============================================================================
 
 #[test]
@@ -599,7 +626,10 @@ fn search_on_disk_cache_reopen_preserves_bm25_state() {
     // Post-reopen: BM25 reconciled via cache fast-path OR slow-path
     // rebuild. Either way, same visible state.
     let post = bm25_hit_count(&test_db.db, "main", "rocket");
-    assert_eq!(post, pre, "reopen must preserve BM25 state (pre={pre}, post={post})");
+    assert_eq!(
+        post, pre,
+        "reopen must preserve BM25 state (pre={pre}, post={post})"
+    );
 }
 
 #[test]
@@ -642,6 +672,34 @@ fn search_on_disk_cache_missing_reopens_to_kv_rebuilt_state() {
     assert!(
         bm25_hit_count(&test_db.db, "main", "rocket") >= 5,
         "search on-disk cache deletion must trigger KV rebuild on reopen",
+    );
+}
+
+#[test]
+fn search_on_disk_cache_delete_recreate_reopen_does_not_resurrect_old_docs() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    seed_kv(&test_db.db, "main", "doc1", "rocket telemetry");
+
+    assert!(bm25_hit_count(&test_db.db, "main", "rocket") > 0);
+
+    // Persist the old lifecycle's cache before delete so reopen must rely on
+    // cleanup rewriting the on-disk cache rather than just rebuilding from an
+    // unfrozen in-memory-only state.
+    SearchSubsystem
+        .freeze(&test_db.db)
+        .expect("freeze search cache");
+
+    test_db.db.branches().delete("main").unwrap();
+    test_db.db.branches().create("main").unwrap();
+
+    test_db.db.shutdown().expect("shutdown after recreate");
+    test_db.reopen();
+
+    assert_eq!(
+        bm25_hit_count(&test_db.db, "main", "rocket"),
+        0,
+        "recreated branch must not reload old search-cache docs on reopen",
     );
 }
 
@@ -691,7 +749,10 @@ fn vector_hnsw_rebuilds_after_reopen() {
         .search(resolve(branch), "default", "c", &query, 3, None)
         .unwrap()
         .len();
-    assert_eq!(post, pre, "HNSW search must heal on reopen (pre={pre}, post={post})");
+    assert_eq!(
+        post, pre,
+        "HNSW search must heal on reopen (pre={pre}, post={post})"
+    );
 }
 
 #[test]

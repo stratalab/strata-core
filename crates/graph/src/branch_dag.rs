@@ -52,6 +52,7 @@
 
 pub use strata_core::branch_dag::*;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use strata_core::contract::Timestamp;
@@ -107,6 +108,12 @@ fn branch_name_from_node(node_id: &str, node: &NodeData) -> String {
         .and_then(|value| value.as_str())
         .unwrap_or(node_id)
         .to_string()
+}
+
+fn branch_generation_from_node_id(node_id: &str) -> Option<u64> {
+    let (prefix, generation) = node_id.rsplit_once("__gen__")?;
+    prefix.strip_prefix("_branchref_")?;
+    generation.parse().ok()
 }
 
 fn branch_name_prop(
@@ -172,17 +179,38 @@ pub fn load_status_cache_readonly(db: &Arc<Database>) {
     }
 
     // Best-effort: populate the cache from existing nodes.
+    //
+    // Multiple DAG branch nodes may share the same user-facing branch name
+    // across delete/recreate lifecycles. Followers hydrate the advisory cache
+    // from the DAG at open time, so we must collapse those nodes by NUMERIC
+    // generation, not raw lexical node-id order. Otherwise `_...__gen__10`
+    // sorts before `_...__gen__2`, and an older deleted lifecycle can
+    // overwrite the newer active lifecycle on reopen.
     if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
         if let Ok(nodes) = graph_store.list_nodes(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH) {
+            let mut hydrated: HashMap<String, (Option<u64>, DagBranchStatus)> = HashMap::new();
             for node_id in nodes {
                 if let Ok(Some(node)) =
                     graph_store.get_node(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH, &node_id)
                 {
                     if node.object_type.as_deref() == Some("branch") {
+                        let name = branch_name_from_node(&node_id, &node);
                         let status = status_from_node_props(&node);
-                        cache.set(branch_name_from_node(&node_id, &node), status);
+                        let generation = branch_generation_from_node_id(&node_id);
+                        let should_replace = match hydrated.get(&name) {
+                            None => true,
+                            Some((None, _)) => generation.is_some(),
+                            Some((Some(_), _)) if generation.is_none() => false,
+                            Some((Some(existing), _)) => generation.is_some_and(|g| g > *existing),
+                        };
+                        if should_replace {
+                            hydrated.insert(name, (generation, status));
+                        }
                     }
                 }
+            }
+            for (name, (_, status)) in hydrated {
+                cache.set(name, status);
             }
         }
     }
