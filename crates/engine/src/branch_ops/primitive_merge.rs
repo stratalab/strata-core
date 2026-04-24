@@ -434,7 +434,7 @@ impl PrimitiveMergeHandler for JsonMergeHandler {
             let result = ctx
                 .db
                 .transaction(ctx.target_id, |txn| {
-                    JsonStore::load_indexes(txn, &ctx.target_id, &space_owned)
+                    JsonStore::load_indexes(ctx.db.as_ref(), txn, &ctx.target_id, &space_owned)
                 })
                 .unwrap_or_else(|e| {
                     tracing::warn!(

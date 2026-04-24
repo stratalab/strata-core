@@ -114,6 +114,16 @@ pub enum VectorError {
     /// Database error
     #[error("Database error: {0}")]
     Database(String),
+
+    /// Collection is fail-closed degraded (B5.4).
+    ///
+    /// Carries a pre-built [`StrataError::PrimitiveDegraded`] so the
+    /// branch-aware attribution captured at mark time survives the
+    /// conversion to `StrataError`. See
+    /// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Surface matrix" row "vector in-memory / HNSW state".
+    #[error(transparent)]
+    Degraded(#[from] Box<StrataError>),
 }
 
 impl VectorError {
@@ -136,7 +146,8 @@ impl VectorError {
             | VectorError::Serialization(_)
             | VectorError::Internal(_)
             | VectorError::Io(_)
-            | VectorError::Database(_) => false,
+            | VectorError::Database(_)
+            | VectorError::Degraded(_) => false,
 
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]
@@ -170,7 +181,8 @@ impl VectorError {
             | VectorError::Serialization(_)
             | VectorError::Internal(_)
             | VectorError::Io(_)
-            | VectorError::Database(_) => false,
+            | VectorError::Database(_)
+            | VectorError::Degraded(_) => false,
 
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]
@@ -219,6 +231,7 @@ impl VectorError {
                 entity_ref: Box::new(EntityRef::vector(branch_id, UNKNOWN_SPACE, collection, "")),
                 reason: format!("Config field '{}' cannot be changed", field),
             },
+            VectorError::Degraded(inner) => *inner,
             // Remaining variants don't use branch context — delegate to From impl
             other => StrataError::from(other),
         }
@@ -305,6 +318,7 @@ impl From<VectorError> for StrataError {
                 message: format!("Database error: {}", msg),
                 source: None,
             },
+            VectorError::Degraded(inner) => *inner,
 
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]

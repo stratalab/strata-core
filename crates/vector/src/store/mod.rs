@@ -356,12 +356,32 @@ impl VectorStore {
             let vec_record = match VectorRecord::from_bytes(vec_bytes) {
                 Ok(r) => r,
                 Err(e) => {
+                    // B5.4 — corrupt vector bytes mean the collection
+                    // cannot be reconstructed safely; mark degraded so
+                    // subsequent reads fail closed rather than returning
+                    // partial / wrong data. Per convergence matrix row
+                    // "vector in-memory / HNSW state".
                     warn!(
                         target: "strata::vector",
                         error = %e,
-                        "Failed to decode vector record during reload, skipping"
+                        "Failed to decode vector record during reload; marking collection degraded"
                     );
-                    continue;
+                    let err =
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            &self.db,
+                            id.branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &id.name,
+                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            format!("{e}"),
+                        )
+                        .map(|entry| entry.to_error())
+                        .unwrap_or_else(|| {
+                            strata_core::StrataError::serialization(format!(
+                                "corrupt vector record during reload: {e}"
+                            ))
+                        });
+                    return Err(VectorError::Degraded(Box::new(err)));
                 }
             };
 
@@ -372,11 +392,35 @@ impl VectorStore {
             } else if vec_record.embedding.is_empty() {
                 continue; // legacy empty-embedding record — skip
             } else {
-                let _ = backend.insert_with_id_and_timestamp(
+                if let Err(e) = backend.insert_with_id_and_timestamp(
                     vid,
                     &vec_record.embedding,
                     vec_record.created_at,
-                );
+                ) {
+                    warn!(
+                        target: "strata::vector",
+                        collection = %id.name,
+                        vector_id = vec_record.vector_id,
+                        error = %e,
+                        "Failed to insert vector during reload; marking collection degraded"
+                    );
+                    let err =
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            &self.db,
+                            id.branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &id.name,
+                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            format!("{e}"),
+                        )
+                        .map(|entry| entry.to_error())
+                        .unwrap_or_else(|| {
+                            strata_core::StrataError::serialization(format!(
+                                "failed to insert vector during reload: {e}"
+                            ))
+                        });
+                    return Err(VectorError::Degraded(Box::new(err)));
+                }
             }
 
             // Populate inline metadata for O(1) search resolution
@@ -636,6 +680,20 @@ impl VectorStore {
     ) -> VectorResult<()> {
         let collection_id = CollectionId::new(branch_id, space, name);
         let state = self.state()?;
+
+        // B5.4 — fail closed if this collection was marked degraded by
+        // an earlier recovery or lazy-load attempt. Per the B5
+        // convergence contract matrix row "vector in-memory / HNSW
+        // state": config mismatch or rebuild failure must fail closed,
+        // not silently fall back to wrong data.
+        if let Some(err) = strata_engine::database::primitive_degradation::primitive_degraded_error(
+            &self.db,
+            branch_id,
+            strata_core::contract::PrimitiveType::Vector,
+            name,
+        ) {
+            return Err(VectorError::Degraded(Box::new(err)));
+        }
 
         // Fast path: check without entry overhead
         if state.backends.contains_key(&collection_id) {

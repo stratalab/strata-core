@@ -24,14 +24,17 @@
 //! Registries use `RwLock` for safe concurrent access. Observers themselves
 //! must be `Send + Sync` since they may be called from any thread.
 
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
+use std::collections::HashSet;
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use strata_core::contract::PrimitiveType;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
-use strata_core::BranchRef;
+use strata_core::{BranchRef, PrimitiveDegradedReason};
 
 // =============================================================================
 // Error Types
@@ -729,6 +732,134 @@ impl Default for BranchOpObserverRegistry {
 }
 
 // =============================================================================
+// Primitive Degraded Observer (B5.4)
+// =============================================================================
+
+/// Event fired when a named primitive is marked as fail-closed degraded.
+///
+/// Per convergence doc §"Required push events", B5.4 must surface
+/// fail-closed degraded primitive events on a push channel so operators
+/// can route on the branch contract instead of log text. This event
+/// carries the same fields as the registry entry in
+/// `primitive_degradation::PrimitiveDegradationEntry`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PrimitiveDegradedEvent {
+    /// Generation-aware branch identity at the time of degradation.
+    pub branch_ref: BranchRef,
+    /// Which primitive subsystem owns the degraded surface.
+    pub primitive: PrimitiveType,
+    /// Primitive-level name (collection, index space, etc.).
+    pub name: String,
+    /// Typed reason for the degradation.
+    pub reason: PrimitiveDegradedReason,
+    /// Operator-facing free-form detail (e.g. decode error message).
+    pub detail: String,
+    /// Wall-clock time the degradation was first marked.
+    pub detected_at: SystemTime,
+}
+
+/// Observer called when a primitive is marked fail-closed degraded.
+///
+/// Fires at most once per `(BranchId, PrimitiveType, name)` key during
+/// the lifetime of the `PrimitiveDegradationRegistry` (first-mark
+/// wins, consistent with the registry's idempotency).
+pub trait PrimitiveDegradedObserver: Send + Sync + 'static {
+    /// Human-readable name for logging.
+    fn name(&self) -> &'static str;
+
+    /// Called after a primitive is marked fail-closed degraded.
+    fn on_primitive_degraded(&self, event: &PrimitiveDegradedEvent) -> Result<(), ObserverError>;
+}
+
+/// Registry for primitive-degraded observers.
+pub struct PrimitiveDegradedObserverRegistry {
+    observers: RwLock<Vec<Arc<dyn PrimitiveDegradedObserver>>>,
+}
+
+impl PrimitiveDegradedObserverRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            observers: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Register a primitive-degraded observer.
+    pub fn register(&self, observer: Arc<dyn PrimitiveDegradedObserver>) {
+        self.observers.write().push(observer);
+    }
+
+    /// Notify all observers of a primitive-degraded event.
+    ///
+    /// Errors are logged but not propagated (consistent with other
+    /// observer registries at the top of this file).
+    pub fn notify(&self, event: &PrimitiveDegradedEvent) {
+        let observers = self.observers.read();
+        for observer in observers.iter() {
+            if let Err(e) = observer.on_primitive_degraded(event) {
+                tracing::error!(
+                    observer = observer.name(),
+                    error = %e,
+                    "primitive degraded observer failed"
+                );
+            }
+        }
+    }
+
+    /// Number of registered observers.
+    pub fn len(&self) -> usize {
+        self.observers.read().len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.observers.read().is_empty()
+    }
+}
+
+impl Default for PrimitiveDegradedObserverRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+type PrimitiveDegradedReplayKey = (BranchRef, PrimitiveType, String);
+
+/// Internal wrapper that deduplicates replayed and live degraded events.
+///
+/// `Database::register_primitive_degraded_observer()` uses this wrapper so a
+/// recovery-time replay and a concurrent live degradation for the same
+/// `(BranchId, PrimitiveType, name)` key cannot double-deliver to the caller.
+pub(crate) struct ReplayDedupPrimitiveDegradedObserver {
+    inner: Arc<dyn PrimitiveDegradedObserver>,
+    seen: Mutex<HashSet<PrimitiveDegradedReplayKey>>,
+}
+
+impl ReplayDedupPrimitiveDegradedObserver {
+    pub(crate) fn new(inner: Arc<dyn PrimitiveDegradedObserver>) -> Self {
+        Self {
+            inner,
+            seen: Mutex::new(HashSet::new()),
+        }
+    }
+}
+
+impl PrimitiveDegradedObserver for ReplayDedupPrimitiveDegradedObserver {
+    fn name(&self) -> &'static str {
+        self.inner.name()
+    }
+
+    fn on_primitive_degraded(&self, event: &PrimitiveDegradedEvent) -> Result<(), ObserverError> {
+        let key = (event.branch_ref, event.primitive, event.name.clone());
+        if !self.seen.lock().insert(key) {
+            return Ok(());
+        }
+        self.inner.on_primitive_degraded(event)
+    }
+}
+
+// =============================================================================
 // Tests
 // =============================================================================
 
@@ -791,6 +922,36 @@ mod tests {
         }
     }
 
+    struct CountingPrimitiveObserver {
+        count: AtomicUsize,
+    }
+
+    impl CountingPrimitiveObserver {
+        fn new() -> Self {
+            Self {
+                count: AtomicUsize::new(0),
+            }
+        }
+
+        fn count(&self) -> usize {
+            self.count.load(Ordering::SeqCst)
+        }
+    }
+
+    impl PrimitiveDegradedObserver for CountingPrimitiveObserver {
+        fn name(&self) -> &'static str {
+            "counting-primitive"
+        }
+
+        fn on_primitive_degraded(
+            &self,
+            _event: &PrimitiveDegradedEvent,
+        ) -> Result<(), ObserverError> {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
     #[test]
     fn test_commit_observer_registry() {
         let registry = CommitObserverRegistry::new();
@@ -831,6 +992,43 @@ mod tests {
 
         registry.notify(&info);
         assert_eq!(observer.count(), 1);
+    }
+
+    #[test]
+    fn test_primitive_replay_wrapper_dedupes_duplicate_delivery() {
+        let inner = Arc::new(CountingPrimitiveObserver::new());
+        let wrapper = ReplayDedupPrimitiveDegradedObserver::new(
+            inner.clone() as Arc<dyn PrimitiveDegradedObserver>
+        );
+
+        let branch_ref = BranchRef::new(BranchId::new(), 7);
+        let event = PrimitiveDegradedEvent {
+            branch_ref,
+            primitive: PrimitiveType::Vector,
+            name: "v1".to_string(),
+            reason: PrimitiveDegradedReason::ConfigMismatch,
+            detail: "corrupt row".to_string(),
+            detected_at: SystemTime::now(),
+        };
+
+        wrapper.on_primitive_degraded(&event).unwrap();
+        wrapper.on_primitive_degraded(&event).unwrap();
+        assert_eq!(
+            inner.count(),
+            1,
+            "same degraded lifecycle key must be delivered at most once"
+        );
+
+        let event2 = PrimitiveDegradedEvent {
+            branch_ref: BranchRef::new(branch_ref.id, branch_ref.generation + 1),
+            ..event
+        };
+        wrapper.on_primitive_degraded(&event2).unwrap();
+        assert_eq!(
+            inner.count(),
+            2,
+            "same-name degrade on a new generation must still be delivered"
+        );
     }
 
     #[test]

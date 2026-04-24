@@ -302,7 +302,7 @@ impl JsonStore {
             txn.put(key.clone(), serialized)?;
 
             // Update secondary indexes
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             if !indexes.is_empty() {
                 Self::update_index_entries(
                     txn,
@@ -598,7 +598,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
         let result = self.db.transaction(*branch_id, |txn| {
             crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, true, branch_id, space, &indexes,
             )
@@ -639,7 +639,7 @@ impl JsonStore {
 
         let results = self.db.transaction(*branch_id, |txn| {
             crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path, value) in &entries {
                 let key = self.key_for(branch_id, space, doc_id);
@@ -761,7 +761,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
         let (version, doc_value) = self.db.transaction(*branch_id, |txn| {
             crate::primitives::space::ensure_space_registered_in_txn(txn, branch_id, space)?;
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             Self::set_in_txn(
                 txn, &key, doc_id, path, value, false, branch_id, space, &indexes,
             )
@@ -809,7 +809,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
 
         self.db.transaction(*branch_id, |txn| {
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
 
             // Load existing document
             let stored = txn.get(&key)?.ok_or_else(|| {
@@ -873,7 +873,7 @@ impl JsonStore {
         let key = self.key_for(branch_id, space, doc_id);
 
         self.db.transaction(*branch_id, |txn| {
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
 
             // Check if document exists and get value for index cleanup
             let stored = match txn.get(&key)? {
@@ -916,7 +916,7 @@ impl JsonStore {
         }
 
         self.db.transaction(*branch_id, |txn| {
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             let mut results = Vec::with_capacity(doc_ids.len());
             for doc_id in doc_ids {
                 let key = self.key_for(branch_id, space, doc_id);
@@ -966,7 +966,7 @@ impl JsonStore {
         }
 
         self.db.transaction(*branch_id, |txn| {
-            let indexes = Self::load_indexes(txn, branch_id, space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, branch_id, space)?;
             let mut results = Vec::with_capacity(entries.len());
             for (doc_id, path) in entries {
                 let key = self.key_for(branch_id, space, doc_id);
@@ -1356,11 +1356,32 @@ impl JsonStore {
     ///
     /// `pub(crate)` so `branch_ops::primitive_merge::JsonMergeHandler` can
     /// re-derive index entries for documents touched by a JSON merge.
+    ///
+    /// Per the B5 convergence contract
+    /// (`docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Surface matrix" row "JSON secondary index rows"), if `_idx`
+    /// metadata cannot be trusted this call fails closed with a typed
+    /// [`StrataError::PrimitiveDegraded`] rather than returning an
+    /// empty or partial result set. A degradation is also recorded on
+    /// the per-Database primitive-degradation registry so subsequent
+    /// reads short-circuit without re-scanning the corrupt metadata.
     pub(crate) fn load_indexes(
+        db: &Database,
         txn: &mut TransactionContext,
         branch_id: &BranchId,
         space: &str,
     ) -> StrataResult<Vec<index::IndexDef>> {
+        // B5.4 fail-closed: if this (branch, Json, space) is already
+        // marked degraded, return the typed error without re-scanning.
+        if let Some(err) = crate::database::primitive_degradation::primitive_degraded_error(
+            db,
+            *branch_id,
+            strata_core::contract::PrimitiveType::Json,
+            space,
+        ) {
+            return Err(err);
+        }
+
         let meta_space = index::index_meta_space_name(space);
         let meta_ns = Arc::new(Namespace::for_branch_space(*branch_id, &meta_space));
         let scan_prefix = Key::new_json(meta_ns, "");
@@ -1369,10 +1390,25 @@ impl JsonStore {
         let mut indexes = Vec::new();
         for (_, value) in entries {
             if let Value::Bytes(bytes) = &value {
-                let def = serde_json::from_slice::<index::IndexDef>(bytes).map_err(|e| {
-                    StrataError::serialization(format!("corrupt index metadata: {}", e))
-                })?;
-                indexes.push(def);
+                match serde_json::from_slice::<index::IndexDef>(bytes) {
+                    Ok(def) => indexes.push(def),
+                    Err(e) => {
+                        // Mark and fail closed — corrupt index metadata
+                        // means the index cannot be trusted to return
+                        // complete results.
+                        let entry = crate::database::primitive_degradation::mark_primitive_degraded(
+                            db,
+                            *branch_id,
+                            strata_core::contract::PrimitiveType::Json,
+                            space,
+                            strata_core::PrimitiveDegradedReason::IndexMetadataCorrupt,
+                            format!("{e}"),
+                        );
+                        return Err(entry.map(|e| e.to_error()).unwrap_or_else(|| {
+                            StrataError::serialization(format!("corrupt index metadata: {}", e))
+                        }));
+                    }
+                }
             }
         }
         Ok(indexes)
@@ -1550,11 +1586,12 @@ impl crate::search::Searchable for JsonStore {
         }
 
         self.db.transaction(req.branch_id, |txn| {
-            let indexes = Self::load_indexes(txn, &req.branch_id, &req.space)?;
+            let indexes = Self::load_indexes(self.db.as_ref(), txn, &req.branch_id, &req.space)?;
 
             // Resolve field filter to candidate set (if present)
             let filter_set: Option<HashSet<String>> = match &req.field_filter {
                 Some(filter) => Some(index::resolve_filter(
+                    self.db.as_ref(),
                     txn,
                     &req.branch_id,
                     &req.space,
@@ -1568,8 +1605,13 @@ impl crate::search::Searchable for JsonStore {
             let ordered_doc_ids: Vec<String> = if let Some(sort) = &req.sort_by {
                 // Sort by indexed field: scan the index in order
                 let sort_idx = index::find_index_for_field(&sort.field, &indexes)?;
-                let mut sorted =
-                    index::scan_index_ordered(txn, &req.branch_id, &req.space, &sort_idx.name)?;
+                let mut sorted = index::scan_index_ordered(
+                    self.db.as_ref(),
+                    txn,
+                    &req.branch_id,
+                    &req.space,
+                    &sort_idx.name,
+                )?;
 
                 // If there's a filter, retain only matching docs (preserving sort order)
                 if let Some(ref fset) = filter_set {

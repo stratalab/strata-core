@@ -153,6 +153,11 @@ architecture scope documents. The current allowed surface:
 `BranchRetentionEntry`, `RetentionBlocker`, `RetentionTotals`, `OrphanStorageEntry`,
 `OrphanReason`, `ReclaimStatus`
 
+**Primitive Degradation (B5.4):** `Database::primitive_degraded_observers()`,
+`Database::active_branch_ref()`, `RetentionReport::degraded_primitives`,
+`DegradedPrimitiveEntry`, `PrimitiveDegradationEntry`, `PrimitiveDegradationRegistry`,
+`PrimitiveDegradedEvent`, `PrimitiveDegradedObserver`, `PrimitiveDegradedObserverRegistry`
+
 **Product:** `SystemBranchCapability` (`pub` type, `pub(crate)` constructor), `Provider`,
 `ControlRegistry`, `ControlEntry`, `ControlOwner`, `BehaviorClass`, `PersistenceClass`
 
@@ -164,7 +169,8 @@ architecture scope documents. The current allowed surface:
 **Errors:** `StrataError`, `executor::Error`, `ErrorSeverity`, `BranchDagError`/`Kind`,
 `ObserverError`/`Kind`, `RefreshHookError`, `AdvanceError`, `UnblockError`,
 `InferenceError`, `BranchBundleError`, `CompactionError`, `ManifestError`,
-`StrataError::RetentionReportUnavailable` (B5.2)
+`StrataError::RetentionReportUnavailable` (B5.2),
+`StrataError::PrimitiveDegraded` + `PrimitiveDegradedReason` (B5.4)
 
 ---
 
