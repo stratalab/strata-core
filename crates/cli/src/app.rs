@@ -182,8 +182,7 @@ fn run_local_command(matches: &clap::ArgMatches) -> Option<i32> {
             let non_interactive = submatches.get_flag("non-interactive");
             let default_path = matches
                 .get_one::<String>("db")
-                .map(String::as_str)
-                .unwrap_or("~/Documents/Strata");
+                .map_or("~/Documents/Strata", String::as_str);
             Some(match init::run_init(default_path, non_interactive) {
                 Ok(()) => 0,
                 Err(error) => {
@@ -212,8 +211,7 @@ fn run_local_command(matches: &clap::ArgMatches) -> Option<i32> {
             let foreground = submatches.get_flag("foreground");
             let db_path = matches
                 .get_one::<String>("db")
-                .map(String::as_str)
-                .unwrap_or(".strata");
+                .map_or(".strata", String::as_str);
             Some(admin::run_up(db_path, foreground))
         }
         "down" => {
@@ -235,8 +233,7 @@ fn run_local_command(matches: &clap::ArgMatches) -> Option<i32> {
             }
             let db_path = matches
                 .get_one::<String>("db")
-                .map(String::as_str)
-                .unwrap_or(".strata");
+                .map_or(".strata", String::as_str);
             Some(admin::run_down(db_path))
         }
         "uninstall" => {

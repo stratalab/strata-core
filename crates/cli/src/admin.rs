@@ -137,12 +137,11 @@ pub(crate) fn run_down(db_path: &str) -> i32 {
 }
 
 pub(crate) fn run_uninstall(skip_confirm: bool) -> i32 {
-    let home = match env::var("HOME") {
-        Ok(home) => PathBuf::from(home),
-        Err(_) => {
-            eprintln!("Could not determine home directory.");
-            return 1;
-        }
+    let home = if let Ok(home) = env::var("HOME") {
+        PathBuf::from(home)
+    } else {
+        eprintln!("Could not determine home directory.");
+        return 1;
     };
 
     let strata_dir = home.join(".strata");
@@ -246,7 +245,7 @@ pub(crate) fn run_uninstall(skip_confirm: bool) -> i32 {
 }
 
 fn install_signal_handlers(running: Arc<AtomicBool>) {
-    let ptr = Arc::into_raw(running) as *mut AtomicBool;
+    let ptr = Arc::into_raw(running).cast_mut();
     RUNNING_PTR.store(ptr, Ordering::SeqCst);
     unsafe {
         libc::signal(

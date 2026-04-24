@@ -760,8 +760,7 @@ fn parse_branch(matches: &ArgMatches, context: &Context) -> Result<CliRequest, S
         })),
         "fork" => Ok(CliRequest::Execute(Command::BranchFork {
             source: branch(context)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "default".to_string()),
+                .map_or_else(|| "default".to_string(), |value| value.to_string()),
             destination: required_string(submatches, "destination")?,
             message: submatches.get_one::<String>("message").cloned(),
             creator: None,
@@ -776,8 +775,7 @@ fn parse_branch(matches: &ArgMatches, context: &Context) -> Result<CliRequest, S
         "merge" => Ok(CliRequest::Execute(Command::BranchMerge {
             source: required_string(submatches, "source")?,
             target: branch(context)
-                .map(|value| value.to_string())
-                .unwrap_or_else(|| "default".to_string()),
+                .map_or_else(|| "default".to_string(), |value| value.to_string()),
             strategy: parse_merge_strategy(submatches.get_one::<String>("strategy"))?,
             message: submatches.get_one::<String>("message").cloned(),
             creator: None,
@@ -1168,7 +1166,7 @@ fn parse_metric(value: Option<&String>) -> Result<DistanceMetric, String> {
 
 fn parse_merge_strategy(value: Option<&String>) -> Result<MergeStrategy, String> {
     match value.map(String::as_str) {
-        None | Some("lww") | Some("last-writer-wins") | Some("last_writer_wins") => {
+        None | Some("lww" | "last-writer-wins" | "last_writer_wins") => {
             Ok(MergeStrategy::LastWriterWins)
         }
         Some("strict") => Ok(MergeStrategy::Strict),
