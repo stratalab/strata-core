@@ -556,6 +556,19 @@ impl BranchService {
                     error = %warning,
                     "Branch delete completed, but storage cleanup reported retention debt"
                 );
+                // B6 — record the debt on the per-Database registry so
+                // operators see it via `RetentionReport::cleanup_debt`
+                // rather than only in the tracing log. Attributed to
+                // the pre-delete `BranchRef` (captured above) so the
+                // entry survives a later same-name recreate per
+                // §"orphan-visible cleanup debt".
+                crate::database::cleanup_debt::record_delete_debt(
+                    &self.db,
+                    branch_ref,
+                    crate::database::cleanup_debt::CleanupDebtKind::DeleteWarning,
+                    "Branch delete completed, but storage cleanup reported retention debt",
+                    warning,
+                );
             }
             DeleteBranchCompletion::PostCommitError(err) => {
                 tracing::warn!(
@@ -563,6 +576,13 @@ impl BranchService {
                     branch = name,
                     error = %err,
                     "Branch delete committed, but post-commit cleanup left retention debt"
+                );
+                crate::database::cleanup_debt::record_delete_debt(
+                    &self.db,
+                    branch_ref,
+                    crate::database::cleanup_debt::CleanupDebtKind::DeletePostCommitError,
+                    "Branch delete committed, but post-commit cleanup left retention debt",
+                    err,
                 );
             }
         }

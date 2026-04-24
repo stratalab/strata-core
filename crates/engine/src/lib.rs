@@ -43,13 +43,13 @@ pub use database::profile::{
     Profile,
 };
 pub use database::{
-    BranchRetentionEntry, CacheMetrics, Database, DatabaseDiskUsage, DegradedPrimitiveEntry,
-    ErrorRole, HealthReport, LossyErrorKind, LossyRecoveryReport, ModelConfig, OrphanReason,
-    OrphanStorageEntry, PrimitiveDegradationEntry, PrimitiveDegradationRegistry,
-    PrimitiveDegradedEvent, PrimitiveDegradedObserver, PrimitiveDegradedObserverRegistry,
-    ReclaimStatus, RecoveryError, RetentionBlocker, RetentionReport, RetentionTotals,
-    StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus,
-    SystemMetrics, WalWriterHealth,
+    BranchRetentionEntry, CacheMetrics, CleanupDebtEntry, CleanupDebtKind, Database,
+    DatabaseDiskUsage, DebtId, DegradedPrimitiveEntry, ErrorRole, HealthReport, LossyErrorKind,
+    LossyRecoveryReport, ModelConfig, OrphanReason, OrphanStorageEntry, PrimitiveDegradationEntry,
+    PrimitiveDegradationRegistry, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
+    PrimitiveDegradedObserverRegistry, ReclaimStatus, RecoveryError, RetentionBlocker,
+    RetentionReport, RetentionTotals, StorageConfig, StorageMetricsSummary, StrataConfig,
+    SubsystemHealth, SubsystemStatus, SystemMetrics, WalWriterHealth,
 };
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;

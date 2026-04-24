@@ -21,6 +21,7 @@
 
 pub mod branch_mutation;
 pub mod branch_service;
+pub mod cleanup_debt;
 pub mod compat;
 pub mod config;
 pub mod dag_hook;
@@ -39,6 +40,7 @@ mod test_hooks;
 
 pub use branch_mutation::{BranchMutation, FailurePoint};
 pub use branch_service::{BranchService, ForkOptions, MergeOptions};
+pub use cleanup_debt::{CleanupDebtEntry, CleanupDebtKind, DebtId};
 pub use compat::{CompatibilitySignature, IncompatibleReason, CURRENT_CODEC_ID};
 pub use dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
