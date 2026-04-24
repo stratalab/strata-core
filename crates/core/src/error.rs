@@ -118,6 +118,57 @@ impl std::fmt::Display for PrimitiveDegradedReason {
     }
 }
 
+/// Typed reason for branch-lineage unavailability (B6).
+///
+/// Lineage reads (merge base, merge edges, ancestor walks) may refuse
+/// to serve results when the control store is missing records the
+/// caller would otherwise rely on. Per
+/// `docs/design/branching/branching-adversarial-verification-program.md`
+/// §"Typed operator failures", this refusal is a first-class failure
+/// class, not an `InvalidOperation` prefix-string archaeology.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum LineageUnavailableReason {
+    /// Follower running in legacy synthesis mode: fork anchors can be
+    /// synthesized from storage but merge/revert edges cannot, so
+    /// merge-lineage reads refuse until the primary migrates.
+    FollowerUnmigrated,
+    /// A lineage walk reached a `BranchRef` with no corresponding
+    /// `BranchControlRecord` — the caller is referencing a lifecycle
+    /// instance the control store does not know about.
+    ControlStoreRecordMissing,
+    /// Fallback for lineage failures that do not yet have a dedicated
+    /// typed discriminant. Callers should migrate to a typed variant
+    /// when the failure pattern stabilizes.
+    Other(String),
+}
+
+impl LineageUnavailableReason {
+    /// Render the reason as a stable wire string.
+    ///
+    /// This preserves the legacy `branch_lineage_unavailable:<reason>`
+    /// shape that external clients may be pattern-matching on in
+    /// `StrataError::details()` JSON.
+    pub fn wire_reason(&self) -> String {
+        match self {
+            Self::FollowerUnmigrated => {
+                "primary migration required for merge-lineage reads; follower running in legacy synthesis mode"
+                    .to_string()
+            }
+            Self::ControlStoreRecordMissing => {
+                "branch control-store record missing for requested lineage walk".to_string()
+            }
+            Self::Other(s) => s.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for LineageUnavailableReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.wire_reason())
+    }
+}
+
 // =============================================================================
 // ErrorCode - Canonical Wire Error Codes (Frozen)
 // =============================================================================
@@ -1141,6 +1192,23 @@ pub enum StrataError {
         reason: PrimitiveDegradedReason,
     },
 
+    /// A lineage read refused because the control store cannot supply
+    /// the requested information.
+    ///
+    /// Per `docs/design/branching/branching-adversarial-verification-program.md`
+    /// §"Typed operator failures" (B6), this is the first-class
+    /// replacement for the old `InvalidOperation { reason:
+    /// "branch_lineage_unavailable:..." }` prefix-string archaeology.
+    /// Wire details preserve the legacy prefix string in the `reason`
+    /// key so external clients continue to match.
+    ///
+    /// Wire code: `ConstraintViolation`
+    #[error("branch lineage unavailable: {reason}")]
+    BranchLineageUnavailable {
+        /// Typed reason for the lineage refusal.
+        reason: LineageUnavailableReason,
+    },
+
     /// Shutdown timeout
     ///
     /// The database shutdown timed out waiting for active transactions to complete.
@@ -1178,7 +1246,13 @@ pub enum StrataError {
     },
 }
 
-const BRANCH_LINEAGE_UNAVAILABLE_PREFIX: &str = "branch_lineage_unavailable:";
+/// Legacy wire prefix for branch-lineage-unavailable details.
+///
+/// Preserved for external clients that pattern-match on the `reason`
+/// key in `details()` JSON. The typed
+/// [`StrataError::BranchLineageUnavailable`] variant is authoritative;
+/// this prefix is only emitted in `details()` for wire compatibility.
+pub const BRANCH_LINEAGE_UNAVAILABLE_DETAIL_PREFIX: &str = "branch_lineage_unavailable:";
 
 impl StrataError {
     // =========================================================================
@@ -1334,19 +1408,23 @@ impl StrataError {
         }
     }
 
-    /// Create an InvalidOperation that specifically marks branch-lineage
-    /// reads as unavailable, while preserving the existing wire/error-code
-    /// shape used for invalid operations.
+    /// Create a typed `BranchLineageUnavailable` error from a free-form
+    /// reason string.
     ///
-    /// This gives callers a reliable predicate via
-    /// [`StrataError::is_branch_lineage_unavailable`] without introducing a
-    /// new public enum variant mid-tranche.
+    /// Prefer [`StrataError::branch_lineage_unavailable_reason`] when
+    /// the failure is known to be a specific typed variant (e.g.
+    /// follower-unmigrated). This constructor wraps the reason in
+    /// [`LineageUnavailableReason::Other`] as a migration escape hatch.
     pub fn branch_lineage_unavailable(reason: impl Into<String>) -> Self {
-        let reason = reason.into();
-        StrataError::invalid_operation(
-            EntityRef::branch(BranchId::from_bytes([0u8; 16])),
-            format!("{BRANCH_LINEAGE_UNAVAILABLE_PREFIX}{reason}"),
-        )
+        StrataError::BranchLineageUnavailable {
+            reason: LineageUnavailableReason::Other(reason.into()),
+        }
+    }
+
+    /// Create a typed `BranchLineageUnavailable` error directly from a
+    /// typed [`LineageUnavailableReason`].
+    pub fn branch_lineage_unavailable_reason(reason: LineageUnavailableReason) -> Self {
+        StrataError::BranchLineageUnavailable { reason }
     }
 
     /// Create an InvalidInput error
@@ -1363,14 +1441,13 @@ impl StrataError {
     }
 
     /// Returns true when this error represents the dedicated
-    /// branch-lineage-unavailable condition used during B3 follower legacy
-    /// synthesis.
+    /// branch-lineage-unavailable condition (B3 follower legacy
+    /// synthesis, B6 control-store lineage refusals).
+    ///
+    /// After B6 this is a simple variant match; callers no longer need
+    /// to pattern-match on an `InvalidOperation` reason string.
     pub fn is_branch_lineage_unavailable(&self) -> bool {
-        matches!(
-            self,
-            StrataError::InvalidOperation { reason, .. }
-                if reason.starts_with(BRANCH_LINEAGE_UNAVAILABLE_PREFIX)
-        )
+        matches!(self, StrataError::BranchLineageUnavailable { .. })
     }
 
     /// Create an IncompatibleReuse error
@@ -1726,6 +1803,7 @@ impl StrataError {
             StrataError::DimensionMismatch { .. } => ErrorCode::ConstraintViolation,
             StrataError::CapacityExceeded { .. } => ErrorCode::ConstraintViolation,
             StrataError::BudgetExceeded { .. } => ErrorCode::ConstraintViolation,
+            StrataError::BranchLineageUnavailable { .. } => ErrorCode::ConstraintViolation,
 
             // Path errors
             StrataError::PathNotFound { .. } => ErrorCode::InvalidPath,
@@ -1875,6 +1953,13 @@ impl StrataError {
             StrataError::Internal { message } => {
                 ErrorDetails::new().with_string("message", message)
             }
+            StrataError::BranchLineageUnavailable { reason } => ErrorDetails::new().with_string(
+                "reason",
+                format!(
+                    "{BRANCH_LINEAGE_UNAVAILABLE_DETAIL_PREFIX}{}",
+                    reason.wire_reason()
+                ),
+            ),
 
             // Catch-all for future variants (due to #[non_exhaustive])
             #[allow(unreachable_patterns)]
@@ -1920,6 +2005,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -1972,6 +2058,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2015,6 +2102,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2067,6 +2155,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2121,6 +2210,7 @@ impl StrataError {
             | StrataError::TransactionAborted { .. }
             | StrataError::TransactionTimeout { .. }
             | StrataError::TransactionNotActive { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2178,6 +2268,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::CapacityExceeded { .. }
             | StrataError::BudgetExceeded { .. }
             | StrataError::Internal { .. } => false,
@@ -2235,6 +2326,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2296,6 +2388,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::CapacityExceeded { .. }
@@ -2345,6 +2438,7 @@ impl StrataError {
             | StrataError::InvalidInput { .. }
             | StrataError::IncompatibleReuse { .. }
             | StrataError::DimensionMismatch { .. }
+            | StrataError::BranchLineageUnavailable { .. }
             | StrataError::Storage { .. }
             | StrataError::Serialization { .. }
             | StrataError::Corruption { .. }
@@ -2538,6 +2632,59 @@ mod strata_error_tests {
         assert!(!e.is_resource_error());
         assert_eq!(e.code(), ErrorCode::ConstraintViolation);
         assert!(format!("{e}").contains("release/2026-03"));
+    }
+
+    #[test]
+    fn test_branch_lineage_unavailable_typed_classifier() {
+        // B6: BranchLineageUnavailable is a first-class failure class,
+        // no longer an InvalidOperation prefix string. Wire code stays
+        // ConstraintViolation. JSON details preserve the legacy
+        // `branch_lineage_unavailable:` prefix so external clients that
+        // pattern-match on the reason key continue to work.
+        let e = StrataError::branch_lineage_unavailable_reason(
+            LineageUnavailableReason::FollowerUnmigrated,
+        );
+
+        assert!(e.is_branch_lineage_unavailable());
+        assert!(!e.is_validation_error());
+        assert!(!e.is_not_found());
+        assert!(!e.is_conflict());
+        assert!(!e.is_storage_error());
+        assert!(!e.is_serious());
+        assert!(!e.is_retryable());
+        assert_eq!(e.code(), ErrorCode::ConstraintViolation);
+
+        let details = e.details();
+        let reason = match details.fields().get("reason") {
+            Some(DetailValue::String(s)) => s.clone(),
+            other => panic!("expected reason string, got {other:?}"),
+        };
+        assert!(
+            reason.starts_with(BRANCH_LINEAGE_UNAVAILABLE_DETAIL_PREFIX),
+            "legacy wire prefix must survive the typed promotion: {reason}"
+        );
+        assert!(
+            reason.contains("primary migration required"),
+            "typed FollowerUnmigrated must render the canonical reason: {reason}"
+        );
+    }
+
+    #[test]
+    fn test_branch_lineage_unavailable_from_other_reason() {
+        // The free-form `branch_lineage_unavailable(str)` constructor
+        // wraps the string in LineageUnavailableReason::Other, which
+        // still satisfies the predicate and preserves the wire shape.
+        let e = StrataError::branch_lineage_unavailable("custom lineage refusal");
+        assert!(e.is_branch_lineage_unavailable());
+        let details = e.details();
+        let reason = match details.fields().get("reason") {
+            Some(DetailValue::String(s)) => s.clone(),
+            other => panic!("expected reason string, got {other:?}"),
+        };
+        assert_eq!(
+            reason,
+            format!("{BRANCH_LINEAGE_UNAVAILABLE_DETAIL_PREFIX}custom lineage refusal")
+        );
     }
 
     #[test]

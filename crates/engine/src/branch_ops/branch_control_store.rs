@@ -160,21 +160,25 @@ pub(crate) struct MigrationReport {
 /// primary; fork anchors can be synthesized from storage but merge/revert
 /// edges cannot, so merge-lineage reads refuse until primary migrates.
 ///
-/// Callers must propagate this as a typed error, not swallow it.
+/// Callers must propagate this as a typed error, not swallow it. After
+/// B6 this wraps a typed [`strata_core::LineageUnavailableReason`] —
+/// `reason` here is the wire-stable string for legacy log output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BranchLineageUnavailable {
     pub reason: &'static str,
+    typed_reason: strata_core::LineageUnavailableReason,
 }
 
 impl BranchLineageUnavailable {
     pub(crate) fn follower_unmigrated() -> Self {
         Self {
             reason: "primary migration required for merge-lineage reads; follower running in legacy synthesis mode",
+            typed_reason: strata_core::LineageUnavailableReason::FollowerUnmigrated,
         }
     }
 
     pub(crate) fn into_strata_error(self) -> StrataError {
-        StrataError::branch_lineage_unavailable(self.reason)
+        StrataError::branch_lineage_unavailable_reason(self.typed_reason)
     }
 }
 
@@ -1754,7 +1758,7 @@ mod tests {
         let e = BranchLineageUnavailable::follower_unmigrated();
         assert!(e.reason.contains("primary migration required"));
         let se = e.into_strata_error();
-        assert!(matches!(se, StrataError::InvalidOperation { .. }));
+        assert!(matches!(se, StrataError::BranchLineageUnavailable { .. }));
         assert!(se.is_branch_lineage_unavailable());
     }
 

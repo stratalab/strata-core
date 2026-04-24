@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "timestamp": "2026-04-17T19:10:05Z",
+    "git_commit": "528760b5",
+    "git_branch": "feat/T3-E12b-wal-codec-threading",
+    "git_dirty": true,
+    "sdk": "rust",
+    "sdk_version": "0.1.0",
+    "hardware": {
+      "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "cores": 16,
+      "ram_gb": 61,
+      "os": "linux",
+      "arch": "x86_64"
+    }
+  },
+  "results": [
+    {
+      "benchmark": "wal/blind_put/cache",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "samples": 250,
+        "durability": "cache",
+        "value_size_bytes": 1024
+      },
+      "metrics": {
+        "ops_per_sec": 374239.73198447353,
+        "p50_ns": 2174,
+        "p95_ns": 5240,
+        "p99_ns": 9678,
+        "min_ns": 1553,
+        "max_ns": 10961,
+        "avg_ns": 2672,
+        "samples": 250
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/standard",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "value_size_bytes": 1024,
+        "samples": 250,
+        "durability": "standard"
+      },
+      "metrics": {
+        "ops_per_sec": 269260.47073192534,
+        "p50_ns": 2715,
+        "p95_ns": 7755,
+        "p99_ns": 10039,
+        "min_ns": 2445,
+        "max_ns": 10620,
+        "avg_ns": 3713,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 0.0
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/always",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "samples": 250,
+        "durability": "always",
+        "value_size_bytes": 1024
+      },
+      "metrics": {
+        "ops_per_sec": 97.38345554616163,
+        "p50_ns": 8845569,
+        "p95_ns": 17717846,
+        "p99_ns": 18025061,
+        "min_ns": 8524537,
+        "max_ns": 21224344,
+        "avg_ns": 10268684,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 1.0
+      }
+    }
+  ]
+}

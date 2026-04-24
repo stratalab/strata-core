@@ -1,0 +1,3975 @@
+[
+  {
+    "timestamp": "2026-04-10T18:06:17Z",
+    "git_commit": "0d6724dc",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "beir": {
+        "suite": "beir",
+        "duration_secs": 104.064732488,
+        "metrics": {
+          "arguana_ndcg_at_10": 0.32031083629952634,
+          "scidocs_ndcg_at_10": 0.1502454922723842,
+          "nfcorpus_ndcg_at_10": 0.32045791601134527,
+          "avg_ndcg_at_10": 0.36640389931568845,
+          "scifact_ndcg_at_10": 0.6746013526794981
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "pass",
+      "regressions": []
+    }
+  },
+  {
+    "timestamp": "2026-04-12T16:11:36Z",
+    "git_commit": "d70ad4db",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 25.079506416,
+        "metrics": {
+          "bulk_load_ops_sec": 296739.7152881187,
+          "bulk_load_duration_ms": 16849.0,
+          "range_scan_ops_sec": 103767.0836022344,
+          "random_read_ops_sec": 295492.7488994456
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.677537867,
+        "metrics": {
+          "run_ops_sec": 449989.01509315806,
+          "p50_us": 2.074,
+          "load_ops_sec": 370458.1017091903,
+          "p99_us": 5.661
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 296739.7152881187,
+          "delta_pct": -9.297155402524805,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 370458.1017091903,
+          "delta_pct": -11.67114505439232,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.074,
+          "delta_pct": 11.866235167206026,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-12T16:17:38Z",
+    "git_commit": "d70ad4db",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.464563614,
+        "metrics": {
+          "random_read_ops_sec": 1079726.1939620352,
+          "bulk_load_ops_sec": 363275.22447021335,
+          "range_scan_ops_sec": 145422.78300349702,
+          "bulk_load_duration_ms": 275.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.087598173,
+        "metrics": {
+          "p50_us": 1.903,
+          "load_ops_sec": 422572.0940741828,
+          "p99_us": 6.622,
+          "run_ops_sec": 532907.5473084678
+        }
+      },
+      "beir": {
+        "suite": "beir",
+        "duration_secs": 103.388893914,
+        "metrics": {
+          "nfcorpus_ndcg_at_10": 0.3204579160113451,
+          "scifact_ndcg_at_10": 0.6746013526794983,
+          "avg_ndcg_at_10": 0.3664038993156884,
+          "scidocs_ndcg_at_10": 0.15024549227238412,
+          "arguana_ndcg_at_10": 0.32031083629952617
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.622,
+          "delta_pct": 15.769230769230772,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T01:59:14Z",
+    "git_commit": "57943f43",
+    "git_branch": "tranche-2/T2-E2-subsystem-initialization",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 1.222784563,
+        "metrics": {
+          "bulk_load_duration_ms": 854.0,
+          "range_scan_ops_sec": 71414.47880138682,
+          "random_read_ops_sec": 507253.836383591,
+          "bulk_load_ops_sec": 117048.41977563578
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.117559619,
+        "metrics": {
+          "p99_us": 6.683,
+          "run_ops_sec": 411307.924237903,
+          "load_ops_sec": 236892.56275562337,
+          "p50_us": 2.615
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 117048.41977563578,
+          "delta_pct": -64.22243440187523,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 411307.924237903,
+          "delta_pct": -10.171211020117395,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.615,
+          "delta_pct": 41.046386192017266,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.683,
+          "delta_pct": 16.835664335664337,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 236892.56275562337,
+          "delta_pct": -43.51736750581198,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T02:12:19Z",
+    "git_commit": "57943f43",
+    "git_branch": "tranche-2/T2-E2-subsystem-initialization",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.178807121,
+        "metrics": {
+          "p99_us": 7.454,
+          "run_ops_sec": 261192.27849804304,
+          "p50_us": 2.835,
+          "load_ops_sec": 102248.960779906
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 1.274668076,
+        "metrics": {
+          "range_scan_ops_sec": 74098.00608341665,
+          "random_read_ops_sec": 369784.0790825556,
+          "bulk_load_ops_sec": 119877.02319673744,
+          "bulk_load_duration_ms": 834.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 119877.02319673744,
+          "delta_pct": -63.35783029492931,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 7.454,
+          "delta_pct": 30.314685314685313,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.835,
+          "delta_pct": 52.91262135922329,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 102248.960779906,
+          "delta_pct": -75.62063406523309,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 261192.27849804304,
+          "delta_pct": -42.95615356341995,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T02:12:25Z",
+    "git_commit": "57943f43",
+    "git_branch": "tranche-2/T2-E2-subsystem-initialization",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.182077752,
+        "metrics": {
+          "load_ops_sec": 122596.97215147254,
+          "run_ops_sec": 175902.39865436073,
+          "p50_us": 2.875,
+          "p99_us": 8.446
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 1.156134939,
+        "metrics": {
+          "random_read_ops_sec": 361624.3501868085,
+          "bulk_load_ops_sec": 141533.46267236723,
+          "range_scan_ops_sec": 69132.56726982481,
+          "bulk_load_duration_ms": 706.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 141533.46267236723,
+          "delta_pct": -56.73822205548134,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.875,
+          "delta_pct": 55.07011866235166,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 122596.97215147254,
+          "delta_pct": -70.76902861625423,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 175902.39865436073,
+          "delta_pct": -61.583284642388016,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 8.446,
+          "delta_pct": 47.65734265734266,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T02:14:44Z",
+    "git_commit": "57943f43",
+    "git_branch": "tranche-2/T2-E2-subsystem-initialization",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.076145715,
+        "metrics": {
+          "p50_us": 2.024,
+          "load_ops_sec": 376979.1499617781,
+          "p99_us": 6.312,
+          "run_ops_sec": 532242.9307893114
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.496703046,
+        "metrics": {
+          "bulk_load_ops_sec": 318134.2307959369,
+          "bulk_load_duration_ms": 314.0,
+          "range_scan_ops_sec": 146939.36182824543,
+          "random_read_ops_sec": 1162426.83104312
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.024,
+          "delta_pct": 9.169363538295574,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.312,
+          "delta_pct": 10.34965034965036,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 376979.1499617781,
+          "delta_pct": -10.116322194428813,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T18:47:36Z",
+    "git_commit": "fd240cc1",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.078321917,
+        "metrics": {
+          "run_ops_sec": 520855.6867232219,
+          "p50_us": 2.143,
+          "load_ops_sec": 365180.57284634846,
+          "p99_us": 6.241
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.489105778,
+        "metrics": {
+          "bulk_load_ops_sec": 328667.2703890023,
+          "bulk_load_duration_ms": 304.0,
+          "range_scan_ops_sec": 148922.26816060522,
+          "random_read_ops_sec": 1124113.1534098804
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 365180.57284634846,
+          "delta_pct": -12.929473808025971,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.143,
+          "delta_pct": 15.587918015102463,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T19:44:05Z",
+    "git_commit": "3ae81c05",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.715779698,
+        "metrics": {
+          "run_ops_sec": 431359.4228369512,
+          "load_ops_sec": 363784.6078483415,
+          "p99_us": 5.971,
+          "p50_us": 2.214
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.458394781,
+        "metrics": {
+          "bulk_load_ops_sec": 275917.5964798437,
+          "range_scan_ops_sec": 104179.3954571319,
+          "random_read_ops_sec": 284973.7756587609,
+          "bulk_load_duration_ms": 18121.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.214,
+          "delta_pct": 19.41747572815533,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 363784.6078483415,
+          "delta_pct": -13.262315738730717,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 431359.4228369512,
+          "delta_pct": -5.792005733174055,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 275917.5964798437,
+          "delta_pct": -15.661741297686746,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T19:44:37Z",
+    "git_commit": "3ae81c05",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.745850489,
+        "metrics": {
+          "random_read_ops_sec": 288023.5833433539,
+          "bulk_load_ops_sec": 272225.2698037784,
+          "range_scan_ops_sec": 102722.59948942468,
+          "bulk_load_duration_ms": 18367.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.69462269,
+        "metrics": {
+          "p99_us": 5.65,
+          "run_ops_sec": 437046.6987150971,
+          "p50_us": 2.274,
+          "load_ops_sec": 364275.141954289
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 272225.2698037784,
+          "delta_pct": -16.790355080904444,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.274,
+          "delta_pct": 22.65372168284789,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 364275.141954289,
+          "delta_pct": -13.145356990385888,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T19:44:45Z",
+    "git_commit": "3ae81c05",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.547793546,
+        "metrics": {
+          "random_read_ops_sec": 1026304.8185452542,
+          "bulk_load_ops_sec": 291037.79861849657,
+          "bulk_load_duration_ms": 343.0,
+          "range_scan_ops_sec": 141431.73523628415
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.083059199,
+        "metrics": {
+          "load_ops_sec": 407662.10714265186,
+          "run_ops_sec": 517864.486360511,
+          "p50_us": 2.104,
+          "p99_us": 6.251
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.104,
+          "delta_pct": 13.48435814455232,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 291037.79861849657,
+          "delta_pct": -11.040029830675866,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-14T19:45:19Z",
+    "git_commit": "3ae81c05",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.397497151,
+        "metrics": {
+          "bulk_load_duration_ms": 18050.0,
+          "bulk_load_ops_sec": 277007.41923691117,
+          "range_scan_ops_sec": 103935.26458730044,
+          "random_read_ops_sec": 284961.14602504944
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.721338075,
+        "metrics": {
+          "run_ops_sec": 397914.9020384245,
+          "p99_us": 6.202,
+          "load_ops_sec": 360281.27245407994,
+          "p50_us": 2.274
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 277007.41923691117,
+          "delta_pct": -15.32862099366171,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 360281.27245407994,
+          "delta_pct": -14.097621006554116,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 397914.9020384245,
+          "delta_pct": -13.096219010636844,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.274,
+          "delta_pct": 22.65372168284789,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T03:25:00Z",
+    "git_commit": "5c59e0d8",
+    "git_branch": "feat/T3-E3-follower-refresh-convergence",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.495938113,
+        "metrics": {
+          "bulk_load_duration_ms": 313.0,
+          "random_read_ops_sec": 1145699.7745755494,
+          "bulk_load_ops_sec": 318562.12677121855,
+          "range_scan_ops_sec": 148832.8542453366
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.08689887,
+        "metrics": {
+          "p50_us": 2.214,
+          "run_ops_sec": 540559.7669365754,
+          "p99_us": 5.049,
+          "load_ops_sec": 350421.80447815935
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 350421.80447815935,
+          "delta_pct": -16.44842805509207,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.214,
+          "delta_pct": 19.41747572815533,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T03:27:37Z",
+    "git_commit": "5c59e0d8",
+    "git_branch": "feat/T3-E3-follower-refresh-convergence",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.562390812,
+        "metrics": {
+          "bulk_load_ops_sec": 268545.57189889293,
+          "range_scan_ops_sec": 148995.4022253804,
+          "random_read_ops_sec": 1049945.2222578644,
+          "bulk_load_duration_ms": 372.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.079958917,
+        "metrics": {
+          "load_ops_sec": 349688.6197685271,
+          "run_ops_sec": 498144.7842871187,
+          "p50_us": 2.234,
+          "p99_us": 6.221
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 268545.57189889293,
+          "delta_pct": -17.915108695055544,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 349688.6197685271,
+          "delta_pct": -16.623242333863818,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.234,
+          "delta_pct": 20.49622437971952,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T03:33:25Z",
+    "git_commit": "5c59e0d8",
+    "git_branch": "feat/T3-E3-follower-refresh-convergence",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.497263697,
+        "metrics": {
+          "random_read_ops_sec": 1124082.9029126223,
+          "range_scan_ops_sec": 149308.4495473162,
+          "bulk_load_duration_ms": 313.0,
+          "bulk_load_ops_sec": 318580.35293554846
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.093305931,
+        "metrics": {
+          "load_ops_sec": 385597.7542169838,
+          "run_ops_sec": 513057.7033433662,
+          "p50_us": 2.224,
+          "p99_us": 5.801
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.224,
+          "delta_pct": 19.956850053937437,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 385597.7542169838,
+          "delta_pct": -8.06137605725603,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T03:35:32Z",
+    "git_commit": "e6b54885",
+    "git_branch": "HEAD",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.578731462,
+        "metrics": {
+          "bulk_load_duration_ms": 375.0,
+          "random_read_ops_sec": 1138133.084109503,
+          "bulk_load_ops_sec": 266582.96743465925,
+          "range_scan_ops_sec": 150024.0398521459
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.075249019,
+        "metrics": {
+          "p50_us": 2.214,
+          "load_ops_sec": 392613.71113870223,
+          "p99_us": 5.691,
+          "run_ops_sec": 531603.5662093635
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 266582.96743465925,
+          "delta_pct": -18.51500752407766,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.214,
+          "delta_pct": 19.41747572815533,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 392613.71113870223,
+          "delta_pct": -6.388551415592306,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:27:35Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.905992258,
+        "metrics": {
+          "random_read_ops_sec": 289742.07943551237,
+          "range_scan_ops_sec": 106690.77074632904,
+          "bulk_load_ops_sec": 266810.0205174302,
+          "bulk_load_duration_ms": 18739.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.741409747,
+        "metrics": {
+          "p50_us": 2.364,
+          "run_ops_sec": 424918.7697659995,
+          "load_ops_sec": 327936.01805631455,
+          "p99_us": 6.011
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 266810.0205174302,
+          "delta_pct": -18.44560542041265,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 327936.01805631455,
+          "delta_pct": -21.809746266327107,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 424918.7697659995,
+          "delta_pct": -7.198630870958935,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.364,
+          "delta_pct": 27.50809061488672,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:28:13Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.775209045,
+        "metrics": {
+          "run_ops_sec": 390914.4950887594,
+          "p99_us": 6.162,
+          "load_ops_sec": 312628.03094829933,
+          "p50_us": 2.365
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 28.099246595,
+        "metrics": {
+          "range_scan_ops_sec": 92711.7434418081,
+          "random_read_ops_sec": 263234.8654427655,
+          "bulk_load_ops_sec": 264831.65669093863,
+          "bulk_load_duration_ms": 18879.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 264831.65669093863,
+          "delta_pct": -19.050321329563207,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 312628.03094829933,
+          "delta_pct": -25.45965152291274,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.365,
+          "delta_pct": 27.56202804746495,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 390914.4950887594,
+          "delta_pct": -14.62509322287071,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:28:46Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.760840861,
+        "metrics": {
+          "p50_us": 2.374,
+          "p99_us": 6.623,
+          "run_ops_sec": 377213.80273889354,
+          "load_ops_sec": 343706.60016759683
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.10482468,
+        "metrics": {
+          "bulk_load_duration_ms": 18776.0,
+          "range_scan_ops_sec": 105083.14171236794,
+          "bulk_load_ops_sec": 266296.39973041404,
+          "random_read_ops_sec": 282227.0420172494
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 377213.80273889354,
+          "delta_pct": -17.61729572967809,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 343706.60016759683,
+          "delta_pct": -18.049543821601656,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.374,
+          "delta_pct": 28.047464940668824,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.623,
+          "delta_pct": 15.786713286713294,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 266296.39973041404,
+          "delta_pct": -18.602601144363952,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:29:17Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.412610271,
+        "metrics": {
+          "range_scan_ops_sec": 102743.820009725,
+          "random_read_ops_sec": 282316.3931206346,
+          "bulk_load_ops_sec": 263485.5775908089,
+          "bulk_load_duration_ms": 18976.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.740168517,
+        "metrics": {
+          "p50_us": 2.364,
+          "load_ops_sec": 348670.43577315717,
+          "run_ops_sec": 381505.94098600576,
+          "p99_us": 6.552
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.552,
+          "delta_pct": 14.545454545454543,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 381505.94098600576,
+          "delta_pct": -16.679901728366996,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.364,
+          "delta_pct": 27.50809061488672,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 348670.43577315717,
+          "delta_pct": -16.866009399882987,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 263485.5775908089,
+          "delta_pct": -19.461770141921978,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:29:50Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.7581172,
+        "metrics": {
+          "run_ops_sec": 367790.77847890795,
+          "p99_us": 6.642,
+          "load_ops_sec": 328446.31600308133,
+          "p50_us": 2.424
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.226981705,
+        "metrics": {
+          "range_scan_ops_sec": 106784.06897897528,
+          "bulk_load_ops_sec": 261938.622519654,
+          "bulk_load_duration_ms": 19088.0,
+          "random_read_ops_sec": 291680.9825637449
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 261938.622519654,
+          "delta_pct": -19.93461963994755,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.424,
+          "delta_pct": 30.74433656957928,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 328446.31600308133,
+          "delta_pct": -21.68807519715344,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.642,
+          "delta_pct": 16.118881118881127,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 367790.77847890795,
+          "delta_pct": -19.675264487199435,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:30:08Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.075208446,
+        "metrics": {
+          "load_ops_sec": 391627.01443145546,
+          "p99_us": 5.55,
+          "run_ops_sec": 531726.6680332043,
+          "p50_us": 2.204
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.506089692,
+        "metrics": {
+          "bulk_load_ops_sec": 313489.17590843205,
+          "range_scan_ops_sec": 149119.09682976975,
+          "bulk_load_duration_ms": 318.0,
+          "random_read_ops_sec": 1084002.826125448
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 391627.01443145546,
+          "delta_pct": -6.6238109224774435,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.204,
+          "delta_pct": 18.87810140237325,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:31:10Z",
+    "git_commit": "15df679a",
+    "git_branch": "HEAD",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.510965227,
+        "metrics": {
+          "bulk_load_duration_ms": 316.0,
+          "random_read_ops_sec": 1045915.7429522328,
+          "range_scan_ops_sec": 140927.49911525715,
+          "bulk_load_ops_sec": 315799.2205778385
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.097160479,
+        "metrics": {
+          "run_ops_sec": 488858.1168999571,
+          "p99_us": 6.141,
+          "load_ops_sec": 361406.3419440322,
+          "p50_us": 2.254
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 361406.3419440322,
+          "delta_pct": -13.829369079215434,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.254,
+          "delta_pct": 21.574973031283704,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T14:32:10Z",
+    "git_commit": "37c36822",
+    "git_branch": "feat/T3-E4-database-layout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.54723098,
+        "metrics": {
+          "bulk_load_ops_sec": 289869.3936922188,
+          "bulk_load_duration_ms": 344.0,
+          "random_read_ops_sec": 1036519.8059759304,
+          "range_scan_ops_sec": 144125.3180017048
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.089147048,
+        "metrics": {
+          "p50_us": 2.294,
+          "p99_us": 6.402,
+          "run_ops_sec": 448688.2375032474,
+          "load_ops_sec": 380637.27129361976
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 289869.3936922188,
+          "delta_pct": -11.397169926844647,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 380637.27129361976,
+          "delta_pct": -9.244111094164296,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.294,
+          "delta_pct": 23.73247033441208,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.402,
+          "delta_pct": 11.92307692307693,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T18:45:10Z",
+    "git_commit": "8ba822f8",
+    "git_branch": "feat/T3-E5-recovery-coordinator-extension",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.51050562,
+        "metrics": {
+          "random_read_ops_sec": 1079273.3623721185,
+          "bulk_load_duration_ms": 320.0,
+          "bulk_load_ops_sec": 311610.2097053511,
+          "range_scan_ops_sec": 145602.6832128391
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.078536513,
+        "metrics": {
+          "p99_us": 5.761,
+          "p50_us": 2.234,
+          "load_ops_sec": 387426.6867637803,
+          "run_ops_sec": 502211.5135103184
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 387426.6867637803,
+          "delta_pct": -7.625301054749796,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.234,
+          "delta_pct": 20.49622437971952,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-16T18:45:55Z",
+    "git_commit": "8ba822f8",
+    "git_branch": "feat/T3-E5-recovery-coordinator-extension",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.077102457,
+        "metrics": {
+          "load_ops_sec": 379719.1688160037,
+          "p50_us": 2.184,
+          "p99_us": 5.62,
+          "run_ops_sec": 532037.8000087999
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.555347141,
+        "metrics": {
+          "bulk_load_duration_ms": 368.0,
+          "range_scan_ops_sec": 150094.3290324954,
+          "random_read_ops_sec": 1088478.3683047465,
+          "bulk_load_ops_sec": 271037.5548795825
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 271037.5548795825,
+          "delta_pct": -17.153397561048507,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.184,
+          "delta_pct": 17.799352750809064,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 379719.1688160037,
+          "delta_pct": -9.463015580788833,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-17T02:51:45Z",
+    "git_commit": "446a94a5",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.079879839,
+        "metrics": {
+          "p99_us": 5.761,
+          "load_ops_sec": 389515.94464043586,
+          "run_ops_sec": 517412.53580882814,
+          "p50_us": 2.264
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.554988258,
+        "metrics": {
+          "bulk_load_duration_ms": 343.0,
+          "range_scan_ops_sec": 142228.58394875049,
+          "bulk_load_ops_sec": 291357.8226401035,
+          "random_read_ops_sec": 1094726.8932272575
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 291357.8226401035,
+          "delta_pct": -10.942209796471513,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 389515.94464043586,
+          "delta_pct": -7.127156311580049,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.264,
+          "delta_pct": 22.114347357065785,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-17T19:05:34Z",
+    "git_commit": "528760b5",
+    "git_branch": "feat/T3-E12b-wal-codec-threading",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 30.953788723,
+        "metrics": {
+          "bulk_load_ops_sec": 265272.54787165235,
+          "bulk_load_duration_ms": 18848.0,
+          "range_scan_ops_sec": 104576.19668260052,
+          "random_read_ops_sec": 137244.42285932478
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.738711528,
+        "metrics": {
+          "load_ops_sec": 342071.68567128584,
+          "run_ops_sec": 366402.85709809314,
+          "p99_us": 7.043,
+          "p50_us": 2.415
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 265272.54787165235,
+          "delta_pct": -18.9155564760961,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 7.043,
+          "delta_pct": 23.129370629370637,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 366402.85709809314,
+          "delta_pct": -19.978383609129523,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 342071.68567128584,
+          "delta_pct": -18.439358822884813,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.415,
+          "delta_pct": 30.2588996763754,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-17T19:08:40Z",
+    "git_commit": "528760b5",
+    "git_branch": "feat/T3-E12b-wal-codec-threading",
+    "tranche": 3,
+    "epic": "T3-E12",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.09297485,
+        "metrics": {
+          "load_ops_sec": 388064.14048294426,
+          "run_ops_sec": 532640.020674955,
+          "p50_us": 2.204,
+          "p99_us": 6.091
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.499701531,
+        "metrics": {
+          "random_read_ops_sec": 1116284.8059137375,
+          "range_scan_ops_sec": 147401.03888547007,
+          "bulk_load_ops_sec": 318437.0599597878,
+          "bulk_load_duration_ms": 314.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "9fd47985",
+      "baseline_timestamp": "2026-04-17T19:07:37Z",
+      "verdict": "pass",
+      "regressions": []
+    }
+  },
+  {
+    "timestamp": "2026-04-18T02:50:32Z",
+    "git_commit": "5b136b20",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.078665289,
+        "metrics": {
+          "p50_us": 2.234,
+          "p99_us": 7.173,
+          "load_ops_sec": 364835.4783531254,
+          "run_ops_sec": 485105.04367594747
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.493840506,
+        "metrics": {
+          "bulk_load_duration_ms": 314.0,
+          "random_read_ops_sec": 1145148.395028146,
+          "bulk_load_ops_sec": 317478.2030736246,
+          "range_scan_ops_sec": 156722.32189761897
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 7.173,
+          "delta_pct": 25.402097902097907,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 364835.4783531254,
+          "delta_pct": -13.011755181530274,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.234,
+          "delta_pct": 20.49622437971952,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-18T02:51:36Z",
+    "git_commit": "5b136b20",
+    "git_branch": "main",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.587131277,
+        "metrics": {
+          "range_scan_ops_sec": 140305.16626211308,
+          "random_read_ops_sec": 1089094.9596924866,
+          "bulk_load_ops_sec": 264052.155307102,
+          "bulk_load_duration_ms": 378.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.082069546,
+        "metrics": {
+          "p99_us": 7.273,
+          "p50_us": 2.274,
+          "run_ops_sec": 455730.9765357792,
+          "load_ops_sec": 361802.18443857686
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.274,
+          "delta_pct": 22.65372168284789,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 361802.18443857686,
+          "delta_pct": -13.73498778718638,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 7.273,
+          "delta_pct": 27.150349650349646,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 264052.155307102,
+          "delta_pct": -19.288587356114455,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-18T13:16:53Z",
+    "git_commit": "6136fedb",
+    "git_branch": "se1-publication-barrier",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.780687325,
+        "metrics": {
+          "p99_us": 6.653,
+          "load_ops_sec": 315212.5477894532,
+          "p50_us": 2.364,
+          "run_ops_sec": 389633.73069492955
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.368556911,
+        "metrics": {
+          "range_scan_ops_sec": 105149.05930015496,
+          "random_read_ops_sec": 273524.689798576,
+          "bulk_load_ops_sec": 264140.11829824874,
+          "bulk_load_duration_ms": 18929.0
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 315212.5477894532,
+          "delta_pct": -24.843421476617344,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.364,
+          "delta_pct": 27.50809061488672,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.653,
+          "delta_pct": 16.31118881118881,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 389633.73069492955,
+          "delta_pct": -14.904809483332896,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 264140.11829824874,
+          "delta_pct": -19.261700178209864,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-18T13:18:30Z",
+    "git_commit": "6136fedb",
+    "git_branch": "se1-publication-barrier",
+    "tranche": 2,
+    "epic": "SE1",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.775485898,
+        "metrics": {
+          "run_ops_sec": 381747.2193828394,
+          "load_ops_sec": 329945.3249581684,
+          "p99_us": 6.903,
+          "p50_us": 2.395
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.896650134,
+        "metrics": {
+          "bulk_load_ops_sec": 263916.0603353574,
+          "range_scan_ops_sec": 101950.5608474178,
+          "bulk_load_duration_ms": 18945.0,
+          "random_read_ops_sec": 249346.90298661697
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.395,
+          "delta_pct": 29.180151024811213,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.903,
+          "delta_pct": 20.68181818181818,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 329945.3249581684,
+          "delta_pct": -21.33066434840923,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 381747.2193828394,
+          "delta_pct": -16.62720703196714,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 263916.0603353574,
+          "delta_pct": -19.330186779571022,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-18T13:22:20Z",
+    "git_commit": "5b136b20",
+    "git_branch": "main",
+    "tranche": 2,
+    "epic": "SE1-baseline-main",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.885180716,
+        "metrics": {
+          "range_scan_ops_sec": 103695.4155918305,
+          "bulk_load_duration_ms": 18528.0,
+          "random_read_ops_sec": 285346.0275882629,
+          "bulk_load_ops_sec": 269851.7599763466
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.748217525,
+        "metrics": {
+          "load_ops_sec": 335924.39320120873,
+          "run_ops_sec": 374374.92864413856,
+          "p99_us": 6.703,
+          "p50_us": 2.374
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 269851.7599763466,
+          "delta_pct": -17.515853158635945,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.374,
+          "delta_pct": 28.047464940668824,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 374374.92864413856,
+          "delta_pct": -18.23729988464472,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.703,
+          "delta_pct": 17.185314685314694,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 335924.39320120873,
+          "delta_pct": -19.905066557153532,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-18T16:35:08Z",
+    "git_commit": "82121b00",
+    "git_branch": "ci-parallel-test-flakes",
+    "tranche": 2,
+    "epic": "SE1-v2-merged",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 27.59855812,
+        "metrics": {
+          "bulk_load_ops_sec": 262584.867086369,
+          "random_read_ops_sec": 266695.96268477564,
+          "range_scan_ops_sec": 104768.276712618,
+          "bulk_load_duration_ms": 19041.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.743211397,
+        "metrics": {
+          "p50_us": 2.355,
+          "p99_us": 6.522,
+          "run_ops_sec": 412480.9253867668,
+          "load_ops_sec": 334110.3235963729
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 334110.3235963729,
+          "delta_pct": -20.33759776715407,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.355,
+          "delta_pct": 27.022653721682843,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p99_us",
+          "baseline_value": 5.72,
+          "current_value": 6.522,
+          "delta_pct": 14.02097902097903,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "run_ops_sec",
+          "baseline_value": 457879.85,
+          "current_value": 412480.9253867668,
+          "delta_pct": -9.915030026596105,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 262584.867086369,
+          "delta_pct": -19.737085513281016,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T01:27:54Z",
+    "git_commit": "f57677f6",
+    "git_branch": "feat/t3-d6-follower-completion",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.078349355,
+        "metrics": {
+          "load_ops_sec": 372162.87216845463,
+          "p99_us": 6.201,
+          "run_ops_sec": 520697.7620774674,
+          "p50_us": 2.244
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.535785966,
+        "metrics": {
+          "bulk_load_duration_ms": 350.0,
+          "random_read_ops_sec": 1122519.7029148336,
+          "bulk_load_ops_sec": 285495.9172285212,
+          "range_scan_ops_sec": 147155.18637196996
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 372162.87216845463,
+          "delta_pct": -11.264674195968167,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.244,
+          "delta_pct": 21.035598705501624,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 285495.9172285212,
+          "delta_pct": -12.733987129261653,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T01:29:03Z",
+    "git_commit": "f57677f6",
+    "git_branch": "feat/t3-d6-follower-completion",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.076389931,
+        "metrics": {
+          "load_ops_sec": 388434.3214662246,
+          "p99_us": 5.961,
+          "p50_us": 2.225,
+          "run_ops_sec": 525985.8302573244
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.509736401,
+        "metrics": {
+          "random_read_ops_sec": 1082143.558874307,
+          "bulk_load_duration_ms": 320.0,
+          "bulk_load_ops_sec": 311923.9515182466,
+          "range_scan_ops_sec": 144437.95019323053
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.225,
+          "delta_pct": 20.010787486515643,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 388434.3214662246,
+          "delta_pct": -7.385049271728374,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T14:34:36Z",
+    "git_commit": "3ff0ca33",
+    "git_branch": "feat/t2-se2-storage-recovery-integrity",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.542630459,
+        "metrics": {
+          "range_scan_ops_sec": 149320.6871851508,
+          "random_read_ops_sec": 1122549.8315305277,
+          "bulk_load_duration_ms": 340.0,
+          "bulk_load_ops_sec": 293741.8803502256
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.119270253,
+        "metrics": {
+          "run_ops_sec": 521581.6127877207,
+          "p99_us": 6.011,
+          "p50_us": 2.235,
+          "load_ops_sec": 328533.53504416294
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 293741.8803502256,
+          "delta_pct": -10.213487603748986,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 328533.53504416294,
+          "delta_pct": -21.66727943646512,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.235,
+          "delta_pct": 20.55016181229772,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T23:37:54Z",
+    "git_commit": "1b87cb34",
+    "git_branch": "feat/se3-deletion-safety-degraded-recovery",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.589982775,
+        "metrics": {
+          "bulk_load_duration_ms": 354.0,
+          "range_scan_ops_sec": 132475.9489914606,
+          "random_read_ops_sec": 988135.8090693952,
+          "bulk_load_ops_sec": 281758.36684781016
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.104357476,
+        "metrics": {
+          "run_ops_sec": 489368.5897302576,
+          "load_ops_sec": 330812.4979903141,
+          "p99_us": 6.102,
+          "p50_us": 2.264
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 330812.4979903141,
+          "delta_pct": -21.12390304229729,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.264,
+          "delta_pct": 22.114347357065785,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 281758.36684781016,
+          "delta_pct": -13.876424200847133,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T23:38:59Z",
+    "git_commit": "1b87cb34",
+    "git_branch": "feat/se3-deletion-safety-degraded-recovery",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.106174395,
+        "metrics": {
+          "load_ops_sec": 343955.3273572471,
+          "run_ops_sec": 537380.3374898985,
+          "p50_us": 2.234,
+          "p99_us": 5.64
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.540042855,
+        "metrics": {
+          "bulk_load_duration_ms": 334.0,
+          "random_read_ops_sec": 1150788.9590453312,
+          "range_scan_ops_sec": 138089.28480314303,
+          "bulk_load_ops_sec": 298792.0259686843
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 298792.0259686843,
+          "delta_pct": -8.669836553262119,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.234,
+          "delta_pct": 20.49622437971952,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 343955.3273572471,
+          "delta_pct": -17.990239442093454,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-19T23:40:05Z",
+    "git_commit": "1b87cb34",
+    "git_branch": "feat/se3-deletion-safety-degraded-recovery",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.543616352,
+        "metrics": {
+          "bulk_load_duration_ms": 341.0,
+          "bulk_load_ops_sec": 292972.3818275536,
+          "range_scan_ops_sec": 146482.2521517364,
+          "random_read_ops_sec": 1147057.5364633815
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.106055267,
+        "metrics": {
+          "p50_us": 2.244,
+          "p99_us": 6.231,
+          "load_ops_sec": 368693.5113149642,
+          "run_ops_sec": 524140.8532101086
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "0d6724dc",
+      "baseline_timestamp": "2026-04-10T18:04:29Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "redb",
+          "metric": "bulk_load_ops_sec",
+          "baseline_value": 327155.9085109209,
+          "current_value": 292972.3818275536,
+          "delta_pct": -10.44869610912932,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "p50_us",
+          "baseline_value": 1.854,
+          "current_value": 2.244,
+          "delta_pct": 21.035598705501624,
+          "threshold_pct": 5.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "ycsb",
+          "metric": "load_ops_sec",
+          "baseline_value": 419407.7936788787,
+          "current_value": 368693.5113149642,
+          "delta_pct": -12.091878865451909,
+          "threshold_pct": -5.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-21T01:16:32Z",
+    "git_commit": "930f8e9e",
+    "git_branch": "feat/b1-branching-baseline-guardrails",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.132092786,
+        "metrics": {
+          "diff_p95_us": 11.702,
+          "diff_p50_us": 9.869,
+          "create_p99_us": 83.205,
+          "fork_p95_us": 84668.042,
+          "delete_p99_us": 11666.688,
+          "merge_small_p95_us": 301.392,
+          "create_p50_us": 26.67,
+          "delete_p50_us": 2352.329,
+          "delete_p95_us": 2876.096,
+          "merge_large_us": 5605.919,
+          "create_p95_us": 40.145,
+          "fork_p99_us": 101025.762,
+          "reopen_after_265_branches_ms": 64.0,
+          "merge_small_p99_us": 311.642,
+          "merge_small_p50_us": 234.087,
+          "fork_p50_us": 71357.517,
+          "diff_p99_us": 21.059
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "930f8e9e",
+      "baseline_timestamp": "2026-04-21T01:14:25Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "branch",
+          "metric": "create_p99_us",
+          "baseline_value": 53.139,
+          "current_value": 83.205,
+          "delta_pct": 56.57991305820582,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-21T01:41:32Z",
+    "git_commit": "930f8e9e",
+    "git_branch": "feat/b1-branching-baseline-guardrails",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.948717578,
+        "metrics": {
+          "diff_p95_us": 15.549,
+          "fork_p50_us": 74310.114,
+          "fork_p99_us": 104983.176,
+          "merge_small_p95_us": 297.197,
+          "create_p50_us": 27.662,
+          "delete_p99_us": 11788.577,
+          "diff_p50_us": 12.663,
+          "reopen_after_branch_heavy_history_ms": 70.0,
+          "merge_small_p50_us": 232.896,
+          "create_p95_us": 49.834,
+          "merge_small_p99_us": 332.653,
+          "delete_p50_us": 2304.464,
+          "delete_p95_us": 2688.684,
+          "merge_large_us": 5675.986,
+          "fork_p95_us": 101113.099,
+          "diff_p99_us": 42.66,
+          "create_p99_us": 87.925
+        }
+      }
+    },
+    "comparison": {
+      "baseline_commit": "930f8e9e",
+      "baseline_timestamp": "2026-04-21T01:27:28Z",
+      "verdict": "fail",
+      "regressions": [
+        {
+          "suite": "branch",
+          "metric": "create_p99_us",
+          "baseline_value": 65.061,
+          "current_value": 87.925,
+          "delta_pct": 35.14240482009189,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        },
+        {
+          "suite": "branch",
+          "metric": "diff_p99_us",
+          "baseline_value": 26.94,
+          "current_value": 42.66,
+          "delta_pct": 58.35189309576836,
+          "threshold_pct": 10.0,
+          "severity": "FAIL"
+        }
+      ]
+    }
+  },
+  {
+    "timestamp": "2026-04-21T22:00:41Z",
+    "git_commit": "26ef97b2",
+    "git_branch": "feat/B3.2-generation-safe-writes",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.003709948,
+        "metrics": {
+          "create_p95_us": 45.385,
+          "reopen_after_branch_heavy_history_ms": 81.0,
+          "diff_p50_us": 10.79,
+          "merge_small_p99_us": 715.966,
+          "create_p99_us": 55.724,
+          "create_p50_us": 31.98,
+          "fork_p95_us": 88203.018,
+          "merge_small_p50_us": 483.231,
+          "delete_p95_us": 2556.668,
+          "delete_p50_us": 2089.648,
+          "merge_large_us": 5163.701,
+          "fork_p99_us": 97721.501,
+          "merge_small_p95_us": 641.887,
+          "diff_p95_us": 14.497,
+          "delete_p99_us": 11314.173,
+          "diff_p99_us": 2438.839,
+          "fork_p50_us": 70103.428
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.566735621,
+        "metrics": {
+          "bulk_load_duration_ms": 348.0,
+          "range_scan_ops_sec": 149149.64715071375,
+          "bulk_load_ops_sec": 287082.6017774857,
+          "random_read_ops_sec": 1136269.739164282
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.104303479,
+        "metrics": {
+          "p99_us": 5.46,
+          "run_ops_sec": 542034.1816511565,
+          "p50_us": 2.204,
+          "load_ops_sec": 390798.9055129533
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T01:35:58Z",
+    "git_commit": "67f3b82b",
+    "git_branch": "feat/B3.2-generation-safe-writes",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.119184897,
+        "metrics": {
+          "p99_us": 8.536,
+          "p50_us": 3.437,
+          "run_ops_sec": 358168.4084217284,
+          "load_ops_sec": 233578.81922216335
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.715032928,
+        "metrics": {
+          "random_read_ops_sec": 1077519.953352868,
+          "bulk_load_ops_sec": 200223.42651852407,
+          "bulk_load_duration_ms": 499.0,
+          "range_scan_ops_sec": 146324.58184056045
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.075219608,
+        "metrics": {
+          "create_p95_us": 44.864,
+          "delete_p99_us": 10972.519,
+          "merge_small_p95_us": 647.188,
+          "merge_small_p50_us": 432.718,
+          "merge_large_us": 6059.7,
+          "delete_p95_us": 2733.051,
+          "fork_p50_us": 69770.506,
+          "create_p99_us": 74.108,
+          "create_p50_us": 35.937,
+          "merge_small_p99_us": 680.43,
+          "diff_p95_us": 16.711,
+          "fork_p99_us": 89305.484,
+          "diff_p50_us": 13.876,
+          "delete_p50_us": 2347.702,
+          "fork_p95_us": 82831.723,
+          "diff_p99_us": 2560.659,
+          "reopen_after_branch_heavy_history_ms": 70.0
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T04:10:57Z",
+    "git_commit": "41e00c73",
+    "git_branch": "feat/B3.4-event-bundle-dag-cleanup",
+    "tranche": 4,
+    "epic": "B3.4",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.713553893,
+        "metrics": {
+          "range_scan_ops_sec": 136831.0786946731,
+          "random_read_ops_sec": 1055744.8594067208,
+          "bulk_load_ops_sec": 199828.4983902276,
+          "bulk_load_duration_ms": 500.0
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.166191511,
+        "metrics": {
+          "delete_p50_us": 2304.414,
+          "delete_p95_us": 2945.657,
+          "merge_small_p95_us": 1126.405,
+          "create_p95_us": 60.983,
+          "fork_p50_us": 69529.691,
+          "merge_small_p99_us": 9794.7,
+          "create_p99_us": 97.401,
+          "diff_p99_us": 1134.98,
+          "fork_p99_us": 88783.069,
+          "diff_p95_us": 18.264,
+          "fork_p95_us": 84895.527,
+          "merge_large_us": 6352.2,
+          "reopen_after_branch_heavy_history_ms": 86.0,
+          "diff_p50_us": 13.925,
+          "delete_p99_us": 11697.478,
+          "merge_small_p50_us": 876.148,
+          "create_p50_us": 37.149
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.124194338,
+        "metrics": {
+          "p50_us": 3.576,
+          "run_ops_sec": 325839.43896704726,
+          "p99_us": 9.398,
+          "load_ops_sec": 252623.7630340599
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T04:35:21Z",
+    "git_commit": "41e00c73",
+    "git_branch": "feat/B3.4-event-bundle-dag-cleanup",
+    "tranche": 4,
+    "epic": "B3.4",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.70361625,
+        "metrics": {
+          "random_read_ops_sec": 1129543.9378246604,
+          "range_scan_ops_sec": 150570.42702857213,
+          "bulk_load_duration_ms": 488.0,
+          "bulk_load_ops_sec": 204738.79278428343
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.054503445,
+        "metrics": {
+          "create_p50_us": 36.307,
+          "diff_p99_us": 314.096,
+          "delete_p99_us": 11658.871,
+          "fork_p99_us": 107772.045,
+          "diff_p50_us": 12.544,
+          "reopen_after_branch_heavy_history_ms": 70.0,
+          "delete_p95_us": 2686.389,
+          "create_p99_us": 83.416,
+          "diff_p95_us": 14.447,
+          "merge_small_p50_us": 858.15,
+          "fork_p95_us": 90900.795,
+          "create_p95_us": 49.092,
+          "merge_small_p99_us": 1227.138,
+          "delete_p50_us": 2300.911,
+          "merge_large_us": 6176.218,
+          "merge_small_p95_us": 1051.431,
+          "fork_p50_us": 69839.992
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.112286353,
+        "metrics": {
+          "p99_us": 8.005,
+          "run_ops_sec": 395560.8265354227,
+          "p50_us": 3.436,
+          "load_ops_sec": 257690.8942577527
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T15:18:57Z",
+    "git_commit": "8342c999",
+    "git_branch": "feat/B4.1-lifecycle-write-gate",
+    "tranche": 4,
+    "epic": "B4.1",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.717212882,
+        "metrics": {
+          "range_scan_ops_sec": 147678.7964910573,
+          "bulk_load_ops_sec": 200110.83058307512,
+          "random_read_ops_sec": 1138140.7267076345,
+          "bulk_load_duration_ms": 499.0
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 11.984150914,
+        "metrics": {
+          "fork_p50_us": 68926.755,
+          "diff_p99_us": 54.271,
+          "create_p99_us": 93.535,
+          "fork_p95_us": 80158.719,
+          "diff_p50_us": 15.408,
+          "merge_small_p50_us": 986.276,
+          "delete_p99_us": 11638.061,
+          "merge_large_us": 23460.354,
+          "create_p95_us": 67.656,
+          "delete_p50_us": 2120.187,
+          "diff_p95_us": 27.491,
+          "create_p50_us": 48.961,
+          "merge_small_p99_us": 10001.565,
+          "merge_small_p95_us": 1198.791,
+          "reopen_after_branch_heavy_history_ms": 100.0,
+          "fork_p99_us": 88801.634,
+          "delete_p95_us": 2673.115
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.118192406,
+        "metrics": {
+          "load_ops_sec": 254460.6830508472,
+          "p50_us": 3.437,
+          "run_ops_sec": 383866.9179459512,
+          "p99_us": 8.285
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T15:19:16Z",
+    "git_commit": "8342c999",
+    "git_branch": "feat/B4.1-lifecycle-write-gate",
+    "tranche": 4,
+    "epic": "B4.1",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.721466024,
+        "metrics": {
+          "bulk_load_duration_ms": 518.0,
+          "random_read_ops_sec": 1122985.976589089,
+          "bulk_load_ops_sec": 192850.89802823824,
+          "range_scan_ops_sec": 148082.62542557652
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.43086001,
+        "metrics": {
+          "fork_p99_us": 101488.601,
+          "fork_p95_us": 90714.509,
+          "create_p99_us": 95.327,
+          "diff_p50_us": 13.956,
+          "fork_p50_us": 70707.852,
+          "delete_p95_us": 2704.093,
+          "diff_p95_us": 16.571,
+          "reopen_after_branch_heavy_history_ms": 104.0,
+          "diff_p99_us": 1665.28,
+          "create_p50_us": 42.73,
+          "merge_small_p50_us": 953.685,
+          "delete_p99_us": 11522.906,
+          "delete_p50_us": 2119.925,
+          "merge_small_p95_us": 1172.271,
+          "merge_small_p99_us": 1438.557,
+          "create_p95_us": 59.32,
+          "merge_large_us": 5654.634
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.137492161,
+        "metrics": {
+          "p50_us": 3.556,
+          "p99_us": 8.235,
+          "run_ops_sec": 281363.0543130016,
+          "load_ops_sec": 251893.8767067133
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T16:24:56Z",
+    "git_commit": "8342c999",
+    "git_branch": "feat/B4.1-lifecycle-write-gate",
+    "tranche": 4,
+    "epic": "B4.1",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.113496664,
+        "metrics": {
+          "p99_us": 8.436,
+          "load_ops_sec": 253681.31543503416,
+          "run_ops_sec": 379615.1522325091,
+          "p50_us": 3.536
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 11.798397409,
+        "metrics": {
+          "merge_small_p95_us": 1112.005,
+          "delete_p99_us": 11898.719,
+          "fork_p95_us": 71872.686,
+          "delete_p50_us": 2300.843,
+          "diff_p99_us": 868.33,
+          "fork_p50_us": 68456.161,
+          "diff_p50_us": 15.158,
+          "create_p50_us": 41.257,
+          "create_p99_us": 80.37,
+          "merge_small_p99_us": 9479.636,
+          "merge_large_us": 6319.841,
+          "diff_p95_us": 19.767,
+          "merge_small_p50_us": 884.56,
+          "reopen_after_branch_heavy_history_ms": 108.0,
+          "delete_p95_us": 2797.058,
+          "fork_p99_us": 84117.291,
+          "create_p95_us": 60.463
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.709152782,
+        "metrics": {
+          "bulk_load_duration_ms": 496.0,
+          "bulk_load_ops_sec": 201475.42184102812,
+          "range_scan_ops_sec": 147517.7882480987,
+          "random_read_ops_sec": 1120333.660459559
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T19:03:50Z",
+    "git_commit": "920ad386",
+    "git_branch": "feat/B4.3-bypass-collapse",
+    "tranche": 4,
+    "epic": "B4.3",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.335276825,
+        "metrics": {
+          "create_p95_us": 70.451,
+          "fork_p95_us": 91750.139,
+          "delete_p99_us": 12031.535,
+          "reopen_after_branch_heavy_history_ms": 102.0,
+          "merge_small_p95_us": 1199.733,
+          "diff_p99_us": 533.257,
+          "diff_p50_us": 15.559,
+          "merge_small_p99_us": 9736.234,
+          "diff_p95_us": 22.211,
+          "fork_p99_us": 100708.38,
+          "merge_small_p50_us": 980.714,
+          "delete_p50_us": 2105.156,
+          "create_p99_us": 97.362,
+          "create_p50_us": 49.412,
+          "merge_large_us": 5891.866,
+          "fork_p50_us": 71634.297,
+          "delete_p95_us": 2508.841
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.715374419,
+        "metrics": {
+          "bulk_load_ops_sec": 202468.31389109752,
+          "bulk_load_duration_ms": 493.0,
+          "range_scan_ops_sec": 148103.24105133928,
+          "random_read_ops_sec": 1125224.9577866232
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.115208332,
+        "metrics": {
+          "p99_us": 8.436,
+          "p50_us": 3.496,
+          "run_ops_sec": 376531.2868506464,
+          "load_ops_sec": 247809.5432991544
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T19:04:13Z",
+    "git_commit": "920ad386",
+    "git_branch": "feat/B4.3-bypass-collapse",
+    "tranche": 4,
+    "epic": "B4.3",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.999074508,
+        "metrics": {
+          "diff_p99_us": 343.212,
+          "fork_p99_us": 117695.676,
+          "diff_p95_us": 15.609,
+          "merge_small_p95_us": 1150.601,
+          "create_p95_us": 71.313,
+          "merge_large_us": 5863.302,
+          "delete_p50_us": 2095.518,
+          "fork_p95_us": 100354.506,
+          "delete_p99_us": 11497.465,
+          "fork_p50_us": 73236.916,
+          "delete_p95_us": 2818.79,
+          "create_p50_us": 48.0,
+          "merge_small_p50_us": 976.717,
+          "reopen_after_branch_heavy_history_ms": 114.0,
+          "diff_p50_us": 13.876,
+          "merge_small_p99_us": 1252.602,
+          "create_p99_us": 129.542
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.752627331,
+        "metrics": {
+          "range_scan_ops_sec": 148433.25214182877,
+          "bulk_load_duration_ms": 534.0,
+          "bulk_load_ops_sec": 187115.15394773925,
+          "random_read_ops_sec": 1129798.416282474
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.141978459,
+        "metrics": {
+          "p50_us": 3.397,
+          "p99_us": 8.095,
+          "run_ops_sec": 277745.7984351524,
+          "load_ops_sec": 237410.07262564052
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-22T20:40:24Z",
+    "git_commit": "45b0a9e1",
+    "git_branch": "feat/B4.4-same-name-serialization",
+    "tranche": 4,
+    "epic": "B4.4",
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 17.789794104,
+        "metrics": {
+          "create_p95_us": 77.214,
+          "create_p99_us": 102.401,
+          "fork_p50_us": 77833.413,
+          "merge_small_p99_us": 1326.015,
+          "delete_p95_us": 2729.235,
+          "diff_p95_us": 25.227,
+          "create_p50_us": 59.24,
+          "delete_p50_us": 2074.392,
+          "merge_small_p95_us": 1181.515,
+          "merge_large_us": 5974.061,
+          "diff_p50_us": 15.349,
+          "delete_p99_us": 19383.461,
+          "diff_p99_us": 2756.776,
+          "fork_p99_us": 275586.485,
+          "reopen_after_branch_heavy_history_ms": 129.0,
+          "fork_p95_us": 139311.246,
+          "merge_small_p50_us": 1002.291
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.16639531,
+        "metrics": {
+          "p99_us": 8.927,
+          "load_ops_sec": 205903.86928991767,
+          "p50_us": 3.547,
+          "run_ops_sec": 241035.17860224663
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.788226951,
+        "metrics": {
+          "bulk_load_ops_sec": 191373.6596712762,
+          "bulk_load_duration_ms": 522.0,
+          "range_scan_ops_sec": 131285.94305522108,
+          "random_read_ops_sec": 1041062.4600414202
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T04:13:37Z",
+    "git_commit": "59310ca4",
+    "git_branch": "feat/B5.2-safe-reclaim-and-reporting",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.760994557,
+        "metrics": {
+          "range_scan_ops_sec": 133270.50606289512,
+          "bulk_load_duration_ms": 524.0,
+          "random_read_ops_sec": 1046189.999905006,
+          "bulk_load_ops_sec": 190559.7739857416
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.145963636,
+        "metrics": {
+          "load_ops_sec": 220350.4819847285,
+          "run_ops_sec": 265371.32201650256,
+          "p50_us": 3.527,
+          "p99_us": 8.586
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.338896231,
+        "metrics": {
+          "fork_p95_us": 91180.812,
+          "merge_small_p50_us": 979.895,
+          "diff_p95_us": 20.478,
+          "fork_p99_us": 100344.088,
+          "delete_p50_us": 3369.055,
+          "create_p95_us": 56.075,
+          "diff_p99_us": 2193.676,
+          "diff_p50_us": 12.693,
+          "merge_small_p95_us": 1234.399,
+          "fork_p50_us": 70832.06,
+          "merge_large_us": 5954.1,
+          "merge_small_p99_us": 1344.735,
+          "create_p99_us": 81.232,
+          "reopen_after_branch_heavy_history_ms": 112.0,
+          "create_p50_us": 42.599,
+          "delete_p99_us": 12938.059,
+          "delete_p95_us": 4090.76
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T04:50:41Z",
+    "git_commit": "59310ca4",
+    "git_branch": "feat/B5.2-safe-reclaim-and-reporting",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.713855096,
+        "metrics": {
+          "range_scan_ops_sec": 144985.8331442718,
+          "bulk_load_ops_sec": 204155.30730374533,
+          "bulk_load_duration_ms": 489.0,
+          "random_read_ops_sec": 1116131.5078377489
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.117522405,
+        "metrics": {
+          "run_ops_sec": 354442.4864253845,
+          "load_ops_sec": 250834.29996511395,
+          "p50_us": 3.586,
+          "p99_us": 8.706
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 13.328935565,
+        "metrics": {
+          "merge_small_p50_us": 863.303,
+          "delete_p99_us": 21392.258,
+          "create_p50_us": 41.518,
+          "delete_p95_us": 4454.483,
+          "merge_large_us": 6209.692,
+          "merge_small_p95_us": 1125.583,
+          "fork_p95_us": 100607.692,
+          "fork_p50_us": 73814.042,
+          "create_p99_us": 84.047,
+          "diff_p95_us": 16.982,
+          "create_p95_us": 50.054,
+          "reopen_after_branch_heavy_history_ms": 100.0,
+          "diff_p50_us": 14.086,
+          "fork_p99_us": 102392.416,
+          "diff_p99_us": 729.553,
+          "merge_small_p99_us": 1366.182,
+          "delete_p50_us": 3727.404
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T21:14:58Z",
+    "git_commit": "2a0e90ce",
+    "git_branch": "feat/B5.3-convergence-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 13.942070585,
+        "metrics": {
+          "diff_p95_us": 18.184,
+          "reopen_after_branch_heavy_history_ms": 117.0,
+          "create_p50_us": 47.008,
+          "fork_p95_us": 88394.697,
+          "merge_small_p50_us": 952.455,
+          "fork_p50_us": 69233.321,
+          "merge_small_p95_us": 1170.571,
+          "merge_small_p99_us": 1189.146,
+          "merge_large_us": 5590.007,
+          "delete_p50_us": 18152.977,
+          "delete_p95_us": 36399.849,
+          "diff_p50_us": 14.297,
+          "delete_p99_us": 45494.728,
+          "create_p99_us": 111.387,
+          "fork_p99_us": 98080.115,
+          "create_p95_us": 76.833,
+          "diff_p99_us": 2317.498
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.129183984,
+        "metrics": {
+          "load_ops_sec": 241045.19510631976,
+          "run_ops_sec": 375015.01466364955,
+          "p50_us": 3.486,
+          "p99_us": 7.464
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.696476777,
+        "metrics": {
+          "random_read_ops_sec": 1128655.037885507,
+          "range_scan_ops_sec": 149722.703073319,
+          "bulk_load_duration_ms": 487.0,
+          "bulk_load_ops_sec": 205004.04794842956
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T21:15:27Z",
+    "git_commit": "2a0e90ce",
+    "git_branch": "feat/B5.3-convergence-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.690993168,
+        "metrics": {
+          "bulk_load_duration_ms": 486.0,
+          "range_scan_ops_sec": 146166.15244439794,
+          "random_read_ops_sec": 1117668.821807847,
+          "bulk_load_ops_sec": 205476.9405917775
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.96745632,
+        "metrics": {
+          "delete_p99_us": 45762.36,
+          "diff_p99_us": 534.306,
+          "merge_small_p95_us": 1227.818,
+          "fork_p95_us": 94498.379,
+          "merge_large_us": 6475.677,
+          "create_p95_us": 63.919,
+          "merge_small_p99_us": 18744.351,
+          "diff_p95_us": 19.336,
+          "reopen_after_branch_heavy_history_ms": 114.0,
+          "fork_p50_us": 71553.2,
+          "fork_p99_us": 237589.502,
+          "create_p99_us": 87.162,
+          "diff_p50_us": 14.287,
+          "delete_p50_us": 18914.549,
+          "merge_small_p50_us": 881.493,
+          "create_p50_us": 50.874,
+          "delete_p95_us": 37735.702
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.142441491,
+        "metrics": {
+          "run_ops_sec": 278363.2220275721,
+          "p99_us": 8.325,
+          "p50_us": 3.466,
+          "load_ops_sec": 239538.99666120965
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T21:15:47Z",
+    "git_commit": "2a0e90ce",
+    "git_branch": "feat/B5.3-convergence-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.745279863,
+        "metrics": {
+          "random_read_ops_sec": 1048027.1433999612,
+          "range_scan_ops_sec": 141259.9089941512,
+          "bulk_load_duration_ms": 512.0,
+          "bulk_load_ops_sec": 195262.05259950037
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.116158388,
+        "metrics": {
+          "load_ops_sec": 250438.37986202948,
+          "run_ops_sec": 385202.9969717652,
+          "p50_us": 3.477,
+          "p99_us": 8.055
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.861673976,
+        "metrics": {
+          "merge_small_p95_us": 1117.472,
+          "diff_p95_us": 19.416,
+          "create_p95_us": 56.796,
+          "create_p99_us": 98.703,
+          "delete_p99_us": 45843.905,
+          "merge_large_us": 6402.873,
+          "delete_p50_us": 18550.421,
+          "diff_p50_us": 14.137,
+          "fork_p50_us": 71324.429,
+          "reopen_after_branch_heavy_history_ms": 129.0,
+          "create_p50_us": 42.98,
+          "diff_p99_us": 2333.699,
+          "delete_p95_us": 37360.525,
+          "fork_p95_us": 99407.694,
+          "fork_p99_us": 219047.872,
+          "merge_small_p99_us": 9842.542,
+          "merge_small_p50_us": 862.838
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-23T21:16:06Z",
+    "git_commit": "2a0e90ce",
+    "git_branch": "feat/B5.3-convergence-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.143630812,
+        "metrics": {
+          "load_ops_sec": 230885.15643023473,
+          "p99_us": 7.434,
+          "run_ops_sec": 276590.45179888624,
+          "p50_us": 3.467
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.760385525,
+        "metrics": {
+          "bulk_load_duration_ms": 539.0,
+          "range_scan_ops_sec": 148000.6517948705,
+          "bulk_load_ops_sec": 185505.96588021048,
+          "random_read_ops_sec": 1112393.4288161425
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.809817185,
+        "metrics": {
+          "merge_small_p95_us": 1126.559,
+          "delete_p50_us": 18500.098,
+          "fork_p99_us": 102088.824,
+          "delete_p95_us": 37116.823,
+          "delete_p99_us": 37815.255,
+          "merge_large_us": 6026.031,
+          "diff_p99_us": 33.062,
+          "create_p50_us": 45.114,
+          "create_p95_us": 59.641,
+          "create_p99_us": 108.502,
+          "fork_p95_us": 93761.047,
+          "diff_p50_us": 13.695,
+          "diff_p95_us": 17.953,
+          "reopen_after_branch_heavy_history_ms": 112.0,
+          "merge_small_p50_us": 858.4,
+          "merge_small_p99_us": 3162.685,
+          "fork_p50_us": 71483.528
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T01:33:31Z",
+    "git_commit": "3bf87a88",
+    "git_branch": "feat/B5.4-degraded-primitive-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.143735636,
+        "metrics": {
+          "load_ops_sec": 248687.64421551916,
+          "p50_us": 3.607,
+          "run_ops_sec": 259225.02139448907,
+          "p99_us": 8.054
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.609710191,
+        "metrics": {
+          "merge_small_p95_us": 1109.071,
+          "delete_p95_us": 37201.995,
+          "diff_p99_us": 595.661,
+          "create_p99_us": 125.222,
+          "merge_large_us": 6721.16,
+          "diff_p95_us": 17.322,
+          "merge_small_p99_us": 1378.219,
+          "fork_p50_us": 72040.028,
+          "reopen_after_branch_heavy_history_ms": 121.0,
+          "diff_p50_us": 14.216,
+          "merge_small_p50_us": 879.196,
+          "delete_p50_us": 19370.718,
+          "delete_p99_us": 47055.962,
+          "create_p95_us": 83.184,
+          "create_p50_us": 47.157,
+          "fork_p99_us": 100938.909,
+          "fork_p95_us": 90880.525
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.692123826,
+        "metrics": {
+          "bulk_load_duration_ms": 482.0,
+          "range_scan_ops_sec": 144094.38666483687,
+          "bulk_load_ops_sec": 207156.1718394585,
+          "random_read_ops_sec": 1063800.0234674283
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T01:33:52Z",
+    "git_commit": "3bf87a88",
+    "git_branch": "feat/B5.4-degraded-primitive-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 15.656018195,
+        "metrics": {
+          "diff_p95_us": 25.657,
+          "create_p99_us": 93.213,
+          "diff_p50_us": 12.684,
+          "merge_small_p95_us": 1016.571,
+          "merge_small_p50_us": 861.394,
+          "delete_p50_us": 19198.95,
+          "create_p50_us": 44.523,
+          "merge_small_p99_us": 1072.654,
+          "delete_p99_us": 46550.474,
+          "fork_p95_us": 102112.237,
+          "delete_p95_us": 37215.293,
+          "fork_p99_us": 111494.735,
+          "fork_p50_us": 76397.207,
+          "reopen_after_branch_heavy_history_ms": 118.0,
+          "diff_p99_us": 814.436,
+          "merge_large_us": 6237.881,
+          "create_p95_us": 60.582
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.123018036,
+        "metrics": {
+          "p50_us": 3.567,
+          "p99_us": 8.286,
+          "run_ops_sec": 341105.9322892445,
+          "load_ops_sec": 226495.50793724065
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.73696534,
+        "metrics": {
+          "range_scan_ops_sec": 134949.38642292577,
+          "bulk_load_ops_sec": 198565.29032260884,
+          "random_read_ops_sec": 1078211.2557211642,
+          "bulk_load_duration_ms": 503.0
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T01:34:10Z",
+    "git_commit": "3bf87a88",
+    "git_branch": "feat/B5.4-degraded-primitive-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 13.838573606,
+        "metrics": {
+          "delete_p50_us": 17976.599,
+          "diff_p95_us": 18.263,
+          "fork_p99_us": 100748.519,
+          "create_p95_us": 62.506,
+          "reopen_after_branch_heavy_history_ms": 113.0,
+          "merge_small_p99_us": 1349.858,
+          "delete_p95_us": 36207.526,
+          "delete_p99_us": 45285.436,
+          "create_p50_us": 45.374,
+          "diff_p99_us": 30.426,
+          "merge_small_p95_us": 1052.488,
+          "create_p99_us": 111.777,
+          "merge_small_p50_us": 868.167,
+          "merge_large_us": 6281.765,
+          "fork_p95_us": 82348.612,
+          "fork_p50_us": 68801.003,
+          "diff_p50_us": 14.758
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.719754398,
+        "metrics": {
+          "bulk_load_ops_sec": 198043.0785126377,
+          "bulk_load_duration_ms": 504.0,
+          "range_scan_ops_sec": 150849.59396418193,
+          "random_read_ops_sec": 1158154.5779649972
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.116597107,
+        "metrics": {
+          "p50_us": 3.647,
+          "p99_us": 9.097,
+          "load_ops_sec": 242683.85826175456,
+          "run_ops_sec": 349800.4825497657
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T02:00:21Z",
+    "git_commit": "3bf87a88",
+    "git_branch": "feat/B5.4-degraded-primitive-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 15.100947736,
+        "metrics": {
+          "merge_large_us": 6730.947,
+          "delete_p99_us": 46901.203,
+          "merge_small_p99_us": 9793.585,
+          "fork_p95_us": 100768.988,
+          "create_p50_us": 42.78,
+          "reopen_after_branch_heavy_history_ms": 111.0,
+          "merge_small_p50_us": 924.212,
+          "fork_p99_us": 113582.171,
+          "diff_p99_us": 28.613,
+          "create_p99_us": 91.05,
+          "diff_p95_us": 15.339,
+          "delete_p50_us": 26836.182,
+          "merge_small_p95_us": 1122.151,
+          "create_p95_us": 59.812,
+          "diff_p50_us": 13.545,
+          "delete_p95_us": 37731.59,
+          "fork_p50_us": 71673.796
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.12307223,
+        "metrics": {
+          "run_ops_sec": 382811.5911215426,
+          "p99_us": 8.035,
+          "p50_us": 3.526,
+          "load_ops_sec": 250278.9671938084
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.712419201,
+        "metrics": {
+          "bulk_load_ops_sec": 199153.1228536023,
+          "bulk_load_duration_ms": 502.0,
+          "random_read_ops_sec": 1115330.6423899636,
+          "range_scan_ops_sec": 137599.57892327258
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T02:00:43Z",
+    "git_commit": "3bf87a88",
+    "git_branch": "feat/B5.4-degraded-primitive-closure",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 15.457366733,
+        "metrics": {
+          "merge_large_us": 5626.057,
+          "diff_p99_us": 25.378,
+          "reopen_after_branch_heavy_history_ms": 120.0,
+          "create_p95_us": 54.291,
+          "delete_p99_us": 55006.551,
+          "merge_small_p99_us": 16487.302,
+          "create_p99_us": 118.551,
+          "diff_p95_us": 16.28,
+          "merge_small_p50_us": 932.598,
+          "fork_p95_us": 101908.556,
+          "delete_p50_us": 18959.22,
+          "create_p50_us": 41.267,
+          "diff_p50_us": 13.826,
+          "delete_p95_us": 39143.643,
+          "fork_p99_us": 106976.963,
+          "merge_small_p95_us": 1347.822,
+          "fork_p50_us": 73234.047
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.707246559,
+        "metrics": {
+          "bulk_load_duration_ms": 484.0,
+          "range_scan_ops_sec": 147487.7939470449,
+          "random_read_ops_sec": 1112351.494262363,
+          "bulk_load_ops_sec": 206294.39687501948
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.113791163,
+        "metrics": {
+          "load_ops_sec": 253327.3919615672,
+          "p50_us": 3.457,
+          "p99_us": 7.564,
+          "run_ops_sec": 392942.0379844494
+        }
+      }
+    },
+    "comparison": null
+  }
+]

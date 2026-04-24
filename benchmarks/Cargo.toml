@@ -1,0 +1,63 @@
+[package]
+name = "strata-benchmarks"
+version = "0.1.0"
+edition = "2021"
+description = "Regression benchmarks for the Strata cleanup program"
+license = "Apache-2.0"
+publish = false
+autobins = false
+
+[dependencies]
+stratadb = { path = "..", features = ["embed"] }
+strata-core = { path = "../crates/core" }
+strata-engine = { path = "../crates/engine" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tempfile = "3.8"
+fastrand = "2.0.0"
+chrono = "0.4"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+redb = "2"
+heed = "0.22"
+rocksdb = { version = "0.22.0", default-features = false, features = ["lz4"] }
+sled = "0.34.7"
+fjall = "=2.11"
+rusqlite = { version = "0.32", features = ["bundled"] }
+ctrlc = "3.2.3"
+env_logger = "0.11"
+comfy-table = "7.0.1"
+byte-unit = "5.1.6"
+walkdir = "2.5.0"
+hex = "0.4"
+
+[[bench]]
+name = "redb_benchmark"
+path = "benches/redb_benchmark.rs"
+harness = false
+
+[[bench]]
+name = "ycsb_compare"
+path = "benches/ycsb_compare.rs"
+harness = false
+
+[[bench]]
+name = "wal_latency"
+path = "benches/wal_latency.rs"
+harness = false
+
+[[bin]]
+name = "beir"
+path = "src/bin/beir.rs"
+
+[[bin]]
+name = "bench-compare"
+path = "src/bin/compare.rs"
+
+[[bin]]
+name = "regression"
+path = "src/bin/regression.rs"
+
+[profile.bench]
+debug = true
