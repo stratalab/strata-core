@@ -1,1591 +1,1043 @@
-//! ArgMatches → Command/BranchOp/MetaCommand conversion.
-//!
-//! Translates clap's parsed arguments into the appropriate action:
-//! - Standard commands → `CliAction::Execute(Command)`
-//! - Branch power ops → `CliAction::BranchOp`
-//! - REPL meta-commands → `CliAction::Meta`
-//! - Multi-key operations → `CliAction::MultiPut/MultiGet/MultiDel`
-//! - Pagination → `CliAction::ListAll`
-
+use std::fs;
 use std::io::Read;
+use std::sync::OnceLock;
 
-use clap::ArgMatches;
+use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand};
 use strata_executor::{
-    BatchVectorEntry, BranchId, BulkGraphEdge, BulkGraphNode, Command, DistanceMetric,
-    ExportFormat, ExportPrimitive, MergeStrategy, MetadataFilter, SearchQuery, TxnOptions, Value,
+    BatchVectorEntry, BranchId, BranchStatus, BulkGraphEdge, BulkGraphNode, Command,
+    DistanceMetric, ExportFormat, ExportPrimitive, MergeStrategy, MetadataFilter, ScanDirection,
+    SearchQuery, TxnOptions, Value,
 };
 
-use crate::state::SessionState;
-use crate::value::{parse_json_value, parse_value, parse_vector};
+use crate::context::Context;
+use crate::request::{CliRequest, MetaCommand};
 
-/// The result of parsing user input.
-#[allow(dead_code)]
-pub enum CliAction {
-    /// A standard command to execute via Session.
-    Execute(Command),
-    /// A branch power-API operation (fork/diff/merge).
-    BranchOp(BranchOp),
-    /// A REPL-only meta-command.
-    Meta(MetaCommand),
-    /// Multi-key put operation.
-    MultiPut {
-        branch: Option<BranchId>,
-        space: Option<String>,
-        pairs: Vec<(String, Value)>,
-    },
-    /// Multi-key get operation.
-    MultiGet {
-        branch: Option<BranchId>,
-        space: Option<String>,
-        keys: Vec<String>,
-        with_version: bool,
-    },
-    /// Multi-key delete operation.
-    MultiDel {
-        branch: Option<BranchId>,
-        space: Option<String>,
-        keys: Vec<String>,
-    },
-    /// List all with automatic pagination.
-    ListAll {
-        branch: Option<BranchId>,
-        space: Option<String>,
-        prefix: Option<String>,
-        primitive: Primitive,
-    },
-    /// Get with version flag (wraps existing command).
-    GetWithVersion {
-        command: Command,
-        with_version: bool,
-    },
-    /// Seed built-in recipes via typed product API.
-    SeedRecipes,
+pub(crate) fn build_cli() -> ClapCommand {
+    register_subcommands(
+        ClapCommand::new("strata")
+            .about("Thin CLI shell over strata-executor")
+            .version(env!("CARGO_PKG_VERSION"))
+            .subcommand_required(false)
+            .arg(global_db_arg())
+            .arg(global_cache_arg())
+            .arg(global_branch_arg())
+            .arg(global_space_arg())
+            .arg(global_json_arg())
+            .arg(global_raw_arg())
+            .arg(global_read_only_arg())
+            .arg(global_follower_arg()),
+    )
+    .subcommand(build_init())
+    .subcommand(build_up())
+    .subcommand(build_down())
+    .subcommand(build_uninstall())
 }
 
-/// Primitive type for ListAll pagination.
-#[derive(Debug, Clone, Copy)]
-pub enum Primitive {
-    Kv,
-    Json,
-}
+pub(crate) fn build_repl_cli() -> ClapCommand {
+    static REPL_CLI: OnceLock<ClapCommand> = OnceLock::new();
 
-/// Branch operations that bypass the Command enum.
-pub enum BranchOp {
-    Fork {
-        destination: String,
-    },
-    Diff {
-        branch_a: String,
-        branch_b: String,
-    },
-    Merge {
-        source: String,
-        strategy: MergeStrategy,
-    },
-}
-
-/// REPL meta-commands.
-pub enum MetaCommand {
-    Use {
-        branch: String,
-        space: Option<String>,
-    },
-    Help {
-        command: Option<String>,
-    },
-    Quit,
-    Clear,
-}
-
-/// Check for REPL meta-commands before delegating to clap.
-///
-/// Returns `Some(MetaCommand)` if the line is a meta-command, `None` otherwise.
-pub fn check_meta_command(line: &str) -> Option<MetaCommand> {
-    let trimmed = line.trim();
-    let mut parts = trimmed.splitn(3, char::is_whitespace);
-    let cmd = parts.next()?;
-
-    match cmd {
-        "quit" | "exit" => Some(MetaCommand::Quit),
-        "clear" => Some(MetaCommand::Clear),
-        "help" => {
-            let command = parts.next().map(|s| s.trim().to_string());
-            Some(MetaCommand::Help { command })
-        }
-        "use" => {
-            let branch = parts.next()?.trim().to_string();
-            let space = parts.next().map(|s| s.trim().to_string());
-            Some(MetaCommand::Use { branch, space })
-        }
-        _ => None,
-    }
-}
-
-/// Build an actionable error message for an unknown subcommand, with "did you mean?" suggestion.
-fn unknown_subcommand(category: &str, input: &str, valid: &[&str]) -> String {
-    let best = valid
-        .iter()
-        .filter_map(|c| {
-            let d = strsim::levenshtein(&input.to_ascii_lowercase(), &c.to_ascii_lowercase());
-            (d <= 2 && d > 0).then_some((*c, d))
+    REPL_CLI
+        .get_or_init(|| {
+            register_subcommands(
+                ClapCommand::new("repl")
+                    .multicall(true)
+                    .subcommand_required(true),
+            )
         })
-        .min_by_key(|(_, d)| *d);
-    let options = valid.join(", ");
-    let prefix = if category.is_empty() {
-        format!("Unknown command \"{}\"", input)
-    } else {
-        format!("Unknown {} subcommand \"{}\"", category, input)
-    };
-    match best {
-        Some((s, _)) => format!(
-            "{}. Did you mean \"{}\"?\nValid options: {}",
-            prefix, s, options
-        ),
-        None => format!("{}.\nValid options: {}", prefix, options),
-    }
+        .clone()
 }
 
-/// Convert clap ArgMatches into a CliAction.
-pub fn matches_to_action(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub_name, sub_matches) = matches
+fn register_subcommands(cmd: ClapCommand) -> ClapCommand {
+    cmd.subcommand(build_ping())
+        .subcommand(build_info())
+        .subcommand(build_health())
+        .subcommand(build_metrics())
+        .subcommand(build_flush())
+        .subcommand(build_compact())
+        .subcommand(build_describe())
+        .subcommand(build_durability_counters())
+        .subcommand(build_kv())
+        .subcommand(build_json())
+        .subcommand(build_event())
+        .subcommand(build_vector())
+        .subcommand(build_graph())
+        .subcommand(build_branch())
+        .subcommand(build_space())
+        .subcommand(build_begin())
+        .subcommand(build_commit())
+        .subcommand(build_rollback())
+        .subcommand(build_txn())
+        .subcommand(build_search())
+        .subcommand(build_config())
+        .subcommand(build_recipe())
+        .subcommand(build_configure_model())
+        .subcommand(build_embed())
+        .subcommand(build_models())
+        .subcommand(build_generate())
+        .subcommand(build_tokenize())
+        .subcommand(build_detokenize())
+        .subcommand(build_export())
+        .subcommand(build_import())
+}
+
+fn build_init() -> ClapCommand {
+    ClapCommand::new("init")
+        .about("Set up a new Strata database with guided setup")
+        .arg(
+            Arg::new("non-interactive")
+                .long("non-interactive")
+                .help("Accept all defaults, skip prompts (for CI and automation)")
+                .action(ArgAction::SetTrue),
+        )
+}
+
+fn build_up() -> ClapCommand {
+    ClapCommand::new("up")
+        .about("Start IPC server for shared database access")
+        .long_about(
+            "Start a background daemon that holds the database and listens on a Unix socket.\n\
+             Other processes can then access the database concurrently via IPC.\n\
+             Similar to `docker compose up -d`.",
+        )
+        .arg(
+            Arg::new("foreground")
+                .long("fg")
+                .help("Run in foreground (for debugging, systemd, or Docker)")
+                .action(ArgAction::SetTrue),
+        )
+}
+
+fn build_down() -> ClapCommand {
+    ClapCommand::new("down")
+        .about("Stop the IPC server")
+        .long_about(
+            "Stop a running Strata IPC server by reading the PID file and sending SIGTERM.\n\
+             Cleans up the socket and PID files.",
+        )
+}
+
+fn build_uninstall() -> ClapCommand {
+    ClapCommand::new("uninstall")
+        .about("Remove Strata from this system")
+        .arg(
+            Arg::new("yes")
+                .long("yes")
+                .short('y')
+                .help("Skip confirmation prompt")
+                .action(ArgAction::SetTrue),
+        )
+}
+
+pub(crate) fn matches_to_request(
+    matches: &ArgMatches,
+    context: &Context,
+) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
         .subcommand()
         .ok_or_else(|| "No command provided".to_string())?;
 
-    match sub_name {
-        "kv" => parse_kv(sub_matches, state),
-        "json" => parse_json(sub_matches, state),
-        "event" => parse_event(sub_matches, state),
-        "vector" => parse_vector_cmd(sub_matches, state),
-        "graph" => parse_graph(sub_matches, state),
-        "branch" => parse_branch(sub_matches, state),
-        "space" => parse_space(sub_matches, state),
-        "begin" => parse_begin(sub_matches, state),
-        "commit" => Ok(CliAction::Execute(Command::TxnCommit)),
-        "rollback" => Ok(CliAction::Execute(Command::TxnRollback)),
-        "txn" => parse_txn(sub_matches),
-        "ping" => Ok(CliAction::Execute(Command::Ping)),
-        "info" => Ok(CliAction::Execute(Command::Info)),
-        "health" => Ok(CliAction::Execute(Command::Health)),
-        "metrics" => Ok(CliAction::Execute(Command::Metrics)),
-        "flush" => Ok(CliAction::Execute(Command::Flush)),
-        "compact" => Ok(CliAction::Execute(Command::Compact)),
-        "describe" => Ok(CliAction::Execute(Command::Describe {
-            branch: branch(state),
+    match name {
+        "ping" => Ok(CliRequest::Execute(Command::Ping)),
+        "info" => Ok(CliRequest::Execute(Command::Info)),
+        "health" => Ok(CliRequest::Execute(Command::Health)),
+        "metrics" => Ok(CliRequest::Execute(Command::Metrics)),
+        "flush" => Ok(CliRequest::Execute(Command::Flush)),
+        "compact" => Ok(CliRequest::Execute(Command::Compact)),
+        "describe" => Ok(CliRequest::Execute(Command::Describe {
+            branch: branch(context),
         })),
-        "search" => parse_search(sub_matches, state),
-        "config" => parse_config(sub_matches),
-        "recipe" => parse_recipe(sub_matches, state),
-        "configure-model" => parse_configure_model(sub_matches),
-        "embed" => parse_embed(sub_matches),
-        "models" => parse_models(sub_matches),
-        "generate" => parse_generate(sub_matches),
-        "tokenize" => parse_tokenize(sub_matches),
-        "detokenize" => parse_detokenize(sub_matches),
-        "export" => parse_db_export(sub_matches, state),
-        "import" => parse_db_import(sub_matches, state),
-        other => Err(unknown_subcommand(
-            "",
-            other,
-            &[
-                "kv",
-                "json",
-                "event",
-                "vector",
-                "graph",
-                "branch",
-                "space",
-                "begin",
-                "commit",
-                "rollback",
-                "txn",
-                "ping",
-                "info",
-                "health",
-                "metrics",
-                "init",
-                "flush",
-                "compact",
-                "describe",
-                "search",
-                "config",
-                "recipe",
-                "configure-model",
-                "embed",
-                "models",
-                "generate",
-                "tokenize",
-                "detokenize",
-                "export",
-                "import",
-            ],
-        )),
+        "durability-counters" => Ok(CliRequest::Execute(Command::DurabilityCounters)),
+        "kv" => parse_kv(submatches, context),
+        "json" => parse_json(submatches, context),
+        "event" => parse_event(submatches, context),
+        "vector" => parse_vector(submatches, context),
+        "graph" => parse_graph(submatches, context),
+        "branch" => parse_branch(submatches),
+        "space" => parse_space(submatches, context),
+        "begin" => parse_begin_request(submatches, context),
+        "commit" => Ok(CliRequest::Execute(Command::TxnCommit)),
+        "rollback" => Ok(CliRequest::Execute(Command::TxnRollback)),
+        "txn" => parse_txn(submatches),
+        "search" => parse_search(submatches, context),
+        "config" => parse_config(submatches),
+        "recipe" => parse_recipe(submatches, context),
+        "configure-model" => parse_configure_model(submatches),
+        "embed" => parse_embed(submatches),
+        "models" => parse_models(submatches),
+        "generate" => parse_generate(submatches),
+        "tokenize" => parse_tokenize(submatches),
+        "detokenize" => parse_detokenize(submatches),
+        "export" => parse_export(submatches, context),
+        "import" => parse_import(submatches, context),
+        other => Err(format!("Unsupported command: {other}")),
     }
 }
 
-// =========================================================================
-// Branch/space helpers
-// =========================================================================
+pub(crate) fn parse_repl_line(line: &str, context: &Context) -> Result<CliRequest, String> {
+    let tokens = shlex::split(line).ok_or_else(|| "Invalid quoting".to_string())?;
+    if tokens.is_empty() {
+        return Err("No command provided".to_string());
+    }
 
-fn branch(state: &SessionState) -> Option<BranchId> {
-    Some(BranchId::from(state.branch()))
+    if let Some(meta) = meta_command_from_tokens(&tokens) {
+        return Ok(CliRequest::Meta(meta));
+    }
+
+    let matches = build_repl_cli()
+        .try_get_matches_from(tokens)
+        .map_err(|error| error.to_string())?;
+    matches_to_request(&matches, context)
 }
 
-fn space(state: &SessionState) -> Option<String> {
-    Some(state.space().to_string())
-}
+pub(crate) fn help_text(command: Option<&str>, repl: bool) -> String {
+    let mut root = if repl { build_repl_cli() } else { build_cli() };
+    let mut buffer = Vec::new();
 
-// =========================================================================
-// File reading helper
-// =========================================================================
+    if let Some(command) = command {
+        if let Some(subcommand) = root.find_subcommand_mut(command) {
+            if subcommand.write_long_help(&mut buffer).is_ok() {
+                return String::from_utf8_lossy(&buffer).into_owned();
+            }
+        }
+    }
 
-/// Read a value from a file or stdin.
-///
-/// If `source` is "-", reads from stdin.
-/// Attempts to parse as JSON first, falls back to string.
-fn read_value_from_source(source: &str) -> Result<Value, String> {
-    let content = if source == "-" {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| format!("Failed to read stdin: {}", e))?;
-        buf
+    if root.write_long_help(&mut buffer).is_ok() {
+        String::from_utf8_lossy(&buffer).into_owned()
     } else {
-        std::fs::read_to_string(source)
-            .map_err(|e| format!("Failed to read '{}': {}", source, e))?
-    };
-
-    // Try JSON first
-    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-        return Ok(Value::from(json));
-    }
-
-    // Fall back to string (trimmed)
-    Ok(Value::String(content.trim().to_string()))
-}
-
-/// Read JSON value from a file or stdin.
-///
-/// If `source` is "-", reads from stdin.
-/// Must be valid JSON.
-fn read_json_from_source(source: &str) -> Result<Value, String> {
-    let content = if source == "-" {
-        let mut buf = String::new();
-        std::io::stdin()
-            .read_to_string(&mut buf)
-            .map_err(|e| format!("Failed to read stdin: {}", e))?;
-        buf
-    } else {
-        std::fs::read_to_string(source)
-            .map_err(|e| format!("Failed to read '{}': {}", source, e))?
-    };
-
-    let json: serde_json::Value =
-        serde_json::from_str(&content).map_err(|e| format!("Invalid JSON in file: {}", e))?;
-    Ok(Value::from(json))
-}
-
-// =========================================================================
-// KV
-// =========================================================================
-
-fn parse_kv(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No kv subcommand")?;
-    match sub {
-        "put" => {
-            if let Some(file_path) = m.get_one::<String>("file") {
-                // File mode: requires exactly one key in pairs
-                let pairs: Vec<String> = m
-                    .get_many::<String>("pairs")
-                    .map(|v| v.cloned().collect())
-                    .unwrap_or_default();
-
-                if pairs.len() != 1 {
-                    return Err("--file requires exactly one key argument".to_string());
-                }
-
-                let value = read_value_from_source(file_path)?;
-                Ok(CliAction::Execute(Command::KvPut {
-                    branch: branch(state),
-                    space: space(state),
-                    key: pairs[0].clone(),
-                    value,
-                }))
-            } else {
-                // Normal mode: key-value pairs from args
-                let pairs: Vec<String> = m
-                    .get_many::<String>("pairs")
-                    .ok_or("Missing key-value pairs")?
-                    .cloned()
-                    .collect();
-
-                if pairs.len() < 2 {
-                    return Err("kv put requires at least one key-value pair".to_string());
-                }
-
-                if !pairs.len().is_multiple_of(2) {
-                    return Err("Key-value pairs must come in pairs".to_string());
-                }
-
-                if pairs.len() == 2 {
-                    // Single pair
-                    let key = pairs[0].clone();
-                    let value = parse_value(&pairs[1]);
-                    Ok(CliAction::Execute(Command::KvPut {
-                        branch: branch(state),
-                        space: space(state),
-                        key,
-                        value,
-                    }))
-                } else {
-                    // Multiple pairs
-                    let kv_pairs: Vec<(String, Value)> = pairs
-                        .chunks(2)
-                        .map(|c| (c[0].clone(), parse_value(&c[1])))
-                        .collect();
-                    Ok(CliAction::MultiPut {
-                        branch: branch(state),
-                        space: space(state),
-                        pairs: kv_pairs,
-                    })
-                }
-            }
-        }
-        "get" => {
-            let keys: Vec<String> = m.get_many::<String>("keys").unwrap().cloned().collect();
-            let with_version = m.get_flag("with-version");
-
-            if keys.len() == 1 {
-                let cmd = Command::KvGet {
-                    branch: branch(state),
-                    space: space(state),
-                    key: keys[0].clone(),
-                    as_of: None,
-                };
-                if with_version {
-                    Ok(CliAction::GetWithVersion {
-                        command: cmd,
-                        with_version: true,
-                    })
-                } else {
-                    Ok(CliAction::Execute(cmd))
-                }
-            } else {
-                Ok(CliAction::MultiGet {
-                    branch: branch(state),
-                    space: space(state),
-                    keys,
-                    with_version,
-                })
-            }
-        }
-        "del" => {
-            let keys: Vec<String> = m.get_many::<String>("keys").unwrap().cloned().collect();
-
-            if keys.len() == 1 {
-                Ok(CliAction::Execute(Command::KvDelete {
-                    branch: branch(state),
-                    space: space(state),
-                    key: keys[0].clone(),
-                }))
-            } else {
-                Ok(CliAction::MultiDel {
-                    branch: branch(state),
-                    space: space(state),
-                    keys,
-                })
-            }
-        }
-        "list" => {
-            let all = m.get_flag("all");
-            let prefix = m.get_one::<String>("prefix").cloned();
-
-            if all {
-                Ok(CliAction::ListAll {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    primitive: Primitive::Kv,
-                })
-            } else {
-                let limit = m.get_one::<u64>("limit").copied();
-                let cursor = m.get_one::<String>("cursor").cloned();
-                Ok(CliAction::Execute(Command::KvList {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    cursor,
-                    limit,
-                    as_of: None,
-                }))
-            }
-        }
-        "history" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            Ok(CliAction::Execute(Command::KvGetv {
-                branch: branch(state),
-                space: space(state),
-                key,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "kv",
-            other,
-            &["put", "get", "del", "list", "history"],
-        )),
+        "No help available".to_string()
     }
 }
 
-// =========================================================================
-// JSON
-// =========================================================================
-
-fn parse_json(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No json subcommand")?;
-    match sub {
-        "set" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            let path = m.get_one::<String>("path").unwrap().clone();
-
-            let value = if let Some(file_path) = m.get_one::<String>("file") {
-                read_json_from_source(file_path)?
-            } else {
-                let raw = m.get_one::<String>("value").unwrap();
-                parse_json_value(raw)?
-            };
-
-            Ok(CliAction::Execute(Command::JsonSet {
-                branch: branch(state),
-                space: space(state),
-                key,
-                path,
-                value,
-            }))
-        }
-        "get" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            let path = m.get_one::<String>("path").unwrap().clone();
-            let with_version = m.get_flag("with-version");
-
-            let cmd = Command::JsonGet {
-                branch: branch(state),
-                space: space(state),
-                key,
-                path,
-                as_of: None,
-            };
-
-            if with_version {
-                Ok(CliAction::GetWithVersion {
-                    command: cmd,
-                    with_version: true,
-                })
-            } else {
-                Ok(CliAction::Execute(cmd))
-            }
-        }
-        "del" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            let path = m.get_one::<String>("path").unwrap().clone();
-            Ok(CliAction::Execute(Command::JsonDelete {
-                branch: branch(state),
-                space: space(state),
-                key,
-                path,
-            }))
-        }
-        "list" => {
-            let all = m.get_flag("all");
-            let prefix = m.get_one::<String>("prefix").cloned();
-
-            if all {
-                Ok(CliAction::ListAll {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    primitive: Primitive::Json,
-                })
-            } else {
-                let cursor = m.get_one::<String>("cursor").cloned();
-                let limit = m.get_one::<u64>("limit").copied().unwrap_or(100);
-                Ok(CliAction::Execute(Command::JsonList {
-                    branch: branch(state),
-                    space: space(state),
-                    prefix,
-                    cursor,
-                    limit,
-                    as_of: None,
-                }))
-            }
-        }
-        "history" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            Ok(CliAction::Execute(Command::JsonGetv {
-                branch: branch(state),
-                space: space(state),
-                key,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "json",
-            other,
-            &["set", "get", "del", "list", "history"],
-        )),
-    }
-}
-
-// =========================================================================
-// Event
-// =========================================================================
-
-fn parse_event(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No event subcommand")?;
-    match sub {
-        "append" => {
-            let event_type = m.get_one::<String>("type").unwrap().clone();
-
-            let payload = if let Some(file_path) = m.get_one::<String>("file") {
-                read_json_from_source(file_path)?
-            } else {
-                let raw = m.get_one::<String>("payload").unwrap();
-                parse_json_value(raw)?
-            };
-
-            Ok(CliAction::Execute(Command::EventAppend {
-                branch: branch(state),
-                space: space(state),
-                event_type,
-                payload,
-            }))
-        }
-        "get" => {
-            let sequence = m
-                .get_one::<String>("sequence")
-                .unwrap()
-                .parse::<u64>()
-                .map_err(|e| format!("Invalid sequence: {}", e))?;
-            Ok(CliAction::Execute(Command::EventGet {
-                branch: branch(state),
-                space: space(state),
-                sequence,
-                as_of: None,
-            }))
-        }
-        "list" => {
-            let event_type = m.get_one::<String>("type").unwrap().clone();
-            let limit = m.get_one::<u64>("limit").copied();
-            let after_sequence = m.get_one::<u64>("after").copied();
-            Ok(CliAction::Execute(Command::EventGetByType {
-                branch: branch(state),
-                space: space(state),
-                event_type,
-                limit,
-                after_sequence,
-                as_of: None,
-            }))
-        }
-        "len" => Ok(CliAction::Execute(Command::EventLen {
-            branch: branch(state),
-            space: space(state),
-            as_of: None,
+fn parse_kv(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No kv subcommand".to_string())?;
+    match name {
+        "put" => Ok(CliRequest::Execute(Command::KvPut {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+            value: parse_value_arg(submatches, "value", "file")?,
         })),
-        other => Err(unknown_subcommand(
-            "event",
-            other,
-            &["append", "get", "list", "len"],
-        )),
-    }
-}
-
-// =========================================================================
-// Vector
-// =========================================================================
-
-fn parse_metric(s: &str) -> Result<DistanceMetric, String> {
-    match s.to_lowercase().as_str() {
-        "cosine" => Ok(DistanceMetric::Cosine),
-        "euclidean" => Ok(DistanceMetric::Euclidean),
-        "dotproduct" | "dot_product" | "dot" => Ok(DistanceMetric::DotProduct),
-        other => Err(unknown_subcommand(
-            "metric",
-            other,
-            &["cosine", "euclidean", "dotproduct"],
-        )),
-    }
-}
-
-fn parse_vector_cmd(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No vector subcommand")?;
-    match sub {
-        "upsert" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            let key = m.get_one::<String>("key").unwrap().clone();
-            let vector = parse_vector(m.get_one::<String>("vector").unwrap())?;
-            let metadata = m
-                .get_one::<String>("metadata")
-                .map(|s| parse_json_value(s))
-                .transpose()?;
-            Ok(CliAction::Execute(Command::VectorUpsert {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                key,
-                vector,
-                metadata,
-            }))
-        }
-        "get" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            let key = m.get_one::<String>("key").unwrap().clone();
-            Ok(CliAction::Execute(Command::VectorGet {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                key,
-                as_of: None,
-            }))
-        }
-        "del" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            let key = m.get_one::<String>("key").unwrap().clone();
-            Ok(CliAction::Execute(Command::VectorDelete {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                key,
-            }))
-        }
-        "search" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            let query = parse_vector(m.get_one::<String>("query").unwrap())?;
-            let k = *m.get_one::<u64>("top-k").unwrap();
-            let metric = m
-                .get_one::<String>("metric")
-                .map(|s| parse_metric(s))
-                .transpose()?;
-            let filter = m
-                .get_one::<String>("filter")
-                .map(|s| -> Result<Vec<MetadataFilter>, String> {
-                    serde_json::from_str(s).map_err(|e| format!("Invalid filter JSON: {}", e))
-                })
-                .transpose()?;
-            Ok(CliAction::Execute(Command::VectorQuery {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                query,
-                k,
-                filter,
-                metric,
-                as_of: None,
-            }))
-        }
-        "create" => {
-            let collection = m.get_one::<String>("name").unwrap().clone();
-            let dimension = *m.get_one::<u64>("dim").unwrap();
-            let metric = parse_metric(m.get_one::<String>("metric").unwrap())?;
-            Ok(CliAction::Execute(Command::VectorCreateCollection {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                dimension,
-                metric,
-            }))
-        }
-        "drop" => {
-            let collection = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::VectorDeleteCollection {
-                branch: branch(state),
-                space: space(state),
-                collection,
-            }))
-        }
-        "collections" => Ok(CliAction::Execute(Command::VectorListCollections {
-            branch: branch(state),
-            space: space(state),
+        "get" => Ok(CliRequest::Execute(Command::KvGet {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+            as_of: optional_u64(submatches, "as-of"),
         })),
-        "stats" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            Ok(CliAction::Execute(Command::VectorCollectionStats {
-                branch: branch(state),
-                space: space(state),
-                collection,
-            }))
-        }
-        "batch-upsert" => {
-            let collection = m.get_one::<String>("collection").unwrap().clone();
-            let raw = m.get_one::<String>("json").unwrap();
-            let entries: Vec<BatchVectorEntry> =
-                serde_json::from_str(raw).map_err(|e| format!("Invalid batch JSON: {}", e))?;
-            Ok(CliAction::Execute(Command::VectorBatchUpsert {
-                branch: branch(state),
-                space: space(state),
-                collection,
-                entries,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "vector",
-            other,
-            &[
-                "upsert",
-                "get",
-                "del",
-                "search",
-                "create",
-                "drop",
-                "collections",
-                "stats",
-                "batch-upsert",
-            ],
-        )),
+        "del" => Ok(CliRequest::Execute(Command::KvDelete {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::KvList {
+            branch: branch(context),
+            space: space(context),
+            prefix: submatches.get_one::<String>("prefix").cloned(),
+            cursor: submatches.get_one::<String>("cursor").cloned(),
+            limit: optional_u64(submatches, "limit"),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "scan" => Ok(CliRequest::Execute(Command::KvScan {
+            branch: branch(context),
+            space: space(context),
+            start: submatches.get_one::<String>("start").cloned(),
+            limit: optional_u64(submatches, "limit"),
+        })),
+        "count" => Ok(CliRequest::Execute(Command::KvCount {
+            branch: branch(context),
+            space: space(context),
+            prefix: submatches.get_one::<String>("prefix").cloned(),
+        })),
+        "history" | "getv" => Ok(CliRequest::Execute(Command::KvGetv {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+        })),
+        _ => Err("Unsupported kv subcommand".to_string()),
     }
 }
 
-// =========================================================================
-// Graph
-// =========================================================================
-
-fn parse_graph(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No graph subcommand")?;
-    match sub {
-        // Lifecycle
-        "create" => {
-            let graph = m.get_one::<String>("name").unwrap().clone();
-            let cascade_policy = m.get_one::<String>("cascade-policy").cloned();
-            Ok(CliAction::Execute(Command::GraphCreate {
-                branch: branch(state),
-                space: None,
-                graph,
-                cascade_policy,
-            }))
-        }
-        "delete" => {
-            let graph = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphDelete {
-                branch: branch(state),
-                space: None,
-                graph,
-            }))
-        }
-        "list" => Ok(CliAction::Execute(Command::GraphList {
-            branch: branch(state),
-            space: None,
+fn parse_json(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No json subcommand".to_string())?;
+    match name {
+        "set" => Ok(CliRequest::Execute(Command::JsonSet {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+            path: required_string(submatches, "path")?,
+            value: parse_json_arg(submatches, "value", "file")?,
         })),
-        "info" => {
-            let graph = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphGetMeta {
-                branch: branch(state),
-                space: None,
-                graph,
-            }))
-        }
-        // Nodes
-        "add-node" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let node_id = m.get_one::<String>("node-id").unwrap().clone();
-            let entity_ref = m.get_one::<String>("entity-ref").cloned();
-            let properties = m
-                .get_one::<String>("properties")
-                .map(|s| parse_json_value(s))
-                .transpose()?;
-            let object_type = m.get_one::<String>("type").cloned();
-            Ok(CliAction::Execute(Command::GraphAddNode {
-                branch: branch(state),
-                space: None,
-                graph,
-                node_id,
-                entity_ref,
-                properties,
-                object_type,
-            }))
-        }
-        "get-node" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let node_id = m.get_one::<String>("node-id").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphGetNode {
-                branch: branch(state),
-                space: None,
-                graph,
-                node_id,
-                as_of: None,
-            }))
-        }
-        "remove-node" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let node_id = m.get_one::<String>("node-id").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphRemoveNode {
-                branch: branch(state),
-                space: None,
-                graph,
-                node_id,
-            }))
-        }
+        "get" => Ok(CliRequest::Execute(Command::JsonGet {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+            path: required_string(submatches, "path")?,
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "del" => Ok(CliRequest::Execute(Command::JsonDelete {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+            path: required_string(submatches, "path")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::JsonList {
+            branch: branch(context),
+            space: space(context),
+            prefix: submatches.get_one::<String>("prefix").cloned(),
+            cursor: submatches.get_one::<String>("cursor").cloned(),
+            limit: submatches.get_one::<u64>("limit").copied().unwrap_or(100),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "count" => Ok(CliRequest::Execute(Command::JsonCount {
+            branch: branch(context),
+            space: space(context),
+            prefix: submatches.get_one::<String>("prefix").cloned(),
+        })),
+        "history" | "getv" => Ok(CliRequest::Execute(Command::JsonGetv {
+            branch: branch(context),
+            space: space(context),
+            key: required_string(submatches, "key")?,
+        })),
+        _ => Err("Unsupported json subcommand".to_string()),
+    }
+}
+
+fn parse_event(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No event subcommand".to_string())?;
+    match name {
+        "append" => Ok(CliRequest::Execute(Command::EventAppend {
+            branch: branch(context),
+            space: space(context),
+            event_type: required_string(submatches, "event-type")?,
+            payload: parse_json_arg(submatches, "payload", "file")?,
+        })),
+        "get" => Ok(CliRequest::Execute(Command::EventGet {
+            branch: branch(context),
+            space: space(context),
+            sequence: required_u64(submatches, "sequence")?,
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "list" => Ok(CliRequest::Execute(Command::EventList {
+            branch: branch(context),
+            space: space(context),
+            event_type: submatches.get_one::<String>("type").cloned(),
+            limit: optional_u64(submatches, "limit"),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "len" => Ok(CliRequest::Execute(Command::EventLen {
+            branch: branch(context),
+            space: space(context),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "range" => Ok(CliRequest::Execute(Command::EventRange {
+            branch: branch(context),
+            space: space(context),
+            start_seq: required_u64(submatches, "start-seq")?,
+            end_seq: optional_u64(submatches, "end-seq"),
+            limit: optional_u64(submatches, "limit"),
+            direction: parse_direction(submatches.get_one::<String>("direction"))?,
+            event_type: submatches.get_one::<String>("type").cloned(),
+        })),
+        "range-time" => Ok(CliRequest::Execute(Command::EventRangeByTime {
+            branch: branch(context),
+            space: space(context),
+            start_ts: required_u64(submatches, "start-ts")?,
+            end_ts: optional_u64(submatches, "end-ts"),
+            limit: optional_u64(submatches, "limit"),
+            direction: parse_direction(submatches.get_one::<String>("direction"))?,
+            event_type: submatches.get_one::<String>("type").cloned(),
+        })),
+        "types" => Ok(CliRequest::Execute(Command::EventListTypes {
+            branch: branch(context),
+            space: space(context),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        _ => Err("Unsupported event subcommand".to_string()),
+    }
+}
+
+fn parse_vector(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No vector subcommand".to_string())?;
+    match name {
+        "upsert" => Ok(CliRequest::Execute(Command::VectorUpsert {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            key: required_string(submatches, "key")?,
+            vector: parse_vector_literal(&required_string(submatches, "vector")?)?,
+            metadata: optional_json(submatches, "metadata")?,
+        })),
+        "get" => Ok(CliRequest::Execute(Command::VectorGet {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            key: required_string(submatches, "key")?,
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "del" => Ok(CliRequest::Execute(Command::VectorDelete {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            key: required_string(submatches, "key")?,
+        })),
+        "search" => Ok(CliRequest::Execute(Command::VectorQuery {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            query: parse_vector_literal(&required_string(submatches, "query")?)?,
+            k: submatches.get_one::<u64>("k").copied().unwrap_or(10),
+            filter: optional_metadata_filters(submatches, "filter")?,
+            metric: optional_metric(submatches, "metric")?,
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "create" => Ok(CliRequest::Execute(Command::VectorCreateCollection {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            dimension: required_u64(submatches, "dimension")?,
+            metric: parse_metric(submatches.get_one::<String>("metric"))?,
+        })),
+        "drop" => Ok(CliRequest::Execute(Command::VectorDeleteCollection {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+        })),
+        "collections" => Ok(CliRequest::Execute(Command::VectorListCollections {
+            branch: branch(context),
+            space: space(context),
+        })),
+        "stats" => Ok(CliRequest::Execute(Command::VectorCollectionStats {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+        })),
+        "batch-upsert" => Ok(CliRequest::Execute(Command::VectorBatchUpsert {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            entries: parse_batch_vector_entries(submatches)?,
+        })),
+        "history" | "getv" => Ok(CliRequest::Execute(Command::VectorGetv {
+            branch: branch(context),
+            space: space(context),
+            collection: required_string(submatches, "collection")?,
+            key: required_string(submatches, "key")?,
+        })),
+        _ => Err("Unsupported vector subcommand".to_string()),
+    }
+}
+
+fn parse_graph(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No graph subcommand".to_string())?;
+    match name {
+        "create" => Ok(CliRequest::Execute(Command::GraphCreate {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            cascade_policy: submatches.get_one::<String>("cascade-policy").cloned(),
+        })),
+        "delete" => Ok(CliRequest::Execute(Command::GraphDelete {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::GraphList {
+            branch: branch(context),
+            space: space(context),
+        })),
+        "info" => Ok(CliRequest::Execute(Command::GraphGetMeta {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "add-node" => Ok(CliRequest::Execute(Command::GraphAddNode {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            node_id: required_string(submatches, "node-id")?,
+            entity_ref: submatches.get_one::<String>("entity-ref").cloned(),
+            properties: optional_json(submatches, "properties")?,
+            object_type: submatches.get_one::<String>("object-type").cloned(),
+        })),
+        "get-node" => Ok(CliRequest::Execute(Command::GraphGetNode {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            node_id: required_string(submatches, "node-id")?,
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "remove-node" => Ok(CliRequest::Execute(Command::GraphRemoveNode {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            node_id: required_string(submatches, "node-id")?,
+        })),
         "list-nodes" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            if let Some(object_type) = m.get_one::<String>("type").cloned() {
-                Ok(CliAction::Execute(Command::GraphNodesByType {
-                    branch: branch(state),
-                    space: None,
+            let graph = required_string(submatches, "graph")?;
+            let object_type = submatches.get_one::<String>("type").cloned();
+            let limit = submatches.get_one::<usize>("limit").copied();
+            let cursor = submatches.get_one::<String>("cursor").cloned();
+            let as_of = optional_u64(submatches, "as-of");
+
+            if let Some(object_type) = object_type {
+                if limit.is_some() || cursor.is_some() || as_of.is_some() {
+                    return Err(
+                        "--type cannot be combined with --limit, --cursor, or --as-of".to_string(),
+                    );
+                }
+                Ok(CliRequest::Execute(Command::GraphNodesByType {
+                    branch: branch(context),
+                    space: space(context),
                     graph,
                     object_type,
                 }))
-            } else {
-                Ok(CliAction::Execute(Command::GraphListNodes {
-                    branch: branch(state),
-                    space: None,
+            } else if limit.is_some() || cursor.is_some() {
+                if as_of.is_some() {
+                    return Err("--limit/--cursor cannot be combined with --as-of".to_string());
+                }
+                Ok(CliRequest::Execute(Command::GraphListNodesPaginated {
+                    branch: branch(context),
+                    space: space(context),
                     graph,
-                    as_of: None,
+                    limit: limit.unwrap_or(100),
+                    cursor,
+                }))
+            } else {
+                Ok(CliRequest::Execute(Command::GraphListNodes {
+                    branch: branch(context),
+                    space: space(context),
+                    graph,
+                    as_of,
                 }))
             }
         }
-        // Edges
-        "add-edge" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let src = m.get_one::<String>("src").unwrap().clone();
-            let dst = m.get_one::<String>("dst").unwrap().clone();
-            let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
-            let weight = m.get_one::<f64>("weight").copied();
-            let properties = m
-                .get_one::<String>("properties")
-                .map(|s| parse_json_value(s))
-                .transpose()?;
-            Ok(CliAction::Execute(Command::GraphAddEdge {
-                branch: branch(state),
-                space: None,
-                graph,
-                src,
-                dst,
-                edge_type,
-                weight,
-                properties,
-            }))
-        }
-        "remove-edge" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let src = m.get_one::<String>("src").unwrap().clone();
-            let dst = m.get_one::<String>("dst").unwrap().clone();
-            let edge_type = m.get_one::<String>("edge-type").unwrap().clone();
-            Ok(CliAction::Execute(Command::GraphRemoveEdge {
-                branch: branch(state),
-                space: None,
-                graph,
-                src,
-                dst,
-                edge_type,
-            }))
-        }
-        "neighbors" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let node_id = m.get_one::<String>("node-id").unwrap().clone();
-            let direction = m.get_one::<String>("direction").cloned();
-            let edge_type = m.get_one::<String>("edge-type").cloned();
-            Ok(CliAction::Execute(Command::GraphNeighbors {
-                branch: branch(state),
-                space: None,
-                graph,
-                node_id,
-                direction,
-                edge_type,
-                as_of: None,
-            }))
-        }
-        // Bulk & Traversal
-        "bulk-insert" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
+        "add-edge" => Ok(CliRequest::Execute(Command::GraphAddEdge {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            src: required_string(submatches, "src")?,
+            dst: required_string(submatches, "dst")?,
+            edge_type: required_string(submatches, "edge-type")?,
+            weight: submatches.get_one::<f64>("weight").copied(),
+            properties: optional_json(submatches, "properties")?,
+        })),
+        "remove-edge" => Ok(CliRequest::Execute(Command::GraphRemoveEdge {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            src: required_string(submatches, "src")?,
+            dst: required_string(submatches, "dst")?,
+            edge_type: required_string(submatches, "edge-type")?,
+        })),
+        "neighbors" => Ok(CliRequest::Execute(Command::GraphNeighbors {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            node_id: required_string(submatches, "node-id")?,
+            direction: submatches.get_one::<String>("direction").cloned(),
+            edge_type: submatches.get_one::<String>("edge-type").cloned(),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "bulk-insert" => Ok(CliRequest::Execute(Command::GraphBulkInsert {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            nodes: parse_bulk_graph_nodes(submatches)?,
+            edges: parse_bulk_graph_edges(submatches)?,
+            chunk_size: submatches.get_one::<usize>("chunk-size").copied(),
+        })),
+        "bfs" => Ok(CliRequest::Execute(Command::GraphBfs {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            start: required_string(submatches, "start-node")?,
+            max_depth: submatches
+                .get_one::<usize>("max-depth")
+                .copied()
+                .unwrap_or(10),
+            max_nodes: submatches.get_one::<usize>("max-nodes").copied(),
+            edge_types: string_list(submatches, "edge-type"),
+            direction: submatches.get_one::<String>("direction").cloned(),
+        })),
+        "wcc" => Ok(CliRequest::Execute(Command::GraphWcc {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            top_n: submatches.get_one::<usize>("top").copied(),
+            include_all: flag_option(submatches, "all"),
+        })),
+        "cdlp" => Ok(CliRequest::Execute(Command::GraphCdlp {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            max_iterations: submatches
+                .get_one::<usize>("max-iterations")
+                .copied()
+                .unwrap_or(20),
+            direction: submatches.get_one::<String>("direction").cloned(),
+            top_n: submatches.get_one::<usize>("top").copied(),
+            include_all: flag_option(submatches, "all"),
+        })),
+        "pagerank" => Ok(CliRequest::Execute(Command::GraphPagerank {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            damping: submatches.get_one::<f64>("damping").copied(),
+            max_iterations: submatches.get_one::<usize>("max-iterations").copied(),
+            tolerance: submatches.get_one::<f64>("tolerance").copied(),
+            top_n: submatches.get_one::<usize>("top").copied(),
+            include_all: flag_option(submatches, "all"),
+        })),
+        "lcc" => Ok(CliRequest::Execute(Command::GraphLcc {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            top_n: submatches.get_one::<usize>("top").copied(),
+            include_all: flag_option(submatches, "all"),
+        })),
+        "sssp" => Ok(CliRequest::Execute(Command::GraphSssp {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            source: required_string(submatches, "source-node")?,
+            direction: submatches.get_one::<String>("direction").cloned(),
+            top_n: submatches.get_one::<usize>("top").copied(),
+            include_all: flag_option(submatches, "all"),
+        })),
+        "ontology" => parse_graph_ontology(submatches, context),
+        _ => Err("Unsupported graph subcommand".to_string()),
+    }
+}
 
-            let raw_json = if let Some(file_path) = m.get_one::<String>("file") {
-                let content = if file_path == "-" {
-                    let mut buf = String::new();
-                    std::io::stdin()
-                        .read_to_string(&mut buf)
-                        .map_err(|e| format!("Failed to read stdin: {}", e))?;
-                    buf
-                } else {
-                    std::fs::read_to_string(file_path)
-                        .map_err(|e| format!("Failed to read '{}': {}", file_path, e))?
-                };
-                content
-            } else {
-                m.get_one::<String>("json").unwrap().clone()
-            };
+fn parse_graph_ontology(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No graph ontology subcommand".to_string())?;
+    match name {
+        "status" => Ok(CliRequest::Execute(Command::GraphOntologyStatus {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "summary" => Ok(CliRequest::Execute(Command::GraphOntologySummary {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "freeze" => Ok(CliRequest::Execute(Command::GraphFreezeOntology {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "list-types" => Ok(CliRequest::Execute(Command::GraphListOntologyTypes {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "object" => parse_graph_ontology_object(submatches, context),
+        "link" => parse_graph_ontology_link(submatches, context),
+        _ => Err("Unsupported graph ontology subcommand".to_string()),
+    }
+}
 
-            let parsed: serde_json::Value =
-                serde_json::from_str(&raw_json).map_err(|e| format!("Invalid JSON: {}", e))?;
+fn parse_graph_ontology_object(
+    matches: &ArgMatches,
+    context: &Context,
+) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No graph ontology object subcommand".to_string())?;
+    match name {
+        "define" => Ok(CliRequest::Execute(Command::GraphDefineObjectType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            definition: parse_named_definition(
+                &required_string(submatches, "definition-json")?,
+                &required_string(submatches, "type")?,
+            )?,
+        })),
+        "get" => Ok(CliRequest::Execute(Command::GraphGetObjectType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            name: required_string(submatches, "type")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::GraphListObjectTypes {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "delete" => Ok(CliRequest::Execute(Command::GraphDeleteObjectType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            name: required_string(submatches, "type")?,
+        })),
+        _ => Err("Unsupported graph ontology object subcommand".to_string()),
+    }
+}
 
-            let nodes: Vec<BulkGraphNode> = parsed
-                .get("nodes")
-                .map(|v| serde_json::from_value(v.clone()))
-                .transpose()
-                .map_err(|e| format!("Invalid nodes: {}", e))?
-                .unwrap_or_default();
+fn parse_graph_ontology_link(
+    matches: &ArgMatches,
+    context: &Context,
+) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No graph ontology link subcommand".to_string())?;
+    match name {
+        "define" => Ok(CliRequest::Execute(Command::GraphDefineLinkType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            definition: parse_named_definition(
+                &required_string(submatches, "definition-json")?,
+                &required_string(submatches, "type")?,
+            )?,
+        })),
+        "get" => Ok(CliRequest::Execute(Command::GraphGetLinkType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            name: required_string(submatches, "type")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::GraphListLinkTypes {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+        })),
+        "delete" => Ok(CliRequest::Execute(Command::GraphDeleteLinkType {
+            branch: branch(context),
+            space: space(context),
+            graph: required_string(submatches, "graph")?,
+            name: required_string(submatches, "type")?,
+        })),
+        _ => Err("Unsupported graph ontology link subcommand".to_string()),
+    }
+}
 
-            let edges: Vec<BulkGraphEdge> = parsed
-                .get("edges")
-                .map(|v| serde_json::from_value(v.clone()))
-                .transpose()
-                .map_err(|e| format!("Invalid edges: {}", e))?
-                .unwrap_or_default();
-
-            let chunk_size = m.get_one::<usize>("chunk-size").copied();
-
-            Ok(CliAction::Execute(Command::GraphBulkInsert {
-                branch: branch(state),
-                space: None,
-                graph,
-                nodes,
-                edges,
-                chunk_size,
-            }))
-        }
-        "bfs" => {
-            let graph = m.get_one::<String>("graph").unwrap().clone();
-            let start = m.get_one::<String>("start").unwrap().clone();
-            let max_depth = *m.get_one::<usize>("max-depth").unwrap();
-            let max_nodes = m.get_one::<usize>("max-nodes").copied();
-            let edge_types = m
-                .get_one::<String>("edge-types")
-                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect());
-            let direction = m.get_one::<String>("direction").cloned();
-            Ok(CliAction::Execute(Command::GraphBfs {
-                branch: branch(state),
-                space: None,
-                graph,
-                start,
-                max_depth,
-                max_nodes,
-                edge_types,
-                direction,
-            }))
-        }
-        // Ontology (nested)
-        "ontology" => {
-            let (onto_sub, onto_m) = m.subcommand().ok_or("No ontology subcommand")?;
-            match onto_sub {
-                "define" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    let definition = if let Some(file_path) = onto_m.get_one::<String>("file") {
-                        read_json_from_source(file_path)?
-                    } else {
-                        let raw = onto_m.get_one::<String>("json").unwrap();
-                        parse_json_value(raw)?
-                    };
-                    // Auto-detect: if JSON has "source" and "target" keys, it's a link type
-                    let is_link = match &definition {
-                        Value::Object(map) => {
-                            map.contains_key("source") && map.contains_key("target")
-                        }
-                        _ => false,
-                    };
-                    if is_link {
-                        Ok(CliAction::Execute(Command::GraphDefineLinkType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            definition,
-                        }))
-                    } else {
-                        Ok(CliAction::Execute(Command::GraphDefineObjectType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            definition,
-                        }))
-                    }
-                }
-                "get" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    let name = onto_m.get_one::<String>("name").unwrap().clone();
-                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
-                    match kind {
-                        Some("link") => Ok(CliAction::Execute(Command::GraphGetLinkType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            name,
-                        })),
-                        _ => Ok(CliAction::Execute(Command::GraphGetObjectType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            name,
-                        })),
-                    }
-                }
-                "list" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
-                    match kind {
-                        Some("object") => Ok(CliAction::Execute(Command::GraphListObjectTypes {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                        })),
-                        Some("link") => Ok(CliAction::Execute(Command::GraphListLinkTypes {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                        })),
-                        None => Ok(CliAction::Execute(Command::GraphListOntologyTypes {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                        })),
-                        Some(other) => Err(format!(
-                            "Invalid --kind '{}'. Use 'object' or 'link'.",
-                            other
-                        )),
-                    }
-                }
-                "delete" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    let name = onto_m.get_one::<String>("name").unwrap().clone();
-                    let kind = onto_m.get_one::<String>("kind").map(|s| s.as_str());
-                    match kind {
-                        Some("link") => Ok(CliAction::Execute(Command::GraphDeleteLinkType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            name,
-                        })),
-                        _ => Ok(CliAction::Execute(Command::GraphDeleteObjectType {
-                            branch: branch(state),
-                            space: None,
-                            graph,
-                            name,
-                        })),
-                    }
-                }
-                "freeze" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    Ok(CliAction::Execute(Command::GraphFreezeOntology {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                    }))
-                }
-                "status" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    Ok(CliAction::Execute(Command::GraphOntologyStatus {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                    }))
-                }
-                "summary" => {
-                    let graph = onto_m.get_one::<String>("graph").unwrap().clone();
-                    Ok(CliAction::Execute(Command::GraphOntologySummary {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                    }))
-                }
-                other => Err(unknown_subcommand(
-                    "ontology",
-                    other,
-                    &[
-                        "define", "get", "list", "delete", "freeze", "status", "summary",
-                    ],
-                )),
+fn parse_branch(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No branch subcommand".to_string())?;
+    match name {
+        "create" => Ok(CliRequest::Execute(Command::BranchCreate {
+            branch_id: submatches.get_one::<String>("name").cloned(),
+            metadata: None,
+        })),
+        "info" => Ok(CliRequest::Execute(Command::BranchGet {
+            branch: required_string(submatches, "name")?.into(),
+        })),
+        "list" => Ok(CliRequest::Execute(Command::BranchList {
+            state: None::<BranchStatus>,
+            limit: optional_u64(submatches, "limit"),
+            offset: optional_u64(submatches, "offset"),
+        })),
+        "exists" => Ok(CliRequest::Execute(Command::BranchExists {
+            branch: required_string(submatches, "name")?.into(),
+        })),
+        "del" => Ok(CliRequest::Execute(Command::BranchDelete {
+            branch: required_string(submatches, "name")?.into(),
+        })),
+        "fork" => Ok(CliRequest::Execute(Command::BranchFork {
+            source: required_string(submatches, "source")?,
+            destination: required_string(submatches, "destination")?,
+            message: submatches.get_one::<String>("message").cloned(),
+            creator: None,
+        })),
+        "diff" => Ok(CliRequest::Execute(Command::BranchDiff {
+            branch_a: required_string(submatches, "branch-a")?,
+            branch_b: required_string(submatches, "branch-b")?,
+            filter_primitives: None,
+            filter_spaces: string_list(submatches, "space"),
+            as_of: optional_u64(submatches, "as-of"),
+        })),
+        "merge" => Ok(CliRequest::Execute(Command::BranchMerge {
+            source: required_string(submatches, "source")?,
+            target: required_string(submatches, "target")?,
+            strategy: parse_merge_strategy(submatches.get_one::<String>("strategy"))?,
+            message: submatches.get_one::<String>("message").cloned(),
+            creator: None,
+        })),
+        "merge-base" => Ok(CliRequest::Execute(Command::BranchMergeBase {
+            branch_a: required_string(submatches, "branch-a")?,
+            branch_b: required_string(submatches, "branch-b")?,
+        })),
+        "diff3" => Ok(CliRequest::Execute(Command::BranchDiffThreeWay {
+            branch_a: required_string(submatches, "branch-a")?,
+            branch_b: required_string(submatches, "branch-b")?,
+        })),
+        "revert" => Ok(CliRequest::Execute(Command::BranchRevert {
+            branch: required_string(submatches, "branch")?,
+            from_version: required_u64(submatches, "from-version")?,
+            to_version: required_u64(submatches, "to-version")?,
+        })),
+        "cherry-pick" => {
+            let keys = parse_space_key_pairs(submatches, "pick")?;
+            let filter_spaces = string_list(submatches, "space");
+            let filter_keys = string_list(submatches, "key");
+            if keys.is_some() && (filter_spaces.is_some() || filter_keys.is_some()) {
+                return Err(
+                    "--pick cannot be combined with --space or --key filter arguments".to_string(),
+                );
             }
+            Ok(CliRequest::Execute(Command::BranchCherryPick {
+                source: required_string(submatches, "source")?,
+                target: required_string(submatches, "target")?,
+                keys,
+                filter_spaces,
+                filter_keys,
+                filter_primitives: None,
+            }))
         }
-        // Analytics (nested)
-        "analytics" => {
-            let (alg_sub, alg_m) = m.subcommand().ok_or("No analytics subcommand")?;
-            // Shared analytics options
-            let top_n = alg_m.get_one::<usize>("top-n").copied();
-            let include_all = if alg_m.get_flag("include-all") {
-                Some(true)
-            } else {
-                None
-            };
-            match alg_sub {
-                "wcc" => {
-                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    Ok(CliAction::Execute(Command::GraphWcc {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                        top_n,
-                        include_all,
-                    }))
-                }
-                "cdlp" => {
-                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    let max_iterations = *alg_m.get_one::<usize>("max-iterations").unwrap();
-                    let direction = alg_m.get_one::<String>("direction").cloned();
-                    Ok(CliAction::Execute(Command::GraphCdlp {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                        max_iterations,
-                        direction,
-                        top_n,
-                        include_all,
-                    }))
-                }
-                "pagerank" => {
-                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    let damping = alg_m.get_one::<f64>("damping").copied();
-                    let max_iterations = alg_m.get_one::<usize>("max-iterations").copied();
-                    let tolerance = alg_m.get_one::<f64>("tolerance").copied();
-                    Ok(CliAction::Execute(Command::GraphPagerank {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                        damping,
-                        max_iterations,
-                        tolerance,
-                        top_n,
-                        include_all,
-                    }))
-                }
-                "lcc" => {
-                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    Ok(CliAction::Execute(Command::GraphLcc {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                        top_n,
-                        include_all,
-                    }))
-                }
-                "sssp" => {
-                    let graph = alg_m.get_one::<String>("graph").unwrap().clone();
-                    let source = alg_m.get_one::<String>("source").unwrap().clone();
-                    let direction = alg_m.get_one::<String>("direction").cloned();
-                    Ok(CliAction::Execute(Command::GraphSssp {
-                        branch: branch(state),
-                        space: None,
-                        graph,
-                        source,
-                        direction,
-                        top_n,
-                        include_all,
-                    }))
-                }
-                other => Err(unknown_subcommand(
-                    "analytics",
-                    other,
-                    &["wcc", "cdlp", "pagerank", "lcc", "sssp"],
-                )),
-            }
-        }
-        other => Err(unknown_subcommand(
-            "graph",
-            other,
-            &[
-                "create",
-                "delete",
-                "list",
-                "info",
-                "add-node",
-                "get-node",
-                "remove-node",
-                "list-nodes",
-                "add-edge",
-                "remove-edge",
-                "neighbors",
-                "bulk-insert",
-                "bfs",
-                "ontology",
-                "analytics",
-            ],
-        )),
+        "bundle" => parse_branch_bundle(submatches),
+        _ => Err("Unsupported branch subcommand".to_string()),
     }
 }
 
-// =========================================================================
-// Branch
-// =========================================================================
-
-fn parse_branch(matches: &ArgMatches, _state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No branch subcommand")?;
-    match sub {
-        "create" => {
-            let branch_id = m.get_one::<String>("name").cloned();
-            Ok(CliAction::Execute(Command::BranchCreate {
-                branch_id,
-                metadata: None,
-            }))
-        }
-        "info" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchGet {
-                branch: BranchId::from(name),
-            }))
-        }
-        "list" => {
-            let limit = m.get_one::<u64>("limit").copied();
-            Ok(CliAction::Execute(Command::BranchList {
-                state: None,
-                limit,
-                offset: None,
-            }))
-        }
-        "exists" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchExists {
-                branch: BranchId::from(name),
-            }))
-        }
-        "del" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchDelete {
-                branch: BranchId::from(name),
-            }))
-        }
-        "fork" => {
-            let destination = m.get_one::<String>("dest").unwrap().clone();
-            Ok(CliAction::BranchOp(BranchOp::Fork { destination }))
-        }
-        "diff" => {
-            let branch_a = m.get_one::<String>("a").unwrap().clone();
-            let branch_b = m.get_one::<String>("b").unwrap().clone();
-            Ok(CliAction::BranchOp(BranchOp::Diff { branch_a, branch_b }))
-        }
-        "merge" => {
-            let source = m.get_one::<String>("source").unwrap().clone();
-            let strategy = match m.get_one::<String>("strategy").map(|s| s.as_str()) {
-                Some("strict") => MergeStrategy::Strict,
-                Some("lww") | Some("last-writer-wins") | Some("last_writer_wins") | None => {
-                    MergeStrategy::LastWriterWins
-                }
-                Some(other) => {
-                    return Err(format!(
-                        "Unknown merge strategy \"{}\". Valid options: lww, strict",
-                        other
-                    ))
-                }
-            };
-            Ok(CliAction::BranchOp(BranchOp::Merge { source, strategy }))
-        }
-        "export" => {
-            let branch_id = m.get_one::<String>("branch").unwrap().clone();
-            let path = m.get_one::<String>("path").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchExport {
-                branch_id,
-                path,
-            }))
-        }
-        "import" => {
-            let path = m.get_one::<String>("path").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchImport { path }))
-        }
-        "validate" => {
-            let path = m.get_one::<String>("path").unwrap().clone();
-            Ok(CliAction::Execute(Command::BranchBundleValidate { path }))
-        }
-        other => Err(unknown_subcommand(
-            "branch",
-            other,
-            &[
-                "create", "info", "list", "exists", "del", "fork", "diff", "merge", "export",
-                "import", "validate",
-            ],
-        )),
-    }
-}
-
-// =========================================================================
-// Space
-// =========================================================================
-
-fn parse_space(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No space subcommand")?;
-    match sub {
-        "list" => Ok(CliAction::Execute(Command::SpaceList {
-            branch: branch(state),
+fn parse_branch_bundle(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No branch bundle subcommand".to_string())?;
+    match name {
+        "export" => Ok(CliRequest::Execute(Command::BranchExport {
+            branch_id: required_string(submatches, "branch")?,
+            path: required_string(submatches, "path")?,
         })),
-        "create" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::SpaceCreate {
-                branch: branch(state),
-                space: name,
-            }))
-        }
-        "del" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            let force = m.get_flag("force");
-            Ok(CliAction::Execute(Command::SpaceDelete {
-                branch: branch(state),
-                space: name,
-                force,
-            }))
-        }
-        "exists" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::SpaceExists {
-                branch: branch(state),
-                space: name,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "space",
-            other,
-            &["list", "create", "del", "exists"],
-        )),
-    }
-}
-
-// =========================================================================
-// Transaction
-// =========================================================================
-
-fn parse_begin(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let read_only = matches.get_flag("txn-read-only");
-    Ok(CliAction::Execute(Command::TxnBegin {
-        branch: branch(state),
-        options: Some(TxnOptions { read_only }),
-    }))
-}
-
-fn parse_txn(matches: &ArgMatches) -> Result<CliAction, String> {
-    let (sub, _) = matches.subcommand().ok_or("No txn subcommand")?;
-    match sub {
-        "info" => Ok(CliAction::Execute(Command::TxnInfo)),
-        "active" => Ok(CliAction::Execute(Command::TxnIsActive)),
-        other => Err(unknown_subcommand("txn", other, &["info", "active"])),
-    }
-}
-
-// =========================================================================
-// Search
-// =========================================================================
-
-// =========================================================================
-// Configure Model
-// =========================================================================
-
-fn parse_config(matches: &ArgMatches) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No config subcommand")?;
-    match sub {
-        "set" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            let value = m.get_one::<String>("value").unwrap().clone();
-            Ok(CliAction::Execute(Command::ConfigureSet { key, value }))
-        }
-        "get" => {
-            let key = m.get_one::<String>("key").unwrap().clone();
-            Ok(CliAction::Execute(Command::ConfigureGetKey { key }))
-        }
-        "list" => Ok(CliAction::Execute(Command::ConfigGet)),
-        other => Err(unknown_subcommand("config", other, &["set", "get", "list"])),
-    }
-}
-
-fn parse_recipe(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No recipe subcommand")?;
-    match sub {
-        "seed" => Ok(CliAction::SeedRecipes),
-        "show" => Ok(CliAction::Execute(Command::RecipeGetDefault {
-            branch: branch(state),
+        "import" => Ok(CliRequest::Execute(Command::BranchImport {
+            path: required_string(submatches, "path")?,
         })),
-        "set" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            let json = m.get_one::<String>("recipe_json").unwrap().clone();
-            Ok(CliAction::Execute(Command::RecipeSet {
-                branch: branch(state),
-                name,
-                recipe_json: json,
-            }))
-        }
-        "get" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::RecipeGet {
-                branch: branch(state),
-                name,
-            }))
-        }
-        "list" => Ok(CliAction::Execute(Command::RecipeList {
-            branch: branch(state),
+        "validate" => Ok(CliRequest::Execute(Command::BranchBundleValidate {
+            path: required_string(submatches, "path")?,
         })),
-        "delete" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::RecipeDelete {
-                branch: branch(state),
-                name,
-            }))
-        }
-        other => Err(unknown_subcommand(
-            "recipe",
-            other,
-            &["seed", "show", "set", "get", "list", "delete"],
-        )),
+        _ => Err("Unsupported branch bundle subcommand".to_string()),
     }
 }
 
-fn parse_configure_model(matches: &ArgMatches) -> Result<CliAction, String> {
-    let endpoint = matches.get_one::<String>("endpoint").unwrap().clone();
-    let model = matches.get_one::<String>("model").unwrap().clone();
-    let api_key = matches.get_one::<String>("api-key").cloned();
-    let timeout_ms = matches.get_one::<u64>("timeout").copied();
-    Ok(CliAction::Execute(Command::ConfigureModel {
-        endpoint,
-        model,
-        api_key,
-        timeout_ms,
-    }))
-}
-
-fn parse_embed(matches: &ArgMatches) -> Result<CliAction, String> {
-    let texts: Vec<String> = matches
-        .get_many::<String>("texts")
-        .ok_or("Missing text argument")?
-        .cloned()
-        .collect();
-
-    if texts.len() == 1 {
-        Ok(CliAction::Execute(Command::Embed {
-            text: texts.into_iter().next().unwrap(),
-        }))
-    } else {
-        Ok(CliAction::Execute(Command::EmbedBatch { texts }))
+fn parse_space(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No space subcommand".to_string())?;
+    match name {
+        "list" => Ok(CliRequest::Execute(Command::SpaceList {
+            branch: branch(context),
+        })),
+        "create" => Ok(CliRequest::Execute(Command::SpaceCreate {
+            branch: branch(context),
+            space: required_string(submatches, "name")?,
+        })),
+        "del" => Ok(CliRequest::Execute(Command::SpaceDelete {
+            branch: branch(context),
+            space: required_string(submatches, "name")?,
+            force: submatches.get_flag("force"),
+        })),
+        "exists" => Ok(CliRequest::Execute(Command::SpaceExists {
+            branch: branch(context),
+            space: required_string(submatches, "name")?,
+        })),
+        _ => Err("Unsupported space subcommand".to_string()),
     }
 }
 
-fn parse_models(matches: &ArgMatches) -> Result<CliAction, String> {
-    let (sub, m) = matches.subcommand().ok_or("No models subcommand")?;
-    match sub {
-        "list" => Ok(CliAction::Execute(Command::ModelsList)),
-        "local" => Ok(CliAction::Execute(Command::ModelsLocal)),
-        "pull" => {
-            let name = m.get_one::<String>("name").unwrap().clone();
-            Ok(CliAction::Execute(Command::ModelsPull { name }))
-        }
-        other => Err(unknown_subcommand(
-            "models",
-            other,
-            &["list", "local", "pull"],
-        )),
-    }
-}
-
-fn parse_generate(matches: &ArgMatches) -> Result<CliAction, String> {
-    let model = matches.get_one::<String>("model").unwrap().clone();
-    let prompt = matches.get_one::<String>("prompt").unwrap().clone();
-    let max_tokens = matches.get_one::<usize>("max-tokens").copied();
-    let temperature = matches.get_one::<f32>("temperature").copied();
-    let top_k = matches.get_one::<usize>("top-k").copied();
-    let top_p = matches.get_one::<f32>("top-p").copied();
-    let seed = matches.get_one::<u64>("seed").copied();
-    let stop_sequences: Option<Vec<String>> = matches
-        .get_many::<String>("stop")
-        .map(|vals| vals.cloned().collect());
-    Ok(CliAction::Execute(Command::Generate {
-        model,
-        prompt,
-        max_tokens,
-        temperature,
-        top_k,
-        top_p,
-        seed,
-        stop_tokens: None,
-        stop_sequences,
-    }))
-}
-
-fn parse_tokenize(matches: &ArgMatches) -> Result<CliAction, String> {
-    let model = matches.get_one::<String>("model").unwrap().clone();
-    let text = matches.get_one::<String>("text").unwrap().clone();
-    let no_special = matches.get_flag("no-special");
-    let add_special_tokens = if no_special { Some(false) } else { None };
-    Ok(CliAction::Execute(Command::Tokenize {
-        model,
-        text,
-        add_special_tokens,
-    }))
-}
-
-fn parse_detokenize(matches: &ArgMatches) -> Result<CliAction, String> {
-    let model = matches.get_one::<String>("model").unwrap().clone();
-    let ids: Vec<u32> = matches
-        .get_many::<String>("ids")
-        .ok_or("Missing token IDs")?
-        .map(|s| s.parse::<u32>())
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|e| format!("Invalid token ID: {}", e))?;
-    Ok(CliAction::Execute(Command::Detokenize { model, ids }))
-}
-
-fn parse_search(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let query = matches.get_one::<String>("query").unwrap().clone();
-    let k = matches.get_one::<u64>("top-k").copied();
-
-    // --recipe: try to parse as JSON object, otherwise treat as recipe name
-    let recipe = matches.get_one::<String>("recipe").map(|s| {
-        match serde_json::from_str::<serde_json::Value>(s) {
-            Ok(v) if v.is_object() => v,
-            _ => serde_json::Value::String(s.clone()),
-        }
-    });
-
-    Ok(CliAction::Execute(Command::Search {
-        branch: branch(state),
-        space: space(state),
-        search: SearchQuery {
-            query,
-            recipe,
-            precomputed_embedding: None,
-            k,
-            as_of: None,
-            diff: None,
+fn parse_begin_request(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::TxnBegin {
+        branch: branch(context),
+        options: if matches.get_flag("read-only") {
+            Some(TxnOptions { read_only: true })
+        } else {
+            None
         },
     }))
 }
 
-fn parse_db_export(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let primitive_str = matches.get_one::<String>("primitive").unwrap();
-    let primitive = match primitive_str.as_str() {
-        "kv" => ExportPrimitive::Kv,
-        "json" => ExportPrimitive::Json,
-        "events" => ExportPrimitive::Events,
-        "vector" => ExportPrimitive::Vector,
-        "graph" => ExportPrimitive::Graph,
-        other => {
-            return Err(format!(
-                "Unknown primitive '{other}'. Expected: kv, json, events, vector, graph"
-            ))
-        }
+fn parse_txn(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let (name, _submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No txn subcommand".to_string())?;
+    match name {
+        "info" => Ok(CliRequest::Execute(Command::TxnInfo)),
+        "active" => Ok(CliRequest::Execute(Command::TxnIsActive)),
+        _ => Err("Unsupported txn subcommand".to_string()),
+    }
+}
+
+fn parse_search(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let recipe = matches
+        .get_one::<String>("recipe")
+        .map(|value| parse_recipe_value(value))
+        .transpose()?;
+    let diff_start = optional_u64(matches, "diff-start");
+    let diff_end = optional_u64(matches, "diff-end");
+    let diff = match (diff_start, diff_end) {
+        (Some(start), Some(end)) => Some((start, end)),
+        (None, None) => None,
+        _ => return Err("Both --diff-start and --diff-end are required together".to_string()),
     };
 
-    let format_str = matches
-        .get_one::<String>("format")
-        .map(|s| s.as_str())
-        .unwrap_or("csv");
-    let format = match format_str {
-        "csv" => ExportFormat::Csv,
-        "json" => ExportFormat::Json,
-        "jsonl" => ExportFormat::Jsonl,
-        "parquet" => ExportFormat::Parquet,
-        other => {
-            return Err(format!(
-                "Unknown format '{other}'. Expected: parquet, csv, jsonl, json"
-            ))
-        }
-    };
+    Ok(CliRequest::Execute(Command::Search {
+        branch: branch(context),
+        space: space(context),
+        search: SearchQuery {
+            query: required_string(matches, "query")?,
+            recipe,
+            precomputed_embedding: None,
+            k: optional_u64(matches, "k"),
+            as_of: optional_u64(matches, "as-of"),
+            diff,
+        },
+    }))
+}
 
-    Ok(CliAction::Execute(Command::DbExport {
-        branch: branch(state),
-        space: space(state),
-        primitive,
-        format,
+fn parse_config(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No config subcommand".to_string())?;
+    match name {
+        "set" => Ok(CliRequest::Execute(Command::ConfigureSet {
+            key: required_string(submatches, "key")?,
+            value: required_string(submatches, "value")?,
+        })),
+        "get" => Ok(CliRequest::Execute(Command::ConfigureGetKey {
+            key: required_string(submatches, "key")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::ConfigGet)),
+        _ => Err("Unsupported config subcommand".to_string()),
+    }
+}
+
+fn parse_recipe(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No recipe subcommand".to_string())?;
+    match name {
+        "show" => Ok(CliRequest::Execute(Command::RecipeGetDefault {
+            branch: branch(context),
+        })),
+        "get" => Ok(CliRequest::Execute(Command::RecipeGet {
+            branch: branch(context),
+            name: submatches
+                .get_one::<String>("name")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()),
+        })),
+        "set" => Ok(CliRequest::Execute(Command::RecipeSet {
+            branch: branch(context),
+            name: submatches
+                .get_one::<String>("name")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()),
+            recipe_json: required_string(submatches, "recipe-json")?,
+        })),
+        "list" => Ok(CliRequest::Execute(Command::RecipeList {
+            branch: branch(context),
+        })),
+        "delete" => Ok(CliRequest::Execute(Command::RecipeDelete {
+            branch: branch(context),
+            name: submatches
+                .get_one::<String>("name")
+                .cloned()
+                .unwrap_or_else(|| "default".to_string()),
+        })),
+        _ => Err("Unsupported recipe subcommand".to_string()),
+    }
+}
+
+fn parse_configure_model(matches: &ArgMatches) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::ConfigureModel {
+        endpoint: required_string(matches, "endpoint")?,
+        model: required_string(matches, "model")?,
+        api_key: matches.get_one::<String>("api-key").cloned(),
+        timeout_ms: optional_u64(matches, "timeout-ms"),
+    }))
+}
+
+fn parse_embed(matches: &ArgMatches) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::Embed {
+        text: required_string(matches, "text")?,
+    }))
+}
+
+fn parse_models(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let (name, submatches) = matches
+        .subcommand()
+        .ok_or_else(|| "No models subcommand".to_string())?;
+    match name {
+        "list" => Ok(CliRequest::Execute(Command::ModelsList)),
+        "local" => Ok(CliRequest::Execute(Command::ModelsLocal)),
+        "pull" => Ok(CliRequest::Execute(Command::ModelsPull {
+            name: required_string(submatches, "name")?,
+        })),
+        _ => Err("Unsupported models subcommand".to_string()),
+    }
+}
+
+fn parse_generate(matches: &ArgMatches) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::Generate {
+        model: required_string(matches, "model")?,
+        prompt: required_string(matches, "prompt")?,
+        max_tokens: matches.get_one::<usize>("max-tokens").copied(),
+        temperature: matches.get_one::<f32>("temperature").copied(),
+        top_k: matches.get_one::<usize>("top-k").copied(),
+        top_p: matches.get_one::<f32>("top-p").copied(),
+        seed: optional_u64(matches, "seed"),
+        stop_tokens: matches
+            .get_many::<u32>("stop-token")
+            .map(|values| values.copied().collect()),
+        stop_sequences: matches
+            .get_many::<String>("stop-sequence")
+            .map(|values| values.cloned().collect()),
+    }))
+}
+
+fn parse_tokenize(matches: &ArgMatches) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::Tokenize {
+        model: required_string(matches, "model")?,
+        text: required_string(matches, "text")?,
+        add_special_tokens: Some(!matches.get_flag("no-special-tokens")),
+    }))
+}
+
+fn parse_detokenize(matches: &ArgMatches) -> Result<CliRequest, String> {
+    let ids = matches
+        .get_many::<u32>("ids")
+        .ok_or_else(|| "Missing token ids".to_string())?
+        .copied()
+        .collect();
+    Ok(CliRequest::Execute(Command::Detokenize {
+        model: required_string(matches, "model")?,
+        ids,
+    }))
+}
+
+fn parse_export(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::DbExport {
+        branch: branch(context),
+        space: space(context),
+        primitive: parse_export_primitive(matches.get_one::<String>("primitive"))?,
+        format: parse_export_format(matches.get_one::<String>("format"))?,
         prefix: matches.get_one::<String>("prefix").cloned(),
-        limit: matches.get_one::<u64>("limit").copied(),
-        path: matches.get_one::<String>("output").cloned(),
+        limit: optional_u64(matches, "limit"),
+        path: matches.get_one::<String>("path").cloned(),
         collection: matches.get_one::<String>("collection").cloned(),
         graph: matches.get_one::<String>("graph").cloned(),
     }))
 }
 
-fn parse_db_import(matches: &ArgMatches, state: &SessionState) -> Result<CliAction, String> {
-    let file_path = matches.get_one::<String>("file").unwrap().clone();
-    let target = matches.get_one::<String>("into").unwrap().clone();
-
-    Ok(CliAction::Execute(Command::ArrowImport {
-        branch: branch(state),
-        space: space(state),
-        file_path,
-        target,
+fn parse_import(matches: &ArgMatches, context: &Context) -> Result<CliRequest, String> {
+    Ok(CliRequest::Execute(Command::ArrowImport {
+        branch: branch(context),
+        space: space(context),
+        file_path: required_string(matches, "file-path")?,
+        target: required_string(matches, "target")?,
         key_column: matches.get_one::<String>("key-column").cloned(),
         value_column: matches.get_one::<String>("value-column").cloned(),
         collection: matches.get_one::<String>("collection").cloned(),
@@ -1594,754 +1046,1998 @@ fn parse_db_import(matches: &ArgMatches, state: &SessionState) -> Result<CliActi
 }
 
 #[cfg(test)]
+pub(crate) fn check_meta_command(line: &str) -> Option<MetaCommand> {
+    let tokens = shlex::split(line.trim())?;
+    meta_command_from_tokens(&tokens)
+}
+
+fn meta_command_from_tokens(tokens: &[String]) -> Option<MetaCommand> {
+    let command = tokens.first()?.as_str();
+    match command {
+        "quit" | "exit" => Some(MetaCommand::Quit),
+        "clear" => Some(MetaCommand::Clear),
+        "help" => Some(MetaCommand::Help {
+            command: tokens.get(1).cloned(),
+        }),
+        "use" => Some(MetaCommand::Use {
+            branch: tokens.get(1)?.clone(),
+            space: tokens.get(2).cloned(),
+        }),
+        _ => None,
+    }
+}
+
+fn branch(context: &Context) -> Option<BranchId> {
+    Some(context.branch().into())
+}
+
+fn space(context: &Context) -> Option<String> {
+    Some(context.space().to_string())
+}
+
+fn required_string(matches: &ArgMatches, key: &str) -> Result<String, String> {
+    matches
+        .get_one::<String>(key)
+        .cloned()
+        .ok_or_else(|| format!("Missing required argument: {key}"))
+}
+
+fn required_u64(matches: &ArgMatches, key: &str) -> Result<u64, String> {
+    matches
+        .get_one::<u64>(key)
+        .copied()
+        .ok_or_else(|| format!("Missing required argument: {key}"))
+}
+
+fn optional_u64(matches: &ArgMatches, key: &str) -> Option<u64> {
+    matches.get_one::<u64>(key).copied()
+}
+
+fn string_list(matches: &ArgMatches, key: &str) -> Option<Vec<String>> {
+    matches
+        .get_many::<String>(key)
+        .map(|values| values.cloned().collect())
+}
+
+fn flag_option(matches: &ArgMatches, key: &str) -> Option<bool> {
+    matches.get_flag(key).then_some(true)
+}
+
+fn parse_value_arg(matches: &ArgMatches, value_key: &str, file_key: &str) -> Result<Value, String> {
+    if let Some(file_path) = matches.get_one::<String>(file_key) {
+        return read_value_from_source(file_path);
+    }
+    let value = matches
+        .get_one::<String>(value_key)
+        .ok_or_else(|| format!("Missing required argument: {value_key}"))?;
+    Ok(parse_value(value))
+}
+
+fn parse_json_arg(matches: &ArgMatches, value_key: &str, file_key: &str) -> Result<Value, String> {
+    if let Some(file_path) = matches.get_one::<String>(file_key) {
+        return read_json_from_source(file_path);
+    }
+    let value = matches
+        .get_one::<String>(value_key)
+        .ok_or_else(|| format!("Missing required argument: {value_key}"))?;
+    parse_json_value(value)
+}
+
+fn optional_json(matches: &ArgMatches, key: &str) -> Result<Option<Value>, String> {
+    matches
+        .get_one::<String>(key)
+        .map(|value| parse_json_value(value))
+        .transpose()
+}
+
+fn parse_named_definition(definition: &str, name: &str) -> Result<Value, String> {
+    let mut json: serde_json::Value =
+        serde_json::from_str(definition).map_err(|error| format!("Invalid JSON: {error}"))?;
+    let object = json
+        .as_object_mut()
+        .ok_or_else(|| "Definition must be a JSON object".to_string())?;
+
+    match object.get("name") {
+        Some(existing) => match existing.as_str() {
+            Some(existing_name) if existing_name == name => {}
+            Some(existing_name) => {
+                return Err(format!(
+                    "Definition name '{existing_name}' does not match CLI type '{name}'"
+                ));
+            }
+            None => return Err("Definition field 'name' must be a string".to_string()),
+        },
+        None => {
+            object.insert(
+                "name".to_string(),
+                serde_json::Value::String(name.to_string()),
+            );
+        }
+    }
+
+    Ok(Value::from(json))
+}
+
+fn parse_direction(value: Option<&String>) -> Result<ScanDirection, String> {
+    match value.map(String::as_str) {
+        None | Some("forward") => Ok(ScanDirection::Forward),
+        Some("reverse") => Ok(ScanDirection::Reverse),
+        Some(other) => Err(format!("Unsupported direction: {other}")),
+    }
+}
+
+fn parse_metric_str(value: &str) -> Result<DistanceMetric, String> {
+    match value {
+        "cosine" => Ok(DistanceMetric::Cosine),
+        "euclidean" => Ok(DistanceMetric::Euclidean),
+        "dot-product" => Ok(DistanceMetric::DotProduct),
+        other => Err(format!("Unsupported metric: {other}")),
+    }
+}
+
+fn parse_metric(value: Option<&String>) -> Result<DistanceMetric, String> {
+    match value {
+        None => Ok(DistanceMetric::Cosine),
+        Some(value) => parse_metric_str(value),
+    }
+}
+
+fn parse_merge_strategy(value: Option<&String>) -> Result<MergeStrategy, String> {
+    match value.map(String::as_str) {
+        None | Some("last-writer-wins") => Ok(MergeStrategy::LastWriterWins),
+        Some("strict") => Ok(MergeStrategy::Strict),
+        Some(other) => Err(format!("Unsupported merge strategy: {other}")),
+    }
+}
+
+fn optional_metric(matches: &ArgMatches, key: &str) -> Result<Option<DistanceMetric>, String> {
+    matches
+        .get_one::<String>(key)
+        .map(|value| parse_metric_str(value))
+        .transpose()
+}
+
+fn optional_metadata_filters(
+    matches: &ArgMatches,
+    key: &str,
+) -> Result<Option<Vec<MetadataFilter>>, String> {
+    matches
+        .get_one::<String>(key)
+        .map(|value| {
+            serde_json::from_str(value).map_err(|error| format!("Invalid filter JSON: {error}"))
+        })
+        .transpose()
+}
+
+fn parse_batch_vector_entries(matches: &ArgMatches) -> Result<Vec<BatchVectorEntry>, String> {
+    let json = if let Some(file_path) = matches.get_one::<String>("file") {
+        read_string_from_source(file_path)?
+    } else {
+        required_string(matches, "entries")?
+    };
+    serde_json::from_str(&json).map_err(|error| format!("Invalid vector entry JSON: {error}"))
+}
+
+fn parse_space_key_pairs(
+    matches: &ArgMatches,
+    key: &str,
+) -> Result<Option<Vec<(String, String)>>, String> {
+    let values = match matches.get_many::<String>(key) {
+        Some(values) => values.cloned().collect::<Vec<_>>(),
+        None => return Ok(None),
+    };
+    if values.len() % 2 != 0 {
+        return Err(format!("Argument '{key}' requires space/key pairs"));
+    }
+    let pairs = values
+        .chunks(2)
+        .map(|chunk| (chunk[0].clone(), chunk[1].clone()))
+        .collect::<Vec<_>>();
+    Ok(Some(pairs))
+}
+
+fn parse_bulk_graph_nodes(matches: &ArgMatches) -> Result<Vec<BulkGraphNode>, String> {
+    let json = if let Some(file_path) = matches.get_one::<String>("nodes-file") {
+        read_string_from_source(file_path)?
+    } else {
+        matches
+            .get_one::<String>("nodes")
+            .cloned()
+            .unwrap_or_else(|| "[]".to_string())
+    };
+    serde_json::from_str(&json).map_err(|error| format!("Invalid graph node JSON: {error}"))
+}
+
+fn parse_bulk_graph_edges(matches: &ArgMatches) -> Result<Vec<BulkGraphEdge>, String> {
+    let json = if let Some(file_path) = matches.get_one::<String>("edges-file") {
+        read_string_from_source(file_path)?
+    } else {
+        matches
+            .get_one::<String>("edges")
+            .cloned()
+            .unwrap_or_else(|| "[]".to_string())
+    };
+    serde_json::from_str(&json).map_err(|error| format!("Invalid graph edge JSON: {error}"))
+}
+
+fn parse_recipe_value(value: &str) -> Result<serde_json::Value, String> {
+    if value.starts_with('{') || value.starts_with('[') || value.starts_with('"') {
+        serde_json::from_str(value).map_err(|error| format!("Invalid recipe JSON: {error}"))
+    } else {
+        Ok(serde_json::Value::String(value.to_string()))
+    }
+}
+
+fn parse_export_format(value: Option<&String>) -> Result<ExportFormat, String> {
+    match value.map(String::as_str) {
+        None | Some("json") => Ok(ExportFormat::Json),
+        Some("jsonl") => Ok(ExportFormat::Jsonl),
+        Some("csv") => Ok(ExportFormat::Csv),
+        Some("parquet") => Ok(ExportFormat::Parquet),
+        Some(other) => Err(format!("Unsupported export format: {other}")),
+    }
+}
+
+fn parse_export_primitive(value: Option<&String>) -> Result<ExportPrimitive, String> {
+    match value.map(String::as_str) {
+        Some("kv") => Ok(ExportPrimitive::Kv),
+        Some("json") => Ok(ExportPrimitive::Json),
+        Some("events") => Ok(ExportPrimitive::Events),
+        Some("graph") => Ok(ExportPrimitive::Graph),
+        Some("vector") => Ok(ExportPrimitive::Vector),
+        Some(other) => Err(format!("Unsupported export primitive: {other}")),
+        None => Err("Missing required argument: primitive".to_string()),
+    }
+}
+
+fn read_value_from_source(source: &str) -> Result<Value, String> {
+    let content = read_string_from_source(source)?;
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+        return Ok(Value::from(json));
+    }
+    Ok(Value::String(content.trim().to_string()))
+}
+
+fn read_json_from_source(source: &str) -> Result<Value, String> {
+    let content = read_string_from_source(source)?;
+    parse_json_value(&content)
+}
+
+fn read_string_from_source(source: &str) -> Result<String, String> {
+    if source == "-" {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .map_err(|error| format!("Failed to read stdin: {error}"))?;
+        Ok(buffer)
+    } else {
+        fs::read_to_string(source).map_err(|error| format!("Failed to read {source}: {error}"))
+    }
+}
+
+fn parse_value(value: &str) -> Value {
+    if value.starts_with('{') || value.starts_with('[') || value.starts_with('"') {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(value) {
+            return Value::from(json);
+        }
+    }
+    if value == "null" {
+        return Value::Null;
+    }
+    if value == "true" {
+        return Value::Bool(true);
+    }
+    if value == "false" {
+        return Value::Bool(false);
+    }
+    if let Ok(number) = value.parse::<i64>() {
+        return Value::Int(number);
+    }
+    if value.contains(['.', 'e', 'E']) {
+        if let Ok(number) = value.parse::<f64>() {
+            return Value::Float(number);
+        }
+    }
+    Value::String(value.to_string())
+}
+
+fn parse_json_value(value: &str) -> Result<Value, String> {
+    serde_json::from_str::<serde_json::Value>(value)
+        .map(Value::from)
+        .map_err(|error| format!("Invalid JSON: {error}"))
+}
+
+fn parse_vector_literal(value: &str) -> Result<Vec<f32>, String> {
+    let json: serde_json::Value =
+        serde_json::from_str(value).map_err(|error| format!("Invalid vector JSON: {error}"))?;
+    match json {
+        serde_json::Value::Array(values) => values
+            .iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value
+                    .as_f64()
+                    .map(|number| number as f32)
+                    .ok_or_else(|| format!("Vector element {index} is not numeric"))
+            })
+            .collect(),
+        _ => Err("Vector must be a JSON array".to_string()),
+    }
+}
+
+fn global_db_arg() -> Arg {
+    Arg::new("db")
+        .long("db")
+        .value_name("PATH")
+        .help("Database path")
+        .global(true)
+}
+
+fn global_cache_arg() -> Arg {
+    Arg::new("cache")
+        .long("cache")
+        .help("Use an ephemeral in-memory database")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("db")
+        .global(true)
+}
+
+fn global_branch_arg() -> Arg {
+    Arg::new("branch")
+        .long("branch")
+        .short('b')
+        .value_name("NAME")
+        .help("Initial branch")
+        .global(true)
+}
+
+fn global_space_arg() -> Arg {
+    Arg::new("space")
+        .long("space")
+        .short('s')
+        .value_name("NAME")
+        .help("Initial space")
+        .global(true)
+}
+
+fn global_json_arg() -> Arg {
+    Arg::new("json")
+        .long("json")
+        .short('j')
+        .help("Pretty JSON output")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("raw")
+        .global(true)
+}
+
+fn global_raw_arg() -> Arg {
+    Arg::new("raw")
+        .long("raw")
+        .short('r')
+        .help("Minimal output for scripts")
+        .action(ArgAction::SetTrue)
+        .global(true)
+}
+
+fn global_read_only_arg() -> Arg {
+    Arg::new("read-only")
+        .long("read-only")
+        .help("Open database in read-only mode")
+        .action(ArgAction::SetTrue)
+        .global(true)
+}
+
+fn global_follower_arg() -> Arg {
+    Arg::new("follower")
+        .long("follower")
+        .help("Open as read-only follower")
+        .action(ArgAction::SetTrue)
+        .conflicts_with("cache")
+        .global(true)
+}
+
+fn build_ping() -> ClapCommand {
+    ClapCommand::new("ping").about("Check connectivity")
+}
+
+fn build_info() -> ClapCommand {
+    ClapCommand::new("info").about("Database info")
+}
+
+fn build_health() -> ClapCommand {
+    ClapCommand::new("health").about("Health report")
+}
+
+fn build_metrics() -> ClapCommand {
+    ClapCommand::new("metrics").about("Database metrics")
+}
+
+fn build_flush() -> ClapCommand {
+    ClapCommand::new("flush").about("Flush pending writes")
+}
+
+fn build_compact() -> ClapCommand {
+    ClapCommand::new("compact").about("Trigger compaction")
+}
+
+fn build_describe() -> ClapCommand {
+    ClapCommand::new("describe").about("Structured database snapshot")
+}
+
+fn build_durability_counters() -> ClapCommand {
+    ClapCommand::new("durability-counters").about("WAL durability counters")
+}
+
+fn build_kv() -> ClapCommand {
+    ClapCommand::new("kv")
+        .about("Key-value operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("put")
+                .about("Write a key")
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("value"))
+                .arg(Arg::new("file").long("file").short('f').value_name("PATH")),
+        )
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Read a key")
+                .arg(Arg::new("key").required(true))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("del")
+                .about("Delete a key")
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List keys")
+                .arg(arg_prefix())
+                .arg(arg_limit())
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("scan")
+                .about("Scan key-value pairs")
+                .arg(Arg::new("start").long("start").value_name("KEY"))
+                .arg(arg_limit()),
+        )
+        .subcommand(
+            ClapCommand::new("count")
+                .about("Count keys")
+                .arg(arg_prefix()),
+        )
+        .subcommand(
+            ClapCommand::new("history")
+                .about("Key history")
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("getv")
+                .about("Get key version history")
+                .arg(Arg::new("key").required(true)),
+        )
+}
+
+fn build_json() -> ClapCommand {
+    ClapCommand::new("json")
+        .about("JSON document operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("set")
+                .about("Set JSON at a path")
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("path").required(true))
+                .arg(Arg::new("value"))
+                .arg(Arg::new("file").long("file").short('f').value_name("PATH")),
+        )
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Get JSON at a path")
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("path").required(true))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("del")
+                .about("Delete JSON at a path")
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("path").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List JSON documents")
+                .arg(arg_prefix())
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("100"),
+                )
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("count")
+                .about("Count JSON documents")
+                .arg(arg_prefix()),
+        )
+        .subcommand(
+            ClapCommand::new("history")
+                .about("Document history")
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("getv")
+                .about("Get document version history")
+                .arg(Arg::new("key").required(true)),
+        )
+}
+
+fn build_event() -> ClapCommand {
+    ClapCommand::new("event")
+        .about("Event log operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("append")
+                .about("Append an event")
+                .arg(Arg::new("event-type").required(true))
+                .arg(Arg::new("payload"))
+                .arg(Arg::new("file").long("file").short('f').value_name("PATH")),
+        )
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Get an event by sequence")
+                .arg(
+                    Arg::new("sequence")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List visible events")
+                .arg(Arg::new("type").long("type").value_name("EVENT_TYPE"))
+                .arg(arg_limit())
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("len")
+                .about("Event count")
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("range")
+                .about("Range by sequence")
+                .arg(
+                    Arg::new("start-seq")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(arg_end_seq())
+                .arg(arg_limit())
+                .arg(arg_direction())
+                .arg(Arg::new("type").long("type").value_name("EVENT_TYPE")),
+        )
+        .subcommand(
+            ClapCommand::new("range-time")
+                .about("Range by timestamp")
+                .arg(
+                    Arg::new("start-ts")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(arg_end_ts())
+                .arg(arg_limit())
+                .arg(arg_direction())
+                .arg(Arg::new("type").long("type").value_name("EVENT_TYPE")),
+        )
+        .subcommand(
+            ClapCommand::new("types")
+                .about("List event types")
+                .arg(arg_as_of()),
+        )
+}
+
+fn build_vector() -> ClapCommand {
+    ClapCommand::new("vector")
+        .about("Vector operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("upsert")
+                .about("Upsert a vector")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("vector").required(true).help("JSON array"))
+                .arg(Arg::new("metadata").long("metadata").value_name("JSON")),
+        )
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Get a vector")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("key").required(true))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("del")
+                .about("Delete a vector")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("search")
+                .about("Search a vector collection")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("query").required(true).help("JSON array"))
+                .arg(
+                    Arg::new("k")
+                        .long("k")
+                        .value_parser(clap::value_parser!(u64))
+                        .default_value("10"),
+                )
+                .arg(Arg::new("metric").long("metric").value_parser([
+                    "cosine",
+                    "euclidean",
+                    "dot-product",
+                ]))
+                .arg(Arg::new("filter").long("filter").value_name("JSON"))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("create")
+                .about("Create a collection")
+                .arg(Arg::new("collection").required(true))
+                .arg(
+                    Arg::new("dimension")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(
+                    Arg::new("metric")
+                        .long("metric")
+                        .value_parser(["cosine", "euclidean", "dot-product"])
+                        .default_value("cosine"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("drop")
+                .about("Delete a collection")
+                .arg(Arg::new("collection").required(true)),
+        )
+        .subcommand(ClapCommand::new("collections").about("List collections"))
+        .subcommand(
+            ClapCommand::new("stats")
+                .about("Collection stats")
+                .arg(Arg::new("collection").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("batch-upsert")
+                .about("Bulk upsert vectors")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("entries"))
+                .arg(Arg::new("file").long("file").short('f').value_name("PATH")),
+        )
+        .subcommand(
+            ClapCommand::new("history")
+                .about("Vector history")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("getv")
+                .about("Get vector version history")
+                .arg(Arg::new("collection").required(true))
+                .arg(Arg::new("key").required(true)),
+        )
+}
+
+fn build_graph() -> ClapCommand {
+    ClapCommand::new("graph")
+        .about("Graph operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("create")
+                .about("Create a graph")
+                .arg(Arg::new("graph").required(true))
+                .arg(
+                    Arg::new("cascade-policy")
+                        .long("cascade-policy")
+                        .value_name("POLICY"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("delete")
+                .about("Delete a graph")
+                .arg(Arg::new("graph").required(true)),
+        )
+        .subcommand(ClapCommand::new("list").about("List graphs"))
+        .subcommand(
+            ClapCommand::new("info")
+                .about("Graph metadata")
+                .arg(Arg::new("graph").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("add-node")
+                .about("Add or update a node")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("node-id").required(true))
+                .arg(Arg::new("entity-ref").long("entity-ref").value_name("REF"))
+                .arg(Arg::new("properties").long("properties").value_name("JSON"))
+                .arg(
+                    Arg::new("object-type")
+                        .long("object-type")
+                        .value_name("TYPE"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("get-node")
+                .about("Get a node")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("node-id").required(true))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("remove-node")
+                .about("Remove a node")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("node-id").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("list-nodes")
+                .about("List node ids")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("type").long("type").value_name("TYPE"))
+                .arg(
+                    Arg::new("limit")
+                        .long("limit")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("cursor").long("cursor").value_name("CURSOR"))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("add-edge")
+                .about("Add or update an edge")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("src").required(true))
+                .arg(Arg::new("dst").required(true))
+                .arg(Arg::new("edge-type").required(true))
+                .arg(
+                    Arg::new("weight")
+                        .long("weight")
+                        .value_parser(clap::value_parser!(f64)),
+                )
+                .arg(Arg::new("properties").long("properties").value_name("JSON")),
+        )
+        .subcommand(
+            ClapCommand::new("remove-edge")
+                .about("Remove an edge")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("src").required(true))
+                .arg(Arg::new("dst").required(true))
+                .arg(Arg::new("edge-type").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("neighbors")
+                .about("Get neighbors")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("node-id").required(true))
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .value_parser(["outgoing", "incoming", "both"]),
+                )
+                .arg(Arg::new("edge-type").long("edge-type").value_name("TYPE"))
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("bulk-insert")
+                .about("Bulk insert graph data")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("nodes").long("nodes").value_name("JSON"))
+                .arg(Arg::new("nodes-file").long("nodes-file").value_name("PATH"))
+                .arg(Arg::new("edges").long("edges").value_name("JSON"))
+                .arg(Arg::new("edges-file").long("edges-file").value_name("PATH"))
+                .arg(
+                    Arg::new("chunk-size")
+                        .long("chunk-size")
+                        .value_parser(clap::value_parser!(usize)),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("bfs")
+                .about("Breadth-first traversal")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("start-node").required(true))
+                .arg(
+                    Arg::new("max-depth")
+                        .long("max-depth")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(
+                    Arg::new("max-nodes")
+                        .long("max-nodes")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(
+                    Arg::new("edge-type")
+                        .long("edge-type")
+                        .action(ArgAction::Append)
+                        .value_name("TYPE"),
+                )
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .value_parser(["outgoing", "incoming", "both"]),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("wcc")
+                .about("Weakly connected components")
+                .arg(Arg::new("graph").required(true))
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("cdlp")
+                .about("Community detection via label propagation")
+                .arg(Arg::new("graph").required(true))
+                .arg(
+                    Arg::new("max-iterations")
+                        .long("max-iterations")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .value_parser(["outgoing", "incoming", "both"]),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("pagerank")
+                .about("PageRank importance scoring")
+                .arg(Arg::new("graph").required(true))
+                .arg(
+                    Arg::new("damping")
+                        .long("damping")
+                        .value_parser(clap::value_parser!(f64))
+                        .value_name("VALUE"),
+                )
+                .arg(
+                    Arg::new("max-iterations")
+                        .long("max-iterations")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(
+                    Arg::new("tolerance")
+                        .long("tolerance")
+                        .value_parser(clap::value_parser!(f64))
+                        .value_name("VALUE"),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("lcc")
+                .about("Local clustering coefficient")
+                .arg(Arg::new("graph").required(true))
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("sssp")
+                .about("Single-source shortest path")
+                .arg(Arg::new("graph").required(true))
+                .arg(Arg::new("source-node").required(true))
+                .arg(
+                    Arg::new("direction")
+                        .long("direction")
+                        .value_parser(["outgoing", "incoming", "both"]),
+                )
+                .arg(
+                    Arg::new("top")
+                        .long("top")
+                        .value_parser(clap::value_parser!(usize))
+                        .value_name("N"),
+                )
+                .arg(Arg::new("all").long("all").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("ontology")
+                .about("Graph ontology operations")
+                .subcommand_required(true)
+                .subcommand(
+                    ClapCommand::new("status")
+                        .about("Ontology status")
+                        .arg(Arg::new("graph").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("summary")
+                        .about("Ontology summary")
+                        .arg(Arg::new("graph").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("freeze")
+                        .about("Freeze ontology")
+                        .arg(Arg::new("graph").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("list-types")
+                        .about("List all ontology types")
+                        .arg(Arg::new("graph").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("object")
+                        .about("Object type operations")
+                        .subcommand_required(true)
+                        .subcommand(
+                            ClapCommand::new("define")
+                                .about("Define an object type")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true))
+                                .arg(Arg::new("definition-json").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("get")
+                                .about("Get an object type definition")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("list")
+                                .about("List object types")
+                                .arg(Arg::new("graph").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("delete")
+                                .about("Delete an object type")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true)),
+                        ),
+                )
+                .subcommand(
+                    ClapCommand::new("link")
+                        .about("Link type operations")
+                        .subcommand_required(true)
+                        .subcommand(
+                            ClapCommand::new("define")
+                                .about("Define a link type")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true))
+                                .arg(Arg::new("definition-json").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("get")
+                                .about("Get a link type definition")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("list")
+                                .about("List link types")
+                                .arg(Arg::new("graph").required(true)),
+                        )
+                        .subcommand(
+                            ClapCommand::new("delete")
+                                .about("Delete a link type")
+                                .arg(Arg::new("graph").required(true))
+                                .arg(Arg::new("type").required(true)),
+                        ),
+                ),
+        )
+}
+
+fn build_branch() -> ClapCommand {
+    ClapCommand::new("branch")
+        .about("Branch lifecycle and power operations")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("create")
+                .about("Create a branch")
+                .arg(Arg::new("name")),
+        )
+        .subcommand(
+            ClapCommand::new("info")
+                .about("Branch info")
+                .arg(Arg::new("name").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("list")
+                .about("List branches")
+                .arg(arg_limit())
+                .arg(
+                    Arg::new("offset")
+                        .long("offset")
+                        .value_parser(clap::value_parser!(u64)),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("exists")
+                .about("Check branch existence")
+                .arg(Arg::new("name").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("del")
+                .about("Delete a branch")
+                .arg(Arg::new("name").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("fork")
+                .about("Fork a branch")
+                .arg(Arg::new("source").required(true))
+                .arg(Arg::new("destination").required(true))
+                .arg(Arg::new("message").long("message").value_name("TEXT")),
+        )
+        .subcommand(
+            ClapCommand::new("diff")
+                .about("Diff two branches")
+                .arg(Arg::new("branch-a").required(true))
+                .arg(Arg::new("branch-b").required(true))
+                .arg(
+                    Arg::new("space")
+                        .long("space")
+                        .action(ArgAction::Append)
+                        .value_name("NAME"),
+                )
+                .arg(arg_as_of()),
+        )
+        .subcommand(
+            ClapCommand::new("merge")
+                .about("Merge one branch into another")
+                .arg(Arg::new("source").required(true))
+                .arg(Arg::new("target").required(true))
+                .arg(
+                    Arg::new("strategy")
+                        .long("strategy")
+                        .value_parser(["last-writer-wins", "strict"])
+                        .default_value("last-writer-wins"),
+                )
+                .arg(Arg::new("message").long("message").value_name("TEXT")),
+        )
+        .subcommand(
+            ClapCommand::new("merge-base")
+                .about("Find the merge base of two branches")
+                .arg(Arg::new("branch-a").required(true))
+                .arg(Arg::new("branch-b").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("diff3")
+                .about("Compute a three-way diff between two branches")
+                .arg(Arg::new("branch-a").required(true))
+                .arg(Arg::new("branch-b").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("revert")
+                .about("Revert a version range on a branch")
+                .arg(Arg::new("branch").required(true))
+                .arg(
+                    Arg::new("from-version")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                )
+                .arg(
+                    Arg::new("to-version")
+                        .required(true)
+                        .value_parser(clap::value_parser!(u64)),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("cherry-pick")
+                .about("Cherry-pick specific or filtered changes between branches")
+                .arg(Arg::new("source").required(true))
+                .arg(Arg::new("target").required(true))
+                .arg(
+                    Arg::new("pick")
+                        .long("pick")
+                        .num_args(2)
+                        .action(ArgAction::Append)
+                        .value_names(["SPACE", "KEY"]),
+                )
+                .arg(
+                    Arg::new("space")
+                        .long("space")
+                        .action(ArgAction::Append)
+                        .value_name("NAME"),
+                )
+                .arg(
+                    Arg::new("key")
+                        .long("key")
+                        .action(ArgAction::Append)
+                        .value_name("USER_KEY"),
+                ),
+        )
+        .subcommand(
+            ClapCommand::new("bundle")
+                .about("Branch bundle portability operations")
+                .subcommand_required(true)
+                .subcommand(
+                    ClapCommand::new("export")
+                        .about("Export a branch bundle")
+                        .arg(Arg::new("branch").required(true))
+                        .arg(Arg::new("path").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("import")
+                        .about("Import a branch bundle")
+                        .arg(Arg::new("path").required(true)),
+                )
+                .subcommand(
+                    ClapCommand::new("validate")
+                        .about("Validate a branch bundle")
+                        .arg(Arg::new("path").required(true)),
+                ),
+        )
+}
+
+fn build_space() -> ClapCommand {
+    ClapCommand::new("space")
+        .about("Space operations")
+        .subcommand_required(true)
+        .subcommand(ClapCommand::new("list").about("List spaces"))
+        .subcommand(
+            ClapCommand::new("create")
+                .about("Create a space")
+                .arg(Arg::new("name").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("del")
+                .about("Delete a space")
+                .arg(Arg::new("name").required(true))
+                .arg(Arg::new("force").long("force").action(ArgAction::SetTrue)),
+        )
+        .subcommand(
+            ClapCommand::new("exists")
+                .about("Check space existence")
+                .arg(Arg::new("name").required(true)),
+        )
+}
+
+fn build_begin() -> ClapCommand {
+    ClapCommand::new("begin").about("Begin a transaction").arg(
+        Arg::new("read-only")
+            .long("read-only")
+            .action(ArgAction::SetTrue),
+    )
+}
+
+fn build_commit() -> ClapCommand {
+    ClapCommand::new("commit").about("Commit the active transaction")
+}
+
+fn build_rollback() -> ClapCommand {
+    ClapCommand::new("rollback").about("Rollback the active transaction")
+}
+
+fn build_txn() -> ClapCommand {
+    ClapCommand::new("txn")
+        .about("Transaction state")
+        .subcommand_required(true)
+        .subcommand(ClapCommand::new("info").about("Transaction info"))
+        .subcommand(ClapCommand::new("active").about("Check if a transaction is active"))
+}
+
+fn build_search() -> ClapCommand {
+    ClapCommand::new("search")
+        .about("Search across primitives")
+        .arg(Arg::new("query").required(true))
+        .arg(Arg::new("recipe").long("recipe").value_name("RECIPE"))
+        .arg(arg_limit().id("k"))
+        .arg(arg_as_of())
+        .arg(
+            Arg::new("diff-start")
+                .long("diff-start")
+                .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            Arg::new("diff-end")
+                .long("diff-end")
+                .value_parser(clap::value_parser!(u64)),
+        )
+}
+
+fn build_config() -> ClapCommand {
+    ClapCommand::new("config")
+        .about("Configuration")
+        .subcommand_required(true)
+        .subcommand(
+            ClapCommand::new("set")
+                .about("Set a config key")
+                .arg(Arg::new("key").required(true))
+                .arg(Arg::new("value").required(true)),
+        )
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Get a config key")
+                .arg(Arg::new("key").required(true)),
+        )
+        .subcommand(ClapCommand::new("list").about("List the current config"))
+}
+
+fn build_recipe() -> ClapCommand {
+    ClapCommand::new("recipe")
+        .about("Recipe operations")
+        .subcommand_required(true)
+        .subcommand(ClapCommand::new("show").about("Show the default recipe"))
+        .subcommand(
+            ClapCommand::new("get")
+                .about("Get a named recipe")
+                .arg(Arg::new("name")),
+        )
+        .subcommand(
+            ClapCommand::new("set")
+                .about("Set a named recipe")
+                .arg(Arg::new("recipe-json").required(true))
+                .arg(Arg::new("name").long("name").value_name("NAME")),
+        )
+        .subcommand(ClapCommand::new("list").about("List recipe names"))
+        .subcommand(
+            ClapCommand::new("delete")
+                .about("Delete a recipe")
+                .arg(Arg::new("name")),
+        )
+}
+
+fn build_configure_model() -> ClapCommand {
+    ClapCommand::new("configure-model")
+        .about("Configure a model endpoint")
+        .arg(Arg::new("endpoint").required(true))
+        .arg(Arg::new("model").required(true))
+        .arg(Arg::new("api-key").long("api-key").value_name("KEY"))
+        .arg(
+            Arg::new("timeout-ms")
+                .long("timeout-ms")
+                .value_parser(clap::value_parser!(u64)),
+        )
+}
+
+fn build_embed() -> ClapCommand {
+    ClapCommand::new("embed")
+        .about("Embed text")
+        .arg(Arg::new("text").required(true))
+}
+
+fn build_models() -> ClapCommand {
+    ClapCommand::new("models")
+        .about("Model operations")
+        .subcommand_required(true)
+        .subcommand(ClapCommand::new("list").about("List available models"))
+        .subcommand(ClapCommand::new("local").about("List local models"))
+        .subcommand(
+            ClapCommand::new("pull")
+                .about("Download a model")
+                .arg(Arg::new("name").required(true)),
+        )
+}
+
+fn build_generate() -> ClapCommand {
+    ClapCommand::new("generate")
+        .about("Generate text")
+        .arg(Arg::new("model").required(true))
+        .arg(Arg::new("prompt").required(true))
+        .arg(
+            Arg::new("max-tokens")
+                .long("max-tokens")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("temperature")
+                .long("temperature")
+                .value_parser(clap::value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("top-k")
+                .long("top-k")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("top-p")
+                .long("top-p")
+                .value_parser(clap::value_parser!(f32)),
+        )
+        .arg(
+            Arg::new("seed")
+                .long("seed")
+                .value_parser(clap::value_parser!(u64)),
+        )
+        .arg(
+            Arg::new("stop-token")
+                .long("stop-token")
+                .value_parser(clap::value_parser!(u32))
+                .action(ArgAction::Append),
+        )
+        .arg(
+            Arg::new("stop-sequence")
+                .long("stop-sequence")
+                .action(ArgAction::Append)
+                .value_name("TEXT"),
+        )
+}
+
+fn build_tokenize() -> ClapCommand {
+    ClapCommand::new("tokenize")
+        .about("Tokenize text")
+        .arg(Arg::new("model").required(true))
+        .arg(Arg::new("text").required(true))
+        .arg(
+            Arg::new("no-special-tokens")
+                .long("no-special-tokens")
+                .action(ArgAction::SetTrue),
+        )
+}
+
+fn build_detokenize() -> ClapCommand {
+    ClapCommand::new("detokenize")
+        .about("Detokenize token ids")
+        .arg(Arg::new("model").required(true))
+        .arg(
+            Arg::new("ids")
+                .required(true)
+                .num_args(1..)
+                .value_parser(clap::value_parser!(u32)),
+        )
+}
+
+fn build_export() -> ClapCommand {
+    ClapCommand::new("export")
+        .about("Export primitive data")
+        .arg(
+            Arg::new("primitive")
+                .required(true)
+                .value_parser(["kv", "json", "events", "graph", "vector"]),
+        )
+        .arg(
+            Arg::new("format")
+                .long("format")
+                .value_parser(["json", "jsonl", "csv", "parquet"])
+                .default_value("json"),
+        )
+        .arg(arg_prefix())
+        .arg(arg_limit())
+        .arg(Arg::new("path").long("path").value_name("PATH"))
+        .arg(Arg::new("collection").long("collection").value_name("NAME"))
+        .arg(Arg::new("graph").long("graph").value_name("NAME"))
+}
+
+fn build_import() -> ClapCommand {
+    ClapCommand::new("import")
+        .about("Import primitive data")
+        .arg(Arg::new("file-path").required(true))
+        .arg(Arg::new("target").required(true))
+        .arg(Arg::new("key-column").long("key-column").value_name("NAME"))
+        .arg(
+            Arg::new("value-column")
+                .long("value-column")
+                .value_name("NAME"),
+        )
+        .arg(Arg::new("collection").long("collection").value_name("NAME"))
+        .arg(Arg::new("format").long("format").value_name("FORMAT"))
+}
+
+fn arg_prefix() -> Arg {
+    Arg::new("prefix").long("prefix").value_name("PREFIX")
+}
+
+fn arg_limit() -> Arg {
+    Arg::new("limit")
+        .long("limit")
+        .value_parser(clap::value_parser!(u64))
+}
+
+fn arg_as_of() -> Arg {
+    Arg::new("as-of")
+        .long("as-of")
+        .value_parser(clap::value_parser!(u64))
+}
+
+fn arg_direction() -> Arg {
+    Arg::new("direction")
+        .long("direction")
+        .value_parser(["forward", "reverse"])
+        .default_value("forward")
+}
+
+fn arg_end_seq() -> Arg {
+    Arg::new("end-seq")
+        .long("end-seq")
+        .value_parser(clap::value_parser!(u64))
+}
+
+fn arg_end_ts() -> Arg {
+    Arg::new("end-ts")
+        .long("end-ts")
+        .value_parser(clap::value_parser!(u64))
+}
+
+#[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::commands::build_repl_cmd;
+    use super::{
+        build_cli, build_repl_cli, check_meta_command, matches_to_request, parse_json_value,
+        parse_value, parse_vector_literal,
+    };
+    use crate::context::Context;
+    use crate::request::MetaCommand;
+    use strata_executor::{Command, MergeStrategy, ScanDirection, TxnOptions, Value};
 
-    fn test_state() -> SessionState {
-        let db = strata_executor::Strata::cache().unwrap();
-        SessionState::new(db, "default".to_string(), "default".to_string())
+    fn context() -> Context {
+        Context::new(
+            "default".to_string(),
+            "main".to_string(),
+            "analytics".to_string(),
+        )
     }
 
-    fn parse(args: &[&str]) -> Result<CliAction, String> {
-        let state = test_state();
-        let cmd = build_repl_cmd();
-        let matches = cmd.try_get_matches_from(args).map_err(|e| e.to_string())?;
-        matches_to_action(&matches, &state)
-    }
-
-    fn parse_cmd(args: &[&str]) -> Command {
-        match parse(args) {
-            Ok(CliAction::Execute(cmd)) => cmd,
-            Ok(_) => panic!("Expected CliAction::Execute"),
-            Err(e) => panic!("Parse failed: {}", e),
+    fn parse_shell(args: &[&str]) -> Command {
+        let matches = build_cli()
+            .try_get_matches_from(args)
+            .expect("args should parse");
+        match matches_to_request(&matches, &context()).expect("request should parse") {
+            crate::request::CliRequest::Execute(command) => command,
+            crate::request::CliRequest::Meta(_) => panic!("expected executor command"),
         }
     }
 
-    fn parse_err(args: &[&str]) -> String {
-        match parse(args) {
-            Err(e) => e,
-            Ok(_) => panic!("Expected parse error"),
+    #[test]
+    fn meta_command_detection_works() {
+        match check_meta_command("use main analytics") {
+            Some(MetaCommand::Use { branch, space }) => {
+                assert_eq!(branch, "main");
+                assert_eq!(space.as_deref(), Some("analytics"));
+            }
+            _ => panic!("expected use meta command"),
+        }
+
+        match check_meta_command("use main \"analytics space\"") {
+            Some(MetaCommand::Use { branch, space }) => {
+                assert_eq!(branch, "main");
+                assert_eq!(space.as_deref(), Some("analytics space"));
+            }
+            _ => panic!("expected quoted use meta command"),
         }
     }
 
-    // =========================================================================
-    // Graph lifecycle
-    // =========================================================================
-
     #[test]
-    fn graph_create_minimal() {
-        let cmd = parse_cmd(&["graph", "create", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphCreate {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                cascade_policy: None,
-            }
-        );
+    fn parse_value_autodetects_simple_scalars() {
+        assert_eq!(parse_value("true"), Value::Bool(true));
+        assert_eq!(parse_value("12"), Value::Int(12));
+        assert_eq!(parse_value("3.5"), Value::Float(3.5));
     }
 
     #[test]
-    fn graph_create_with_cascade_policy() {
-        let cmd = parse_cmd(&["graph", "create", "social", "--cascade-policy", "cascade"]);
-        assert_eq!(
-            cmd,
-            Command::GraphCreate {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                cascade_policy: Some("cascade".into()),
-            }
-        );
+    fn parse_json_requires_valid_json() {
+        assert!(parse_json_value("{").is_err());
+        assert!(parse_json_value("{\"ok\":true}").is_ok());
     }
 
     #[test]
-    fn graph_delete() {
-        let cmd = parse_cmd(&["graph", "delete", "social"]);
+    fn parse_vector_requires_json_array() {
         assert_eq!(
-            cmd,
-            Command::GraphDelete {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
+            parse_vector_literal("[1,2,3]").expect("vector should parse"),
+            vec![1.0, 2.0, 3.0]
         );
+        assert!(parse_vector_literal("{\"x\":1}").is_err());
     }
 
     #[test]
-    fn graph_list() {
-        let cmd = parse_cmd(&["graph", "list"]);
-        assert_eq!(
-            cmd,
-            Command::GraphList {
-                branch: Some(BranchId::from("default")),
-                space: None,
-            }
-        );
+    fn global_flag_conflicts_are_rejected() {
+        assert!(build_cli()
+            .try_get_matches_from(["strata", "--cache", "--follower", "ping"])
+            .is_err());
+        assert!(build_cli()
+            .try_get_matches_from(["strata", "--json", "--raw", "ping"])
+            .is_err());
     }
 
     #[test]
-    fn graph_info() {
-        let cmd = parse_cmd(&["graph", "info", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphGetMeta {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
+    fn kept_command_groups_parse_into_executor_commands() {
+        assert!(matches!(parse_shell(&["strata", "ping"]), Command::Ping));
+        assert!(matches!(
+            parse_shell(&["strata", "kv", "scan", "--start", "a", "--limit", "5"]),
+            Command::KvScan { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "json", "count", "--prefix", "doc:"]),
+            Command::JsonCount { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "event",
+                "range",
+                "1",
+                "--end-seq",
+                "5",
+                "--direction",
+                "reverse"
+            ]),
+            Command::EventRange {
+                direction: ScanDirection::Reverse,
+                ..
             }
-        );
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "vector", "history", "emb", "k"]),
+            Command::VectorGetv { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "kv", "getv", "key"]),
+            Command::KvGetv { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "json", "getv", "doc"]),
+            Command::JsonGetv { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "vector", "getv", "emb", "k"]),
+            Command::VectorGetv { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "neighbors", "g", "n1"]),
+            Command::GraphNeighbors { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "list-nodes",
+                "g",
+                "--limit",
+                "25",
+                "--cursor",
+                "next"
+            ]),
+            Command::GraphListNodesPaginated { limit: 25, .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "list-nodes", "g", "--type", "Person"]),
+            Command::GraphNodesByType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "bfs",
+                "g",
+                "A",
+                "--max-depth",
+                "4",
+                "--edge-type",
+                "knows"
+            ]),
+            Command::GraphBfs { max_depth: 4, .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "wcc", "g", "--top", "5"]),
+            Command::GraphWcc { top_n: Some(5), .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "cdlp",
+                "g",
+                "--max-iterations",
+                "9",
+                "--direction",
+                "both"
+            ]),
+            Command::GraphCdlp {
+                max_iterations: 9,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "pagerank", "g", "--damping", "0.9"]),
+            Command::GraphPagerank {
+                damping: Some(_),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "lcc", "g", "--all"]),
+            Command::GraphLcc {
+                include_all: Some(true),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "sssp",
+                "g",
+                "A",
+                "--direction",
+                "outgoing"
+            ]),
+            Command::GraphSssp { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "status", "g"]),
+            Command::GraphOntologyStatus { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "summary", "g"]),
+            Command::GraphOntologySummary { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "freeze", "g"]),
+            Command::GraphFreezeOntology { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "list-types", "g"]),
+            Command::GraphListOntologyTypes { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "ontology",
+                "object",
+                "define",
+                "g",
+                "Person",
+                "{\"fields\":{}}"
+            ]),
+            Command::GraphDefineObjectType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "object", "get", "g", "Person"]),
+            Command::GraphGetObjectType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "object", "list", "g"]),
+            Command::GraphListObjectTypes { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "object", "delete", "g", "Person"]),
+            Command::GraphDeleteObjectType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "graph",
+                "ontology",
+                "link",
+                "define",
+                "g",
+                "KNOWS",
+                "{\"source\":\"Person\",\"target\":\"Person\"}"
+            ]),
+            Command::GraphDefineLinkType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "link", "get", "g", "KNOWS"]),
+            Command::GraphGetLinkType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "link", "list", "g"]),
+            Command::GraphListLinkTypes { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "graph", "ontology", "link", "delete", "g", "KNOWS"]),
+            Command::GraphDeleteLinkType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "del", "feature"]),
+            Command::BranchDelete { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "fork", "main", "feature"]),
+            Command::BranchFork { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "diff", "main", "feature"]),
+            Command::BranchDiff { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "branch",
+                "merge",
+                "feature",
+                "main",
+                "--strategy",
+                "strict"
+            ]),
+            Command::BranchMerge {
+                strategy: MergeStrategy::Strict,
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "merge-base", "main", "feature"]),
+            Command::BranchMergeBase { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "diff3", "main", "feature"]),
+            Command::BranchDiffThreeWay { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "branch", "revert", "main", "10", "12"]),
+            Command::BranchRevert { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "branch",
+                "cherry-pick",
+                "feature",
+                "main",
+                "--pick",
+                "default",
+                "user:1",
+                "--pick",
+                "analytics",
+                "user:2"
+            ]),
+            Command::BranchCherryPick { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "branch",
+                "bundle",
+                "export",
+                "main",
+                "main.branchbundle.tar.zst"
+            ]),
+            Command::BranchExport { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "branch",
+                "bundle",
+                "import",
+                "main.branchbundle.tar.zst"
+            ]),
+            Command::BranchImport { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "branch",
+                "bundle",
+                "validate",
+                "main.branchbundle.tar.zst"
+            ]),
+            Command::BranchBundleValidate { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "space", "exists", "analytics"]),
+            Command::SpaceExists { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "begin", "--read-only"]),
+            Command::TxnBegin {
+                options: Some(TxnOptions { read_only: true }),
+                ..
+            }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "txn", "active"]),
+            Command::TxnIsActive
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata",
+                "search",
+                "hello",
+                "--diff-start",
+                "1",
+                "--diff-end",
+                "3"
+            ]),
+            Command::Search { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "config", "get", "durability.mode"]),
+            Command::ConfigureGetKey { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "recipe", "list"]),
+            Command::RecipeList { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "configure-model", "local", "tiny"]),
+            Command::ConfigureModel { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "embed", "hello"]),
+            Command::Embed { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "models", "pull", "tiny"]),
+            Command::ModelsPull { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "generate", "tiny", "hello"]),
+            Command::Generate { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "tokenize", "tiny", "hello"]),
+            Command::Tokenize { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "detokenize", "tiny", "1", "2"]),
+            Command::Detokenize { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "export", "kv", "--format", "json"]),
+            Command::DbExport { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&["strata", "import", "data.arrow", "kv"]),
+            Command::ArrowImport { .. }
+        ));
     }
 
-    // =========================================================================
-    // Nodes
-    // =========================================================================
-
     #[test]
-    fn graph_add_node_minimal() {
-        let cmd = parse_cmd(&["graph", "add-node", "social", "alice"]);
-        assert_eq!(
-            cmd,
-            Command::GraphAddNode {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-                entity_ref: None,
-                properties: None,
-                object_type: None,
+    fn context_is_applied_to_data_commands() {
+        match parse_shell(&["strata", "kv", "put", "key", "1"]) {
+            Command::KvPut {
+                branch,
+                space,
+                key,
+                value,
+            } => {
+                assert_eq!(
+                    branch.map(|value| value.to_string()),
+                    Some("main".to_string())
+                );
+                assert_eq!(space.as_deref(), Some("analytics"));
+                assert_eq!(key, "key");
+                assert_eq!(value, Value::Int(1));
             }
-        );
+            other => panic!("expected KvPut, got {other:?}"),
+        }
     }
 
     #[test]
-    fn graph_add_node_all_options() {
-        let cmd = parse_cmd(&[
+    fn executor_omissions_remain_absent_from_the_parser_tree() {
+        for args in [vec!["strata", "recipe", "seed"]] {
+            assert!(
+                build_cli().try_get_matches_from(args).is_err(),
+                "deferred command unexpectedly parsed"
+            );
+        }
+    }
+
+    #[test]
+    fn shell_only_local_commands_are_available_but_not_in_repl() {
+        for args in [
+            vec!["strata", "init"],
+            vec!["strata", "up"],
+            vec!["strata", "down"],
+            vec!["strata", "uninstall"],
+        ] {
+            assert!(
+                build_cli().try_get_matches_from(args.clone()).is_ok(),
+                "shell command should parse"
+            );
+        }
+
+        for args in [
+            vec!["repl", "init"],
+            vec!["repl", "up"],
+            vec!["repl", "down"],
+            vec!["repl", "uninstall"],
+        ] {
+            assert!(
+                build_repl_cli().try_get_matches_from(args).is_err(),
+                "REPL should reject shell-only command"
+            );
+        }
+    }
+
+    #[test]
+    fn cherry_pick_rejects_mixed_direct_and_filter_modes() {
+        let result = build_cli().try_get_matches_from([
+            "strata",
+            "branch",
+            "cherry-pick",
+            "feature",
+            "main",
+            "--pick",
+            "default",
+            "user:1",
+            "--space",
+            "default",
+        ]);
+        let matches = result.expect("args should parse");
+        match matches_to_request(&matches, &context()) {
+            Ok(_) => panic!("request should fail"),
+            Err(err) => assert!(err.contains("--pick cannot be combined")),
+        }
+    }
+
+    #[test]
+    fn graph_list_nodes_rejects_mixed_modes() {
+        let result = build_cli().try_get_matches_from([
+            "strata",
             "graph",
-            "add-node",
-            "social",
-            "alice",
-            "--entity-ref",
-            "kv://main/alice",
-            "--properties",
-            r#"{"age": 30}"#,
+            "list-nodes",
+            "g",
             "--type",
             "Person",
+            "--limit",
+            "10",
         ]);
-        assert_eq!(
-            cmd,
-            Command::GraphAddNode {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-                entity_ref: Some("kv://main/alice".into()),
-                properties: Some(Value::from(serde_json::json!({"age": 30}))),
-                object_type: Some("Person".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_get_node() {
-        let cmd = parse_cmd(&["graph", "get-node", "social", "alice"]);
-        assert_eq!(
-            cmd,
-            Command::GraphGetNode {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-                as_of: None,
-            }
-        );
-    }
-
-    #[test]
-    fn graph_remove_node() {
-        let cmd = parse_cmd(&["graph", "remove-node", "social", "alice"]);
-        assert_eq!(
-            cmd,
-            Command::GraphRemoveNode {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_list_nodes() {
-        let cmd = parse_cmd(&["graph", "list-nodes", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphListNodes {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                as_of: None,
-            }
-        );
-    }
-
-    // =========================================================================
-    // Edges
-    // =========================================================================
-
-    #[test]
-    fn graph_add_edge_minimal() {
-        let cmd = parse_cmd(&["graph", "add-edge", "social", "alice", "bob", "FOLLOWS"]);
-        assert_eq!(
-            cmd,
-            Command::GraphAddEdge {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                src: "alice".into(),
-                dst: "bob".into(),
-                edge_type: "FOLLOWS".into(),
-                weight: None,
-                properties: None,
-            }
-        );
-    }
-
-    #[test]
-    fn graph_add_edge_with_weight_and_properties() {
-        let cmd = parse_cmd(&[
-            "graph",
-            "add-edge",
-            "social",
-            "alice",
-            "bob",
-            "FOLLOWS",
-            "--weight",
-            "0.85",
-            "--properties",
-            r#"{"since": "2024"}"#,
-        ]);
-        assert_eq!(
-            cmd,
-            Command::GraphAddEdge {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                src: "alice".into(),
-                dst: "bob".into(),
-                edge_type: "FOLLOWS".into(),
-                weight: Some(0.85),
-                properties: Some(Value::from(serde_json::json!({"since": "2024"}))),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_remove_edge() {
-        let cmd = parse_cmd(&["graph", "remove-edge", "social", "alice", "bob", "FOLLOWS"]);
-        assert_eq!(
-            cmd,
-            Command::GraphRemoveEdge {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                src: "alice".into(),
-                dst: "bob".into(),
-                edge_type: "FOLLOWS".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_neighbors_minimal() {
-        let cmd = parse_cmd(&["graph", "neighbors", "social", "alice"]);
-        assert_eq!(
-            cmd,
-            Command::GraphNeighbors {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-                direction: None,
-                edge_type: None,
-                as_of: None,
-            }
-        );
-    }
-
-    #[test]
-    fn graph_neighbors_with_filters() {
-        let cmd = parse_cmd(&[
-            "graph",
-            "neighbors",
-            "social",
-            "alice",
-            "--direction",
-            "incoming",
-            "--edge-type",
-            "FOLLOWS",
-        ]);
-        assert_eq!(
-            cmd,
-            Command::GraphNeighbors {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                node_id: "alice".into(),
-                direction: Some("incoming".into()),
-                edge_type: Some("FOLLOWS".into()),
-                as_of: None,
-            }
-        );
-    }
-
-    // =========================================================================
-    // BFS
-    // =========================================================================
-
-    #[test]
-    fn graph_bfs_minimal() {
-        let cmd = parse_cmd(&["graph", "bfs", "social", "alice", "--max-depth", "3"]);
-        assert_eq!(
-            cmd,
-            Command::GraphBfs {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                start: "alice".into(),
-                max_depth: 3,
-                max_nodes: None,
-                edge_types: None,
-                direction: None,
-            }
-        );
-    }
-
-    #[test]
-    fn graph_bfs_all_options() {
-        let cmd = parse_cmd(&[
-            "graph",
-            "bfs",
-            "social",
-            "alice",
-            "--max-depth",
-            "5",
-            "--max-nodes",
-            "100",
-            "--edge-types",
-            "FOLLOWS,LIKES",
-            "--direction",
-            "outgoing",
-        ]);
-        assert_eq!(
-            cmd,
-            Command::GraphBfs {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                start: "alice".into(),
-                max_depth: 5,
-                max_nodes: Some(100),
-                edge_types: Some(vec!["FOLLOWS".into(), "LIKES".into()]),
-                direction: Some("outgoing".into()),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_bfs_invalid_depth() {
-        let err = parse_err(&[
-            "graph",
-            "bfs",
-            "social",
-            "alice",
-            "--max-depth",
-            "not_a_number",
-        ]);
-        assert!(
-            err.contains("invalid") || err.contains("Invalid"),
-            "got: {}",
-            err
-        );
-    }
-
-    // =========================================================================
-    // Bulk insert
-    // =========================================================================
-
-    #[test]
-    fn graph_bulk_insert_inline() {
-        let json = r#"{"nodes":[{"node_id":"a"},{"node_id":"b"}],"edges":[{"src":"a","dst":"b","edge_type":"LINK"}]}"#;
-        let cmd = parse_cmd(&["graph", "bulk-insert", "social", json]);
-        assert_eq!(
-            cmd,
-            Command::GraphBulkInsert {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                nodes: vec![
-                    BulkGraphNode {
-                        node_id: "a".into(),
-                        entity_ref: None,
-                        properties: None,
-                        object_type: None,
-                    },
-                    BulkGraphNode {
-                        node_id: "b".into(),
-                        entity_ref: None,
-                        properties: None,
-                        object_type: None,
-                    },
-                ],
-                edges: vec![BulkGraphEdge {
-                    src: "a".into(),
-                    dst: "b".into(),
-                    edge_type: "LINK".into(),
-                    weight: None,
-                    properties: None,
-                }],
-                chunk_size: None,
-            }
-        );
-    }
-
-    #[test]
-    fn graph_bulk_insert_nodes_only() {
-        let json = r#"{"nodes":[{"node_id":"x"}]}"#;
-        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json]);
-        match cmd {
-            Command::GraphBulkInsert { nodes, edges, .. } => {
-                assert_eq!(nodes.len(), 1);
-                assert!(edges.is_empty());
-            }
-            _ => panic!("Expected GraphBulkInsert"),
+        let matches = result.expect("args should parse");
+        match matches_to_request(&matches, &context()) {
+            Ok(_) => panic!("request should fail"),
+            Err(err) => assert!(err.contains("--type cannot be combined")),
         }
     }
 
     #[test]
-    fn graph_bulk_insert_edges_only() {
-        let json = r#"{"edges":[{"src":"a","dst":"b","edge_type":"E"}]}"#;
-        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json]);
-        match cmd {
-            Command::GraphBulkInsert { nodes, edges, .. } => {
-                assert!(nodes.is_empty());
-                assert_eq!(edges.len(), 1);
-            }
-            _ => panic!("Expected GraphBulkInsert"),
-        }
-    }
-
-    #[test]
-    fn graph_bulk_insert_with_chunk_size() {
-        let json = r#"{"nodes":[],"edges":[]}"#;
-        let cmd = parse_cmd(&["graph", "bulk-insert", "g", json, "--chunk-size", "500"]);
-        match cmd {
-            Command::GraphBulkInsert { chunk_size, .. } => {
-                assert_eq!(chunk_size, Some(500));
-            }
-            _ => panic!("Expected GraphBulkInsert"),
-        }
-    }
-
-    #[test]
-    fn graph_bulk_insert_invalid_json() {
-        let err = parse_err(&["graph", "bulk-insert", "g", "not json"]);
-        assert!(err.contains("Invalid JSON"), "got: {}", err);
-    }
-
-    #[test]
-    fn graph_bulk_insert_invalid_node_schema() {
-        let json = r#"{"nodes":[{"bad_field":"x"}]}"#;
-        let err = parse_err(&["graph", "bulk-insert", "g", json]);
-        assert!(err.contains("Invalid nodes"), "got: {}", err);
-    }
-
-    // =========================================================================
-    // Ontology — Object Types (via `graph ontology` subcommands)
-    // =========================================================================
-
-    #[test]
-    fn graph_define_object_type_inline() {
-        let json = r#"{"name":"Person","properties":{"age":"int"}}"#;
-        let cmd = parse_cmd(&["graph", "ontology", "define", "social", json]);
-        assert_eq!(
-            cmd,
-            Command::GraphDefineObjectType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                definition: Value::from(
-                    serde_json::json!({"name": "Person", "properties": {"age": "int"}})
-                ),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_get_object_type() {
-        let cmd = parse_cmd(&["graph", "ontology", "get", "social", "Person"]);
-        assert_eq!(
-            cmd,
-            Command::GraphGetObjectType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                name: "Person".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_list_object_types() {
-        let cmd = parse_cmd(&["graph", "ontology", "list", "social", "--kind", "object"]);
-        assert_eq!(
-            cmd,
-            Command::GraphListObjectTypes {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_delete_object_type() {
-        let cmd = parse_cmd(&["graph", "ontology", "delete", "social", "Person"]);
-        assert_eq!(
-            cmd,
-            Command::GraphDeleteObjectType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                name: "Person".into(),
-            }
-        );
-    }
-
-    // =========================================================================
-    // Ontology — Link Types (via `graph ontology` subcommands)
-    // =========================================================================
-
-    #[test]
-    fn graph_define_link_type_inline() {
-        let json = r#"{"name":"FOLLOWS","source":"Person","target":"Person"}"#;
-        let cmd = parse_cmd(&["graph", "ontology", "define", "social", json]);
-        assert_eq!(
-            cmd,
-            Command::GraphDefineLinkType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                definition: Value::from(
-                    serde_json::json!({"name": "FOLLOWS", "source": "Person", "target": "Person"})
-                ),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_get_link_type() {
-        let cmd = parse_cmd(&[
-            "graph", "ontology", "get", "social", "FOLLOWS", "--kind", "link",
-        ]);
-        assert_eq!(
-            cmd,
-            Command::GraphGetLinkType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                name: "FOLLOWS".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_list_link_types() {
-        let cmd = parse_cmd(&["graph", "ontology", "list", "social", "--kind", "link"]);
-        assert_eq!(
-            cmd,
-            Command::GraphListLinkTypes {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_delete_link_type() {
-        let cmd = parse_cmd(&[
-            "graph", "ontology", "delete", "social", "FOLLOWS", "--kind", "link",
-        ]);
-        assert_eq!(
-            cmd,
-            Command::GraphDeleteLinkType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                name: "FOLLOWS".into(),
-            }
-        );
-    }
-
-    // =========================================================================
-    // Ontology — Management (via `graph ontology` subcommands)
-    // =========================================================================
-
-    #[test]
-    fn graph_freeze_ontology() {
-        let cmd = parse_cmd(&["graph", "ontology", "freeze", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphFreezeOntology {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_ontology_status() {
-        let cmd = parse_cmd(&["graph", "ontology", "status", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphOntologyStatus {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_ontology_summary() {
-        let cmd = parse_cmd(&["graph", "ontology", "summary", "social"]);
-        assert_eq!(
-            cmd,
-            Command::GraphOntologySummary {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-            }
-        );
-    }
-
-    #[test]
-    fn graph_nodes_by_type() {
-        let cmd = parse_cmd(&["graph", "list-nodes", "social", "--type", "Person"]);
-        assert_eq!(
-            cmd,
-            Command::GraphNodesByType {
-                branch: Some(BranchId::from("default")),
-                space: None,
-                graph: "social".into(),
-                object_type: "Person".into(),
-            }
-        );
-    }
-
-    // =========================================================================
-    // Error cases
-    // =========================================================================
-
-    #[test]
-    fn graph_add_edge_invalid_weight() {
-        let err = parse_err(&[
+    fn graph_object_definition_injects_name() {
+        match parse_shell(&[
+            "strata",
             "graph",
-            "add-edge",
+            "ontology",
+            "object",
+            "define",
             "g",
-            "a",
-            "b",
-            "E",
-            "--weight",
-            "not_a_float",
-        ]);
-        assert!(
-            err.contains("invalid") || err.contains("Invalid"),
-            "got: {}",
-            err
-        );
+            "Person",
+            "{\"fields\":{\"name\":\"string\"}}",
+        ]) {
+            Command::GraphDefineObjectType { definition, .. } => match definition {
+                Value::Object(map) => {
+                    assert_eq!(map.get("name"), Some(&Value::String("Person".to_string())));
+                }
+                other => panic!("expected object definition, got {other:?}"),
+            },
+            other => panic!("expected GraphDefineObjectType, got {other:?}"),
+        }
     }
 
     #[test]
-    fn graph_add_node_invalid_properties_json() {
-        let err = parse_err(&["graph", "add-node", "g", "n", "--properties", "not json"]);
-        assert!(!err.is_empty());
-    }
-
-    #[test]
-    fn graph_bfs_invalid_max_nodes() {
-        let err = parse_err(&[
+    fn graph_definition_name_mismatch_is_rejected() {
+        let result = build_cli().try_get_matches_from([
+            "strata",
             "graph",
-            "bfs",
+            "ontology",
+            "object",
+            "define",
             "g",
-            "start",
-            "--max-depth",
-            "3",
-            "--max-nodes",
-            "xyz",
+            "Person",
+            "{\"name\":\"Animal\"}",
         ]);
-        assert!(
-            err.contains("invalid") || err.contains("Invalid"),
-            "got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn graph_bulk_insert_invalid_chunk_size() {
-        let json = r#"{"nodes":[]}"#;
-        let err = parse_err(&["graph", "bulk-insert", "g", json, "--chunk-size", "abc"]);
-        assert!(
-            err.contains("invalid") || err.contains("Invalid"),
-            "got: {}",
-            err
-        );
-    }
-
-    #[test]
-    fn graph_missing_required_arg() {
-        // graph create without name should fail at clap level
-        assert!(parse(&["graph", "create"]).is_err());
-    }
-
-    #[test]
-    fn graph_add_edge_missing_edge_type() {
-        // only 2 positional args instead of 4
-        assert!(parse(&["graph", "add-edge", "g", "a"]).is_err());
-    }
-
-    // =========================================================================
-    // Edge-type comma splitting
-    // =========================================================================
-
-    #[test]
-    fn graph_bfs_edge_types_with_spaces() {
-        let cmd = parse_cmd(&[
-            "graph",
-            "bfs",
-            "social",
-            "alice",
-            "--max-depth",
-            "2",
-            "--edge-types",
-            "FOLLOWS, LIKES, BLOCKS",
-        ]);
-        match cmd {
-            Command::GraphBfs { edge_types, .. } => {
-                assert_eq!(
-                    edge_types,
-                    Some(vec![
-                        "FOLLOWS".to_string(),
-                        "LIKES".to_string(),
-                        "BLOCKS".to_string(),
-                    ])
-                );
-            }
-            _ => panic!("Expected GraphBfs"),
+        let matches = result.expect("args should parse");
+        match matches_to_request(&matches, &context()) {
+            Ok(_) => panic!("request should fail"),
+            Err(err) => assert!(err.contains("does not match CLI type")),
         }
     }
 }
