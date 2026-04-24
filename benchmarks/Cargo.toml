@@ -11,6 +11,12 @@ autobins = false
 stratadb = { path = "..", features = ["embed"] }
 strata-core = { path = "../crates/core" }
 strata-engine = { path = "../crates/engine" }
+# Required only for the B6 materialize smoke in `src/bin/regression.rs`:
+# `branches().fork()` installs a DAG hook via `GraphSubsystem::initialize`,
+# and the benchmark opens a fresh engine `Database` rather than reusing
+# the `Strata` executor (which does not expose `storage().materialize_layer`).
+strata-graph = { path = "../crates/graph" }
+strata-vector = { path = "../crates/vector" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.8"

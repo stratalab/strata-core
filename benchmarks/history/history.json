@@ -11,11 +11,11 @@
         "suite": "beir",
         "duration_secs": 104.064732488,
         "metrics": {
+          "avg_ndcg_at_10": 0.36640389931568845,
           "arguana_ndcg_at_10": 0.32031083629952634,
           "scidocs_ndcg_at_10": 0.1502454922723842,
-          "nfcorpus_ndcg_at_10": 0.32045791601134527,
-          "avg_ndcg_at_10": 0.36640389931568845,
-          "scifact_ndcg_at_10": 0.6746013526794981
+          "scifact_ndcg_at_10": 0.6746013526794981,
+          "nfcorpus_ndcg_at_10": 0.32045791601134527
         }
       }
     },
@@ -39,8 +39,8 @@
         "duration_secs": 25.079506416,
         "metrics": {
           "bulk_load_ops_sec": 296739.7152881187,
-          "bulk_load_duration_ms": 16849.0,
           "range_scan_ops_sec": 103767.0836022344,
+          "bulk_load_duration_ms": 16849.0,
           "random_read_ops_sec": 295492.7488994456
         }
       },
@@ -48,10 +48,10 @@
         "suite": "ycsb",
         "duration_secs": 0.677537867,
         "metrics": {
-          "run_ops_sec": 449989.01509315806,
-          "p50_us": 2.074,
           "load_ops_sec": 370458.1017091903,
-          "p99_us": 5.661
+          "p50_us": 2.074,
+          "p99_us": 5.661,
+          "run_ops_sec": 449989.01509315806
         }
       }
     },
@@ -102,9 +102,9 @@
         "suite": "redb",
         "duration_secs": 0.464563614,
         "metrics": {
+          "range_scan_ops_sec": 145422.78300349702,
           "random_read_ops_sec": 1079726.1939620352,
           "bulk_load_ops_sec": 363275.22447021335,
-          "range_scan_ops_sec": 145422.78300349702,
           "bulk_load_duration_ms": 275.0
         }
       },
@@ -122,11 +122,11 @@
         "suite": "beir",
         "duration_secs": 103.388893914,
         "metrics": {
-          "nfcorpus_ndcg_at_10": 0.3204579160113451,
           "scifact_ndcg_at_10": 0.6746013526794983,
-          "avg_ndcg_at_10": 0.3664038993156884,
+          "arguana_ndcg_at_10": 0.32031083629952617,
+          "nfcorpus_ndcg_at_10": 0.3204579160113451,
           "scidocs_ndcg_at_10": 0.15024549227238412,
-          "arguana_ndcg_at_10": 0.32031083629952617
+          "avg_ndcg_at_10": 0.3664038993156884
         }
       }
     },
@@ -161,17 +161,17 @@
         "metrics": {
           "bulk_load_duration_ms": 854.0,
           "range_scan_ops_sec": 71414.47880138682,
-          "random_read_ops_sec": 507253.836383591,
-          "bulk_load_ops_sec": 117048.41977563578
+          "bulk_load_ops_sec": 117048.41977563578,
+          "random_read_ops_sec": 507253.836383591
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.117559619,
         "metrics": {
-          "p99_us": 6.683,
           "run_ops_sec": 411307.924237903,
           "load_ops_sec": 236892.56275562337,
+          "p99_us": 6.683,
           "p50_us": 2.615
         }
       }
@@ -237,6 +237,16 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 1.274668076,
+        "metrics": {
+          "bulk_load_ops_sec": 119877.02319673744,
+          "range_scan_ops_sec": 74098.00608341665,
+          "bulk_load_duration_ms": 834.0,
+          "random_read_ops_sec": 369784.0790825556
+        }
+      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.178807121,
@@ -245,16 +255,6 @@
           "run_ops_sec": 261192.27849804304,
           "p50_us": 2.835,
           "load_ops_sec": 102248.960779906
-        }
-      },
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 1.274668076,
-        "metrics": {
-          "range_scan_ops_sec": 74098.00608341665,
-          "random_read_ops_sec": 369784.0790825556,
-          "bulk_load_ops_sec": 119877.02319673744,
-          "bulk_load_duration_ms": 834.0
         }
       }
     },
@@ -323,9 +323,9 @@
         "suite": "ycsb",
         "duration_secs": 0.182077752,
         "metrics": {
+          "p50_us": 2.875,
           "load_ops_sec": 122596.97215147254,
           "run_ops_sec": 175902.39865436073,
-          "p50_us": 2.875,
           "p99_us": 8.446
         }
       },
@@ -333,10 +333,10 @@
         "suite": "redb",
         "duration_secs": 1.156134939,
         "metrics": {
-          "random_read_ops_sec": 361624.3501868085,
           "bulk_load_ops_sec": 141533.46267236723,
+          "bulk_load_duration_ms": 706.0,
           "range_scan_ops_sec": 69132.56726982481,
-          "bulk_load_duration_ms": 706.0
+          "random_read_ops_sec": 361624.3501868085
         }
       }
     },
@@ -405,10 +405,10 @@
         "suite": "ycsb",
         "duration_secs": 0.076145715,
         "metrics": {
-          "p50_us": 2.024,
-          "load_ops_sec": 376979.1499617781,
           "p99_us": 6.312,
-          "run_ops_sec": 532242.9307893114
+          "run_ops_sec": 532242.9307893114,
+          "load_ops_sec": 376979.1499617781,
+          "p50_us": 2.024
         }
       },
       "redb": {
@@ -416,9 +416,9 @@
         "duration_secs": 0.496703046,
         "metrics": {
           "bulk_load_ops_sec": 318134.2307959369,
+          "random_read_ops_sec": 1162426.83104312,
           "bulk_load_duration_ms": 314.0,
-          "range_scan_ops_sec": 146939.36182824543,
-          "random_read_ops_sec": 1162426.83104312
+          "range_scan_ops_sec": 146939.36182824543
         }
       }
     },
@@ -465,24 +465,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.489105778,
+        "metrics": {
+          "random_read_ops_sec": 1124113.1534098804,
+          "bulk_load_ops_sec": 328667.2703890023,
+          "range_scan_ops_sec": 148922.26816060522,
+          "bulk_load_duration_ms": 304.0
+        }
+      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.078321917,
         "metrics": {
           "run_ops_sec": 520855.6867232219,
-          "p50_us": 2.143,
           "load_ops_sec": 365180.57284634846,
-          "p99_us": 6.241
-        }
-      },
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.489105778,
-        "metrics": {
-          "bulk_load_ops_sec": 328667.2703890023,
-          "bulk_load_duration_ms": 304.0,
-          "range_scan_ops_sec": 148922.26816060522,
-          "random_read_ops_sec": 1124113.1534098804
+          "p99_us": 6.241,
+          "p50_us": 2.143
         }
       }
     },
@@ -534,10 +534,10 @@
         "suite": "redb",
         "duration_secs": 26.458394781,
         "metrics": {
-          "bulk_load_ops_sec": 275917.5964798437,
+          "bulk_load_duration_ms": 18121.0,
           "range_scan_ops_sec": 104179.3954571319,
           "random_read_ops_sec": 284973.7756587609,
-          "bulk_load_duration_ms": 18121.0
+          "bulk_load_ops_sec": 275917.5964798437
         }
       }
     },
@@ -607,10 +607,10 @@
         "suite": "ycsb",
         "duration_secs": 0.69462269,
         "metrics": {
-          "p99_us": 5.65,
           "run_ops_sec": 437046.6987150971,
-          "p50_us": 2.274,
-          "load_ops_sec": 364275.141954289
+          "load_ops_sec": 364275.141954289,
+          "p99_us": 5.65,
+          "p50_us": 2.274
         }
       }
     },
@@ -661,19 +661,19 @@
         "suite": "redb",
         "duration_secs": 0.547793546,
         "metrics": {
-          "random_read_ops_sec": 1026304.8185452542,
-          "bulk_load_ops_sec": 291037.79861849657,
           "bulk_load_duration_ms": 343.0,
-          "range_scan_ops_sec": 141431.73523628415
+          "range_scan_ops_sec": 141431.73523628415,
+          "bulk_load_ops_sec": 291037.79861849657,
+          "random_read_ops_sec": 1026304.8185452542
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.083059199,
         "metrics": {
-          "load_ops_sec": 407662.10714265186,
-          "run_ops_sec": 517864.486360511,
           "p50_us": 2.104,
+          "run_ops_sec": 517864.486360511,
+          "load_ops_sec": 407662.10714265186,
           "p99_us": 6.251
         }
       }
@@ -716,20 +716,20 @@
         "suite": "redb",
         "duration_secs": 26.397497151,
         "metrics": {
-          "bulk_load_duration_ms": 18050.0,
           "bulk_load_ops_sec": 277007.41923691117,
           "range_scan_ops_sec": 103935.26458730044,
-          "random_read_ops_sec": 284961.14602504944
+          "random_read_ops_sec": 284961.14602504944,
+          "bulk_load_duration_ms": 18050.0
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.721338075,
         "metrics": {
-          "run_ops_sec": 397914.9020384245,
-          "p99_us": 6.202,
           "load_ops_sec": 360281.27245407994,
-          "p50_us": 2.274
+          "p50_us": 2.274,
+          "run_ops_sec": 397914.9020384245,
+          "p99_us": 6.202
         }
       }
     },
@@ -785,24 +785,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.495938113,
-        "metrics": {
-          "bulk_load_duration_ms": 313.0,
-          "random_read_ops_sec": 1145699.7745755494,
-          "bulk_load_ops_sec": 318562.12677121855,
-          "range_scan_ops_sec": 148832.8542453366
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.08689887,
         "metrics": {
+          "load_ops_sec": 350421.80447815935,
           "p50_us": 2.214,
-          "run_ops_sec": 540559.7669365754,
           "p99_us": 5.049,
-          "load_ops_sec": 350421.80447815935
+          "run_ops_sec": 540559.7669365754
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.495938113,
+        "metrics": {
+          "range_scan_ops_sec": 148832.8542453366,
+          "bulk_load_duration_ms": 313.0,
+          "bulk_load_ops_sec": 318562.12677121855,
+          "random_read_ops_sec": 1145699.7745755494
         }
       }
     },
@@ -840,24 +840,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.562390812,
-        "metrics": {
-          "bulk_load_ops_sec": 268545.57189889293,
-          "range_scan_ops_sec": 148995.4022253804,
-          "random_read_ops_sec": 1049945.2222578644,
-          "bulk_load_duration_ms": 372.0
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.079958917,
         "metrics": {
           "load_ops_sec": 349688.6197685271,
-          "run_ops_sec": 498144.7842871187,
+          "p99_us": 6.221,
           "p50_us": 2.234,
-          "p99_us": 6.221
+          "run_ops_sec": 498144.7842871187
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.562390812,
+        "metrics": {
+          "random_read_ops_sec": 1049945.2222578644,
+          "bulk_load_duration_ms": 372.0,
+          "range_scan_ops_sec": 148995.4022253804,
+          "bulk_load_ops_sec": 268545.57189889293
         }
       }
     },
@@ -908,19 +908,19 @@
         "suite": "redb",
         "duration_secs": 0.497263697,
         "metrics": {
-          "random_read_ops_sec": 1124082.9029126223,
-          "range_scan_ops_sec": 149308.4495473162,
+          "bulk_load_ops_sec": 318580.35293554846,
           "bulk_load_duration_ms": 313.0,
-          "bulk_load_ops_sec": 318580.35293554846
+          "range_scan_ops_sec": 149308.4495473162,
+          "random_read_ops_sec": 1124082.9029126223
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.093305931,
         "metrics": {
-          "load_ops_sec": 385597.7542169838,
           "run_ops_sec": 513057.7033433662,
           "p50_us": 2.224,
+          "load_ops_sec": 385597.7542169838,
           "p99_us": 5.801
         }
       }
@@ -963,10 +963,10 @@
         "suite": "redb",
         "duration_secs": 0.578731462,
         "metrics": {
-          "bulk_load_duration_ms": 375.0,
           "random_read_ops_sec": 1138133.084109503,
           "bulk_load_ops_sec": 266582.96743465925,
-          "range_scan_ops_sec": 150024.0398521459
+          "range_scan_ops_sec": 150024.0398521459,
+          "bulk_load_duration_ms": 375.0
         }
       },
       "ycsb": {
@@ -975,8 +975,8 @@
         "metrics": {
           "p50_us": 2.214,
           "load_ops_sec": 392613.71113870223,
-          "p99_us": 5.691,
-          "run_ops_sec": 531603.5662093635
+          "run_ops_sec": 531603.5662093635,
+          "p99_us": 5.691
         }
       }
     },
@@ -1023,24 +1023,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 26.905992258,
-        "metrics": {
-          "random_read_ops_sec": 289742.07943551237,
-          "range_scan_ops_sec": 106690.77074632904,
-          "bulk_load_ops_sec": 266810.0205174302,
-          "bulk_load_duration_ms": 18739.0
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.741409747,
         "metrics": {
-          "p50_us": 2.364,
-          "run_ops_sec": 424918.7697659995,
           "load_ops_sec": 327936.01805631455,
-          "p99_us": 6.011
+          "p50_us": 2.364,
+          "p99_us": 6.011,
+          "run_ops_sec": 424918.7697659995
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.905992258,
+        "metrics": {
+          "bulk_load_ops_sec": 266810.0205174302,
+          "range_scan_ops_sec": 106690.77074632904,
+          "random_read_ops_sec": 289742.07943551237,
+          "bulk_load_duration_ms": 18739.0
         }
       }
     },
@@ -1096,24 +1096,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.775209045,
-        "metrics": {
-          "run_ops_sec": 390914.4950887594,
-          "p99_us": 6.162,
-          "load_ops_sec": 312628.03094829933,
-          "p50_us": 2.365
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 28.099246595,
         "metrics": {
-          "range_scan_ops_sec": 92711.7434418081,
-          "random_read_ops_sec": 263234.8654427655,
           "bulk_load_ops_sec": 264831.65669093863,
-          "bulk_load_duration_ms": 18879.0
+          "bulk_load_duration_ms": 18879.0,
+          "range_scan_ops_sec": 92711.7434418081,
+          "random_read_ops_sec": 263234.8654427655
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.775209045,
+        "metrics": {
+          "p50_us": 2.365,
+          "p99_us": 6.162,
+          "run_ops_sec": 390914.4950887594,
+          "load_ops_sec": 312628.03094829933
         }
       }
     },
@@ -1169,24 +1169,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.760840861,
-        "metrics": {
-          "p50_us": 2.374,
-          "p99_us": 6.623,
-          "run_ops_sec": 377213.80273889354,
-          "load_ops_sec": 343706.60016759683
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 27.10482468,
         "metrics": {
           "bulk_load_duration_ms": 18776.0,
-          "range_scan_ops_sec": 105083.14171236794,
           "bulk_load_ops_sec": 266296.39973041404,
+          "range_scan_ops_sec": 105083.14171236794,
           "random_read_ops_sec": 282227.0420172494
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.760840861,
+        "metrics": {
+          "load_ops_sec": 343706.60016759683,
+          "p99_us": 6.623,
+          "run_ops_sec": 377213.80273889354,
+          "p50_us": 2.374
         }
       }
     },
@@ -1257,17 +1257,17 @@
         "metrics": {
           "range_scan_ops_sec": 102743.820009725,
           "random_read_ops_sec": 282316.3931206346,
-          "bulk_load_ops_sec": 263485.5775908089,
-          "bulk_load_duration_ms": 18976.0
+          "bulk_load_duration_ms": 18976.0,
+          "bulk_load_ops_sec": 263485.5775908089
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.740168517,
         "metrics": {
-          "p50_us": 2.364,
           "load_ops_sec": 348670.43577315717,
           "run_ops_sec": 381505.94098600576,
+          "p50_us": 2.364,
           "p99_us": 6.552
         }
       }
@@ -1337,10 +1337,10 @@
         "suite": "ycsb",
         "duration_secs": 0.7581172,
         "metrics": {
-          "run_ops_sec": 367790.77847890795,
-          "p99_us": 6.642,
           "load_ops_sec": 328446.31600308133,
-          "p50_us": 2.424
+          "p50_us": 2.424,
+          "run_ops_sec": 367790.77847890795,
+          "p99_us": 6.642
         }
       },
       "redb": {
@@ -1415,24 +1415,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.075208446,
-        "metrics": {
-          "load_ops_sec": 391627.01443145546,
-          "p99_us": 5.55,
-          "run_ops_sec": 531726.6680332043,
-          "p50_us": 2.204
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.506089692,
         "metrics": {
           "bulk_load_ops_sec": 313489.17590843205,
-          "range_scan_ops_sec": 149119.09682976975,
           "bulk_load_duration_ms": 318.0,
+          "range_scan_ops_sec": 149119.09682976975,
           "random_read_ops_sec": 1084002.826125448
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.075208446,
+        "metrics": {
+          "p99_us": 5.55,
+          "load_ops_sec": 391627.01443145546,
+          "p50_us": 2.204,
+          "run_ops_sec": 531726.6680332043
         }
       }
     },
@@ -1474,8 +1474,8 @@
         "suite": "redb",
         "duration_secs": 0.510965227,
         "metrics": {
-          "bulk_load_duration_ms": 316.0,
           "random_read_ops_sec": 1045915.7429522328,
+          "bulk_load_duration_ms": 316.0,
           "range_scan_ops_sec": 140927.49911525715,
           "bulk_load_ops_sec": 315799.2205778385
         }
@@ -1484,9 +1484,9 @@
         "suite": "ycsb",
         "duration_secs": 0.097160479,
         "metrics": {
-          "run_ops_sec": 488858.1168999571,
-          "p99_us": 6.141,
           "load_ops_sec": 361406.3419440322,
+          "p99_us": 6.141,
+          "run_ops_sec": 488858.1168999571,
           "p50_us": 2.254
         }
       }
@@ -1529,20 +1529,20 @@
         "suite": "redb",
         "duration_secs": 0.54723098,
         "metrics": {
-          "bulk_load_ops_sec": 289869.3936922188,
-          "bulk_load_duration_ms": 344.0,
           "random_read_ops_sec": 1036519.8059759304,
-          "range_scan_ops_sec": 144125.3180017048
+          "range_scan_ops_sec": 144125.3180017048,
+          "bulk_load_duration_ms": 344.0,
+          "bulk_load_ops_sec": 289869.3936922188
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.089147048,
         "metrics": {
+          "load_ops_sec": 380637.27129361976,
           "p50_us": 2.294,
           "p99_us": 6.402,
-          "run_ops_sec": 448688.2375032474,
-          "load_ops_sec": 380637.27129361976
+          "run_ops_sec": 448688.2375032474
         }
       }
     },
@@ -1602,9 +1602,9 @@
         "suite": "redb",
         "duration_secs": 0.51050562,
         "metrics": {
+          "bulk_load_ops_sec": 311610.2097053511,
           "random_read_ops_sec": 1079273.3623721185,
           "bulk_load_duration_ms": 320.0,
-          "bulk_load_ops_sec": 311610.2097053511,
           "range_scan_ops_sec": 145602.6832128391
         }
       },
@@ -1657,9 +1657,9 @@
         "suite": "ycsb",
         "duration_secs": 0.077102457,
         "metrics": {
-          "load_ops_sec": 379719.1688160037,
           "p50_us": 2.184,
           "p99_us": 5.62,
+          "load_ops_sec": 379719.1688160037,
           "run_ops_sec": 532037.8000087999
         }
       },
@@ -1667,10 +1667,10 @@
         "suite": "redb",
         "duration_secs": 0.555347141,
         "metrics": {
-          "bulk_load_duration_ms": 368.0,
-          "range_scan_ops_sec": 150094.3290324954,
+          "bulk_load_ops_sec": 271037.5548795825,
           "random_read_ops_sec": 1088478.3683047465,
-          "bulk_load_ops_sec": 271037.5548795825
+          "bulk_load_duration_ms": 368.0,
+          "range_scan_ops_sec": 150094.3290324954
         }
       }
     },
@@ -1717,24 +1717,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.079879839,
-        "metrics": {
-          "p99_us": 5.761,
-          "load_ops_sec": 389515.94464043586,
-          "run_ops_sec": 517412.53580882814,
-          "p50_us": 2.264
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.554988258,
         "metrics": {
+          "random_read_ops_sec": 1094726.8932272575,
           "bulk_load_duration_ms": 343.0,
           "range_scan_ops_sec": 142228.58394875049,
-          "bulk_load_ops_sec": 291357.8226401035,
-          "random_read_ops_sec": 1094726.8932272575
+          "bulk_load_ops_sec": 291357.8226401035
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.079879839,
+        "metrics": {
+          "run_ops_sec": 517412.53580882814,
+          "p99_us": 5.761,
+          "p50_us": 2.264,
+          "load_ops_sec": 389515.94464043586
         }
       }
     },
@@ -1786,8 +1786,8 @@
         "duration_secs": 30.953788723,
         "metrics": {
           "bulk_load_ops_sec": 265272.54787165235,
-          "bulk_load_duration_ms": 18848.0,
           "range_scan_ops_sec": 104576.19668260052,
+          "bulk_load_duration_ms": 18848.0,
           "random_read_ops_sec": 137244.42285932478
         }
       },
@@ -1867,20 +1867,20 @@
         "suite": "ycsb",
         "duration_secs": 0.09297485,
         "metrics": {
-          "load_ops_sec": 388064.14048294426,
+          "p99_us": 6.091,
           "run_ops_sec": 532640.020674955,
           "p50_us": 2.204,
-          "p99_us": 6.091
+          "load_ops_sec": 388064.14048294426
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.499701531,
         "metrics": {
-          "random_read_ops_sec": 1116284.8059137375,
+          "bulk_load_duration_ms": 314.0,
           "range_scan_ops_sec": 147401.03888547007,
           "bulk_load_ops_sec": 318437.0599597878,
-          "bulk_load_duration_ms": 314.0
+          "random_read_ops_sec": 1116284.8059137375
         }
       }
     },
@@ -1899,24 +1899,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.078665289,
-        "metrics": {
-          "p50_us": 2.234,
-          "p99_us": 7.173,
-          "load_ops_sec": 364835.4783531254,
-          "run_ops_sec": 485105.04367594747
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.493840506,
         "metrics": {
-          "bulk_load_duration_ms": 314.0,
-          "random_read_ops_sec": 1145148.395028146,
+          "range_scan_ops_sec": 156722.32189761897,
           "bulk_load_ops_sec": 317478.2030736246,
-          "range_scan_ops_sec": 156722.32189761897
+          "random_read_ops_sec": 1145148.395028146,
+          "bulk_load_duration_ms": 314.0
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.078665289,
+        "metrics": {
+          "load_ops_sec": 364835.4783531254,
+          "p50_us": 2.234,
+          "run_ops_sec": 485105.04367594747,
+          "p99_us": 7.173
         }
       }
     },
@@ -1967,9 +1967,9 @@
         "suite": "redb",
         "duration_secs": 0.587131277,
         "metrics": {
+          "bulk_load_ops_sec": 264052.155307102,
           "range_scan_ops_sec": 140305.16626211308,
           "random_read_ops_sec": 1089094.9596924866,
-          "bulk_load_ops_sec": 264052.155307102,
           "bulk_load_duration_ms": 378.0
         }
       },
@@ -1978,9 +1978,9 @@
         "duration_secs": 0.082069546,
         "metrics": {
           "p99_us": 7.273,
-          "p50_us": 2.274,
+          "load_ops_sec": 361802.18443857686,
           "run_ops_sec": 455730.9765357792,
-          "load_ops_sec": 361802.18443857686
+          "p50_us": 2.274
         }
       }
     },
@@ -2041,18 +2041,18 @@
         "duration_secs": 0.780687325,
         "metrics": {
           "p99_us": 6.653,
-          "load_ops_sec": 315212.5477894532,
+          "run_ops_sec": 389633.73069492955,
           "p50_us": 2.364,
-          "run_ops_sec": 389633.73069492955
+          "load_ops_sec": 315212.5477894532
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 27.368556911,
         "metrics": {
+          "bulk_load_ops_sec": 264140.11829824874,
           "range_scan_ops_sec": 105149.05930015496,
           "random_read_ops_sec": 273524.689798576,
-          "bulk_load_ops_sec": 264140.11829824874,
           "bulk_load_duration_ms": 18929.0
         }
       }
@@ -2123,19 +2123,19 @@
         "duration_secs": 0.775485898,
         "metrics": {
           "run_ops_sec": 381747.2193828394,
+          "p50_us": 2.395,
           "load_ops_sec": 329945.3249581684,
-          "p99_us": 6.903,
-          "p50_us": 2.395
+          "p99_us": 6.903
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 27.896650134,
         "metrics": {
-          "bulk_load_ops_sec": 263916.0603353574,
-          "range_scan_ops_sec": 101950.5608474178,
           "bulk_load_duration_ms": 18945.0,
-          "random_read_ops_sec": 249346.90298661697
+          "random_read_ops_sec": 249346.90298661697,
+          "bulk_load_ops_sec": 263916.0603353574,
+          "range_scan_ops_sec": 101950.5608474178
         }
       }
     },
@@ -2200,24 +2200,24 @@
     "epic": "SE1-baseline-main",
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 26.885180716,
-        "metrics": {
-          "range_scan_ops_sec": 103695.4155918305,
-          "bulk_load_duration_ms": 18528.0,
-          "random_read_ops_sec": 285346.0275882629,
-          "bulk_load_ops_sec": 269851.7599763466
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.748217525,
         "metrics": {
           "load_ops_sec": 335924.39320120873,
           "run_ops_sec": 374374.92864413856,
-          "p99_us": 6.703,
-          "p50_us": 2.374
+          "p50_us": 2.374,
+          "p99_us": 6.703
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 26.885180716,
+        "metrics": {
+          "bulk_load_ops_sec": 269851.7599763466,
+          "bulk_load_duration_ms": 18528.0,
+          "range_scan_ops_sec": 103695.4155918305,
+          "random_read_ops_sec": 285346.0275882629
         }
       }
     },
@@ -2287,19 +2287,19 @@
         "duration_secs": 27.59855812,
         "metrics": {
           "bulk_load_ops_sec": 262584.867086369,
-          "random_read_ops_sec": 266695.96268477564,
+          "bulk_load_duration_ms": 19041.0,
           "range_scan_ops_sec": 104768.276712618,
-          "bulk_load_duration_ms": 19041.0
+          "random_read_ops_sec": 266695.96268477564
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.743211397,
         "metrics": {
-          "p50_us": 2.355,
           "p99_us": 6.522,
-          "run_ops_sec": 412480.9253867668,
-          "load_ops_sec": 334110.3235963729
+          "p50_us": 2.355,
+          "load_ops_sec": 334110.3235963729,
+          "run_ops_sec": 412480.9253867668
         }
       }
     },
@@ -2368,9 +2368,9 @@
         "suite": "ycsb",
         "duration_secs": 0.078349355,
         "metrics": {
+          "run_ops_sec": 520697.7620774674,
           "load_ops_sec": 372162.87216845463,
           "p99_us": 6.201,
-          "run_ops_sec": 520697.7620774674,
           "p50_us": 2.244
         }
       },
@@ -2379,9 +2379,9 @@
         "duration_secs": 0.535785966,
         "metrics": {
           "bulk_load_duration_ms": 350.0,
+          "range_scan_ops_sec": 147155.18637196996,
           "random_read_ops_sec": 1122519.7029148336,
-          "bulk_load_ops_sec": 285495.9172285212,
-          "range_scan_ops_sec": 147155.18637196996
+          "bulk_load_ops_sec": 285495.9172285212
         }
       }
     },
@@ -2428,24 +2428,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.076389931,
-        "metrics": {
-          "load_ops_sec": 388434.3214662246,
-          "p99_us": 5.961,
-          "p50_us": 2.225,
-          "run_ops_sec": 525985.8302573244
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.509736401,
         "metrics": {
-          "random_read_ops_sec": 1082143.558874307,
-          "bulk_load_duration_ms": 320.0,
           "bulk_load_ops_sec": 311923.9515182466,
-          "range_scan_ops_sec": 144437.95019323053
+          "bulk_load_duration_ms": 320.0,
+          "range_scan_ops_sec": 144437.95019323053,
+          "random_read_ops_sec": 1082143.558874307
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.076389931,
+        "metrics": {
+          "run_ops_sec": 525985.8302573244,
+          "load_ops_sec": 388434.3214662246,
+          "p99_us": 5.961,
+          "p50_us": 2.225
         }
       }
     },
@@ -2483,16 +2483,6 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.542630459,
-        "metrics": {
-          "range_scan_ops_sec": 149320.6871851508,
-          "random_read_ops_sec": 1122549.8315305277,
-          "bulk_load_duration_ms": 340.0,
-          "bulk_load_ops_sec": 293741.8803502256
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.119270253,
@@ -2501,6 +2491,16 @@
           "p99_us": 6.011,
           "p50_us": 2.235,
           "load_ops_sec": 328533.53504416294
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.542630459,
+        "metrics": {
+          "range_scan_ops_sec": 149320.6871851508,
+          "bulk_load_duration_ms": 340.0,
+          "bulk_load_ops_sec": 293741.8803502256,
+          "random_read_ops_sec": 1122549.8315305277
         }
       }
     },
@@ -2547,24 +2547,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.589982775,
-        "metrics": {
-          "bulk_load_duration_ms": 354.0,
-          "range_scan_ops_sec": 132475.9489914606,
-          "random_read_ops_sec": 988135.8090693952,
-          "bulk_load_ops_sec": 281758.36684781016
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.104357476,
         "metrics": {
-          "run_ops_sec": 489368.5897302576,
-          "load_ops_sec": 330812.4979903141,
+          "p50_us": 2.264,
           "p99_us": 6.102,
-          "p50_us": 2.264
+          "run_ops_sec": 489368.5897302576,
+          "load_ops_sec": 330812.4979903141
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.589982775,
+        "metrics": {
+          "range_scan_ops_sec": 132475.9489914606,
+          "bulk_load_ops_sec": 281758.36684781016,
+          "random_read_ops_sec": 988135.8090693952,
+          "bulk_load_duration_ms": 354.0
         }
       }
     },
@@ -2615,9 +2615,9 @@
         "suite": "ycsb",
         "duration_secs": 0.106174395,
         "metrics": {
+          "p50_us": 2.234,
           "load_ops_sec": 343955.3273572471,
           "run_ops_sec": 537380.3374898985,
-          "p50_us": 2.234,
           "p99_us": 5.64
         }
       },
@@ -2627,8 +2627,8 @@
         "metrics": {
           "bulk_load_duration_ms": 334.0,
           "random_read_ops_sec": 1150788.9590453312,
-          "range_scan_ops_sec": 138089.28480314303,
-          "bulk_load_ops_sec": 298792.0259686843
+          "bulk_load_ops_sec": 298792.0259686843,
+          "range_scan_ops_sec": 138089.28480314303
         }
       }
     },
@@ -2675,24 +2675,24 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.543616352,
-        "metrics": {
-          "bulk_load_duration_ms": 341.0,
-          "bulk_load_ops_sec": 292972.3818275536,
-          "range_scan_ops_sec": 146482.2521517364,
-          "random_read_ops_sec": 1147057.5364633815
-        }
-      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.106055267,
         "metrics": {
+          "load_ops_sec": 368693.5113149642,
           "p50_us": 2.244,
           "p99_us": 6.231,
-          "load_ops_sec": 368693.5113149642,
           "run_ops_sec": 524140.8532101086
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.543616352,
+        "metrics": {
+          "bulk_load_ops_sec": 292972.3818275536,
+          "range_scan_ops_sec": 146482.2521517364,
+          "bulk_load_duration_ms": 341.0,
+          "random_read_ops_sec": 1147057.5364633815
         }
       }
     },
@@ -2743,23 +2743,23 @@
         "suite": "branch",
         "duration_secs": 12.132092786,
         "metrics": {
+          "fork_p99_us": 101025.762,
+          "merge_small_p50_us": 234.087,
+          "create_p95_us": 40.145,
+          "diff_p99_us": 21.059,
           "diff_p95_us": 11.702,
-          "diff_p50_us": 9.869,
-          "create_p99_us": 83.205,
           "fork_p95_us": 84668.042,
+          "diff_p50_us": 9.869,
+          "fork_p50_us": 71357.517,
+          "create_p50_us": 26.67,
+          "merge_large_us": 5605.919,
+          "reopen_after_265_branches_ms": 64.0,
+          "delete_p95_us": 2876.096,
           "delete_p99_us": 11666.688,
           "merge_small_p95_us": 301.392,
-          "create_p50_us": 26.67,
-          "delete_p50_us": 2352.329,
-          "delete_p95_us": 2876.096,
-          "merge_large_us": 5605.919,
-          "create_p95_us": 40.145,
-          "fork_p99_us": 101025.762,
-          "reopen_after_265_branches_ms": 64.0,
           "merge_small_p99_us": 311.642,
-          "merge_small_p50_us": 234.087,
-          "fork_p50_us": 71357.517,
-          "diff_p99_us": 21.059
+          "delete_p50_us": 2352.329,
+          "create_p99_us": 83.205
         }
       }
     },
@@ -2792,23 +2792,23 @@
         "suite": "branch",
         "duration_secs": 12.948717578,
         "metrics": {
-          "diff_p95_us": 15.549,
-          "fork_p50_us": 74310.114,
-          "fork_p99_us": 104983.176,
-          "merge_small_p95_us": 297.197,
-          "create_p50_us": 27.662,
-          "delete_p99_us": 11788.577,
-          "diff_p50_us": 12.663,
           "reopen_after_branch_heavy_history_ms": 70.0,
-          "merge_small_p50_us": 232.896,
-          "create_p95_us": 49.834,
           "merge_small_p99_us": 332.653,
+          "delete_p99_us": 11788.577,
+          "create_p50_us": 27.662,
+          "merge_large_us": 5675.986,
+          "create_p99_us": 87.925,
+          "merge_small_p50_us": 232.896,
+          "fork_p95_us": 101113.099,
+          "fork_p50_us": 74310.114,
+          "diff_p95_us": 15.549,
+          "diff_p50_us": 12.663,
+          "fork_p99_us": 104983.176,
           "delete_p50_us": 2304.464,
           "delete_p95_us": 2688.684,
-          "merge_large_us": 5675.986,
-          "fork_p95_us": 101113.099,
           "diff_p99_us": 42.66,
-          "create_p99_us": 87.925
+          "merge_small_p95_us": 297.197,
+          "create_p95_us": 49.834
         }
       }
     },
@@ -2850,33 +2850,23 @@
         "suite": "branch",
         "duration_secs": 12.003709948,
         "metrics": {
-          "create_p95_us": 45.385,
+          "delete_p50_us": 2089.648,
           "reopen_after_branch_heavy_history_ms": 81.0,
+          "diff_p99_us": 2438.839,
           "diff_p50_us": 10.79,
-          "merge_small_p99_us": 715.966,
+          "delete_p95_us": 2556.668,
+          "create_p95_us": 45.385,
+          "diff_p95_us": 14.497,
           "create_p99_us": 55.724,
           "create_p50_us": 31.98,
           "fork_p95_us": 88203.018,
           "merge_small_p50_us": 483.231,
-          "delete_p95_us": 2556.668,
-          "delete_p50_us": 2089.648,
-          "merge_large_us": 5163.701,
-          "fork_p99_us": 97721.501,
           "merge_small_p95_us": 641.887,
-          "diff_p95_us": 14.497,
           "delete_p99_us": 11314.173,
-          "diff_p99_us": 2438.839,
-          "fork_p50_us": 70103.428
-        }
-      },
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.566735621,
-        "metrics": {
-          "bulk_load_duration_ms": 348.0,
-          "range_scan_ops_sec": 149149.64715071375,
-          "bulk_load_ops_sec": 287082.6017774857,
-          "random_read_ops_sec": 1136269.739164282
+          "merge_small_p99_us": 715.966,
+          "merge_large_us": 5163.701,
+          "fork_p50_us": 70103.428,
+          "fork_p99_us": 97721.501
         }
       },
       "ycsb": {
@@ -2887,6 +2877,16 @@
           "run_ops_sec": 542034.1816511565,
           "p50_us": 2.204,
           "load_ops_sec": 390798.9055129533
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.566735621,
+        "metrics": {
+          "bulk_load_ops_sec": 287082.6017774857,
+          "bulk_load_duration_ms": 348.0,
+          "range_scan_ops_sec": 149149.64715071375,
+          "random_read_ops_sec": 1136269.739164282
         }
       }
     },
@@ -2900,13 +2900,36 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.075219608,
+        "metrics": {
+          "merge_small_p50_us": 432.718,
+          "fork_p50_us": 69770.506,
+          "create_p50_us": 35.937,
+          "merge_large_us": 6059.7,
+          "create_p99_us": 74.108,
+          "delete_p50_us": 2347.702,
+          "delete_p99_us": 10972.519,
+          "merge_small_p99_us": 680.43,
+          "merge_small_p95_us": 647.188,
+          "diff_p99_us": 2560.659,
+          "fork_p99_us": 89305.484,
+          "fork_p95_us": 82831.723,
+          "delete_p95_us": 2733.051,
+          "create_p95_us": 44.864,
+          "diff_p95_us": 16.711,
+          "diff_p50_us": 13.876,
+          "reopen_after_branch_heavy_history_ms": 70.0
+        }
+      },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.119184897,
         "metrics": {
-          "p99_us": 8.536,
           "p50_us": 3.437,
           "run_ops_sec": 358168.4084217284,
+          "p99_us": 8.536,
           "load_ops_sec": 233578.81922216335
         }
       },
@@ -2915,32 +2938,9 @@
         "duration_secs": 0.715032928,
         "metrics": {
           "random_read_ops_sec": 1077519.953352868,
-          "bulk_load_ops_sec": 200223.42651852407,
           "bulk_load_duration_ms": 499.0,
-          "range_scan_ops_sec": 146324.58184056045
-        }
-      },
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 12.075219608,
-        "metrics": {
-          "create_p95_us": 44.864,
-          "delete_p99_us": 10972.519,
-          "merge_small_p95_us": 647.188,
-          "merge_small_p50_us": 432.718,
-          "merge_large_us": 6059.7,
-          "delete_p95_us": 2733.051,
-          "fork_p50_us": 69770.506,
-          "create_p99_us": 74.108,
-          "create_p50_us": 35.937,
-          "merge_small_p99_us": 680.43,
-          "diff_p95_us": 16.711,
-          "fork_p99_us": 89305.484,
-          "diff_p50_us": 13.876,
-          "delete_p50_us": 2347.702,
-          "fork_p95_us": 82831.723,
-          "diff_p99_us": 2560.659,
-          "reopen_after_branch_heavy_history_ms": 70.0
+          "range_scan_ops_sec": 146324.58184056045,
+          "bulk_load_ops_sec": 200223.42651852407
         }
       }
     },
@@ -2954,37 +2954,37 @@
     "epic": "B3.4",
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.713553893,
-        "metrics": {
-          "range_scan_ops_sec": 136831.0786946731,
-          "random_read_ops_sec": 1055744.8594067208,
-          "bulk_load_ops_sec": 199828.4983902276,
-          "bulk_load_duration_ms": 500.0
-        }
-      },
       "branch": {
         "suite": "branch",
         "duration_secs": 12.166191511,
         "metrics": {
+          "merge_large_us": 6352.2,
           "delete_p50_us": 2304.414,
-          "delete_p95_us": 2945.657,
-          "merge_small_p95_us": 1126.405,
           "create_p95_us": 60.983,
+          "reopen_after_branch_heavy_history_ms": 86.0,
+          "diff_p50_us": 13.925,
+          "fork_p95_us": 84895.527,
+          "delete_p95_us": 2945.657,
           "fork_p50_us": 69529.691,
           "merge_small_p99_us": 9794.7,
           "create_p99_us": 97.401,
-          "diff_p99_us": 1134.98,
+          "create_p50_us": 37.149,
+          "merge_small_p50_us": 876.148,
+          "merge_small_p95_us": 1126.405,
           "fork_p99_us": 88783.069,
           "diff_p95_us": 18.264,
-          "fork_p95_us": 84895.527,
-          "merge_large_us": 6352.2,
-          "reopen_after_branch_heavy_history_ms": 86.0,
-          "diff_p50_us": 13.925,
-          "delete_p99_us": 11697.478,
-          "merge_small_p50_us": 876.148,
-          "create_p50_us": 37.149
+          "diff_p99_us": 1134.98,
+          "delete_p99_us": 11697.478
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.713553893,
+        "metrics": {
+          "bulk_load_ops_sec": 199828.4983902276,
+          "random_read_ops_sec": 1055744.8594067208,
+          "bulk_load_duration_ms": 500.0,
+          "range_scan_ops_sec": 136831.0786946731
         }
       },
       "ycsb": {
@@ -2993,8 +2993,8 @@
         "metrics": {
           "p50_us": 3.576,
           "run_ops_sec": 325839.43896704726,
-          "p99_us": 9.398,
-          "load_ops_sec": 252623.7630340599
+          "load_ops_sec": 252623.7630340599,
+          "p99_us": 9.398
         }
       }
     },
@@ -3013,42 +3013,42 @@
         "duration_secs": 0.70361625,
         "metrics": {
           "random_read_ops_sec": 1129543.9378246604,
+          "bulk_load_ops_sec": 204738.79278428343,
           "range_scan_ops_sec": 150570.42702857213,
-          "bulk_load_duration_ms": 488.0,
-          "bulk_load_ops_sec": 204738.79278428343
+          "bulk_load_duration_ms": 488.0
         }
       },
       "branch": {
         "suite": "branch",
         "duration_secs": 12.054503445,
         "metrics": {
-          "create_p50_us": 36.307,
           "diff_p99_us": 314.096,
-          "delete_p99_us": 11658.871,
-          "fork_p99_us": 107772.045,
-          "diff_p50_us": 12.544,
-          "reopen_after_branch_heavy_history_ms": 70.0,
-          "delete_p95_us": 2686.389,
-          "create_p99_us": 83.416,
-          "diff_p95_us": 14.447,
-          "merge_small_p50_us": 858.15,
           "fork_p95_us": 90900.795,
-          "create_p95_us": 49.092,
+          "fork_p50_us": 69839.992,
+          "merge_small_p50_us": 858.15,
+          "create_p99_us": 83.416,
+          "reopen_after_branch_heavy_history_ms": 70.0,
+          "merge_large_us": 6176.218,
+          "diff_p50_us": 12.544,
           "merge_small_p99_us": 1227.138,
           "delete_p50_us": 2300.911,
-          "merge_large_us": 6176.218,
+          "fork_p99_us": 107772.045,
+          "delete_p99_us": 11658.871,
+          "create_p95_us": 49.092,
           "merge_small_p95_us": 1051.431,
-          "fork_p50_us": 69839.992
+          "create_p50_us": 36.307,
+          "delete_p95_us": 2686.389,
+          "diff_p95_us": 14.447
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.112286353,
         "metrics": {
-          "p99_us": 8.005,
           "run_ops_sec": 395560.8265354227,
+          "load_ops_sec": 257690.8942577527,
           "p50_us": 3.436,
-          "load_ops_sec": 257690.8942577527
+          "p99_us": 8.005
         }
       }
     },
@@ -3062,47 +3062,47 @@
     "epic": "B4.1",
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.717212882,
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.118192406,
         "metrics": {
-          "range_scan_ops_sec": 147678.7964910573,
-          "bulk_load_ops_sec": 200110.83058307512,
-          "random_read_ops_sec": 1138140.7267076345,
-          "bulk_load_duration_ms": 499.0
+          "run_ops_sec": 383866.9179459512,
+          "load_ops_sec": 254460.6830508472,
+          "p99_us": 8.285,
+          "p50_us": 3.437
         }
       },
       "branch": {
         "suite": "branch",
         "duration_secs": 11.984150914,
         "metrics": {
-          "fork_p50_us": 68926.755,
-          "diff_p99_us": 54.271,
-          "create_p99_us": 93.535,
-          "fork_p95_us": 80158.719,
-          "diff_p50_us": 15.408,
-          "merge_small_p50_us": 986.276,
-          "delete_p99_us": 11638.061,
-          "merge_large_us": 23460.354,
-          "create_p95_us": 67.656,
-          "delete_p50_us": 2120.187,
-          "diff_p95_us": 27.491,
-          "create_p50_us": 48.961,
-          "merge_small_p99_us": 10001.565,
-          "merge_small_p95_us": 1198.791,
-          "reopen_after_branch_heavy_history_ms": 100.0,
           "fork_p99_us": 88801.634,
-          "delete_p95_us": 2673.115
+          "create_p50_us": 48.961,
+          "create_p99_us": 93.535,
+          "merge_small_p95_us": 1198.791,
+          "diff_p95_us": 27.491,
+          "merge_large_us": 23460.354,
+          "delete_p95_us": 2673.115,
+          "create_p95_us": 67.656,
+          "fork_p95_us": 80158.719,
+          "merge_small_p99_us": 10001.565,
+          "delete_p99_us": 11638.061,
+          "reopen_after_branch_heavy_history_ms": 100.0,
+          "merge_small_p50_us": 986.276,
+          "diff_p50_us": 15.408,
+          "delete_p50_us": 2120.187,
+          "diff_p99_us": 54.271,
+          "fork_p50_us": 68926.755
         }
       },
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.118192406,
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.717212882,
         "metrics": {
-          "load_ops_sec": 254460.6830508472,
-          "p50_us": 3.437,
-          "run_ops_sec": 383866.9179459512,
-          "p99_us": 8.285
+          "bulk_load_duration_ms": 499.0,
+          "random_read_ops_sec": 1138140.7267076345,
+          "range_scan_ops_sec": 147678.7964910573,
+          "bulk_load_ops_sec": 200110.83058307512
         }
       }
     },
@@ -3120,9 +3120,9 @@
         "suite": "redb",
         "duration_secs": 0.721466024,
         "metrics": {
-          "bulk_load_duration_ms": 518.0,
-          "random_read_ops_sec": 1122985.976589089,
           "bulk_load_ops_sec": 192850.89802823824,
+          "random_read_ops_sec": 1122985.976589089,
+          "bulk_load_duration_ms": 518.0,
           "range_scan_ops_sec": 148082.62542557652
         }
       },
@@ -3130,33 +3130,33 @@
         "suite": "branch",
         "duration_secs": 12.43086001,
         "metrics": {
-          "fork_p99_us": 101488.601,
-          "fork_p95_us": 90714.509,
-          "create_p99_us": 95.327,
           "diff_p50_us": 13.956,
-          "fork_p50_us": 70707.852,
-          "delete_p95_us": 2704.093,
-          "diff_p95_us": 16.571,
-          "reopen_after_branch_heavy_history_ms": 104.0,
-          "diff_p99_us": 1665.28,
-          "create_p50_us": 42.73,
-          "merge_small_p50_us": 953.685,
-          "delete_p99_us": 11522.906,
-          "delete_p50_us": 2119.925,
-          "merge_small_p95_us": 1172.271,
-          "merge_small_p99_us": 1438.557,
           "create_p95_us": 59.32,
-          "merge_large_us": 5654.634
+          "merge_small_p99_us": 1438.557,
+          "create_p99_us": 95.327,
+          "merge_small_p95_us": 1172.271,
+          "merge_small_p50_us": 953.685,
+          "fork_p95_us": 90714.509,
+          "delete_p95_us": 2704.093,
+          "fork_p50_us": 70707.852,
+          "diff_p95_us": 16.571,
+          "fork_p99_us": 101488.601,
+          "diff_p99_us": 1665.28,
+          "reopen_after_branch_heavy_history_ms": 104.0,
+          "delete_p50_us": 2119.925,
+          "merge_large_us": 5654.634,
+          "delete_p99_us": 11522.906,
+          "create_p50_us": 42.73
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.137492161,
         "metrics": {
-          "p50_us": 3.556,
+          "load_ops_sec": 251893.8767067133,
           "p99_us": 8.235,
           "run_ops_sec": 281363.0543130016,
-          "load_ops_sec": 251893.8767067133
+          "p50_us": 3.556
         }
       }
     },
@@ -3174,43 +3174,43 @@
         "suite": "ycsb",
         "duration_secs": 0.113496664,
         "metrics": {
+          "p50_us": 3.536,
           "p99_us": 8.436,
           "load_ops_sec": 253681.31543503416,
-          "run_ops_sec": 379615.1522325091,
-          "p50_us": 3.536
-        }
-      },
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 11.798397409,
-        "metrics": {
-          "merge_small_p95_us": 1112.005,
-          "delete_p99_us": 11898.719,
-          "fork_p95_us": 71872.686,
-          "delete_p50_us": 2300.843,
-          "diff_p99_us": 868.33,
-          "fork_p50_us": 68456.161,
-          "diff_p50_us": 15.158,
-          "create_p50_us": 41.257,
-          "create_p99_us": 80.37,
-          "merge_small_p99_us": 9479.636,
-          "merge_large_us": 6319.841,
-          "diff_p95_us": 19.767,
-          "merge_small_p50_us": 884.56,
-          "reopen_after_branch_heavy_history_ms": 108.0,
-          "delete_p95_us": 2797.058,
-          "fork_p99_us": 84117.291,
-          "create_p95_us": 60.463
+          "run_ops_sec": 379615.1522325091
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.709152782,
         "metrics": {
-          "bulk_load_duration_ms": 496.0,
-          "bulk_load_ops_sec": 201475.42184102812,
           "range_scan_ops_sec": 147517.7882480987,
-          "random_read_ops_sec": 1120333.660459559
+          "bulk_load_ops_sec": 201475.42184102812,
+          "random_read_ops_sec": 1120333.660459559,
+          "bulk_load_duration_ms": 496.0
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 11.798397409,
+        "metrics": {
+          "merge_large_us": 6319.841,
+          "merge_small_p50_us": 884.56,
+          "delete_p95_us": 2797.058,
+          "create_p50_us": 41.257,
+          "create_p95_us": 60.463,
+          "delete_p99_us": 11898.719,
+          "fork_p95_us": 71872.686,
+          "delete_p50_us": 2300.843,
+          "diff_p99_us": 868.33,
+          "reopen_after_branch_heavy_history_ms": 108.0,
+          "merge_small_p95_us": 1112.005,
+          "diff_p50_us": 15.158,
+          "fork_p50_us": 68456.161,
+          "create_p99_us": 80.37,
+          "merge_small_p99_us": 9479.636,
+          "diff_p95_us": 19.767,
+          "fork_p99_us": 84117.291
         }
       }
     },
@@ -3224,27 +3224,14 @@
     "epic": "B4.3",
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 12.335276825,
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.115208332,
         "metrics": {
-          "create_p95_us": 70.451,
-          "fork_p95_us": 91750.139,
-          "delete_p99_us": 12031.535,
-          "reopen_after_branch_heavy_history_ms": 102.0,
-          "merge_small_p95_us": 1199.733,
-          "diff_p99_us": 533.257,
-          "diff_p50_us": 15.559,
-          "merge_small_p99_us": 9736.234,
-          "diff_p95_us": 22.211,
-          "fork_p99_us": 100708.38,
-          "merge_small_p50_us": 980.714,
-          "delete_p50_us": 2105.156,
-          "create_p99_us": 97.362,
-          "create_p50_us": 49.412,
-          "merge_large_us": 5891.866,
-          "fork_p50_us": 71634.297,
-          "delete_p95_us": 2508.841
+          "load_ops_sec": 247809.5432991544,
+          "run_ops_sec": 376531.2868506464,
+          "p99_us": 8.436,
+          "p50_us": 3.496
         }
       },
       "redb": {
@@ -3252,19 +3239,32 @@
         "duration_secs": 0.715374419,
         "metrics": {
           "bulk_load_ops_sec": 202468.31389109752,
-          "bulk_load_duration_ms": 493.0,
           "range_scan_ops_sec": 148103.24105133928,
+          "bulk_load_duration_ms": 493.0,
           "random_read_ops_sec": 1125224.9577866232
         }
       },
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.115208332,
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.335276825,
         "metrics": {
-          "p99_us": 8.436,
-          "p50_us": 3.496,
-          "run_ops_sec": 376531.2868506464,
-          "load_ops_sec": 247809.5432991544
+          "merge_small_p95_us": 1199.733,
+          "create_p99_us": 97.362,
+          "fork_p95_us": 91750.139,
+          "diff_p95_us": 22.211,
+          "diff_p99_us": 533.257,
+          "delete_p95_us": 2508.841,
+          "create_p95_us": 70.451,
+          "create_p50_us": 49.412,
+          "merge_small_p99_us": 9736.234,
+          "merge_small_p50_us": 980.714,
+          "diff_p50_us": 15.559,
+          "fork_p99_us": 100708.38,
+          "merge_large_us": 5891.866,
+          "delete_p99_us": 12031.535,
+          "reopen_after_branch_heavy_history_ms": 102.0,
+          "delete_p50_us": 2105.156,
+          "fork_p50_us": 71634.297
         }
       }
     },
@@ -3282,33 +3282,33 @@
         "suite": "branch",
         "duration_secs": 12.999074508,
         "metrics": {
-          "diff_p99_us": 343.212,
-          "fork_p99_us": 117695.676,
-          "diff_p95_us": 15.609,
           "merge_small_p95_us": 1150.601,
-          "create_p95_us": 71.313,
-          "merge_large_us": 5863.302,
-          "delete_p50_us": 2095.518,
-          "fork_p95_us": 100354.506,
           "delete_p99_us": 11497.465,
-          "fork_p50_us": 73236.916,
+          "diff_p99_us": 343.212,
+          "create_p95_us": 71.313,
           "delete_p95_us": 2818.79,
+          "fork_p95_us": 100354.506,
+          "fork_p50_us": 73236.916,
+          "merge_large_us": 5863.302,
+          "create_p99_us": 129.542,
           "create_p50_us": 48.0,
-          "merge_small_p50_us": 976.717,
-          "reopen_after_branch_heavy_history_ms": 114.0,
+          "fork_p99_us": 117695.676,
           "diff_p50_us": 13.876,
+          "diff_p95_us": 15.609,
+          "delete_p50_us": 2095.518,
           "merge_small_p99_us": 1252.602,
-          "create_p99_us": 129.542
+          "merge_small_p50_us": 976.717,
+          "reopen_after_branch_heavy_history_ms": 114.0
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.752627331,
         "metrics": {
-          "range_scan_ops_sec": 148433.25214182877,
-          "bulk_load_duration_ms": 534.0,
           "bulk_load_ops_sec": 187115.15394773925,
-          "random_read_ops_sec": 1129798.416282474
+          "random_read_ops_sec": 1129798.416282474,
+          "bulk_load_duration_ms": 534.0,
+          "range_scan_ops_sec": 148433.25214182877
         }
       },
       "ycsb": {
@@ -3316,9 +3316,9 @@
         "duration_secs": 0.141978459,
         "metrics": {
           "p50_us": 3.397,
-          "p99_us": 8.095,
           "run_ops_sec": 277745.7984351524,
-          "load_ops_sec": 237410.07262564052
+          "load_ops_sec": 237410.07262564052,
+          "p99_us": 8.095
         }
       }
     },
@@ -3336,23 +3336,33 @@
         "suite": "branch",
         "duration_secs": 17.789794104,
         "metrics": {
-          "create_p95_us": 77.214,
-          "create_p99_us": 102.401,
-          "fork_p50_us": 77833.413,
-          "merge_small_p99_us": 1326.015,
-          "delete_p95_us": 2729.235,
-          "diff_p95_us": 25.227,
           "create_p50_us": 59.24,
-          "delete_p50_us": 2074.392,
-          "merge_small_p95_us": 1181.515,
           "merge_large_us": 5974.061,
-          "diff_p50_us": 15.349,
+          "reopen_after_branch_heavy_history_ms": 129.0,
+          "merge_small_p50_us": 1002.291,
           "delete_p99_us": 19383.461,
+          "delete_p95_us": 2729.235,
+          "create_p95_us": 77.214,
+          "delete_p50_us": 2074.392,
           "diff_p99_us": 2756.776,
           "fork_p99_us": 275586.485,
-          "reopen_after_branch_heavy_history_ms": 129.0,
+          "merge_small_p99_us": 1326.015,
+          "diff_p95_us": 25.227,
+          "merge_small_p95_us": 1181.515,
+          "diff_p50_us": 15.349,
           "fork_p95_us": 139311.246,
-          "merge_small_p50_us": 1002.291
+          "fork_p50_us": 77833.413,
+          "create_p99_us": 102.401
+        }
+      },
+      "redb": {
+        "suite": "redb",
+        "duration_secs": 0.788226951,
+        "metrics": {
+          "bulk_load_ops_sec": 191373.6596712762,
+          "range_scan_ops_sec": 131285.94305522108,
+          "bulk_load_duration_ms": 522.0,
+          "random_read_ops_sec": 1041062.4600414202
         }
       },
       "ycsb": {
@@ -3361,18 +3371,8 @@
         "metrics": {
           "p99_us": 8.927,
           "load_ops_sec": 205903.86928991767,
-          "p50_us": 3.547,
-          "run_ops_sec": 241035.17860224663
-        }
-      },
-      "redb": {
-        "suite": "redb",
-        "duration_secs": 0.788226951,
-        "metrics": {
-          "bulk_load_ops_sec": 191373.6596712762,
-          "bulk_load_duration_ms": 522.0,
-          "range_scan_ops_sec": 131285.94305522108,
-          "random_read_ops_sec": 1041062.4600414202
+          "run_ops_sec": 241035.17860224663,
+          "p50_us": 3.547
         }
       }
     },
@@ -3386,47 +3386,47 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 12.338896231,
+        "metrics": {
+          "create_p50_us": 42.599,
+          "delete_p99_us": 12938.059,
+          "reopen_after_branch_heavy_history_ms": 112.0,
+          "diff_p99_us": 2193.676,
+          "fork_p50_us": 70832.06,
+          "create_p99_us": 81.232,
+          "fork_p95_us": 91180.812,
+          "merge_small_p95_us": 1234.399,
+          "merge_small_p99_us": 1344.735,
+          "fork_p99_us": 100344.088,
+          "create_p95_us": 56.075,
+          "delete_p50_us": 3369.055,
+          "merge_large_us": 5954.1,
+          "merge_small_p50_us": 979.895,
+          "delete_p95_us": 4090.76,
+          "diff_p50_us": 12.693,
+          "diff_p95_us": 20.478
+        }
+      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.760994557,
         "metrics": {
-          "range_scan_ops_sec": 133270.50606289512,
-          "bulk_load_duration_ms": 524.0,
+          "bulk_load_ops_sec": 190559.7739857416,
           "random_read_ops_sec": 1046189.999905006,
-          "bulk_load_ops_sec": 190559.7739857416
+          "range_scan_ops_sec": 133270.50606289512,
+          "bulk_load_duration_ms": 524.0
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.145963636,
         "metrics": {
-          "load_ops_sec": 220350.4819847285,
           "run_ops_sec": 265371.32201650256,
-          "p50_us": 3.527,
-          "p99_us": 8.586
-        }
-      },
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 12.338896231,
-        "metrics": {
-          "fork_p95_us": 91180.812,
-          "merge_small_p50_us": 979.895,
-          "diff_p95_us": 20.478,
-          "fork_p99_us": 100344.088,
-          "delete_p50_us": 3369.055,
-          "create_p95_us": 56.075,
-          "diff_p99_us": 2193.676,
-          "diff_p50_us": 12.693,
-          "merge_small_p95_us": 1234.399,
-          "fork_p50_us": 70832.06,
-          "merge_large_us": 5954.1,
-          "merge_small_p99_us": 1344.735,
-          "create_p99_us": 81.232,
-          "reopen_after_branch_heavy_history_ms": 112.0,
-          "create_p50_us": 42.599,
-          "delete_p99_us": 12938.059,
-          "delete_p95_us": 4090.76
+          "p99_us": 8.586,
+          "load_ops_sec": 220350.4819847285,
+          "p50_us": 3.527
         }
       }
     },
@@ -3444,9 +3444,9 @@
         "suite": "redb",
         "duration_secs": 0.713855096,
         "metrics": {
+          "bulk_load_duration_ms": 489.0,
           "range_scan_ops_sec": 144985.8331442718,
           "bulk_load_ops_sec": 204155.30730374533,
-          "bulk_load_duration_ms": 489.0,
           "random_read_ops_sec": 1116131.5078377489
         }
       },
@@ -3464,23 +3464,23 @@
         "suite": "branch",
         "duration_secs": 13.328935565,
         "metrics": {
-          "merge_small_p50_us": 863.303,
-          "delete_p99_us": 21392.258,
-          "create_p50_us": 41.518,
-          "delete_p95_us": 4454.483,
-          "merge_large_us": 6209.692,
-          "merge_small_p95_us": 1125.583,
-          "fork_p95_us": 100607.692,
-          "fork_p50_us": 73814.042,
           "create_p99_us": 84.047,
           "diff_p95_us": 16.982,
+          "merge_small_p99_us": 1366.182,
+          "fork_p50_us": 73814.042,
+          "merge_small_p95_us": 1125.583,
+          "merge_large_us": 6209.692,
           "create_p95_us": 50.054,
           "reopen_after_branch_heavy_history_ms": 100.0,
+          "delete_p99_us": 21392.258,
+          "delete_p50_us": 3727.404,
+          "fork_p95_us": 100607.692,
           "diff_p50_us": 14.086,
-          "fork_p99_us": 102392.416,
           "diff_p99_us": 729.553,
-          "merge_small_p99_us": 1366.182,
-          "delete_p50_us": 3727.404
+          "delete_p95_us": 4454.483,
+          "fork_p99_us": 102392.416,
+          "create_p50_us": 41.518,
+          "merge_small_p50_us": 863.303
         }
       }
     },
@@ -3498,23 +3498,23 @@
         "suite": "branch",
         "duration_secs": 13.942070585,
         "metrics": {
-          "diff_p95_us": 18.184,
-          "reopen_after_branch_heavy_history_ms": 117.0,
-          "create_p50_us": 47.008,
-          "fork_p95_us": 88394.697,
-          "merge_small_p50_us": 952.455,
-          "fork_p50_us": 69233.321,
-          "merge_small_p95_us": 1170.571,
-          "merge_small_p99_us": 1189.146,
           "merge_large_us": 5590.007,
-          "delete_p50_us": 18152.977,
-          "delete_p95_us": 36399.849,
+          "merge_small_p50_us": 952.455,
           "diff_p50_us": 14.297,
+          "reopen_after_branch_heavy_history_ms": 117.0,
           "delete_p99_us": 45494.728,
+          "delete_p95_us": 36399.849,
+          "fork_p95_us": 88394.697,
+          "diff_p99_us": 2317.498,
           "create_p99_us": 111.387,
+          "delete_p50_us": 18152.977,
+          "merge_small_p99_us": 1189.146,
+          "fork_p50_us": 69233.321,
           "fork_p99_us": 98080.115,
           "create_p95_us": 76.833,
-          "diff_p99_us": 2317.498
+          "create_p50_us": 47.008,
+          "diff_p95_us": 18.184,
+          "merge_small_p95_us": 1170.571
         }
       },
       "ycsb": {
@@ -3522,19 +3522,19 @@
         "duration_secs": 0.129183984,
         "metrics": {
           "load_ops_sec": 241045.19510631976,
-          "run_ops_sec": 375015.01466364955,
+          "p99_us": 7.464,
           "p50_us": 3.486,
-          "p99_us": 7.464
+          "run_ops_sec": 375015.01466364955
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.696476777,
         "metrics": {
-          "random_read_ops_sec": 1128655.037885507,
-          "range_scan_ops_sec": 149722.703073319,
           "bulk_load_duration_ms": 487.0,
-          "bulk_load_ops_sec": 205004.04794842956
+          "bulk_load_ops_sec": 205004.04794842956,
+          "range_scan_ops_sec": 149722.703073319,
+          "random_read_ops_sec": 1128655.037885507
         }
       }
     },
@@ -3552,9 +3552,9 @@
         "suite": "redb",
         "duration_secs": 0.690993168,
         "metrics": {
-          "bulk_load_duration_ms": 486.0,
-          "range_scan_ops_sec": 146166.15244439794,
           "random_read_ops_sec": 1117668.821807847,
+          "range_scan_ops_sec": 146166.15244439794,
+          "bulk_load_duration_ms": 486.0,
           "bulk_load_ops_sec": 205476.9405917775
         }
       },
@@ -3563,22 +3563,22 @@
         "duration_secs": 14.96745632,
         "metrics": {
           "delete_p99_us": 45762.36,
-          "diff_p99_us": 534.306,
-          "merge_small_p95_us": 1227.818,
-          "fork_p95_us": 94498.379,
-          "merge_large_us": 6475.677,
-          "create_p95_us": 63.919,
-          "merge_small_p99_us": 18744.351,
-          "diff_p95_us": 19.336,
-          "reopen_after_branch_heavy_history_ms": 114.0,
-          "fork_p50_us": 71553.2,
-          "fork_p99_us": 237589.502,
-          "create_p99_us": 87.162,
-          "diff_p50_us": 14.287,
-          "delete_p50_us": 18914.549,
           "merge_small_p50_us": 881.493,
+          "fork_p50_us": 71553.2,
+          "merge_large_us": 6475.677,
+          "create_p99_us": 87.162,
+          "delete_p95_us": 37735.702,
+          "merge_small_p95_us": 1227.818,
           "create_p50_us": 50.874,
-          "delete_p95_us": 37735.702
+          "diff_p50_us": 14.287,
+          "diff_p99_us": 534.306,
+          "reopen_after_branch_heavy_history_ms": 114.0,
+          "create_p95_us": 63.919,
+          "fork_p95_us": 94498.379,
+          "merge_small_p99_us": 18744.351,
+          "fork_p99_us": 237589.502,
+          "diff_p95_us": 19.336,
+          "delete_p50_us": 18914.549
         }
       },
       "ycsb": {
@@ -3606,43 +3606,43 @@
         "suite": "redb",
         "duration_secs": 0.745279863,
         "metrics": {
+          "bulk_load_ops_sec": 195262.05259950037,
           "random_read_ops_sec": 1048027.1433999612,
           "range_scan_ops_sec": 141259.9089941512,
-          "bulk_load_duration_ms": 512.0,
-          "bulk_load_ops_sec": 195262.05259950037
+          "bulk_load_duration_ms": 512.0
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.116158388,
         "metrics": {
-          "load_ops_sec": 250438.37986202948,
-          "run_ops_sec": 385202.9969717652,
+          "p99_us": 8.055,
           "p50_us": 3.477,
-          "p99_us": 8.055
+          "load_ops_sec": 250438.37986202948,
+          "run_ops_sec": 385202.9969717652
         }
       },
       "branch": {
         "suite": "branch",
         "duration_secs": 14.861673976,
         "metrics": {
-          "merge_small_p95_us": 1117.472,
-          "diff_p95_us": 19.416,
-          "create_p95_us": 56.796,
-          "create_p99_us": 98.703,
           "delete_p99_us": 45843.905,
-          "merge_large_us": 6402.873,
-          "delete_p50_us": 18550.421,
-          "diff_p50_us": 14.137,
-          "fork_p50_us": 71324.429,
-          "reopen_after_branch_heavy_history_ms": 129.0,
-          "create_p50_us": 42.98,
-          "diff_p99_us": 2333.699,
-          "delete_p95_us": 37360.525,
+          "diff_p95_us": 19.416,
           "fork_p95_us": 99407.694,
-          "fork_p99_us": 219047.872,
           "merge_small_p99_us": 9842.542,
-          "merge_small_p50_us": 862.838
+          "merge_large_us": 6402.873,
+          "create_p95_us": 56.796,
+          "reopen_after_branch_heavy_history_ms": 129.0,
+          "diff_p50_us": 14.137,
+          "fork_p99_us": 219047.872,
+          "merge_small_p95_us": 1117.472,
+          "create_p99_us": 98.703,
+          "fork_p50_us": 71324.429,
+          "delete_p50_us": 18550.421,
+          "merge_small_p50_us": 862.838,
+          "diff_p99_us": 2333.699,
+          "create_p50_us": 42.98,
+          "delete_p95_us": 37360.525
         }
       }
     },
@@ -3656,47 +3656,47 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.143630812,
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.809817185,
         "metrics": {
-          "load_ops_sec": 230885.15643023473,
-          "p99_us": 7.434,
-          "run_ops_sec": 276590.45179888624,
-          "p50_us": 3.467
+          "fork_p99_us": 102088.824,
+          "merge_small_p50_us": 858.4,
+          "merge_small_p99_us": 3162.685,
+          "delete_p50_us": 18500.098,
+          "diff_p95_us": 17.953,
+          "delete_p95_us": 37116.823,
+          "merge_large_us": 6026.031,
+          "reopen_after_branch_heavy_history_ms": 112.0,
+          "delete_p99_us": 37815.255,
+          "fork_p50_us": 71483.528,
+          "diff_p50_us": 13.695,
+          "diff_p99_us": 33.062,
+          "create_p95_us": 59.641,
+          "fork_p95_us": 93761.047,
+          "merge_small_p95_us": 1126.559,
+          "create_p99_us": 108.502,
+          "create_p50_us": 45.114
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.760385525,
         "metrics": {
-          "bulk_load_duration_ms": 539.0,
-          "range_scan_ops_sec": 148000.6517948705,
           "bulk_load_ops_sec": 185505.96588021048,
-          "random_read_ops_sec": 1112393.4288161425
+          "bulk_load_duration_ms": 539.0,
+          "random_read_ops_sec": 1112393.4288161425,
+          "range_scan_ops_sec": 148000.6517948705
         }
       },
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 14.809817185,
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.143630812,
         "metrics": {
-          "merge_small_p95_us": 1126.559,
-          "delete_p50_us": 18500.098,
-          "fork_p99_us": 102088.824,
-          "delete_p95_us": 37116.823,
-          "delete_p99_us": 37815.255,
-          "merge_large_us": 6026.031,
-          "diff_p99_us": 33.062,
-          "create_p50_us": 45.114,
-          "create_p95_us": 59.641,
-          "create_p99_us": 108.502,
-          "fork_p95_us": 93761.047,
-          "diff_p50_us": 13.695,
-          "diff_p95_us": 17.953,
-          "reopen_after_branch_heavy_history_ms": 112.0,
-          "merge_small_p50_us": 858.4,
-          "merge_small_p99_us": 3162.685,
-          "fork_p50_us": 71483.528
+          "run_ops_sec": 276590.45179888624,
+          "p50_us": 3.467,
+          "load_ops_sec": 230885.15643023473,
+          "p99_us": 7.434
         }
       }
     },
@@ -3715,32 +3715,9 @@
         "duration_secs": 0.143735636,
         "metrics": {
           "load_ops_sec": 248687.64421551916,
-          "p50_us": 3.607,
           "run_ops_sec": 259225.02139448907,
-          "p99_us": 8.054
-        }
-      },
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 14.609710191,
-        "metrics": {
-          "merge_small_p95_us": 1109.071,
-          "delete_p95_us": 37201.995,
-          "diff_p99_us": 595.661,
-          "create_p99_us": 125.222,
-          "merge_large_us": 6721.16,
-          "diff_p95_us": 17.322,
-          "merge_small_p99_us": 1378.219,
-          "fork_p50_us": 72040.028,
-          "reopen_after_branch_heavy_history_ms": 121.0,
-          "diff_p50_us": 14.216,
-          "merge_small_p50_us": 879.196,
-          "delete_p50_us": 19370.718,
-          "delete_p99_us": 47055.962,
-          "create_p95_us": 83.184,
-          "create_p50_us": 47.157,
-          "fork_p99_us": 100938.909,
-          "fork_p95_us": 90880.525
+          "p99_us": 8.054,
+          "p50_us": 3.607
         }
       },
       "redb": {
@@ -3751,6 +3728,29 @@
           "range_scan_ops_sec": 144094.38666483687,
           "bulk_load_ops_sec": 207156.1718394585,
           "random_read_ops_sec": 1063800.0234674283
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 14.609710191,
+        "metrics": {
+          "merge_small_p99_us": 1378.219,
+          "fork_p50_us": 72040.028,
+          "merge_small_p50_us": 879.196,
+          "reopen_after_branch_heavy_history_ms": 121.0,
+          "delete_p99_us": 47055.962,
+          "merge_small_p95_us": 1109.071,
+          "diff_p99_us": 595.661,
+          "fork_p99_us": 100938.909,
+          "create_p50_us": 47.157,
+          "fork_p95_us": 90880.525,
+          "create_p95_us": 83.184,
+          "diff_p50_us": 14.216,
+          "delete_p95_us": 37201.995,
+          "delete_p50_us": 19370.718,
+          "diff_p95_us": 17.322,
+          "merge_large_us": 6721.16,
+          "create_p99_us": 125.222
         }
       }
     },
@@ -3764,47 +3764,47 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 15.656018195,
-        "metrics": {
-          "diff_p95_us": 25.657,
-          "create_p99_us": 93.213,
-          "diff_p50_us": 12.684,
-          "merge_small_p95_us": 1016.571,
-          "merge_small_p50_us": 861.394,
-          "delete_p50_us": 19198.95,
-          "create_p50_us": 44.523,
-          "merge_small_p99_us": 1072.654,
-          "delete_p99_us": 46550.474,
-          "fork_p95_us": 102112.237,
-          "delete_p95_us": 37215.293,
-          "fork_p99_us": 111494.735,
-          "fork_p50_us": 76397.207,
-          "reopen_after_branch_heavy_history_ms": 118.0,
-          "diff_p99_us": 814.436,
-          "merge_large_us": 6237.881,
-          "create_p95_us": 60.582
-        }
-      },
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.123018036,
-        "metrics": {
-          "p50_us": 3.567,
-          "p99_us": 8.286,
-          "run_ops_sec": 341105.9322892445,
-          "load_ops_sec": 226495.50793724065
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.73696534,
         "metrics": {
           "range_scan_ops_sec": 134949.38642292577,
           "bulk_load_ops_sec": 198565.29032260884,
-          "random_read_ops_sec": 1078211.2557211642,
-          "bulk_load_duration_ms": 503.0
+          "bulk_load_duration_ms": 503.0,
+          "random_read_ops_sec": 1078211.2557211642
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 15.656018195,
+        "metrics": {
+          "merge_small_p99_us": 1072.654,
+          "merge_small_p50_us": 861.394,
+          "delete_p99_us": 46550.474,
+          "fork_p99_us": 111494.735,
+          "delete_p95_us": 37215.293,
+          "create_p95_us": 60.582,
+          "create_p99_us": 93.213,
+          "fork_p95_us": 102112.237,
+          "fork_p50_us": 76397.207,
+          "create_p50_us": 44.523,
+          "delete_p50_us": 19198.95,
+          "diff_p50_us": 12.684,
+          "diff_p95_us": 25.657,
+          "merge_large_us": 6237.881,
+          "diff_p99_us": 814.436,
+          "reopen_after_branch_heavy_history_ms": 118.0,
+          "merge_small_p95_us": 1016.571
+        }
+      },
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.123018036,
+        "metrics": {
+          "p99_us": 8.286,
+          "load_ops_sec": 226495.50793724065,
+          "run_ops_sec": 341105.9322892445,
+          "p50_us": 3.567
         }
       }
     },
@@ -3818,47 +3818,47 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
+      "ycsb": {
+        "suite": "ycsb",
+        "duration_secs": 0.116597107,
+        "metrics": {
+          "load_ops_sec": 242683.85826175456,
+          "p50_us": 3.647,
+          "p99_us": 9.097,
+          "run_ops_sec": 349800.4825497657
+        }
+      },
       "branch": {
         "suite": "branch",
         "duration_secs": 13.838573606,
         "metrics": {
-          "delete_p50_us": 17976.599,
-          "diff_p95_us": 18.263,
-          "fork_p99_us": 100748.519,
-          "create_p95_us": 62.506,
           "reopen_after_branch_heavy_history_ms": 113.0,
-          "merge_small_p99_us": 1349.858,
-          "delete_p95_us": 36207.526,
           "delete_p99_us": 45285.436,
+          "diff_p95_us": 18.263,
+          "delete_p95_us": 36207.526,
           "create_p50_us": 45.374,
-          "diff_p99_us": 30.426,
-          "merge_small_p95_us": 1052.488,
-          "create_p99_us": 111.777,
-          "merge_small_p50_us": 868.167,
           "merge_large_us": 6281.765,
+          "fork_p99_us": 100748.519,
+          "merge_small_p99_us": 1349.858,
+          "create_p99_us": 111.777,
+          "diff_p50_us": 14.758,
+          "merge_small_p95_us": 1052.488,
           "fork_p95_us": 82348.612,
+          "create_p95_us": 62.506,
+          "merge_small_p50_us": 868.167,
           "fork_p50_us": 68801.003,
-          "diff_p50_us": 14.758
+          "diff_p99_us": 30.426,
+          "delete_p50_us": 17976.599
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.719754398,
         "metrics": {
-          "bulk_load_ops_sec": 198043.0785126377,
           "bulk_load_duration_ms": 504.0,
-          "range_scan_ops_sec": 150849.59396418193,
-          "random_read_ops_sec": 1158154.5779649972
-        }
-      },
-      "ycsb": {
-        "suite": "ycsb",
-        "duration_secs": 0.116597107,
-        "metrics": {
-          "p50_us": 3.647,
-          "p99_us": 9.097,
-          "load_ops_sec": 242683.85826175456,
-          "run_ops_sec": 349800.4825497657
+          "random_read_ops_sec": 1158154.5779649972,
+          "bulk_load_ops_sec": 198043.0785126377,
+          "range_scan_ops_sec": 150849.59396418193
         }
       }
     },
@@ -3876,43 +3876,43 @@
         "suite": "branch",
         "duration_secs": 15.100947736,
         "metrics": {
-          "merge_large_us": 6730.947,
-          "delete_p99_us": 46901.203,
-          "merge_small_p99_us": 9793.585,
           "fork_p95_us": 100768.988,
+          "merge_large_us": 6730.947,
+          "fork_p50_us": 71673.796,
           "create_p50_us": 42.78,
-          "reopen_after_branch_heavy_history_ms": 111.0,
-          "merge_small_p50_us": 924.212,
+          "create_p99_us": 91.05,
+          "delete_p95_us": 37731.59,
+          "diff_p95_us": 15.339,
           "fork_p99_us": 113582.171,
           "diff_p99_us": 28.613,
-          "create_p99_us": 91.05,
-          "diff_p95_us": 15.339,
-          "delete_p50_us": 26836.182,
+          "merge_small_p99_us": 9793.585,
           "merge_small_p95_us": 1122.151,
-          "create_p95_us": 59.812,
+          "delete_p99_us": 46901.203,
           "diff_p50_us": 13.545,
-          "delete_p95_us": 37731.59,
-          "fork_p50_us": 71673.796
+          "delete_p50_us": 26836.182,
+          "create_p95_us": 59.812,
+          "reopen_after_branch_heavy_history_ms": 111.0,
+          "merge_small_p50_us": 924.212
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.12307223,
         "metrics": {
-          "run_ops_sec": 382811.5911215426,
           "p99_us": 8.035,
-          "p50_us": 3.526,
-          "load_ops_sec": 250278.9671938084
+          "load_ops_sec": 250278.9671938084,
+          "run_ops_sec": 382811.5911215426,
+          "p50_us": 3.526
         }
       },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.712419201,
         "metrics": {
+          "range_scan_ops_sec": 137599.57892327258,
           "bulk_load_ops_sec": 199153.1228536023,
-          "bulk_load_duration_ms": 502.0,
           "random_read_ops_sec": 1115330.6423899636,
-          "range_scan_ops_sec": 137599.57892327258
+          "bulk_load_duration_ms": 502.0
         }
       }
     },
@@ -3926,47 +3926,84 @@
     "epic": null,
     "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
     "suites": {
-      "branch": {
-        "suite": "branch",
-        "duration_secs": 15.457366733,
-        "metrics": {
-          "merge_large_us": 5626.057,
-          "diff_p99_us": 25.378,
-          "reopen_after_branch_heavy_history_ms": 120.0,
-          "create_p95_us": 54.291,
-          "delete_p99_us": 55006.551,
-          "merge_small_p99_us": 16487.302,
-          "create_p99_us": 118.551,
-          "diff_p95_us": 16.28,
-          "merge_small_p50_us": 932.598,
-          "fork_p95_us": 101908.556,
-          "delete_p50_us": 18959.22,
-          "create_p50_us": 41.267,
-          "diff_p50_us": 13.826,
-          "delete_p95_us": 39143.643,
-          "fork_p99_us": 106976.963,
-          "merge_small_p95_us": 1347.822,
-          "fork_p50_us": 73234.047
-        }
-      },
       "redb": {
         "suite": "redb",
         "duration_secs": 0.707246559,
         "metrics": {
-          "bulk_load_duration_ms": 484.0,
-          "range_scan_ops_sec": 147487.7939470449,
           "random_read_ops_sec": 1112351.494262363,
-          "bulk_load_ops_sec": 206294.39687501948
+          "bulk_load_ops_sec": 206294.39687501948,
+          "bulk_load_duration_ms": 484.0,
+          "range_scan_ops_sec": 147487.7939470449
         }
       },
       "ycsb": {
         "suite": "ycsb",
         "duration_secs": 0.113791163,
         "metrics": {
-          "load_ops_sec": 253327.3919615672,
           "p50_us": 3.457,
-          "p99_us": 7.564,
-          "run_ops_sec": 392942.0379844494
+          "run_ops_sec": 392942.0379844494,
+          "load_ops_sec": 253327.3919615672,
+          "p99_us": 7.564
+        }
+      },
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 15.457366733,
+        "metrics": {
+          "delete_p50_us": 18959.22,
+          "reopen_after_branch_heavy_history_ms": 120.0,
+          "diff_p99_us": 25.378,
+          "create_p50_us": 41.267,
+          "create_p99_us": 118.551,
+          "merge_small_p50_us": 932.598,
+          "delete_p99_us": 55006.551,
+          "merge_small_p99_us": 16487.302,
+          "create_p95_us": 54.291,
+          "fork_p95_us": 101908.556,
+          "diff_p95_us": 16.28,
+          "merge_large_us": 5626.057,
+          "merge_small_p95_us": 1347.822,
+          "diff_p50_us": 13.826,
+          "fork_p50_us": 73234.047,
+          "delete_p95_us": 39143.643,
+          "fork_p99_us": 106976.963
+        }
+      }
+    },
+    "comparison": null
+  },
+  {
+    "timestamp": "2026-04-24T15:01:46Z",
+    "git_commit": "6b94483c",
+    "git_branch": "feat/B6-tranche-closeout",
+    "tranche": null,
+    "epic": null,
+    "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+    "suites": {
+      "branch": {
+        "suite": "branch",
+        "duration_secs": 31.255797459,
+        "metrics": {
+          "merge_small_p95_us": 1267.666,
+          "create_p95_us": 64.461,
+          "materialize_p95_us": 98008.145,
+          "diff_p99_us": 35.867,
+          "merge_small_p50_us": 981.361,
+          "delete_p95_us": 37925.017,
+          "diff_p95_us": 16.11,
+          "fork_p50_us": 70914.303,
+          "fork_p95_us": 94127.004,
+          "materialize_p50_us": 72986.64,
+          "delete_p99_us": 50654.403,
+          "merge_large_us": 15824.452,
+          "reopen_after_branch_heavy_history_ms": 108.0,
+          "create_p50_us": 47.779,
+          "materialize_p99_us": 103524.849,
+          "delete_p50_us": 19009.176,
+          "fork_p99_us": 103877.19,
+          "create_p99_us": 133.068,
+          "diff_p50_us": 14.136,
+          "merge_small_p99_us": 9502.143
         }
       }
     },

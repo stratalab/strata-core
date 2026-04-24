@@ -1,0 +1,37 @@
+{
+  "timestamp": "2026-04-24T15:03:20Z",
+  "git_commit": "6b94483c",
+  "git_branch": "feat/B6-tranche-closeout",
+  "tranche": 4,
+  "epic": "B6",
+  "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+  "suites": {
+    "branch": {
+      "suite": "branch",
+      "duration_secs": 30.712828392,
+      "metrics": {
+        "fork_p95_us": 97407.757,
+        "delete_p50_us": 18296.334,
+        "diff_p95_us": 18.364,
+        "materialize_p50_us": 66459.652,
+        "diff_p50_us": 14.346,
+        "merge_small_p99_us": 9650.329,
+        "diff_p99_us": 33.182,
+        "merge_small_p95_us": 1174.192,
+        "merge_small_p50_us": 901.162,
+        "delete_p95_us": 37084.976,
+        "fork_p50_us": 73361.964,
+        "fork_p99_us": 107772.208,
+        "create_p95_us": 80.571,
+        "materialize_p99_us": 105013.077,
+        "delete_p99_us": 38837.156,
+        "materialize_p95_us": 85633.302,
+        "create_p50_us": 55.864,
+        "reopen_after_branch_heavy_history_ms": 112.0,
+        "merge_large_us": 5606.713,
+        "create_p99_us": 111.829
+      }
+    }
+  },
+  "comparison": null
+}
