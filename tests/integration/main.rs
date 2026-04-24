@@ -11,6 +11,7 @@
 mod common;
 
 mod branching;
+mod branching_adversarial_history;
 mod branching_control_store_recovery;
 mod branching_convergence_differential;
 mod branching_degraded_primitive_paths;
