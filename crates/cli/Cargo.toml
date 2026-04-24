@@ -6,7 +6,7 @@ rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Redis-inspired CLI for the Strata database"
+description = "Thin CLI shell over strata-executor"
 publish = false
 
 [lints]
@@ -23,7 +23,6 @@ anthropic = ["embed", "strata-executor/anthropic"]
 openai = ["embed", "strata-executor/openai"]
 google = ["embed", "strata-executor/google"]
 cloud = ["anthropic", "openai", "google"]
-# Arrow-based import/export (Parquet, CSV, JSONL)
 arrow = ["strata-executor/arrow"]
 
 [dependencies]
@@ -35,4 +34,7 @@ libc = { workspace = true }
 rustyline = { version = "15", features = ["with-file-history"] }
 shlex = "1"
 serde_json = { workspace = true }
-strsim = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

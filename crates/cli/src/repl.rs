@@ -1,731 +1,262 @@
-//! REPL loop with rustyline.
-//!
-//! Interactive mode: prompt, meta-commands, history, TAB completion.
-//! Pipe mode: read lines from stdin, execute each.
-
 use std::io::{self, BufRead};
 
-use rustyline::completion::{Completer, Pair};
 use rustyline::error::ReadlineError;
-use rustyline::highlight::Highlighter;
-use rustyline::hint::Hinter;
-use rustyline::validate::Validator;
-use rustyline::{CompletionType, Config, Context, Editor, Helper};
+use rustyline::DefaultEditor;
 
-use strata_executor::{Command, Output};
+use crate::app::{CliApp, ReplOutcome};
+use crate::parse;
 
-use crate::commands::build_repl_cmd;
-use crate::format::{
-    format_diff, format_error, format_fork_info, format_merge_info, format_multi_output,
-    format_multi_versioned_output, format_output, format_versioned_output, OutputMode,
-};
-use crate::parse::{
-    check_meta_command, matches_to_action, BranchOp, CliAction, MetaCommand, Primitive,
-};
-use crate::state::SessionState;
+fn process_line(app: &mut CliApp, trimmed: &str) -> Result<ReplOutcome, String> {
+    let request = parse::parse_repl_line(trimmed, app.context())?;
+    app.execute_request(request)
+}
 
-/// Run the interactive REPL.
-///
-/// When `first_run` is true, a short guided tour is shown before the main
-/// loop to help new users discover core commands.
-pub fn run_repl(state: &mut SessionState, mode: OutputMode, db_path: &str, first_run: bool) {
-    let config = Config::builder()
-        .history_ignore_space(true)
-        .completion_type(CompletionType::List)
-        .build();
-
-    let helper = StrataHelper::new();
-    let mut rl: Editor<StrataHelper, _> = Editor::with_config(config).unwrap();
-    rl.set_helper(Some(helper));
-
-    // Load history
-    let history_path = history_file();
-    if let Some(ref path) = history_path {
-        let _ = rl.load_history(path);
+fn print_outcome(outcome: ReplOutcome) {
+    match outcome {
+        ReplOutcome::Continue { rendered } => {
+            if let Some(rendered) = rendered {
+                if !rendered.is_empty() {
+                    println!("{rendered}");
+                }
+            }
+        }
+        ReplOutcome::Clear => {
+            print!("\x1B[2J\x1B[1;1H");
+        }
+        ReplOutcome::Exit => {}
     }
+}
 
-    print_welcome(db_path);
+/// Run the interactive CLI.
+pub(crate) fn run_repl(app: &mut CliApp) -> i32 {
+    let mut editor = match DefaultEditor::new() {
+        Ok(editor) => editor,
+        Err(error) => {
+            eprintln!("Failed to initialize line editor: {error}");
+            return 1;
+        }
+    };
 
-    if first_run {
-        run_guided_tour(state, mode, &mut rl);
+    if let Some(history_path) = history_path() {
+        let _ = editor.load_history(&history_path);
     }
 
     loop {
-        let prompt = state.prompt();
-        match rl.readline(&prompt) {
+        match editor.readline(&app.context().prompt()) {
             Ok(line) => {
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
                 }
+                let _ = editor.add_history_entry(trimmed);
 
-                let _ = rl.add_history_entry(trimmed);
-
-                // Check meta-commands first
-                if let Some(meta) = check_meta_command(trimmed) {
-                    match meta {
-                        MetaCommand::Quit => break,
-                        MetaCommand::Clear => {
-                            // ANSI clear screen
-                            print!("\x1B[2J\x1B[1;1H");
-                        }
-                        MetaCommand::Help { command } => {
-                            print_help(command.as_deref());
-                        }
-                        MetaCommand::Use { branch, space } => match state.set_branch(&branch) {
-                            Ok(()) => {
-                                if let Some(s) = space {
-                                    state.set_space(&s);
-                                } else {
-                                    state.set_space("default");
-                                }
-                            }
-                            Err(e) => {
-                                eprintln!("{}", format_error(&e, mode));
-                            }
-                        },
-                    }
-                    continue;
+                match process_line(app, trimmed) {
+                    Ok(ReplOutcome::Exit) => break,
+                    Ok(outcome) => print_outcome(outcome),
+                    Err(error) => eprintln!("{error}"),
                 }
-
-                // Tokenize with shlex (respects quotes)
-                let tokens = match shlex::split(trimmed) {
-                    Some(t) => t,
-                    None => {
-                        eprintln!("(error) Invalid quoting");
-                        continue;
-                    }
-                };
-
-                if tokens.is_empty() {
-                    continue;
-                }
-
-                // Parse via clap
-                let cmd = build_repl_cmd();
-                let matches = match cmd.try_get_matches_from(tokens) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        // clap error — show help text
-                        eprintln!("{}", e);
-                        continue;
-                    }
-                };
-
-                execute_action(&matches, state, mode);
             }
-            Err(ReadlineError::Interrupted) => {
-                // Ctrl-C — just show new prompt
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                // Ctrl-D — exit
-                break;
-            }
-            Err(err) => {
-                eprintln!("(error) {:?}", err);
-                break;
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
+            Err(error) => {
+                eprintln!("Readline error: {error}");
+                return 1;
             }
         }
     }
 
-    // Save history
-    if let Some(ref path) = history_path {
-        let _ = rl.save_history(path);
+    if let Some(history_path) = history_path() {
+        let _ = editor.save_history(&history_path);
     }
+
+    0
 }
 
-/// Run in pipe mode: read lines from stdin, execute each.
-pub fn run_pipe(state: &mut SessionState, mode: OutputMode) -> i32 {
+/// Run in stdin-driven pipe mode.
+pub(crate) fn run_pipe(app: &mut CliApp) -> i32 {
     let stdin = io::stdin();
+    run_pipe_reader(app, stdin.lock())
+}
+
+fn run_pipe_reader<R: BufRead>(app: &mut CliApp, reader: R) -> i32 {
     let mut exit_code = 0;
 
-    for line in stdin.lock().lines() {
+    for line in reader.lines() {
         let line = match line {
-            Ok(l) => l,
-            Err(_) => break,
+            Ok(line) => line,
+            Err(error) => {
+                eprintln!("Failed to read stdin: {error}");
+                return 1;
+            }
         };
         let trimmed = line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
 
-        let tokens = match shlex::split(trimmed) {
-            Some(t) => t,
-            None => {
-                eprintln!("(error) Invalid quoting: {}", trimmed);
+        match process_line(app, trimmed) {
+            Ok(ReplOutcome::Exit) => break,
+            Ok(outcome) => print_outcome(outcome),
+            Err(error) => {
+                eprintln!("{error}");
                 exit_code = 1;
-                continue;
             }
-        };
-
-        if tokens.is_empty() {
-            continue;
-        }
-
-        let cmd = build_repl_cmd();
-        let matches = match cmd.try_get_matches_from(tokens) {
-            Ok(m) => m,
-            Err(e) => {
-                eprintln!("{}", e);
-                exit_code = 1;
-                continue;
-            }
-        };
-
-        if !execute_action(&matches, state, mode) {
-            exit_code = 1;
         }
     }
 
     exit_code
 }
 
-/// Execute a parsed action. Returns true on success, false on error.
-fn execute_action(matches: &clap::ArgMatches, state: &mut SessionState, mode: OutputMode) -> bool {
-    match matches_to_action(matches, state) {
-        Ok(CliAction::Execute(cmd)) => match state.execute(cmd) {
-            Ok(output) => {
-                let formatted = format_output(&output, mode);
-                if !formatted.is_empty() {
-                    println!("{}", formatted);
-                }
-                true
-            }
-            Err(e) => {
-                eprintln!("{}", format_error(&e, mode));
-                false
-            }
-        },
-        Ok(CliAction::BranchOp(op)) => match op {
-            BranchOp::Fork { destination } => match state.fork_branch(&destination) {
-                Ok(info) => {
-                    println!("{}", format_fork_info(&info, mode));
-                    true
-                }
-                Err(e) => {
-                    eprintln!("{}", format_error(&e, mode));
-                    false
-                }
-            },
-            BranchOp::Diff { branch_a, branch_b } => {
-                match state.diff_branches(&branch_a, &branch_b) {
-                    Ok(diff) => {
-                        println!("{}", format_diff(&diff, mode));
-                        true
-                    }
-                    Err(e) => {
-                        eprintln!("{}", format_error(&e, mode));
-                        false
-                    }
-                }
-            }
-            BranchOp::Merge { source, strategy } => match state.merge_branch(&source, strategy) {
-                Ok(info) => {
-                    println!("{}", format_merge_info(&info, mode));
-                    true
-                }
-                Err(e) => {
-                    eprintln!("{}", format_error(&e, mode));
-                    false
-                }
-            },
-        },
-        Ok(CliAction::SeedRecipes) => match state.seed_builtin_recipes() {
-            Ok(()) => {
-                println!("OK");
-                true
-            }
-            Err(e) => {
-                eprintln!("{}", format_error(&e, mode));
-                false
-            }
-        },
-        Ok(CliAction::Meta(_)) => {
-            // Meta-commands should have been handled before reaching here
-            true
-        }
-        Ok(CliAction::MultiPut {
-            branch,
-            space,
-            pairs,
-        }) => {
-            let mut outputs = Vec::new();
-            for (key, value) in pairs {
-                match state.execute(Command::KvPut {
-                    branch: branch.clone(),
-                    space: space.clone(),
-                    key,
-                    value,
-                }) {
-                    Ok(output) => outputs.push(output),
-                    Err(e) => {
-                        eprintln!("{}", format_error(&e, mode));
-                        return false;
-                    }
-                }
-            }
-            let formatted = format_multi_output(&outputs, mode);
-            if !formatted.is_empty() {
-                println!("{}", formatted);
-            }
-            true
-        }
-        Ok(CliAction::MultiGet {
-            branch,
-            space,
-            keys,
-            with_version,
-        }) => {
-            let mut outputs = Vec::new();
-            for key in keys {
-                match state.execute(Command::KvGet {
-                    branch: branch.clone(),
-                    space: space.clone(),
-                    key,
-                    as_of: None,
-                }) {
-                    Ok(output) => outputs.push(output),
-                    Err(e) => {
-                        eprintln!("{}", format_error(&e, mode));
-                        return false;
-                    }
-                }
-            }
-            let formatted = format_multi_versioned_output(&outputs, mode, with_version);
-            if !formatted.is_empty() {
-                println!("{}", formatted);
-            }
-            true
-        }
-        Ok(CliAction::MultiDel {
-            branch,
-            space,
-            keys,
-        }) => {
-            let mut outputs = Vec::new();
-            for key in keys {
-                match state.execute(Command::KvDelete {
-                    branch: branch.clone(),
-                    space: space.clone(),
-                    key,
-                }) {
-                    Ok(output) => outputs.push(output),
-                    Err(e) => {
-                        eprintln!("{}", format_error(&e, mode));
-                        return false;
-                    }
-                }
-            }
-            let formatted = format_multi_output(&outputs, mode);
-            if !formatted.is_empty() {
-                println!("{}", formatted);
-            }
-            true
-        }
-        Ok(CliAction::ListAll {
-            branch,
-            space,
-            prefix,
-            primitive,
-        }) => {
-            let mut all_keys = Vec::new();
-            let mut cursor: Option<String> = None;
-
-            loop {
-                let output = match primitive {
-                    Primitive::Kv => state.execute(Command::KvList {
-                        branch: branch.clone(),
-                        space: space.clone(),
-                        prefix: prefix.clone(),
-                        cursor: cursor.clone(),
-                        limit: Some(1000),
-                        as_of: None,
-                    }),
-                    Primitive::Json => state.execute(Command::JsonList {
-                        branch: branch.clone(),
-                        space: space.clone(),
-                        prefix: prefix.clone(),
-                        cursor: cursor.clone(),
-                        limit: 1000,
-                        as_of: None,
-                    }),
-                };
-
-                match output {
-                    Ok(Output::Keys(keys)) => {
-                        all_keys.extend(keys);
-                        break;
-                    }
-                    Ok(Output::JsonListResult {
-                        keys, cursor: next, ..
-                    }) => {
-                        all_keys.extend(keys);
-                        if next.is_none() {
-                            break;
-                        }
-                        cursor = next;
-                    }
-                    Ok(_) => break,
-                    Err(e) => {
-                        eprintln!("{}", format_error(&e, mode));
-                        return false;
-                    }
-                }
-            }
-
-            let formatted = format_output(&Output::Keys(all_keys), mode);
-            if !formatted.is_empty() {
-                println!("{}", formatted);
-            }
-            true
-        }
-        Ok(CliAction::GetWithVersion {
-            command,
-            with_version,
-        }) => match state.execute(command) {
-            Ok(output) => {
-                let formatted = format_versioned_output(&output, mode, with_version);
-                if !formatted.is_empty() {
-                    println!("{}", formatted);
-                }
-                true
-            }
-            Err(e) => {
-                eprintln!("{}", format_error(&e, mode));
-                false
-            }
-        },
-        Err(e) => {
-            eprintln!("(error) {}", e);
-            false
-        }
-    }
+fn history_path() -> Option<String> {
+    std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|path| path.join(".strata_history"))
+        .map(|path| path.to_string_lossy().to_string())
 }
 
-// =========================================================================
-// Guided tour (first-run only)
-// =========================================================================
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
 
-/// Tour steps shown on first run. Each step has a hint, a suggested command,
-/// and a message shown on successful execution.
-struct TourStep {
-    hint: &'static str,
-    command: &'static str,
-    success_msg: &'static str,
-}
+    use strata_executor::{Command, Output, Session, Strata};
 
-const TOUR_STEPS: &[TourStep] = &[
-    TourStep {
-        hint:
-            "Let's try retrieving a value. Type the command below (or press Enter to auto-run it):",
-        command: "kv get greeting",
-        success_msg: "You just read a key from the KV store.",
-    },
-    TourStep {
-        hint: "Strata also stores JSON documents. Try querying one:",
-        command: "json get user:1 $.name",
-        success_msg: "JSON path queries let you reach into nested documents.",
-    },
-    TourStep {
-        hint: "Events are append-only logs. Let's check what happened:",
-        command: "event list",
-        success_msg: "Event logs are great for audit trails and time-series data.",
-    },
-];
+    use super::{process_line, run_pipe_reader};
+    use crate::app::{CliApp, ReplOutcome};
+    use crate::context::Context;
+    use crate::render::RenderMode;
 
-fn run_guided_tour(
-    state: &mut SessionState,
-    mode: OutputMode,
-    rl: &mut Editor<StrataHelper, rustyline::history::DefaultHistory>,
-) {
-    eprintln!("  \u{1f9ed} Quick tour \u{2014} let's explore your new database!\n");
-
-    for (i, step) in TOUR_STEPS.iter().enumerate() {
-        eprintln!("  Step {}/{}: {}", i + 1, TOUR_STEPS.len(), step.hint);
-        eprintln!("    > {}", step.command);
-        eprintln!();
-
-        // Read user input — Enter auto-runs the suggested command
-        let prompt = format!("  tour {}> ", i + 1);
-        let line = match rl.readline(&prompt) {
-            Ok(l) => {
-                let trimmed = l.trim().to_string();
-                if trimmed.is_empty() {
-                    step.command.to_string()
-                } else {
-                    let _ = rl.add_history_entry(&trimmed);
-                    trimmed
-                }
-            }
-            Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
-                eprintln!("\n  Tour skipped. Type 'help' to see all commands.\n");
-                return;
-            }
-            Err(_) => {
-                eprintln!("\n  Tour skipped. Type 'help' to see all commands.\n");
-                return;
-            }
-        };
-
-        // Parse and execute whatever the user typed
-        let tokens = match shlex::split(&line) {
-            Some(t) if !t.is_empty() => t,
-            _ => {
-                eprintln!("  (invalid input, skipping step)\n");
-                continue;
-            }
-        };
-
-        let cmd = build_repl_cmd();
-        let ok = match cmd.try_get_matches_from(tokens) {
-            Ok(matches) => execute_action(&matches, state, mode),
-            Err(e) => {
-                eprintln!("{}", e);
-                false
-            }
-        };
-
-        if ok {
-            eprintln!("  \u{2713} {}\n", step.success_msg);
-        } else {
-            eprintln!("  (no worries, let's keep going)\n");
-        }
-    }
-
-    eprintln!("  \u{1f389} Tour complete! Type 'help' to see all commands, or start exploring.\n");
-}
-
-fn print_welcome(db_path: &str) {
-    let version = env!("CARGO_PKG_VERSION");
-    eprintln!("Strata v{version} — type 'help' for commands, 'quit' to exit.");
-    eprintln!("Database: {db_path}");
-    eprintln!();
-    eprintln!("  Quick start:");
-    eprintln!("    kv put greeting \"hello world\"    Store a value");
-    eprintln!("    kv get greeting                   Retrieve it");
-    eprintln!("    search \"hello\"                    Search across all data");
-    eprintln!();
-}
-
-fn history_file() -> Option<String> {
-    std::env::var("HOME")
-        .ok()
-        .map(|h| format!("{}/.strata_history", h))
-}
-
-fn print_help(command: Option<&str>) {
-    if let Some(cmd) = command {
-        // Show help for a specific command
-        let cli = build_repl_cmd();
-        match cli.try_get_matches_from(vec![cmd, "--help"]) {
-            Ok(_) => {}
-            Err(e) => println!("{}", e),
-        }
-    } else {
-        println!("Available commands:");
-        println!("  kv          Key-value operations (put, get, del, list, history)");
-        println!("  json        JSON document operations (set, get, del, list, history)");
-        println!("  event       Event log operations (append, get, list, len)");
-        println!("  state       State cell operations (set, get, del, init, cas, list, history)");
-        println!("  vector      Vector store operations (upsert, get, del, search, create, ...)");
-        println!(
-            "  graph       Graph operations (add-node, add-edge, neighbors, bfs, ontology, ...)"
+    fn cache_app() -> CliApp {
+        let db = Strata::cache().expect("cache db should open");
+        let default_branch = db.current_branch().to_string();
+        let session = db.session();
+        let context = Context::new(
+            default_branch.clone(),
+            default_branch,
+            "default".to_string(),
         );
-        println!("  branch      Branch operations (create, info, list, fork, diff, merge, ...)");
-        println!("  space       Space operations (list, create, del, exists)");
-        println!("  begin       Begin a transaction");
-        println!("  commit      Commit a transaction");
-        println!("  rollback    Rollback a transaction");
-        println!("  txn         Transaction info (info, active)");
-        println!("  ping        Ping the database");
-        println!("  info        Database information");
-        println!("  flush       Flush writes to disk");
-        println!("  compact     Trigger compaction");
-        println!("  search      Search across primitives");
-        println!("  config      Configuration operations (set, get, list)");
-        println!();
-        println!("Meta-commands:");
-        println!("  use <branch> [space]   Switch branch/space context");
-        println!("  help [command]         Show help");
-        println!("  quit / exit            Exit REPL");
-        println!("  clear                  Clear screen");
+        CliApp::new_for_test(db, session, context, RenderMode::Human)
     }
-}
 
-// =========================================================================
-// TAB Completion
-// =========================================================================
-
-/// Known top-level commands for TAB completion.
-const TOP_LEVEL_COMMANDS: &[&str] = &[
-    "kv", "json", "event", "vector", "graph", "branch", "space", "begin", "commit", "rollback",
-    "txn", "ping", "info", "health", "metrics", "init", "flush", "compact", "search", "config",
-    "use", "help", "quit", "exit", "clear",
-];
-
-/// Known subcommands for each top-level command.
-fn subcommands_for(cmd: &str) -> &'static [&'static str] {
-    match cmd {
-        "kv" => &["put", "get", "del", "list", "history"],
-        "json" => &["set", "get", "del", "list", "history"],
-        "event" => &["append", "get", "list", "len"],
-        "vector" => &[
-            "upsert",
-            "get",
-            "del",
-            "search",
-            "create",
-            "drop",
-            "del-collection",
-            "collections",
-            "stats",
-            "batch-upsert",
-        ],
-        "graph" => &[
-            "create",
-            "delete",
-            "list",
-            "info",
-            "add-node",
-            "get-node",
-            "remove-node",
-            "list-nodes",
-            "add-edge",
-            "remove-edge",
-            "neighbors",
-            "bulk-insert",
-            "bfs",
-            "ontology",
-            "analytics",
-        ],
-        "branch" => &[
-            "create", "info", "get", "list", "exists", "del", "fork", "diff", "merge", "export",
-            "import", "validate",
-        ],
-        "space" => &["list", "create", "del", "exists"],
-        "txn" => &["info", "active"],
-        "config" => &["set", "get", "list"],
-        _ => &[],
+    fn kv_get(session: &mut Session, branch: &str, space: &str) -> Output {
+        session
+            .execute(Command::KvGet {
+                branch: Some(branch.into()),
+                space: Some(space.to_string()),
+                key: "k".to_string(),
+                as_of: None,
+            })
+            .expect("kv get should succeed")
     }
-}
 
-/// Known sub-subcommands for nested commands (3rd level).
-fn sub_subcommands_for(cmd: &str, sub: &str) -> &'static [&'static str] {
-    match (cmd, sub) {
-        ("graph", "ontology") => &[
-            "define", "get", "list", "delete", "freeze", "status", "summary",
-        ],
-        ("graph", "analytics") => &["wcc", "cdlp", "pagerank", "lcc", "sssp"],
-        _ => &[],
-    }
-}
+    #[test]
+    fn process_line_handles_help_and_quit_meta_commands() {
+        let mut app = cache_app();
 
-struct StrataHelper;
-
-impl StrataHelper {
-    fn new() -> Self {
-        Self
-    }
-}
-
-impl Helper for StrataHelper {}
-impl Validator for StrataHelper {}
-impl Highlighter for StrataHelper {}
-impl Hinter for StrataHelper {
-    type Hint = String;
-
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<String> {
-        None
-    }
-}
-
-impl Completer for StrataHelper {
-    type Candidate = Pair;
-
-    fn complete(
-        &self,
-        line: &str,
-        pos: usize,
-        _ctx: &Context<'_>,
-    ) -> rustyline::Result<(usize, Vec<Pair>)> {
-        let line_to_pos = &line[..pos];
-        let parts: Vec<&str> = line_to_pos.split_whitespace().collect();
-
-        // Determine if we're completing a partial word or starting a new word
-        let trailing_space = line_to_pos.ends_with(' ');
-
-        if parts.is_empty() || (parts.len() == 1 && !trailing_space) {
-            // Completing top-level command
-            let prefix = parts.first().copied().unwrap_or("");
-            let start = pos - prefix.len();
-            let candidates: Vec<Pair> = TOP_LEVEL_COMMANDS
-                .iter()
-                .filter(|cmd| cmd.starts_with(prefix))
-                .map(|cmd| Pair {
-                    display: cmd.to_string(),
-                    replacement: cmd.to_string(),
-                })
-                .collect();
-            Ok((start, candidates))
-        } else if parts.len() == 1 && trailing_space {
-            // Just typed the top-level command, completing subcommand
-            let subs = subcommands_for(parts[0]);
-            let candidates: Vec<Pair> = subs
-                .iter()
-                .map(|s| Pair {
-                    display: s.to_string(),
-                    replacement: s.to_string(),
-                })
-                .collect();
-            Ok((pos, candidates))
-        } else if parts.len() == 2 && !trailing_space {
-            // Completing partial subcommand
-            let subs = subcommands_for(parts[0]);
-            let prefix = parts[1];
-            let start = pos - prefix.len();
-            let candidates: Vec<Pair> = subs
-                .iter()
-                .filter(|s| s.starts_with(prefix))
-                .map(|s| Pair {
-                    display: s.to_string(),
-                    replacement: s.to_string(),
-                })
-                .collect();
-            Ok((start, candidates))
-        } else if parts.len() == 2 && trailing_space {
-            // Just typed "graph ontology ", completing sub-subcommand
-            let sub_subs = sub_subcommands_for(parts[0], parts[1]);
-            if !sub_subs.is_empty() {
-                let candidates: Vec<Pair> = sub_subs
-                    .iter()
-                    .map(|s| Pair {
-                        display: s.to_string(),
-                        replacement: s.to_string(),
-                    })
-                    .collect();
-                return Ok((pos, candidates));
+        match process_line(&mut app, "help kv").expect("help should parse") {
+            ReplOutcome::Continue { rendered } => {
+                let rendered = rendered.expect("help should render");
+                assert!(rendered.contains("kv"));
             }
-            Ok((pos, vec![]))
-        } else if parts.len() == 3 && !trailing_space {
-            // Completing partial sub-subcommand
-            let sub_subs = sub_subcommands_for(parts[0], parts[1]);
-            if !sub_subs.is_empty() {
-                let prefix = parts[2];
-                let start = pos - prefix.len();
-                let candidates: Vec<Pair> = sub_subs
-                    .iter()
-                    .filter(|s| s.starts_with(prefix))
-                    .map(|s| Pair {
-                        display: s.to_string(),
-                        replacement: s.to_string(),
-                    })
-                    .collect();
-                return Ok((start, candidates));
-            }
-            Ok((pos, vec![]))
-        } else {
-            Ok((pos, vec![]))
+            _ => panic!("expected continue outcome"),
         }
+
+        assert!(matches!(
+            process_line(&mut app, "quit").expect("quit should parse"),
+            ReplOutcome::Exit
+        ));
+    }
+
+    #[test]
+    fn process_line_use_updates_context_only_after_validation() {
+        let mut app = cache_app();
+
+        app.execute_command(Command::BranchCreate {
+            branch_id: Some("feature".into()),
+            metadata: None,
+        })
+        .expect("branch create should succeed");
+
+        assert!(matches!(
+            process_line(&mut app, "use feature analytics").expect("use should succeed"),
+            ReplOutcome::Continue { .. }
+        ));
+        assert_eq!(app.context().branch(), "feature");
+        assert_eq!(app.context().space(), "analytics");
+
+        let error = match process_line(&mut app, "use missing") {
+            Ok(_) => panic!("missing branch should fail"),
+            Err(error) => error,
+        };
+        assert!(error.contains("Branch not found"));
+        assert_eq!(app.context().branch(), "feature");
+    }
+
+    #[test]
+    fn process_line_use_preserves_current_space_when_omitted() {
+        let mut app = cache_app();
+
+        app.execute_command(Command::SpaceCreate {
+            branch: Some(app.context().branch().into()),
+            space: "analytics".to_string(),
+        })
+        .expect("space create should succeed");
+        app.execute_command(Command::BranchCreate {
+            branch_id: Some("feature".into()),
+            metadata: None,
+        })
+        .expect("branch create should succeed");
+
+        assert!(matches!(
+            process_line(&mut app, "use default analytics").expect("explicit use should succeed"),
+            ReplOutcome::Continue { .. }
+        ));
+        assert_eq!(app.context().space(), "analytics");
+
+        assert!(matches!(
+            process_line(&mut app, "use feature").expect("implicit-space use should succeed"),
+            ReplOutcome::Continue { .. }
+        ));
+        assert_eq!(app.context().branch(), "feature");
+        assert_eq!(app.context().space(), "analytics");
+    }
+
+    #[test]
+    fn run_pipe_reader_skips_blank_and_comment_lines() {
+        let mut app = cache_app();
+        let input = Cursor::new("# comment\n\nping\n");
+
+        assert_eq!(run_pipe_reader(&mut app, input), 0);
+    }
+
+    #[test]
+    fn run_pipe_reader_accumulates_failures_but_continues() {
+        let mut app = cache_app();
+        let input = Cursor::new("use missing\nkv put k 1\n");
+
+        assert_eq!(run_pipe_reader(&mut app, input), 1);
+        let branch = app.context().branch().to_string();
+        let space = app.context().space().to_string();
+        assert!(matches!(
+            kv_get(app.session_mut(), &branch, &space),
+            Output::MaybeVersioned(Some(_))
+        ));
+    }
+
+    #[test]
+    fn run_pipe_reader_stops_after_quit() {
+        let mut app = cache_app();
+        let input = Cursor::new("quit\nuse missing\n");
+
+        assert_eq!(run_pipe_reader(&mut app, input), 0);
+        assert_eq!(app.context().branch(), "default");
+    }
+
+    #[test]
+    fn run_pipe_reader_reports_failure_before_quit() {
+        let mut app = cache_app();
+        let input = Cursor::new("use missing\nquit\nkv put k 1\n");
+
+        assert_eq!(run_pipe_reader(&mut app, input), 1);
+        assert_eq!(app.context().branch(), "default");
     }
 }
