@@ -1,0 +1,34 @@
+{
+  "timestamp": "2026-04-21T01:27:28Z",
+  "git_commit": "930f8e9e",
+  "git_branch": "feat/b1-branching-baseline-guardrails",
+  "tranche": null,
+  "epic": null,
+  "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+  "suites": {
+    "branch": {
+      "suite": "branch",
+      "duration_secs": 12.694346143,
+      "metrics": {
+        "fork_p95_us": 99632.003,
+        "merge_small_p50_us": 240.108,
+        "diff_p50_us": 12.844,
+        "delete_p95_us": 2740.594,
+        "diff_p99_us": 26.94,
+        "create_p50_us": 30.156,
+        "create_p95_us": 45.344,
+        "create_p99_us": 65.061,
+        "delete_p50_us": 2280.666,
+        "fork_p50_us": 71886.533,
+        "merge_small_p99_us": 374.669,
+        "merge_large_us": 5580.542,
+        "delete_p99_us": 12173.555,
+        "fork_p99_us": 119834.549,
+        "diff_p95_us": 14.707,
+        "merge_small_p95_us": 317.873,
+        "reopen_after_branch_heavy_history_ms": 62.0
+      }
+    }
+  },
+  "comparison": null
+}

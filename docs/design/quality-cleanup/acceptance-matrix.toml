@@ -4699,3 +4699,103 @@ status = "pending"
 evidence_kind = "feature_matrix"
 file = ""
 notes = "CAP-API-005: Feature matrix proves every advertised method/command behaves under its supported build"
+
+# =============================================================================
+# TRANCHE 4 BRANCHING CLOSURE (B1-B6) — per branching-execution-plan.md
+# =============================================================================
+# One entry per epic. Status "passed" because the accepted tranche-4
+# artifacts have landed on main as of closeout. B6 is accepted in its
+# narrowed form: unified restart/degradation history lane, benchmark
+# smoke, runbooks, and closeout docs, while follower/race proofs remain
+# in dedicated suites and two operator-facing surface additions are
+# explicitly deferred. See docs/design/branching/tranche-4-closeout.md.
+
+[[tests]]
+name = "branching_b1_lifecycle_gate"
+scope = "branching"
+phase = "B1"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_lifecycle_gate.rs"
+notes = "B1: branch lifecycle gate + restart invariants — canonical BranchService mutation gate"
+
+[[tests]]
+name = "branching_b2_identity_migration"
+scope = "branching"
+phase = "B2"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_generation_migration.rs"
+notes = "B2: BranchId derivation, generation allocator, control-store recovery"
+
+[[tests]]
+name = "branching_b3_recreate_and_merge_lineage"
+scope = "branching"
+phase = "B3"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_recreate_state_machine.rs"
+notes = "B3: same-name recreate monotonicity, merge lineage edges, same-name race serialization"
+
+[[tests]]
+name = "branching_b4_guardrails_snapshot"
+scope = "branching"
+phase = "B4"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_guardrails.rs"
+notes = "B4: transitional-shape snapshot + lifecycle gate matrix locked for every mutation path"
+
+[[tests]]
+name = "branching_b5_retention_and_degradation"
+scope = "branching"
+phase = "B5"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_retention_matrix.rs"
+notes = "B5: retention report (B5.2), convergence closure (B5.3), degraded primitives (B5.4), retention state machine"
+
+[[tests]]
+name = "branching_b6_adversarial_history_suite"
+scope = "branching"
+phase = "B6"
+tranche = 4
+status = "passed"
+evidence_kind = "rust_test"
+file = "tests/integration/branching_adversarial_history.rs"
+notes = "B6 (narrowed): unified proptest state machine over 3-branch × 8-op alphabet with 6 postconditions; restart/degradation covered here, follower/race remain in dedicated suites"
+
+[[tests]]
+name = "branching_b6_materialize_benchmark_baseline"
+scope = "branching"
+phase = "B6"
+tranche = 4
+status = "passed"
+evidence_kind = "benchmark"
+file = "benchmarks/baselines/b6-baseline.json"
+notes = "B6 (narrowed): materialize_p50_us + materialize_p99_us gated alongside the pre-existing branch ops; reopen measured here, follower catch-up remains out-of-band"
+
+[[tests]]
+name = "branching_b6_operator_runbooks"
+scope = "branching"
+phase = "B6"
+tranche = 4
+status = "passed"
+evidence_kind = "doc_gate"
+file = "docs/design/branching/runbooks/README.md"
+notes = "B6 (narrowed): four named operator runbooks citing already-public typed errors, stable predicates, or documented structured logs"
+
+[[tests]]
+name = "branching_b6_tranche_4_closeout"
+scope = "branching"
+phase = "B6"
+tranche = 4
+status = "passed"
+evidence_kind = "doc_gate"
+file = "docs/design/branching/tranche-4-closeout.md"
+notes = "B6 (narrowed): 8-bar evidence map, invariant re-audit, benchmark delta, sign-off, and explicit deferred items with re-open criteria"

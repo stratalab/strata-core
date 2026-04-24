@@ -1,0 +1,42 @@
+{
+  "timestamp": "2026-04-12T16:18:00Z",
+  "git_commit": "d70ad4db",
+  "git_branch": "main",
+  "tranche": 1,
+  "epic": "T1-COMPLETE",
+  "hardware": "AMD Ryzen 7 7800X3D 8-Core Processor (16 cores, 61 GB)",
+  "suites": {
+    "redb": {
+      "suite": "redb",
+      "duration_secs": 23.9,
+      "metrics": {
+        "bulk_load_ops_sec": 320371,
+        "bulk_load_duration_ms": 15600,
+        "range_scan_ops_sec": 111011,
+        "random_read_ops_sec": 267573
+      }
+    },
+    "ycsb": {
+      "suite": "ycsb",
+      "duration_secs": 0.6,
+      "metrics": {
+        "load_ops_sec": 421106,
+        "run_ops_sec": 441200,
+        "p50_us": 1.93,
+        "p99_us": 5.67
+      }
+    },
+    "beir": {
+      "suite": "beir",
+      "duration_secs": 103.8,
+      "metrics": {
+        "nfcorpus_ndcg_at_10": 0.3205,
+        "scifact_ndcg_at_10": 0.6746,
+        "arguana_ndcg_at_10": 0.3203,
+        "scidocs_ndcg_at_10": 0.1502,
+        "avg_ndcg_at_10": 0.3664
+      }
+    }
+  },
+  "comparison": null
+}

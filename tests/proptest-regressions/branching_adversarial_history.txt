@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc be64befd2d09773219e6936dea76cf890ddc36367c353175b0b2a4b91249b7f4 # shrinks to ops = [InjectDegradation("main"), Reopen]
+cc 6653e6aaf19f25e0ea6b97e1ed56a223c47531fbf21730e75d4b8f144afdacd7 # shrinks to ops = [Create("feature"), Delete("main"), Reopen, Fork("feature", "main")]

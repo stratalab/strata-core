@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "timestamp": "2026-04-15T16:41:06Z",
+    "git_commit": "e33da45d",
+    "git_branch": "feat/t3-e1-wal-sync-correctness",
+    "git_dirty": true,
+    "sdk": "rust",
+    "sdk_version": "0.1.0",
+    "hardware": {
+      "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "cores": 16,
+      "ram_gb": 61,
+      "os": "linux",
+      "arch": "x86_64"
+    }
+  },
+  "results": [
+    {
+      "benchmark": "wal/blind_put/cache",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "value_size_bytes": 1024,
+        "durability": "cache",
+        "samples": 250
+      },
+      "metrics": {
+        "ops_per_sec": 383283.91526052577,
+        "p50_ns": 1844,
+        "p95_ns": 5420,
+        "p99_ns": 7745,
+        "min_ns": 1703,
+        "max_ns": 9427,
+        "avg_ns": 2609,
+        "samples": 250
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/standard",
+      "category": "latency",
+      "parameters": {
+        "value_size_bytes": 1024,
+        "durability": "standard",
+        "warmup_ops": 25,
+        "samples": 250
+      },
+      "metrics": {
+        "ops_per_sec": 253781.59961587618,
+        "p50_ns": 2886,
+        "p95_ns": 8346,
+        "p99_ns": 9718,
+        "min_ns": 2595,
+        "max_ns": 11281,
+        "avg_ns": 3940,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 0.0
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/always",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "samples": 250,
+        "durability": "always",
+        "value_size_bytes": 1024
+      },
+      "metrics": {
+        "ops_per_sec": 95.41735092627712,
+        "p50_ns": 8900597,
+        "p95_ns": 17610509,
+        "p99_ns": 18194500,
+        "min_ns": 8628810,
+        "max_ns": 18931926,
+        "avg_ns": 10480274,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 1.0
+      }
+    }
+  ]
+}

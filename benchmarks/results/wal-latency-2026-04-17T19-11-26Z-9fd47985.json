@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "timestamp": "2026-04-17T19:11:26Z",
+    "git_commit": "9fd47985",
+    "git_branch": "main",
+    "git_dirty": true,
+    "sdk": "rust",
+    "sdk_version": "0.1.0",
+    "hardware": {
+      "cpu": "AMD Ryzen 7 7800X3D 8-Core Processor",
+      "cores": 16,
+      "ram_gb": 61,
+      "os": "linux",
+      "arch": "x86_64"
+    }
+  },
+  "results": [
+    {
+      "benchmark": "wal/blind_put/cache",
+      "category": "latency",
+      "parameters": {
+        "value_size_bytes": 1024,
+        "durability": "cache",
+        "samples": 250,
+        "warmup_ops": 25
+      },
+      "metrics": {
+        "ops_per_sec": 414112.970018221,
+        "p50_ns": 1663,
+        "p95_ns": 5029,
+        "p99_ns": 8406,
+        "min_ns": 1513,
+        "max_ns": 9538,
+        "avg_ns": 2414,
+        "samples": 250
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/standard",
+      "category": "latency",
+      "parameters": {
+        "warmup_ops": 25,
+        "durability": "standard",
+        "samples": 250,
+        "value_size_bytes": 1024
+      },
+      "metrics": {
+        "ops_per_sec": 228064.3177866449,
+        "p50_ns": 3196,
+        "p95_ns": 9458,
+        "p99_ns": 12504,
+        "min_ns": 2865,
+        "max_ns": 15319,
+        "avg_ns": 4384,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 0.0
+      }
+    },
+    {
+      "benchmark": "wal/blind_put/always",
+      "category": "latency",
+      "parameters": {
+        "samples": 250,
+        "durability": "always",
+        "warmup_ops": 25,
+        "value_size_bytes": 1024
+      },
+      "metrics": {
+        "ops_per_sec": 97.53011106904994,
+        "p50_ns": 8878982,
+        "p95_ns": 17718842,
+        "p99_ns": 18716029,
+        "min_ns": 8616862,
+        "max_ns": 21593235,
+        "avg_ns": 10253243,
+        "samples": 250,
+        "wal_appends_per_op": 1.0,
+        "wal_syncs_per_op": 1.0
+      }
+    }
+  ]
+}
