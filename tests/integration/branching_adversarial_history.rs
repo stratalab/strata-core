@@ -19,19 +19,26 @@
 //!
 //! 1. Live-branch visibility: for each name in the topology,
 //!    `BranchService::control_record(name)?.is_some()` matches
-//!    the model's `live` bit.
+//!    the model's `live` bit. (`control_record` is the public
+//!    equivalent of `BranchControlStore::list_visible` for a single
+//!    name — the store itself is `pub(crate)`.)
 //! 2. KV read consistency: live branches return the expected `root`
 //!    value; deleted branches read `None`.
 //! 3. Fork-frontier preservation: unrewritten fork children keep the
-//!    parent's snapshot value through subsequent parent rewrites.
+//!    parent's snapshot value through subsequent parent rewrites
+//!    (verified end-to-end by postcondition 2; this one asserts the
+//!    model's own fork_frontier == value invariant so a model-logic
+//!    regression trips the suite).
 //! 4. Typed rejection surfaces: deleting a non-existent branch
 //!    returns `StrataError::BranchNotFoundByName`.
-//! 5. Orphan attribution on recreate: `retention_report().orphan_storage`
-//!    surfaces `detached_shared_bytes` when descendants outlive a
-//!    parent delete (B5.2 shape).
+//! 5. Orphan attribution on recreate: a recreated parent (generation
+//!    >= 1) with a live descendant must appear in `report.branches`
+//!    with `shared_bytes == 0` — the old-lifecycle bytes belong in
+//!    `orphan_storage`, not the recreated entry.
 //! 6. Degraded-primitive isolation: `retention_report().degraded_primitives`
-//!    obeys the B5.4 generation-equality filter and never leaks to
-//!    sibling branches.
+//!    obeys the B5.4 generation-equality filter (entries for the live
+//!    generation appear; entries for stale generations do not) and
+//!    never leaks to sibling branches.
 //!
 //! No `reclaim_status` postcondition beyond "stays `Allowed` on
 //! healthy reopens" — the suite never injects `RecoveryHealth` faults.
@@ -450,16 +457,28 @@ fn assert_invariants(
         if !has_live_descendant {
             continue;
         }
-        if let Some(entry) = report.branches.iter().find(|e| e.name == *name) {
-            prop_assert_eq!(
-                entry.shared_bytes,
-                0,
-                "step {} after {:?}: recreated {} must not inherit shared_bytes from old lifecycle",
-                step,
-                op,
-                name
-            );
-        }
+        // Every live branch must appear in report.branches (postcondition
+        // 1 already verified liveness via control_record; the retention
+        // report joins on the same control-record set). Missing entries
+        // indicate a real attribution regression — don't let this check
+        // silently skip.
+        let entry = report
+            .branches
+            .iter()
+            .find(|e| e.name == *name)
+            .ok_or_else(|| {
+                TestCaseError::fail(format!(
+                    "step {step} after {op:?}: live recreated branch {name} missing from report.branches"
+                ))
+            })?;
+        prop_assert_eq!(
+            entry.shared_bytes,
+            0,
+            "step {} after {:?}: recreated {} must not inherit shared_bytes from old lifecycle",
+            step,
+            op,
+            name
+        );
     }
 
     // Postcondition 6 — degraded-primitive attribution. B5.4 filters
@@ -507,6 +526,22 @@ fn assert_invariants(
                 "step {} after {:?}: degraded entry must carry current live branch name",
                 step,
                 op
+            );
+        } else {
+            // Enforce the B5.4 generation-equality filter in the negative
+            // direction: when the recorded `branch_ref` does not match a
+            // live control record (because the branch was deleted, or a
+            // same-name recreate advanced the generation past the old
+            // lifecycle), the entry must NOT appear in the report. A
+            // leak here would surface old-lifecycle degradation against
+            // the new live branch.
+            let leaked = report
+                .degraded_primitives
+                .iter()
+                .any(|e| e.branch == *branch_ref && e.primitive_name == *coll_name);
+            prop_assert!(
+                !leaked,
+                "step {step} after {op:?}: stale degraded entry ({branch_ref:?}, {coll_name}) must not appear in report.degraded_primitives (B5.4 generation-equality filter)"
             );
         }
         for e in &report.degraded_primitives {
