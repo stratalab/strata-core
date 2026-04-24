@@ -54,6 +54,8 @@ use strata_core::contract::PrimitiveType;
 use strata_core::value::Value;
 use strata_core::{BranchRef, PrimitiveDegradedReason, StrataError};
 use strata_engine::{PrimitiveDegradationRegistry, ReclaimStatus};
+use strata_graph::GraphSubsystem;
+use strata_vector::VectorSubsystem;
 
 const BRANCH_NAMES: [&str; 3] = ["main", "feature", "hotfix"];
 
@@ -73,6 +75,36 @@ fn flush_branch(db: &Arc<Database>, name: &str) {
     db.storage()
         .flush_oldest_frozen(&id)
         .expect("flush succeeds");
+}
+
+fn write_branch_value_checked(
+    db: &Arc<Database>,
+    name: &str,
+    value: i64,
+    op: &Op,
+    context: &str,
+) -> Result<(), TestCaseError> {
+    KVStore::new(db.clone())
+        .put(&resolve(name), "default", "root", Value::Int(value))
+        .map_err(|e| {
+            TestCaseError::fail(format!(
+                "{context} after {op:?}: kv write failed unexpectedly: {e:?}"
+            ))
+        })?;
+    let id = resolve(name);
+    db.storage().rotate_memtable(&id);
+    db.storage().flush_oldest_frozen(&id).map_err(|e| {
+        TestCaseError::fail(format!(
+            "{context} after {op:?}: branch flush failed unexpectedly: {e:?}"
+        ))
+    })?;
+    Ok(())
+}
+
+fn unexpected_engine_error(op: &Op, context: &str, err: &StrataError) -> TestCaseError {
+    TestCaseError::fail(format!(
+        "{context} after {op:?}: unexpected engine-side failure: {err:?}"
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -156,27 +188,24 @@ fn op_strategy() -> impl Strategy<Value = Op> {
 /// lockstep. Returns `Ok(true)` when executed, `Ok(false)` when the
 /// model-level guard skipped it (e.g. forking a missing parent),
 /// `Err` only for unexpected engine-side failures.
-fn apply_op(
-    test_db: &mut TestDb,
-    model: &mut ModelState,
-    op: &Op,
-) -> Result<bool, TestCaseError> {
+fn apply_op(test_db: &mut TestDb, model: &mut ModelState, op: &Op) -> Result<bool, TestCaseError> {
     match op {
         Op::Create(name) => {
             if model.live(name) {
                 return Ok(false);
             }
-            if test_db.db.branches().create(name).is_err() {
-                return Ok(false);
-            }
+            test_db
+                .db
+                .branches()
+                .create(name)
+                .map_err(|e| unexpected_engine_error(op, "create", &e))?;
             let generation = model
                 .branches
                 .get(name)
                 .map(|b| b.generation + 1)
                 .unwrap_or(0);
             let value = model.alloc_value();
-            seed(&test_db.db, name, "root", value);
-            flush_branch(&test_db.db, name);
+            write_branch_value_checked(&test_db.db, name, value, op, "create")?;
             model.branches.insert(
                 name.clone(),
                 BranchModel {
@@ -193,9 +222,11 @@ fn apply_op(
             if !model.live(name) {
                 return Ok(false);
             }
-            if test_db.db.branches().delete(name).is_err() {
-                return Ok(false);
-            }
+            test_db
+                .db
+                .branches()
+                .delete(name)
+                .map_err(|e| unexpected_engine_error(op, "delete", &e))?;
             if let Some(b) = model.branches.get_mut(name) {
                 b.live = false;
                 b.fork_frontier = None;
@@ -215,9 +246,11 @@ fn apply_op(
             if src == dst || !model.live(src) || model.branches.contains_key(dst) {
                 return Ok(false);
             }
-            if test_db.db.branches().fork(src, dst).is_err() {
-                return Ok(false);
-            }
+            test_db
+                .db
+                .branches()
+                .fork(src, dst)
+                .map_err(|e| unexpected_engine_error(op, "fork", &e))?;
             let src_value = model.branches.get(src).map(|b| b.value).unwrap_or(0);
             model.branches.insert(
                 dst.clone(),
@@ -236,8 +269,7 @@ fn apply_op(
                 return Ok(false);
             }
             let v = model.alloc_value();
-            seed(&test_db.db, name, "root", v);
-            flush_branch(&test_db.db, name);
+            write_branch_value_checked(&test_db.db, name, v, op, "rewrite")?;
             if let Some(b) = model.branches.get_mut(name) {
                 b.value = v;
                 // Rewriting a fork child moves it past the fork frontier.
@@ -268,7 +300,11 @@ fn apply_op(
                 .db
                 .storage()
                 .materialize_layer(&id, 0)
-                .expect("materialize layer 0 succeeds");
+                .map_err(|e| {
+                    TestCaseError::fail(format!(
+                        "materialize after {op:?}: storage materialize failed unexpectedly: {e:?}"
+                    ))
+                })?;
             Ok(true)
         }
         Op::Gc => {
@@ -283,11 +319,11 @@ fn apply_op(
             if !has_deleted && !has_fork {
                 return Ok(false);
             }
-            test_db
-                .db
-                .storage()
-                .gc_orphan_segments()
-                .expect("healthy histories permit GC");
+            test_db.db.storage().gc_orphan_segments().map_err(|e| {
+                TestCaseError::fail(format!(
+                    "gc after {op:?}: healthy history GC failed unexpectedly: {e:?}"
+                ))
+            })?;
             Ok(true)
         }
         Op::InjectDegradation(name) => {
@@ -324,6 +360,46 @@ fn apply_op(
             Ok(true)
         }
     }
+}
+
+fn follower_adversarial_test_db() -> TestDb {
+    let dir = tempfile::tempdir().expect("follower adversarial tempdir");
+    let primary_spec = OpenSpec::primary(dir.path())
+        .with_subsystem(GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem);
+    let primary = Database::open_runtime(primary_spec).expect("primary open");
+    primary.branches().create("main").expect("seed main branch");
+    seed(&primary, "main", "root", 1);
+    flush_branch(&primary, "main");
+    drop(primary);
+
+    let follower_spec = OpenSpec::follower(dir.path())
+        .with_subsystem(GraphSubsystem)
+        .with_subsystem(VectorSubsystem)
+        .with_subsystem(SearchSubsystem);
+    let follower = Database::open_runtime(follower_spec).expect("follower open");
+    TestDb {
+        db: follower,
+        dir,
+        branch_id: BranchId::new(),
+    }
+}
+
+fn follower_seed_model() -> ModelState {
+    let mut model = ModelState::new();
+    model.branches.insert(
+        "main".to_string(),
+        BranchModel {
+            live: true,
+            generation: 0,
+            value: 1,
+            fork_frontier: None,
+            fork_parent: None,
+        },
+    );
+    model.next_value = 2;
+    model
 }
 
 fn assert_invariants(
@@ -600,4 +676,85 @@ proptest! {
             assert_invariants(&test_db, &model, step + 1, &op)?;
         }
     }
+}
+
+#[test]
+fn apply_op_create_surfaces_follower_engine_failure() {
+    let mut test_db = follower_adversarial_test_db();
+    let mut model = follower_seed_model();
+    let err = apply_op(&mut test_db, &mut model, &Op::Create("feature".to_string()))
+        .expect_err("follower create must surface as an unexpected engine failure");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("create after Create(\"feature\")"),
+        "error should name the create op context, got: {msg}"
+    );
+    assert!(
+        !model.live("feature"),
+        "failed create must not mutate the model"
+    );
+    assert!(
+        test_db
+            .kv()
+            .get(&resolve("feature"), "default", "root")
+            .expect("feature kv read")
+            .is_none(),
+        "failed create must not leave a live follower-visible branch"
+    );
+}
+
+#[test]
+fn apply_op_delete_surfaces_follower_engine_failure() {
+    let mut test_db = follower_adversarial_test_db();
+    let mut model = follower_seed_model();
+    let err = apply_op(&mut test_db, &mut model, &Op::Delete("main".to_string()))
+        .expect_err("follower delete must surface as an unexpected engine failure");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("delete after Delete(\"main\")"),
+        "error should name the delete op context, got: {msg}"
+    );
+    assert!(
+        model.live("main"),
+        "failed delete must not mutate the model"
+    );
+    assert!(
+        matches!(
+            test_db
+                .kv()
+                .get(&resolve("main"), "default", "root")
+                .expect("main kv read"),
+            Some(Value::Int(1))
+        ),
+        "failed delete must leave main readable on the follower"
+    );
+}
+
+#[test]
+fn apply_op_fork_surfaces_follower_engine_failure() {
+    let mut test_db = follower_adversarial_test_db();
+    let mut model = follower_seed_model();
+    let err = apply_op(
+        &mut test_db,
+        &mut model,
+        &Op::Fork("main".to_string(), "feature".to_string()),
+    )
+    .expect_err("follower fork must surface as an unexpected engine failure");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("fork after Fork(\"main\", \"feature\")"),
+        "error should name the fork op context, got: {msg}"
+    );
+    assert!(
+        !model.live("feature"),
+        "failed fork must not mutate the model"
+    );
+    assert!(
+        test_db
+            .kv()
+            .get(&resolve("feature"), "default", "root")
+            .expect("feature kv read")
+            .is_none(),
+        "failed fork must not leave a follower-visible destination branch"
+    );
 }

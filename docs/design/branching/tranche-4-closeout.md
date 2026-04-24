@@ -1,7 +1,13 @@
 # Tranche 4 closeout — branching
 
-Tranche 4 closes the branching correctness sprint. Six epics (B1–B6)
-landed on `main` per `docs/design/branching/branching-execution-plan.md`.
+Tranche 4 closes the branching correctness sprint under the narrowed B6
+acceptance now reflected in
+`docs/design/branching/branching-execution-plan.md`. Six epics (B1–B6)
+landed on `main`; B6 contributes a unified restart/degradation history
+lane, benchmark smoke, runbooks, and closeout artifacts, while
+follower/race proofs remain in dedicated suites and two operator-facing
+surface expansions remain deliberately deferred.
+
 This document is the tranche-4 acceptance record: what shipped, what
 each invariant-class reads like post-closeout, where the regression
 gates live, and what tranche 4 **deliberately did not ship**.
@@ -21,7 +27,7 @@ regression gate that now pins it.
 | 5 | Generation-aware retention attribution via `RetentionReport` | B5.1–B5.2 (#2456–#2459) | `branching_retention_matrix.rs`, `branching_retention_state_machine.rs` |
 | 6 | Convergence closure + differential corpus | B5.3 (#2460) | `branching_convergence_differential.rs` |
 | 7 | Fail-closed degraded primitives (vector config mismatch, JSON `_idx` load) | B5.4 (#2461) | `branching_degraded_primitive_paths.rs` |
-| 8 | Unified adversarial history gate + benchmark smoke + runbooks | B6 (this PR) | `branching_adversarial_history.rs`, `benchmarks/baselines/b6-baseline.json`, `docs/design/branching/runbooks/` |
+| 8 | Narrowed B6 closeout: unified restart/degradation history gate + benchmark smoke + runbooks | B6 (this PR) | `branching_adversarial_history.rs`, dedicated follower/race suites, `benchmarks/baselines/b6-baseline.json`, `docs/design/branching/runbooks/` |
 
 ## 2. Invariant re-audit
 
@@ -88,7 +94,9 @@ captured at commit `6b94483c` on `feat/B6-tranche-closeout`:
 
 The 5 pre-existing branch metrics (`create_p*`, `fork_p*`, `diff_p*`,
 `delete_p*`, `merge_small_p*`, `merge_large_us`) stay gated at S4
-thresholds (5% median, 10% tail). Baseline file:
+thresholds (5% median, 10% tail). This smoke harness ends at `reopen`;
+follower catch-up remains covered by dedicated follower tests, not the
+benchmark binary. Baseline file:
 `benchmarks/baselines/b6-baseline.json`.
 
 Run future regression comparisons via:
@@ -107,12 +115,14 @@ cargo run --release -p strata-benchmarks --bin regression -- \
 - **Assurance class:** S4. Regression gates above cover the
   invariants. Benchmark baseline captured. Adversarial history suite
   runs 16 cases × 1..20 ops every `cargo test -p stratadb --test
-  integration`.
+  integration`; follower and race coverage remain in their dedicated
+  suites and are part of the closeout evidence rather than the
+  generated-history alphabet.
 - **D4 surface:** unchanged from post-B5.4 shape. No new public
   types. No new `#[non_exhaustive]` enums. No field additions to
   existing public structs.
 
-## 5. Deferred items
+## 5. Deferred items under narrowed B6 acceptance
 
 Two items originally scoped for B6 were explicitly dropped during
 planning after a review round flagged the additions as abstraction
