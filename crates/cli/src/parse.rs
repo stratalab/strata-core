@@ -628,18 +628,20 @@ fn parse_graph_ontology(matches: &ArgMatches, context: &Context) -> Result<CliRe
             }
         }
         "get" => match submatches.get_one::<String>("kind").map(String::as_str) {
+            Some("object") => Ok(CliRequest::Execute(Command::GraphGetObjectType {
+                branch: branch(context),
+                space: space(context),
+                graph: required_string(submatches, "graph")?,
+                name: required_string(submatches, "name")?,
+            })),
             Some("link") => Ok(CliRequest::Execute(Command::GraphGetLinkType {
                 branch: branch(context),
                 space: space(context),
                 graph: required_string(submatches, "graph")?,
                 name: required_string(submatches, "name")?,
             })),
-            _ => Ok(CliRequest::Execute(Command::GraphGetObjectType {
-                branch: branch(context),
-                space: space(context),
-                graph: required_string(submatches, "graph")?,
-                name: required_string(submatches, "name")?,
-            })),
+            None => Err("--kind is required for `graph ontology get`.".to_string()),
+            Some(other) => Err(format!("Invalid --kind '{other}'. Use 'object' or 'link'.")),
         },
         "list" => match submatches.get_one::<String>("kind").map(String::as_str) {
             Some("object") => Ok(CliRequest::Execute(Command::GraphListObjectTypes {
@@ -660,18 +662,20 @@ fn parse_graph_ontology(matches: &ArgMatches, context: &Context) -> Result<CliRe
             Some(other) => Err(format!("Invalid --kind '{other}'. Use 'object' or 'link'.")),
         },
         "delete" => match submatches.get_one::<String>("kind").map(String::as_str) {
+            Some("object") => Ok(CliRequest::Execute(Command::GraphDeleteObjectType {
+                branch: branch(context),
+                space: space(context),
+                graph: required_string(submatches, "graph")?,
+                name: required_string(submatches, "name")?,
+            })),
             Some("link") => Ok(CliRequest::Execute(Command::GraphDeleteLinkType {
                 branch: branch(context),
                 space: space(context),
                 graph: required_string(submatches, "graph")?,
                 name: required_string(submatches, "name")?,
             })),
-            _ => Ok(CliRequest::Execute(Command::GraphDeleteObjectType {
-                branch: branch(context),
-                space: space(context),
-                graph: required_string(submatches, "graph")?,
-                name: required_string(submatches, "name")?,
-            })),
+            None => Err("--kind is required for `graph ontology delete`.".to_string()),
+            Some(other) => Err(format!("Invalid --kind '{other}'. Use 'object' or 'link'.")),
         },
         _ => Err("Unsupported graph ontology subcommand".to_string()),
     }
@@ -1892,6 +1896,7 @@ fn build_graph() -> ClapCommand {
                         .arg(
                             Arg::new("kind")
                                 .long("kind")
+                                .required(true)
                                 .value_parser(["object", "link"]),
                         ),
                 )
@@ -1913,6 +1918,7 @@ fn build_graph() -> ClapCommand {
                         .arg(
                             Arg::new("kind")
                                 .long("kind")
+                                .required(true)
                                 .value_parser(["object", "link"]),
                         ),
                 ),
@@ -2671,15 +2677,17 @@ mod tests {
             Command::GraphDefineObjectType { .. }
         ));
         assert!(matches!(
-            parse_shell(&["strata", "graph", "ontology", "get", "g", "Person"]),
-            Command::GraphGetObjectType { .. }
-        ));
-        assert!(matches!(
             parse_shell(&["strata", "graph", "ontology", "list", "g"]),
             Command::GraphListOntologyTypes { .. }
         ));
         assert!(matches!(
-            parse_shell(&["strata", "graph", "ontology", "delete", "g", "Person"]),
+            parse_shell(&["strata", "graph", "ontology", "get", "g", "Person", "--kind", "object"]),
+            Command::GraphGetObjectType { .. }
+        ));
+        assert!(matches!(
+            parse_shell(&[
+                "strata", "graph", "ontology", "delete", "g", "Person", "--kind", "object"
+            ]),
             Command::GraphDeleteObjectType { .. }
         ));
         assert!(matches!(
@@ -2965,6 +2973,20 @@ mod tests {
     fn graph_ontology_list_rejects_invalid_kind() {
         assert!(build_cli()
             .try_get_matches_from(["strata", "graph", "ontology", "list", "g", "--kind", "bad"])
+            .is_err());
+    }
+
+    #[test]
+    fn graph_ontology_get_requires_kind() {
+        assert!(build_cli()
+            .try_get_matches_from(["strata", "graph", "ontology", "get", "g", "Person"])
+            .is_err());
+    }
+
+    #[test]
+    fn graph_ontology_delete_requires_kind() {
+        assert!(build_cli()
+            .try_get_matches_from(["strata", "graph", "ontology", "delete", "g", "Person"])
             .is_err());
     }
 }
