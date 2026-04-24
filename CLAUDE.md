@@ -65,6 +65,11 @@ assurance_class: S4
 benchmark_required: true
 ```
 
+> **Tranche 4 closed** with B6 — see `docs/design/branching/tranche-4-closeout.md`
+> for the 8-bar evidence map, invariant re-audit, benchmark delta, and
+> explicitly-deferred items (typed lineage variant; cleanup-debt
+> programmatic surface).
+
 ---
 
 ## Hard Architectural Rules
