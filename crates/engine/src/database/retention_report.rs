@@ -46,7 +46,6 @@ use strata_storage::{
 };
 
 use crate::branch_ops::branch_control_store::BranchControlStore;
-use crate::database::cleanup_debt::{self, CleanupDebtEntry};
 use crate::database::primitive_degradation::PrimitiveDegradationRegistry;
 use crate::database::Database;
 
@@ -253,18 +252,6 @@ pub struct RetentionReport {
     /// (defense-in-depth against missed `clear_branch` on same-name
     /// recreate).
     pub degraded_primitives: Vec<DegradedPrimitiveEntry>,
-    /// Unacknowledged cleanup-debt entries (B6).
-    ///
-    /// Populated from the per-`Database` `CleanupDebtRegistry`. Every
-    /// entry is returned unfiltered (orphan-visible): cleanup debt
-    /// survives delete and recreate of the same branch name, because
-    /// the debt is about work that did not complete against a
-    /// *specific* lifecycle instance. Acknowledgement via
-    /// [`crate::database::cleanup_debt::acknowledge`] is the only way
-    /// to prune an entry.
-    ///
-    /// Sorted by `DebtId` ascending for deterministic output.
-    pub cleanup_debt: Vec<CleanupDebtEntry>,
 }
 
 impl Database {
@@ -476,18 +463,12 @@ impl Database {
             }
         }
 
-        // B6 — cleanup debt is orphan-visible: no generation or
-        // liveness filter. Entries are sorted by `DebtId` ascending by
-        // the snapshot helper, so output is deterministic.
-        let cleanup_debt = cleanup_debt::snapshot(self);
-
         Ok(RetentionReport {
             reclaim_status,
             branches,
             orphan_storage,
             totals,
             degraded_primitives,
-            cleanup_debt,
         })
     }
 }

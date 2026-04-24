@@ -33,8 +33,8 @@ pub use branch::{
 // Re-export commonly used types and traits
 pub use branch_types::{BranchEventOffsets, BranchMetadata, BranchStatus};
 pub use error::{
-    ConstraintReason, DetailValue, ErrorCode, ErrorDetails, LineageUnavailableReason,
-    PrimitiveDegradedReason, StrataError, StrataResult, BRANCH_LINEAGE_UNAVAILABLE_DETAIL_PREFIX,
+    ConstraintReason, DetailValue, ErrorCode, ErrorDetails, PrimitiveDegradedReason, StrataError,
+    StrataResult,
 };
 pub use id::{CommitVersion, TxnId};
 pub use limits::{LimitError, Limits};
