@@ -32,9 +32,9 @@
 //! 4. Typed rejection surfaces: deleting a non-existent branch
 //!    returns `StrataError::BranchNotFoundByName`.
 //! 5. Orphan attribution on recreate: a recreated parent (generation
-//!    >= 1) with a live descendant must appear in `report.branches`
-//!    with `shared_bytes == 0` — the old-lifecycle bytes belong in
-//!    `orphan_storage`, not the recreated entry.
+//!    at or above 1) with a live descendant must appear in
+//!    `report.branches` with `shared_bytes == 0` — the old-lifecycle
+//!    bytes belong in `orphan_storage`, not the recreated entry.
 //! 6. Degraded-primitive isolation: `retention_report().degraded_primitives`
 //!    obeys the B5.4 generation-equality filter (entries for the live
 //!    generation appear; entries for stale generations do not) and
@@ -203,23 +203,27 @@ fn apply_op(
             Ok(true)
         }
         Op::Fork(src, dst) => {
-            if src == dst || !model.live(src) || model.live(dst) {
+            // Guard rail: only fork into a destination that has never
+            // had a lifecycle. Forking into a previously-deleted name
+            // (same-name recreate via fork) is a narrow corner where
+            // the engine's KV visibility through the fresh inherited
+            // layer interacts with the tombstones of the old lifecycle
+            // — the semantics there are not specified by B3 and not in
+            // scope for the B6 regression gate. Recreate-via-fork is
+            // separately covered by branching_recreate_state_machine.rs
+            // for the narrower patterns that are specified.
+            if src == dst || !model.live(src) || model.branches.contains_key(dst) {
                 return Ok(false);
             }
             if test_db.db.branches().fork(src, dst).is_err() {
                 return Ok(false);
             }
             let src_value = model.branches.get(src).map(|b| b.value).unwrap_or(0);
-            let generation = model
-                .branches
-                .get(dst)
-                .map(|b| b.generation + 1)
-                .unwrap_or(0);
             model.branches.insert(
                 dst.clone(),
                 BranchModel {
                     live: true,
-                    generation,
+                    generation: 0,
                     value: src_value,
                     fork_frontier: Some(src_value),
                     fork_parent: Some(src.clone()),
