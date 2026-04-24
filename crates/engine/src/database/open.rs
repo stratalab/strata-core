@@ -482,6 +482,8 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
+            primitive_degraded_observers: super::observers::PrimitiveDegradedObserverRegistry::new(
+            ),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),
             ),
@@ -823,6 +825,8 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
+            primitive_degraded_observers: super::observers::PrimitiveDegradedObserverRegistry::new(
+            ),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),
             ),
@@ -990,6 +994,8 @@ impl Database {
             commit_observers: super::CommitObserverRegistry::new(),
             abort_observers: super::AbortObserverRegistry::new(),
             replay_observers: super::ReplayObserverRegistry::new(),
+            primitive_degraded_observers: super::observers::PrimitiveDegradedObserverRegistry::new(
+            ),
             lifecycle_state: std::sync::atomic::AtomicU8::new(
                 super::LifecycleState::Uninitialized.as_u8(),
             ),

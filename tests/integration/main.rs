@@ -13,6 +13,7 @@ mod common;
 mod branching;
 mod branching_control_store_recovery;
 mod branching_convergence_differential;
+mod branching_degraded_primitive_paths;
 mod branching_gc_quarantine_recovery;
 mod branching_generation_migration;
 mod branching_guardrails;

@@ -27,11 +27,13 @@
 use parking_lot::RwLock;
 use std::fmt;
 use std::sync::Arc;
+use std::time::SystemTime;
 
+use strata_core::contract::PrimitiveType;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
-use strata_core::BranchRef;
+use strata_core::{BranchRef, PrimitiveDegradedReason};
 
 // =============================================================================
 // Error Types
@@ -723,6 +725,99 @@ impl BranchOpObserverRegistry {
 }
 
 impl Default for BranchOpObserverRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+// =============================================================================
+// Primitive Degraded Observer (B5.4)
+// =============================================================================
+
+/// Event fired when a named primitive is marked as fail-closed degraded.
+///
+/// Per convergence doc §"Required push events", B5.4 must surface
+/// fail-closed degraded primitive events on a push channel so operators
+/// can route on the branch contract instead of log text. This event
+/// carries the same fields as the registry entry in
+/// `primitive_degradation::PrimitiveDegradationEntry`.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct PrimitiveDegradedEvent {
+    /// Generation-aware branch identity at the time of degradation.
+    pub branch_ref: BranchRef,
+    /// Which primitive subsystem owns the degraded surface.
+    pub primitive: PrimitiveType,
+    /// Primitive-level name (collection, index space, etc.).
+    pub name: String,
+    /// Typed reason for the degradation.
+    pub reason: PrimitiveDegradedReason,
+    /// Operator-facing free-form detail (e.g. decode error message).
+    pub detail: String,
+    /// Wall-clock time the degradation was first marked.
+    pub detected_at: SystemTime,
+}
+
+/// Observer called when a primitive is marked fail-closed degraded.
+///
+/// Fires at most once per `(BranchId, PrimitiveType, name)` key during
+/// the lifetime of the `PrimitiveDegradationRegistry` (first-mark
+/// wins, consistent with the registry's idempotency).
+pub trait PrimitiveDegradedObserver: Send + Sync + 'static {
+    /// Human-readable name for logging.
+    fn name(&self) -> &'static str;
+
+    /// Called after a primitive is marked fail-closed degraded.
+    fn on_primitive_degraded(&self, event: &PrimitiveDegradedEvent) -> Result<(), ObserverError>;
+}
+
+/// Registry for primitive-degraded observers.
+pub struct PrimitiveDegradedObserverRegistry {
+    observers: RwLock<Vec<Arc<dyn PrimitiveDegradedObserver>>>,
+}
+
+impl PrimitiveDegradedObserverRegistry {
+    /// Create an empty registry.
+    pub fn new() -> Self {
+        Self {
+            observers: RwLock::new(Vec::new()),
+        }
+    }
+
+    /// Register a primitive-degraded observer.
+    pub fn register(&self, observer: Arc<dyn PrimitiveDegradedObserver>) {
+        self.observers.write().push(observer);
+    }
+
+    /// Notify all observers of a primitive-degraded event.
+    ///
+    /// Errors are logged but not propagated (consistent with other
+    /// observer registries at the top of this file).
+    pub fn notify(&self, event: &PrimitiveDegradedEvent) {
+        let observers = self.observers.read();
+        for observer in observers.iter() {
+            if let Err(e) = observer.on_primitive_degraded(event) {
+                tracing::error!(
+                    observer = observer.name(),
+                    error = %e,
+                    "primitive degraded observer failed"
+                );
+            }
+        }
+    }
+
+    /// Number of registered observers.
+    pub fn len(&self) -> usize {
+        self.observers.read().len()
+    }
+
+    /// Whether the registry is empty.
+    pub fn is_empty(&self) -> bool {
+        self.observers.read().is_empty()
+    }
+}
+
+impl Default for PrimitiveDegradedObserverRegistry {
     fn default() -> Self {
         Self::new()
     }

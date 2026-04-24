@@ -356,10 +356,23 @@ impl VectorStore {
             let vec_record = match VectorRecord::from_bytes(vec_bytes) {
                 Ok(r) => r,
                 Err(e) => {
+                    // B5.4 — corrupt vector bytes mean the collection
+                    // cannot be reconstructed safely; mark degraded so
+                    // subsequent reads fail closed rather than returning
+                    // partial / wrong data. Per convergence matrix row
+                    // "vector in-memory / HNSW state".
                     warn!(
                         target: "strata::vector",
                         error = %e,
-                        "Failed to decode vector record during reload, skipping"
+                        "Failed to decode vector record during reload; marking collection degraded"
+                    );
+                    strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                        &self.db,
+                        id.branch_id,
+                        strata_core::contract::PrimitiveType::Vector,
+                        &id.name,
+                        strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                        format!("{e}"),
                     );
                     continue;
                 }
@@ -636,6 +649,20 @@ impl VectorStore {
     ) -> VectorResult<()> {
         let collection_id = CollectionId::new(branch_id, space, name);
         let state = self.state()?;
+
+        // B5.4 — fail closed if this collection was marked degraded by
+        // an earlier recovery or lazy-load attempt. Per the B5
+        // convergence contract matrix row "vector in-memory / HNSW
+        // state": config mismatch or rebuild failure must fail closed,
+        // not silently fall back to wrong data.
+        if let Some(err) = strata_engine::database::primitive_degradation::primitive_degraded_error(
+            &self.db,
+            branch_id,
+            strata_core::contract::PrimitiveType::Vector,
+            name,
+        ) {
+            return Err(VectorError::Degraded(Box::new(err)));
+        }
 
         // Fast path: check without entry overhead
         if state.backends.contains_key(&collection_id) {

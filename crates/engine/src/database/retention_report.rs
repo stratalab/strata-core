@@ -33,10 +33,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use strata_core::contract::PrimitiveType;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{
-    BranchControlRecord, BranchLifecycleStatus, BranchRef, StrataError, StrataResult,
+    BranchControlRecord, BranchLifecycleStatus, BranchRef, PrimitiveDegradedReason, StrataError,
+    StrataResult,
 };
 use strata_storage::{
     DegradationClass, RecoveryHealth, StorageBranchRetention, StorageError,
@@ -44,6 +46,7 @@ use strata_storage::{
 };
 
 use crate::branch_ops::branch_control_store::BranchControlStore;
+use crate::database::primitive_degradation::PrimitiveDegradationRegistry;
 use crate::database::Database;
 
 /// Reclaim readiness classification for a retention report.
@@ -195,6 +198,36 @@ pub struct RetentionTotals {
     pub quarantined_bytes: u64,
 }
 
+/// A fail-closed degraded primitive state attributed to a live
+/// branch lifecycle instance (B5.4).
+///
+/// Populated by joining the per-`Database`
+/// [`PrimitiveDegradationRegistry`] with live `BranchControlRecord`
+/// records: entries whose recorded generation no longer matches a live
+/// lifecycle are filtered out (defense-in-depth against a missed
+/// `clear_branch` call during same-name recreate).
+///
+/// Per the B5 convergence contract
+/// (`docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+/// §"Degraded-state closure targets"), this surface is the
+/// branch-facing pull contract for named primitive degradation.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct DegradedPrimitiveEntry {
+    /// Generation-aware branch identity.
+    pub branch: BranchRef,
+    /// User-facing branch name recorded on the control record.
+    pub name: String,
+    /// Which primitive subsystem owns the degraded surface.
+    pub primitive: PrimitiveType,
+    /// Primitive-level name (collection, index space, etc.).
+    pub primitive_name: String,
+    /// Typed reason for the degradation.
+    pub reason: PrimitiveDegradedReason,
+    /// Operator-facing free-form detail captured at mark time.
+    pub detail: String,
+}
+
 /// Generation-aware branch-vocabulary retention attribution surface.
 ///
 /// See the module-level doc and the B5 contract for the governing rules.
@@ -209,6 +242,16 @@ pub struct RetentionReport {
     pub orphan_storage: Vec<OrphanStorageEntry>,
     /// Aggregate totals across the entire report.
     pub totals: RetentionTotals,
+    /// Named primitives in fail-closed degraded state (B5.4).
+    ///
+    /// This list is orthogonal to byte-accounting fields: a degraded
+    /// primitive is a logical lifecycle fact, not a storage retention
+    /// debt. Populated from the per-`Database`
+    /// [`PrimitiveDegradationRegistry`]; entries whose generation does
+    /// not match a live `BranchControlRecord` are filtered out
+    /// (defense-in-depth against missed `clear_branch` on same-name
+    /// recreate).
+    pub degraded_primitives: Vec<DegradedPrimitiveEntry>,
 }
 
 impl Database {
@@ -370,11 +413,40 @@ impl Database {
             });
         }
 
+        // B5.4 — join primitive-degradation registry with live lifecycle.
+        // Entries are dropped when:
+        //   - no live control record exists for the BranchId (orphan
+        //     degradation — the branch has been deleted; the physical
+        //     cleanup hook also clears the registry, so this is
+        //     defense-in-depth), or
+        //   - the recorded generation does not match the live record
+        //     (same-name recreate advanced past the old lifecycle).
+        let mut degraded_primitives: Vec<DegradedPrimitiveEntry> = Vec::new();
+        if let Ok(registry) = self.extension::<PrimitiveDegradationRegistry>() {
+            for entry in registry.list() {
+                let Some(record) = live_by_id.get(&entry.branch_ref.id) else {
+                    continue;
+                };
+                if record.branch.generation != entry.branch_ref.generation {
+                    continue;
+                }
+                degraded_primitives.push(DegradedPrimitiveEntry {
+                    branch: record.branch,
+                    name: record.name.clone(),
+                    primitive: entry.primitive,
+                    primitive_name: entry.name.clone(),
+                    reason: entry.reason,
+                    detail: entry.detail.clone(),
+                });
+            }
+        }
+
         Ok(RetentionReport {
             reclaim_status,
             branches,
             orphan_storage,
             totals,
+            degraded_primitives,
         })
     }
 }

@@ -40,7 +40,7 @@ use tracing::info;
 ///
 /// Called by Database during startup to restore vector state from KV store.
 fn recover_vector_state(db: &std::sync::Arc<Database>) -> StrataResult<()> {
-    recover_from_db(db)?;
+    recover_from_db(db.as_ref())?;
 
     // Register the lifecycle hook used for freeze-to-disk and merge reloads.
     register_vector_lifecycle_hook(db);
@@ -238,7 +238,19 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                     _ => continue,
                 };
 
-                // Decode the CollectionRecord
+                // Extract collection name from the key's user_key ("__config__/{name}")
+                // before decoding so we can attribute a degradation to a
+                // named primitive even if decode fails (B5.4).
+                let collection_name = match key.user_key_string() {
+                    Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
+                    None => continue,
+                };
+
+                // Decode the CollectionRecord. On failure this collection
+                // must fail closed for subsequent reads rather than be
+                // silently dropped from recovery — see
+                // `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+                // §"Surface matrix" row "vector in-memory / HNSW state".
                 let record = match super::CollectionRecord::from_bytes(config_bytes) {
                     Ok(r) => r,
                     Err(e) => {
@@ -246,16 +258,18 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             target: "strata::vector",
                             key = ?key,
                             error = %e,
-                            "Failed to decode collection record during recovery, skipping"
+                            "Failed to decode collection record during recovery; marking collection degraded"
+                        );
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            db,
+                            branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &collection_name,
+                            strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                            format!("{e}"),
                         );
                         continue;
                     }
-                };
-
-                // Extract collection name from the key's user_key ("__config__/{name}")
-                let collection_name = match key.user_key_string() {
-                    Some(raw) => raw.strip_prefix("__config__/").unwrap_or(&raw).to_string(),
-                    None => continue,
                 };
 
                 // Read backend type before consuming record.config (Issue #1964)
@@ -268,7 +282,15 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             target: "strata::vector",
                             collection = %collection_name,
                             error = %e,
-                            "Failed to convert collection config during recovery, skipping"
+                            "Failed to convert collection config during recovery; marking collection degraded"
+                        );
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            db,
+                            branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &collection_name,
+                            strata_core::PrimitiveDegradedReason::ConfigShapeConversion,
+                            format!("{e}"),
                         );
                         continue;
                     }

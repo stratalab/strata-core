@@ -710,6 +710,18 @@ impl BranchIndex {
             }
         }
 
+        // B5.4 — clear any primitive-degradation entries attributed to
+        // the deleted BranchId so a same-name recreate starts with a
+        // clean registry (retention contract §"Same-name recreate").
+        // Post-commit best-effort: failure here is logged but not
+        // raised — consistent with the surrounding cleanup pattern.
+        if let Ok(registry) =
+            self.db
+                .extension::<crate::database::primitive_degradation::PrimitiveDegradationRegistry>()
+        {
+            registry.clear_branch(executor_branch_id);
+        }
+
         // Remove commit lock entry. The deleting mark is intentionally
         // kept: any pre-existing transaction that tries to commit on
         // this branch after deletion will be rejected (#1916).

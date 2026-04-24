@@ -8,9 +8,12 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use strata_core::contract::PrimitiveType;
 use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
-use strata_core::{StrataError, StrataResult};
+use strata_core::{PrimitiveDegradedReason, StrataError, StrataResult};
+
+use crate::database::Database;
 
 // =============================================================================
 // Index Types
@@ -273,14 +276,63 @@ pub fn extract_field_value(doc_value: &JsonValue, field_path: &str) -> Option<Js
 use std::collections::HashSet;
 use strata_concurrency::TransactionContext;
 
+/// Fail-closed helper (B5.4): extract `doc_id` from an index entry's
+/// `user_key` or register a degradation and return a typed error.
+///
+/// Per the B5 convergence contract
+/// (`docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+/// §"Surface matrix" row "JSON secondary index rows"), a corrupt
+/// `_idx` row must fail closed rather than be silently filtered out
+/// of the result set.
+fn extract_doc_id_or_degrade(
+    db: &Database,
+    branch_id: &BranchId,
+    space: &str,
+    user_key: &[u8],
+) -> StrataResult<String> {
+    if let Some(id) = extract_doc_id_from_index_key(user_key) {
+        return Ok(id);
+    }
+    let entry = crate::database::primitive_degradation::mark_primitive_degraded(
+        db,
+        *branch_id,
+        PrimitiveType::Json,
+        space,
+        PrimitiveDegradedReason::IndexEntryCorrupt,
+        "index entry user_key missing separator or non-utf8 doc_id",
+    );
+    Err(entry
+        .map(|e| e.to_error())
+        .unwrap_or_else(|| StrataError::serialization("corrupt secondary index entry")))
+}
+
+/// Fail-closed gate (B5.4): if `(branch_id, Json, space)` is already
+/// marked degraded, return the typed error without touching storage.
+/// Callers put this at the top of every `_idx` read path so repeat
+/// lookups after a mark short-circuit rather than re-scanning the
+/// corrupt index.
+fn reject_if_space_degraded(db: &Database, branch_id: &BranchId, space: &str) -> StrataResult<()> {
+    if let Some(err) = crate::database::primitive_degradation::primitive_degraded_error(
+        db,
+        *branch_id,
+        PrimitiveType::Json,
+        space,
+    ) {
+        return Err(err);
+    }
+    Ok(())
+}
+
 /// Look up all doc_ids matching an exact value in an index.
 pub fn lookup_eq(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
     index_name: &str,
     encoded_value: &[u8],
 ) -> StrataResult<Vec<String>> {
+    reject_if_space_degraded(db, branch_id, space)?;
     // Scan with encoded_value ++ separator as prefix, so "active" doesn't
     // false-match "actively" (both start with "active" but only "active\xFF"
     // matches "active\xFF<doc_id>").
@@ -289,10 +341,16 @@ pub fn lookup_eq(
     exact_prefix.push(INDEX_KEY_SEPARATOR);
     let prefix = index_value_prefix(branch_id, space, index_name, &exact_prefix);
     let entries = txn.scan_prefix(&prefix)?;
-    Ok(entries
-        .iter()
-        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
-        .collect())
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, _) in entries.iter() {
+        out.push(extract_doc_id_or_degrade(
+            db,
+            branch_id,
+            space,
+            &k.user_key,
+        )?);
+    }
+    Ok(out)
 }
 
 /// Look up all doc_ids in a value range [lower, upper].
@@ -301,6 +359,7 @@ pub fn lookup_eq(
 /// Both bounds are optional (None = unbounded on that side).
 #[allow(clippy::too_many_arguments)]
 pub fn lookup_range(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
@@ -310,16 +369,30 @@ pub fn lookup_range(
     lower_inclusive: bool,
     upper_inclusive: bool,
 ) -> StrataResult<Vec<String>> {
+    reject_if_space_degraded(db, branch_id, space)?;
     let prefix = index_scan_prefix(branch_id, space, index_name);
     let entries = txn.scan_prefix(&prefix)?;
 
     let mut doc_ids = Vec::new();
     for (key, _) in &entries {
         let user_key = &key.user_key;
-        // Find the separator to split value from doc_id
+        // Find the separator to split value from doc_id. Missing
+        // separator is B5.4 fail-closed: mark degradation and error.
         let sep_pos = match user_key.iter().rposition(|&b| b == INDEX_KEY_SEPARATOR) {
             Some(pos) => pos,
-            None => continue,
+            None => {
+                let entry = crate::database::primitive_degradation::mark_primitive_degraded(
+                    db,
+                    *branch_id,
+                    PrimitiveType::Json,
+                    space,
+                    PrimitiveDegradedReason::IndexEntryCorrupt,
+                    "index entry user_key missing separator in lookup_range",
+                );
+                return Err(entry.map(|e| e.to_error()).unwrap_or_else(|| {
+                    StrataError::serialization("corrupt secondary index entry")
+                }));
+            }
         };
         let value_bytes = &user_key[..sep_pos];
 
@@ -345,27 +418,33 @@ pub fn lookup_range(
             }
         }
 
-        if let Some(doc_id) = extract_doc_id_from_index_key(user_key) {
-            doc_ids.push(doc_id);
-        }
+        doc_ids.push(extract_doc_id_or_degrade(db, branch_id, space, user_key)?);
     }
     Ok(doc_ids)
 }
 
 /// Look up all doc_ids matching a text prefix in an index.
 pub fn lookup_prefix(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
     index_name: &str,
     prefix_bytes: &[u8],
 ) -> StrataResult<Vec<String>> {
+    reject_if_space_degraded(db, branch_id, space)?;
     let prefix = index_value_prefix(branch_id, space, index_name, prefix_bytes);
     let entries = txn.scan_prefix(&prefix)?;
-    Ok(entries
-        .iter()
-        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
-        .collect())
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, _) in entries.iter() {
+        out.push(extract_doc_id_or_degrade(
+            db,
+            branch_id,
+            space,
+            &k.user_key,
+        )?);
+    }
+    Ok(out)
 }
 
 /// Scan all entries of an index in order, returning doc_ids in index value order.
@@ -373,23 +452,32 @@ pub fn lookup_prefix(
 /// Used for sort-by-indexed-field: the KV layer stores index entries in
 /// order-preserving byte order, so a prefix scan returns them sorted.
 pub fn scan_index_ordered(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
     index_name: &str,
 ) -> StrataResult<Vec<String>> {
+    reject_if_space_degraded(db, branch_id, space)?;
     let prefix = index_scan_prefix(branch_id, space, index_name);
     let entries = txn.scan_prefix(&prefix)?;
-    Ok(entries
-        .iter()
-        .filter_map(|(k, _)| extract_doc_id_from_index_key(&k.user_key))
-        .collect())
+    let mut out = Vec::with_capacity(entries.len());
+    for (k, _) in entries.iter() {
+        out.push(extract_doc_id_or_degrade(
+            db,
+            branch_id,
+            space,
+            &k.user_key,
+        )?);
+    }
+    Ok(out)
 }
 
 /// Resolve a FieldFilter against available indexes, returning matching doc_ids.
 ///
 /// Returns an error if a predicate references a field with no corresponding index.
 pub fn resolve_filter(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
@@ -399,11 +487,11 @@ pub fn resolve_filter(
     use crate::search::FieldFilter;
 
     match filter {
-        FieldFilter::Predicate(pred) => resolve_predicate(txn, branch_id, space, pred, indexes),
+        FieldFilter::Predicate(pred) => resolve_predicate(db, txn, branch_id, space, pred, indexes),
         FieldFilter::And(filters) => {
             let mut result: Option<HashSet<String>> = None;
             for f in filters {
-                let set = resolve_filter(txn, branch_id, space, f, indexes)?;
+                let set = resolve_filter(db, txn, branch_id, space, f, indexes)?;
                 result = Some(match result {
                     Some(acc) => acc.intersection(&set).cloned().collect(),
                     None => set,
@@ -414,7 +502,7 @@ pub fn resolve_filter(
         FieldFilter::Or(filters) => {
             let mut result = HashSet::new();
             for f in filters {
-                let set = resolve_filter(txn, branch_id, space, f, indexes)?;
+                let set = resolve_filter(db, txn, branch_id, space, f, indexes)?;
                 result.extend(set);
             }
             Ok(result)
@@ -424,6 +512,7 @@ pub fn resolve_filter(
 
 /// Resolve a single predicate against indexes.
 fn resolve_predicate(
+    db: &Database,
     txn: &mut TransactionContext,
     branch_id: &BranchId,
     space: &str,
@@ -441,7 +530,7 @@ fn resolve_predicate(
                     idx.name, idx.index_type
                 ))
             })?;
-            let doc_ids = lookup_eq(txn, branch_id, space, &idx.name, &encoded)?;
+            let doc_ids = lookup_eq(db, txn, branch_id, space, &idx.name, &encoded)?;
             Ok(doc_ids.into_iter().collect())
         }
         FieldPredicate::Range {
@@ -471,6 +560,7 @@ fn resolve_predicate(
                 None => None,
             };
             let doc_ids = lookup_range(
+                db,
                 txn,
                 branch_id,
                 space,
@@ -485,7 +575,7 @@ fn resolve_predicate(
         FieldPredicate::Prefix { field, prefix } => {
             let idx = find_index_for_field(field, indexes)?;
             let prefix_bytes = encode_text(prefix);
-            let doc_ids = lookup_prefix(txn, branch_id, space, &idx.name, &prefix_bytes)?;
+            let doc_ids = lookup_prefix(db, txn, branch_id, space, &idx.name, &prefix_bytes)?;
             Ok(doc_ids.into_iter().collect())
         }
     }

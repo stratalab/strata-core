@@ -65,11 +65,58 @@
 //! }
 //! ```
 
-use crate::contract::{EntityRef, Version};
+use crate::branch::BranchRef;
+use crate::contract::{EntityRef, PrimitiveType, Version};
 use crate::types::BranchId;
 use std::collections::HashMap;
 use std::io;
 use thiserror::Error;
+
+// =============================================================================
+// Primitive Degradation Reason (B5.4)
+// =============================================================================
+
+/// Typed reason for a [`StrataError::PrimitiveDegraded`] failure.
+///
+/// Each variant names a specific class of fail-closed degradation that a
+/// primitive subsystem may observe at recovery or read time. Per
+/// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+/// §"Degraded-state closure targets", named degraded primitive paths must
+/// fail closed with a typed reason rather than silently serving stale or
+/// wrong data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum PrimitiveDegradedReason {
+    /// Persisted primitive configuration bytes failed to decode (e.g.
+    /// `CollectionRecord::from_bytes` on a corrupt KV value).
+    ConfigDecodeFailure,
+    /// Persisted configuration decoded but could not be converted into
+    /// the primitive's in-memory config shape (e.g. a legacy vector
+    /// config shape that has since been removed).
+    ConfigShapeConversion,
+    /// Persisted configuration disagrees with persisted primitive data
+    /// (e.g. declared `VectorConfig.dimension` does not match a stored
+    /// `VectorRecord.embedding.len()`).
+    ConfigMismatch,
+    /// Secondary-index metadata bytes failed to decode (e.g. corrupt
+    /// JSON `_idx_meta/{space}/{name}` entry).
+    IndexMetadataCorrupt,
+    /// A secondary-index entry key could not be decoded (e.g. a JSON
+    /// `_idx/{space}/{name}/` row missing the value/doc_id separator).
+    IndexEntryCorrupt,
+}
+
+impl std::fmt::Display for PrimitiveDegradedReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ConfigDecodeFailure => write!(f, "ConfigDecodeFailure"),
+            Self::ConfigShapeConversion => write!(f, "ConfigShapeConversion"),
+            Self::ConfigMismatch => write!(f, "ConfigMismatch"),
+            Self::IndexMetadataCorrupt => write!(f, "IndexMetadataCorrupt"),
+            Self::IndexEntryCorrupt => write!(f, "IndexEntryCorrupt"),
+        }
+    }
+}
 
 // =============================================================================
 // ErrorCode - Canonical Wire Error Codes (Frozen)
@@ -1061,6 +1108,39 @@ pub enum StrataError {
         class: String,
     },
 
+    /// A named primitive on a specific branch lifecycle instance is
+    /// degraded and must fail closed rather than serve stale or wrong
+    /// branch-visible data.
+    ///
+    /// Per the B5 convergence contract at
+    /// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Degraded-state closure targets" (B5.4), named primitive failure
+    /// paths (vector config mismatch, JSON `_idx` load failure) must
+    /// surface as typed errors rather than silent fallback to
+    /// incorrect results. This is the branch-facing unavailable
+    /// contract for those paths.
+    ///
+    /// `branch` uses `BranchRef` so attribution survives same-name
+    /// recreate (`branching-retention-contract.md` §"Same-name
+    /// recreate"). `primitive` discriminates which subsystem owns the
+    /// degraded surface (e.g. `PrimitiveType::Vector` or
+    /// `PrimitiveType::Json`). `name` is the primitive-level identity
+    /// (collection name for vector, secondary-index space for JSON).
+    ///
+    /// Wire code: `StorageError`
+    #[error("primitive {primitive:?} '{name}' on branch {branch:?} is degraded: {reason}")]
+    PrimitiveDegraded {
+        /// Generation-aware branch identity — preserved across same-name
+        /// recreate so reports don't confuse lifecycle instances.
+        branch: BranchRef,
+        /// Which primitive subsystem owns the degraded surface.
+        primitive: PrimitiveType,
+        /// Primitive-level name (collection, index space, etc.).
+        name: String,
+        /// Typed reason for the degradation (no string factory).
+        reason: PrimitiveDegradedReason,
+    },
+
     /// Shutdown timeout
     ///
     /// The database shutdown timed out waiting for active transactions to complete.
@@ -1412,6 +1492,25 @@ impl StrataError {
         }
     }
 
+    /// Create a [`StrataError::PrimitiveDegraded`] for a named primitive
+    /// on a specific branch lifecycle instance.
+    ///
+    /// Contract: `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Degraded-state closure targets" (B5.4).
+    pub fn primitive_degraded(
+        branch: BranchRef,
+        primitive: PrimitiveType,
+        name: impl Into<String>,
+        reason: PrimitiveDegradedReason,
+    ) -> Self {
+        StrataError::PrimitiveDegraded {
+            branch,
+            primitive,
+            name: name.into(),
+            reason,
+        }
+    }
+
     /// Create a Corruption error
     ///
     /// ## Example
@@ -1641,6 +1740,7 @@ impl StrataError {
             StrataError::CodecDecode { .. } => ErrorCode::StorageError,
             StrataError::LegacyFormat { .. } => ErrorCode::StorageError,
             StrataError::RetentionReportUnavailable { .. } => ErrorCode::StorageError,
+            StrataError::PrimitiveDegraded { .. } => ErrorCode::StorageError,
 
             // Internal errors
             StrataError::Internal { .. } => ErrorCode::InternalError,

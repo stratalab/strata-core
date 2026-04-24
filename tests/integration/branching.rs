@@ -5211,8 +5211,22 @@ fn json_merge_secondary_index_refreshed_post_commit() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits_25 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
-            hits_10 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            hits_25 = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_25,
+            )?;
+            hits_10 = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_10,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -5296,7 +5310,14 @@ fn json_merge_source_only_new_doc_propagates() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_7)?;
+            hits = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "qty_idx",
+                &encoded_7,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -5382,7 +5403,14 @@ fn json_merge_source_deletes_doc_propagates() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_99)?;
+            hits = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "qty_idx",
+                &encoded_99,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -5575,8 +5603,22 @@ fn json_merge_path_level_via_cherry_pick() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits_42 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_42)?;
-            hits_10 = index::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            hits_42 = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_42,
+            )?;
+            hits_10 = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_10,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -5651,7 +5693,14 @@ fn json_merge_both_sides_deleted_doc_no_action() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            pre_merge_hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_5)?;
+            pre_merge_hits = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "qty_idx",
+                &encoded_5,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -5683,7 +5732,14 @@ fn json_merge_both_sides_deleted_doc_no_action() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            post_merge_hits = index::lookup_eq(txn, &target_id, "default", "qty_idx", &encoded_5)?;
+            post_merge_hits = index::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "qty_idx",
+                &encoded_5,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -6551,8 +6607,22 @@ fn cross_primitive_merge_invariant_sweep() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits_25 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
-            hits_10 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            hits_25 = jindex::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_25,
+            )?;
+            hits_10 = jindex::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_10,
+            )?;
             Ok(())
         })
         .unwrap();
@@ -6822,8 +6892,22 @@ fn cross_primitive_merge_rollback_via_reopen() {
     test_db
         .db
         .transaction(target_id, |txn| {
-            hits_25 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_25)?;
-            hits_10 = jindex::lookup_eq(txn, &target_id, "default", "price_idx", &encoded_10)?;
+            hits_25 = jindex::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_25,
+            )?;
+            hits_10 = jindex::lookup_eq(
+                test_db.db.as_ref(),
+                txn,
+                &target_id,
+                "default",
+                "price_idx",
+                &encoded_10,
+            )?;
             Ok(())
         })
         .unwrap();

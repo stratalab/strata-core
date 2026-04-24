@@ -26,6 +26,7 @@ pub mod config;
 pub mod dag_hook;
 pub mod merge_registry;
 pub mod observers;
+pub mod primitive_degradation;
 pub mod profile;
 pub(crate) mod recovery;
 mod recovery_error;
@@ -50,16 +51,18 @@ pub use merge_registry::{
 pub use observers::{
     AbortInfo, AbortObserver, AbortObserverRegistry, BranchOpEvent, BranchOpKind, BranchOpObserver,
     BranchOpObserverRegistry, CommitInfo, CommitObserver, CommitObserverRegistry, ObserverError,
-    ObserverErrorKind, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
+    ObserverErrorKind, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
+    PrimitiveDegradedObserverRegistry, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
 };
+pub use primitive_degradation::{PrimitiveDegradationEntry, PrimitiveDegradationRegistry};
 pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{
     AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,
     UnblockError,
 };
 pub use retention_report::{
-    BranchRetentionEntry, OrphanReason, OrphanStorageEntry, ReclaimStatus, RetentionBlocker,
-    RetentionReport, RetentionTotals,
+    BranchRetentionEntry, DegradedPrimitiveEntry, OrphanReason, OrphanStorageEntry, ReclaimStatus,
+    RetentionBlocker, RetentionReport, RetentionTotals,
 };
 pub use spec::{
     search_only_cache_spec, search_only_follower_spec, search_only_primary_spec, DatabaseMode,
@@ -703,6 +706,15 @@ pub struct Database {
     /// Best-effort: failures are logged, not propagated.
     replay_observers: ReplayObserverRegistry,
 
+    /// Per-database primitive-degraded observer registry (B5.4).
+    ///
+    /// Observers are notified when a named primitive is marked
+    /// fail-closed degraded (vector config mismatch, JSON `_idx` load
+    /// failure, etc.). Best-effort: failures are logged, not propagated.
+    /// See `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Required push events".
+    primitive_degraded_observers: observers::PrimitiveDegradedObserverRegistry,
+
     /// Lifecycle state for `open_runtime` and registry reuse.
     ///
     /// Tracks whether this instance is uninitialized, currently initializing,
@@ -982,6 +994,48 @@ impl Database {
     /// Observers are notified after each fully-applied follower replay record.
     pub fn replay_observers(&self) -> &ReplayObserverRegistry {
         &self.replay_observers
+    }
+
+    /// Get the per-database primitive-degraded observer registry (B5.4).
+    ///
+    /// Observers are notified when a named primitive is marked
+    /// fail-closed degraded. See
+    /// `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
+    /// §"Required push events".
+    pub fn primitive_degraded_observers(&self) -> &observers::PrimitiveDegradedObserverRegistry {
+        &self.primitive_degraded_observers
+    }
+
+    /// Resolve the current-generation [`BranchRef`] for a storage-layer
+    /// [`BranchId`] by reading the control-store active pointer
+    /// directly from storage (no `Arc<Database>` needed).
+    ///
+    /// Used by primitive-degradation mark sites during recovery — those
+    /// paths see `&Database` or `BranchId` but still need a
+    /// generation-aware `BranchRef` so `retention_report()` can attribute
+    /// the degradation to the current live lifecycle instance per
+    /// `docs/design/branching/branching-gc/branching-retention-contract.md`
+    /// §"Same-name recreate".
+    ///
+    /// Returns `None` when the active pointer is absent (legacy /
+    /// gen-0-only branches; follower pre-migration state).
+    pub fn active_branch_ref(&self, branch_id: BranchId) -> Option<strata_core::BranchRef> {
+        use crate::branch_ops::branch_control_store::active_ptr_key;
+        use strata_core::id::CommitVersion;
+        use strata_core::traits::Storage;
+        use strata_core::value::Value;
+
+        let ap_key = active_ptr_key(branch_id);
+        let versioned = self
+            .storage
+            .get_versioned(&ap_key, CommitVersion::MAX)
+            .ok()
+            .flatten()?;
+        let generation = match versioned.value {
+            Value::Int(n) if n >= 0 => n as u64,
+            _ => return None,
+        };
+        Some(strata_core::BranchRef::new(branch_id, generation))
     }
 
     // =========================================================================
