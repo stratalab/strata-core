@@ -3,6 +3,35 @@
 use super::*;
 
 impl VectorStore {
+    fn degrade_collection_read(
+        &self,
+        branch_id: BranchId,
+        name: &str,
+        reason: strata_core::PrimitiveDegradedReason,
+        detail: impl Into<String>,
+    ) -> VectorError {
+        let detail = detail.into();
+        let err = strata_engine::database::primitive_degradation::mark_primitive_degraded(
+            &self.db,
+            branch_id,
+            strata_core::contract::PrimitiveType::Vector,
+            name,
+            reason,
+            detail.clone(),
+        )
+        .map(|entry| entry.to_error())
+        .or_else(|| {
+            strata_engine::database::primitive_degradation::primitive_degraded_error(
+                &self.db,
+                branch_id,
+                strata_core::contract::PrimitiveType::Vector,
+                name,
+            )
+        })
+        .unwrap_or_else(|| strata_core::StrataError::serialization(detail));
+        VectorError::Degraded(Box::new(err))
+    }
+
     /// Creates a collection with the specified configuration.
     /// The configuration (dimension, metric, dtype) is immutable after creation.
     ///
@@ -316,13 +345,30 @@ impl VectorStore {
             let bytes = match &versioned_value.value {
                 Value::Bytes(b) => b.clone(),
                 _ => {
-                    return Err(VectorError::Serialization(
-                        "Expected Bytes value for collection record".to_string(),
-                    ))
+                    return Err(self.degrade_collection_read(
+                        branch_id,
+                        &name,
+                        strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                        "Expected Bytes value for collection record",
+                    ));
                 }
             };
-            let record = CollectionRecord::from_bytes(&bytes)?;
-            let config = VectorConfig::try_from(record.config)?;
+            let record = CollectionRecord::from_bytes(&bytes).map_err(|e| {
+                self.degrade_collection_read(
+                    branch_id,
+                    &name,
+                    strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                    format!("Failed to decode collection record during list: {e}"),
+                )
+            })?;
+            let config = VectorConfig::try_from(record.config).map_err(|e| {
+                self.degrade_collection_read(
+                    branch_id,
+                    &name,
+                    strata_core::PrimitiveDegradedReason::ConfigShapeConversion,
+                    format!("Failed to convert collection config during list: {e}"),
+                )
+            })?;
 
             // Get current count from backend
             let collection_id = CollectionId::new(branch_id, space, &name);

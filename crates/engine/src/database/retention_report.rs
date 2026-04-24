@@ -387,23 +387,45 @@ impl Database {
             });
         }
 
-        // Remaining storage directories have no live control record.
         let mut orphan_storage: Vec<OrphanStorageEntry> = Vec::new();
+        // Detached descendant-held bytes must surface as orphan storage even
+        // when the same BranchId currently has a live control record. This is
+        // the same-name recreate shape: the old lifecycle's bytes still live
+        // under the deterministic storage directory, but they are not owned by
+        // the new live manifest and must not be folded into the recreated
+        // branch entry's `shared_bytes`.
+        for snap in snapshot_by_id.values() {
+            if snap.detached_shared_bytes == 0 || !live_by_id.contains_key(&snap.branch_id) {
+                continue;
+            }
+            totals.shared_bytes += snap.detached_shared_bytes;
+            orphan_storage.push(OrphanStorageEntry {
+                branch_id: snap.branch_id,
+                bytes: snap.detached_shared_bytes,
+                quarantined_bytes: 0,
+                reason: OrphanReason::DescendantInheritance,
+            });
+        }
+
+        // Remaining storage directories have no live control record.
         for (branch_id, snap) in &snapshot_by_id {
             if live_by_id.contains_key(branch_id) {
                 continue;
             }
-            let total_bytes = snap.exclusive_bytes + snap.shared_bytes;
+            let total_bytes = snap.exclusive_bytes + snap.shared_bytes + snap.detached_shared_bytes;
             if total_bytes == 0 && snap.quarantined_bytes == 0 {
                 continue;
             }
-            let reason = if inherited_sources.contains_key(branch_id) || snap.shared_bytes > 0 {
+            let reason = if inherited_sources.contains_key(branch_id)
+                || snap.shared_bytes > 0
+                || snap.detached_shared_bytes > 0
+            {
                 OrphanReason::DescendantInheritance
             } else {
                 OrphanReason::UntrackedLifecycle
             };
             totals.exclusive_bytes += snap.exclusive_bytes;
-            totals.shared_bytes += snap.shared_bytes;
+            totals.shared_bytes += snap.shared_bytes + snap.detached_shared_bytes;
             totals.quarantined_bytes += snap.quarantined_bytes;
             orphan_storage.push(OrphanStorageEntry {
                 branch_id: *branch_id,

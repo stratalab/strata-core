@@ -800,6 +800,50 @@ fn retention_report_canonical_blocker_points_at_live_descendant_after_parent_del
     );
 }
 
+#[test]
+fn retention_report_recreate_does_not_fold_old_descendant_bytes_into_new_main() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    for i in 0..15 {
+        seed(&test_db.db, "main", &format!("k{i}"), i);
+    }
+    flush_branch(&test_db.db, "main");
+    test_db.db.branches().fork("main", "feature").unwrap();
+
+    test_db.db.branches().delete("main").unwrap();
+    test_db.db.branches().create("main").unwrap();
+    seed(&test_db.db, "main", "fresh", 999);
+    flush_branch(&test_db.db, "main");
+
+    let report = test_db.db.retention_report().expect("healthy");
+    let main_entry = report
+        .branches
+        .iter()
+        .find(|b| b.name == "main")
+        .expect("recreated main present");
+    let feature_entry = report
+        .branches
+        .iter()
+        .find(|b| b.name == "feature")
+        .expect("feature present");
+
+    assert_eq!(
+        main_entry.shared_bytes, 0,
+        "recreated main must not inherit descendant-held bytes from the deleted lifecycle",
+    );
+    assert!(
+        feature_entry.inherited_layer_bytes > 0,
+        "feature must still report inherited bytes from the deleted main lifecycle",
+    );
+    assert!(
+        report.orphan_storage.iter().any(|entry| {
+            entry.branch_id == resolve("main")
+                && matches!(entry.reason, strata_engine::OrphanReason::DescendantInheritance)
+        }),
+        "old descendant-held bytes must surface as orphan storage, not as shared bytes on the recreated main",
+    );
+}
+
 // =============================================================================
 // Schedule extension: live-branch top-level orphan `.sst` files that are no
 // longer manifest-owned are cleanup debt, not branch-visible retained bytes.

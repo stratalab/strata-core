@@ -783,7 +783,7 @@ impl strata_engine::search::Searchable for VectorStore {
         // Discover all _system_embed_* collections on this branch
         let collections = self
             .list_collections(req.branch_id, SYSTEM_SPACE)
-            .unwrap_or_default();
+            .map_err(|e| e.into_strata_error(req.branch_id))?;
 
         let mut all_hits: Vec<SearchHit> = Vec::new();
 
@@ -795,11 +795,9 @@ impl strata_engine::search::Searchable for VectorStore {
                 continue;
             }
 
-            let matches =
-                match self.system_search_with_sources(req.branch_id, &col.name, embedding, req.k) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
+            let matches = self
+                .system_search_with_sources(req.branch_id, &col.name, embedding, req.k)
+                .map_err(|e| e.into_strata_error(req.branch_id))?;
 
             for m in matches {
                 // Phase 1 Part 2: drop matches whose source isn't in the
