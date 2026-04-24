@@ -1006,6 +1006,55 @@ impl Database {
         &self.primitive_degraded_observers
     }
 
+    /// Register a primitive-degraded observer and replay current degraded state.
+    ///
+    /// Recovery-time degradations are often discovered while opening the
+    /// database, before user code can register observers. This helper closes
+    /// that gap by replaying the current primitive-degradation registry after
+    /// registration, so callers can observe startup degradations without
+    /// polling `retention_report()`.
+    ///
+    /// Replay is best-effort and uses the current registry contents at the time
+    /// of registration. A replay-dedup wrapper ensures a concurrent live mark
+    /// and the startup replay cannot double-deliver the same degraded key to
+    /// the observer. Subsequent live degradations continue to arrive through
+    /// the normal push path.
+    pub fn register_primitive_degraded_observer(
+        &self,
+        observer: Arc<dyn observers::PrimitiveDegradedObserver>,
+    ) {
+        let replay_safe = Arc::new(observers::ReplayDedupPrimitiveDegradedObserver::new(
+            observer,
+        ));
+        self.primitive_degraded_observers
+            .register(replay_safe.clone() as Arc<dyn observers::PrimitiveDegradedObserver>);
+
+        if let Ok(registry) =
+            self.extension::<primitive_degradation::PrimitiveDegradationRegistry>()
+        {
+            for entry in registry.list() {
+                let event = observers::PrimitiveDegradedEvent {
+                    branch_ref: entry.branch_ref,
+                    primitive: entry.primitive,
+                    name: entry.name.clone(),
+                    reason: entry.reason,
+                    detail: entry.detail.clone(),
+                    detected_at: entry.detected_at,
+                };
+                if let Err(e) = observers::PrimitiveDegradedObserver::on_primitive_degraded(
+                    &*replay_safe,
+                    &event,
+                ) {
+                    tracing::error!(
+                        observer = replay_safe.name(),
+                        error = %e,
+                        "primitive degraded observer replay failed"
+                    );
+                }
+            }
+        }
+    }
+
     /// Resolve the current-generation [`BranchRef`] for a storage-layer
     /// [`BranchId`] by reading the control-store active pointer
     /// directly from storage (no `Arc<Database>` needed).

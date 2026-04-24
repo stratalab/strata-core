@@ -25,7 +25,7 @@ use crate::common::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
-use strata_core::types::Namespace;
+use strata_core::types::{Namespace, TypeTag};
 use strata_core::value::Value;
 use strata_core::{BranchId, Key, PrimitiveDegradedReason, StrataError};
 use strata_engine::database::observers::ObserverError;
@@ -58,6 +58,61 @@ fn poison_vector_config(db: &Arc<Database>, branch: &str, space: &str, collectio
     .expect("poison vector config write");
 }
 
+/// Poison one persisted vector row so lazy reload from KV hits a corrupt
+/// `VectorRecord`.
+fn poison_vector_record(
+    db: &Arc<Database>,
+    branch: &str,
+    space: &str,
+    collection: &str,
+    key: &str,
+) {
+    let branch_id = resolve(branch);
+    let ns = vector_namespace(branch_id, space);
+    let kv_key = Key::new_vector(ns, collection, key);
+    db.transaction(branch_id, |txn| {
+        txn.put(
+            kv_key,
+            Value::Bytes(b"\x00\xFF\x00\xFFnot a vector record".to_vec()),
+        )
+    })
+    .expect("poison vector row");
+}
+
+fn vector_mmap_path(
+    db: &Arc<Database>,
+    branch: &str,
+    space: &str,
+    collection: &str,
+) -> std::path::PathBuf {
+    let branch_id = resolve(branch);
+    let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
+    db.data_dir()
+        .join("vectors")
+        .join(branch_hex)
+        .join(space)
+        .join(format!("{collection}.vec"))
+}
+
+/// Corrupt the mmap header dimension so reopen must reject the cache and rebuild
+/// from KV.
+fn poison_vector_mmap_dimension(
+    db: &Arc<Database>,
+    branch: &str,
+    space: &str,
+    collection: &str,
+    dimension: u32,
+) {
+    let path = vector_mmap_path(db, branch, space, collection);
+    let mut bytes = std::fs::read(&path).expect("read vector mmap");
+    assert!(
+        bytes.len() >= 12,
+        "mmap header must contain dimension field"
+    );
+    bytes[8..12].copy_from_slice(&dimension.to_le_bytes());
+    std::fs::write(&path, bytes).expect("rewrite vector mmap");
+}
+
 /// Poison a JSON `_idx_meta/{space}` metadata row so `load_indexes`
 /// fails closed on next search.
 fn poison_json_idx_meta(
@@ -74,6 +129,24 @@ fn poison_json_idx_meta(
         txn.put(key, Value::Bytes(b"not a valid IndexDef".to_vec()))
     })
     .expect("poison _idx_meta write");
+}
+
+/// Poison a JSON `_idx/{space}/{name}` row so prefix/range scans hit an entry
+/// whose `user_key` has no value/doc_id separator.
+fn poison_json_idx_entry_missing_separator(
+    db: &Arc<Database>,
+    branch: &str,
+    collection_space: &str,
+    index_name: &str,
+    raw_user_key: &[u8],
+) {
+    let branch_id = resolve(branch);
+    let idx_space =
+        strata_engine::primitives::json::index::index_space_name(collection_space, index_name);
+    let ns = Arc::new(Namespace::for_branch_space(branch_id, &idx_space));
+    let key = Key::new(ns, TypeTag::Json, raw_user_key.to_vec());
+    db.transaction(branch_id, |txn| txn.put(key, Value::Bytes(vec![])))
+        .expect("poison _idx entry");
 }
 
 fn small_vector_config() -> VectorConfig {
@@ -187,8 +260,12 @@ fn vector_mmap_dim_mismatch_rebuilds_from_kv_without_degradation() {
     // Reopen once so heap mmap is written (best-effort freeze on shutdown).
     test_db.reopen();
 
-    // Reopen again — since we didn't corrupt anything, the collection
-    // must be healthy and no degradation entry registered.
+    // Corrupt only the mmap header dimension. This is a cache-only failure and
+    // must trigger KV rebuild, not primitive degradation.
+    poison_vector_mmap_dimension(&test_db.db, "main", "default", "v1", 4);
+
+    // Reopen again — the collection must be healthy and no degradation entry
+    // registered.
     test_db.reopen();
     let registry = test_db
         .db
@@ -206,6 +283,81 @@ fn vector_mmap_dim_mismatch_rebuilds_from_kv_without_degradation() {
         .search(resolve("main"), "default", "v1", &[1.0, 0.0, 0.0], 5, None)
         .expect("healthy search");
     assert_eq!(hits.len(), 1);
+}
+
+#[test]
+fn vector_lazy_reload_corruption_fails_closed_on_triggering_read() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    test_db
+        .vector()
+        .create_collection(resolve("main"), "default", "v1", small_vector_config())
+        .unwrap();
+    test_db
+        .vector()
+        .insert(
+            resolve("main"),
+            "default",
+            "v1",
+            "k1",
+            &[1.0, 0.0, 0.0],
+            None,
+        )
+        .unwrap();
+    test_db
+        .vector()
+        .insert(
+            resolve("main"),
+            "default",
+            "v1",
+            "k2",
+            &[0.0, 1.0, 0.0],
+            None,
+        )
+        .unwrap();
+
+    // Force the next read through ensure_collection_loaded() instead of using
+    // the already-loaded backend.
+    {
+        let state = test_db.vector().state().unwrap();
+        let cid = strata_vector::CollectionId::new(resolve("main"), "default", "v1");
+        state.backends.remove(&cid);
+    }
+
+    // Corrupt one persisted vector row after eviction. The triggering reload
+    // must fail closed immediately rather than returning a partially rebuilt
+    // backend for the first read.
+    poison_vector_record(&test_db.db, "main", "default", "v1", "k2");
+
+    let err = test_db
+        .vector()
+        .search(resolve("main"), "default", "v1", &[1.0, 0.0, 0.0], 5, None)
+        .expect_err("lazy reload must fail closed on the triggering read");
+    let err = StrataError::from(err);
+    match &err {
+        StrataError::PrimitiveDegraded {
+            primitive,
+            name,
+            reason,
+            ..
+        } => {
+            assert_eq!(*primitive, PrimitiveType::Vector);
+            assert_eq!(name, "v1");
+            assert_eq!(*reason, PrimitiveDegradedReason::ConfigMismatch);
+        }
+        other => panic!("expected PrimitiveDegraded, got {other:?}"),
+    }
+
+    let report = test_db.db.retention_report().expect("retention_report");
+    assert!(
+        report
+            .degraded_primitives
+            .iter()
+            .any(|e| e.primitive == PrimitiveType::Vector
+                && e.primitive_name == "v1"
+                && e.reason == PrimitiveDegradedReason::ConfigMismatch),
+        "triggering lazy reload must record degradation for reporting too"
+    );
 }
 
 // =============================================================================
@@ -282,6 +434,61 @@ fn json_idx_meta_corrupt_fails_closed() {
             .any(|e| e.primitive == PrimitiveType::Json && e.primitive_name == "default"),
         "retention_report must surface JSON _idx degradation"
     );
+}
+
+#[test]
+fn json_idx_entry_corrupt_fails_closed() {
+    use strata_engine::search::{FieldFilter, FieldPredicate};
+    use strata_engine::Searchable;
+
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    let json = test_db.json();
+    json.create(
+        &resolve("main"),
+        "default",
+        "doc1",
+        json_value(serde_json::json!({ "status": "active" })),
+    )
+    .unwrap();
+    json.create_index(
+        &resolve("main"),
+        "default",
+        "by_status",
+        "$.status",
+        strata_engine::primitives::json::index::IndexType::Tag,
+    )
+    .unwrap();
+
+    // A prefix scan over "active" will see this poisoned row, then fail while
+    // extracting the doc_id because the separator is missing.
+    poison_json_idx_entry_missing_separator(&test_db.db, "main", "default", "by_status", b"active");
+
+    let req = strata_engine::SearchRequest::new(resolve("main"), "").with_field_filter(
+        FieldFilter::Predicate(FieldPredicate::Prefix {
+            field: "$.status".to_string(),
+            prefix: "active".to_string(),
+        }),
+    );
+    let err = json.search(&req).expect_err("search must fail closed");
+    match &err {
+        StrataError::PrimitiveDegraded {
+            primitive, reason, ..
+        } => {
+            assert_eq!(*primitive, PrimitiveType::Json);
+            assert_eq!(*reason, PrimitiveDegradedReason::IndexEntryCorrupt);
+        }
+        other => panic!("expected PrimitiveDegraded on JSON; got {other:?}"),
+    }
+
+    let registry = test_db
+        .db
+        .extension::<PrimitiveDegradationRegistry>()
+        .unwrap();
+    let entry = registry
+        .lookup(resolve("main"), PrimitiveType::Json, "default")
+        .expect("JSON _idx degradation entry");
+    assert_eq!(entry.reason, PrimitiveDegradedReason::IndexEntryCorrupt);
 }
 
 // =============================================================================
@@ -572,12 +779,10 @@ fn push_observer_fires_exactly_once_on_degradation() {
 }
 
 #[test]
-fn push_observer_receives_event_on_recovery_triggered_degradation() {
-    // Integration-level check: poison + reopen detects degradation
-    // during subsystem recovery, and a subsequent same-session mark
-    // attempt (e.g. via a read path, or any primitive subsystem that
-    // also encounters the issue) re-marks but does not re-fire. The
-    // post-reopen registry should contain the expected entry.
+fn register_primitive_degraded_observer_replays_recovery_discovered_entry() {
+    // Recovery-time degradations happen during open, before callers can attach
+    // observers. The Database-level registration helper must replay the current
+    // registry so startup degradations are observable on subscribe.
     let mut test_db = TestDb::new();
     test_db.db.branches().create("main").unwrap();
     test_db
@@ -598,8 +803,21 @@ fn push_observer_receives_event_on_recovery_triggered_degradation() {
     poison_vector_config(&test_db.db, "main", "default", "v1");
     test_db.reopen();
 
-    // Registry is populated by recovery (which fires to its own
-    // observers at that time — no user-registered observers yet).
+    let observer = Arc::new(CountingObserver::default());
+    test_db.db.register_primitive_degraded_observer(
+        observer.clone() as Arc<dyn PrimitiveDegradedObserver>
+    );
+    assert_eq!(
+        observer.count.load(Ordering::SeqCst),
+        1,
+        "registration must replay the existing recovery-time degradation"
+    );
+    assert_eq!(
+        *observer.last_primitive.lock(),
+        Some(PrimitiveType::Vector),
+        "replayed event must preserve the primitive kind"
+    );
+
     let registry = test_db
         .db
         .extension::<PrimitiveDegradationRegistry>()

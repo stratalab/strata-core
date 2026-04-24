@@ -30,11 +30,39 @@
 //! mismatch, recovery falls back transparently to full KV-based rebuild
 //! with no data loss.
 
+#[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
+use std::io;
+
 use strata_core::id::CommitVersion;
 use strata_core::StrataResult;
 use strata_engine::database::observers::{AbortInfo, AbortObserver};
 use strata_engine::Database;
 use tracing::info;
+
+#[cfg(test)]
+thread_local! {
+    static VECTOR_SCAN_FAILURE: Cell<Option<io::ErrorKind>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn inject_vector_scan_failure_for_test(kind: io::ErrorKind) {
+    VECTOR_SCAN_FAILURE.with(|slot| slot.set(Some(kind)));
+}
+
+#[cfg(test)]
+fn clear_vector_scan_failure_for_test() {
+    VECTOR_SCAN_FAILURE.with(|slot| slot.set(None));
+}
+
+#[cfg(test)]
+fn maybe_inject_vector_scan_failure_for_test() -> Option<io::Error> {
+    VECTOR_SCAN_FAILURE.with(|slot| {
+        slot.take()
+            .map(|kind| io::Error::new(kind, "injected vector recovery scan failure"))
+    })
+}
 
 /// Recovery function for VectorStore
 ///
@@ -341,23 +369,38 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                 // Scan KV for vector entries
                 // -----------------------------------------------------------
                 let vector_prefix = Key::new_vector(ns.clone(), &collection_name, "");
-                let vector_entries =
-                    match db.storage().scan_prefix(&vector_prefix, snapshot_version) {
-                        Ok(entries) => entries,
-                        Err(e) => {
-                            tracing::warn!(
-                                target: "strata::vector",
-                                collection = %collection_name,
-                                error = %e,
-                                "Failed to scan vectors during recovery"
-                            );
-                            // If mmap loaded, the backend has embeddings but no timestamps;
-                            // proceed anyway so rebuild_index() at least builds the graph.
-                            state.backends.insert(collection_id.clone(), backend);
-                            stats.collections_created += 1;
-                            continue;
-                        }
-                    };
+                #[cfg(test)]
+                let scan_result = if let Some(err) = maybe_inject_vector_scan_failure_for_test() {
+                    Err(err.into())
+                } else {
+                    db.storage().scan_prefix(&vector_prefix, snapshot_version)
+                };
+                #[cfg(not(test))]
+                let scan_result = db.storage().scan_prefix(&vector_prefix, snapshot_version);
+
+                let vector_entries = match scan_result {
+                    Ok(entries) => entries,
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "strata::vector",
+                            collection = %collection_name,
+                            error = %e,
+                            "Failed to scan vectors during recovery; marking collection degraded"
+                        );
+                        // B5.4 — vector rebuild failure must fail closed. A
+                        // partial mmap-only or empty backend is not trusted
+                        // enough to serve branch-visible reads.
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            db,
+                            branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &collection_name,
+                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            format!("failed to scan vectors during recovery: {e}"),
+                        );
+                        continue;
+                    }
+                };
 
                 let collection_prefix = format!("{}/", collection_name);
                 for (vec_key, vec_versioned) in &vector_entries {
@@ -373,7 +416,15 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             tracing::warn!(
                                 target: "strata::vector",
                                 error = %e,
-                                "Failed to decode vector record during recovery, skipping"
+                                "Failed to decode vector record during recovery; marking collection degraded"
+                            );
+                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                                db,
+                                branch_id,
+                                strata_core::contract::PrimitiveType::Vector,
+                                &collection_name,
+                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                format!("{e}"),
                             );
                             continue;
                         }
@@ -387,11 +438,28 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                         stats.vectors_mmap_registered += 1;
                     } else if loaded_from_mmap && !vec_record.embedding.is_empty() {
                         // Vector in KV but not in mmap (added after last freeze) — insert from KV
-                        let _ = backend.insert_with_id_and_timestamp(
+                        if let Err(e) = backend.insert_with_id_and_timestamp(
                             vid,
                             &vec_record.embedding,
                             vec_record.created_at,
-                        );
+                        ) {
+                            tracing::warn!(
+                                target: "strata::vector",
+                                collection = %collection_name,
+                                vector_id = vec_record.vector_id,
+                                error = %e,
+                                "Failed to insert vector during recovery; marking collection degraded"
+                            );
+                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                                db,
+                                branch_id,
+                                strata_core::contract::PrimitiveType::Vector,
+                                &collection_name,
+                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                format!("{e}"),
+                            );
+                            continue;
+                        }
                         stats.vectors_upserted += 1;
                     } else if vec_record.embedding.is_empty() {
                         // Legacy record with no embedding (pre-#1962 lite mode or
@@ -405,11 +473,28 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                         continue;
                     } else {
                         // Full KV-based recovery: insert embedding + timestamp
-                        let _ = backend.insert_with_id_and_timestamp(
+                        if let Err(e) = backend.insert_with_id_and_timestamp(
                             vid,
                             &vec_record.embedding,
                             vec_record.created_at,
-                        );
+                        ) {
+                            tracing::warn!(
+                                target: "strata::vector",
+                                collection = %collection_name,
+                                vector_id = vec_record.vector_id,
+                                error = %e,
+                                "Failed to insert vector during recovery; marking collection degraded"
+                            );
+                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                                db,
+                                branch_id,
+                                strata_core::contract::PrimitiveType::Vector,
+                                &collection_name,
+                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                format!("{e}"),
+                            );
+                            continue;
+                        }
                         stats.vectors_upserted += 1;
                     }
 
@@ -1219,6 +1304,91 @@ mod tests {
         assert_ne!(ga, gb);
         assert!(ga.to_string_lossy().contains("tenant_a"));
         assert!(gb.to_string_lossy().contains("tenant_b"));
+    }
+
+    #[test]
+    fn test_recovery_vector_scan_failure_marks_collection_degraded_and_fails_closed() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_name = "main";
+        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+
+        {
+            let db = Database::open_runtime(
+                OpenSpec::primary(temp.path())
+                    .with_subsystem(VectorSubsystem)
+                    .with_subsystem(strata_engine::SearchSubsystem),
+            )
+            .unwrap();
+            let store = VectorStore::new(db.clone());
+
+            db.branches().create(branch_name).unwrap();
+            store
+                .create_collection(
+                    branch_id,
+                    "default",
+                    "embeddings",
+                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                )
+                .unwrap();
+            store
+                .insert(
+                    branch_id,
+                    "default",
+                    "embeddings",
+                    "v1",
+                    &[1.0, 0.0, 0.0],
+                    None,
+                )
+                .unwrap();
+        }
+
+        clear_vector_scan_failure_for_test();
+        inject_vector_scan_failure_for_test(std::io::ErrorKind::Other);
+
+        let db = Database::open_runtime(
+            OpenSpec::primary(temp.path())
+                .with_subsystem(VectorSubsystem)
+                .with_subsystem(strata_engine::SearchSubsystem),
+        )
+        .unwrap();
+        let store = VectorStore::new(db.clone());
+
+        let registry = db
+            .extension::<strata_engine::PrimitiveDegradationRegistry>()
+            .unwrap();
+        let entry = registry
+            .lookup(
+                branch_id,
+                strata_core::contract::PrimitiveType::Vector,
+                "embeddings",
+            )
+            .expect("scan failure must mark the collection degraded");
+        assert_eq!(
+            entry.reason,
+            strata_core::PrimitiveDegradedReason::ConfigMismatch
+        );
+
+        let err = store
+            .search(
+                branch_id,
+                "default",
+                "embeddings",
+                &[1.0, 0.0, 0.0],
+                5,
+                None,
+            )
+            .expect_err("degraded collection must fail closed after reopen");
+        match strata_core::StrataError::from(err) {
+            strata_core::StrataError::PrimitiveDegraded {
+                primitive, name, ..
+            } => {
+                assert_eq!(primitive, strata_core::contract::PrimitiveType::Vector);
+                assert_eq!(name, "embeddings");
+            }
+            other => panic!("expected PrimitiveDegraded, got {other:?}"),
+        }
+
+        clear_vector_scan_failure_for_test();
     }
 
     #[test]

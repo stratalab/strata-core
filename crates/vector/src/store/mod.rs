@@ -366,15 +366,22 @@ impl VectorStore {
                         error = %e,
                         "Failed to decode vector record during reload; marking collection degraded"
                     );
-                    strata_engine::database::primitive_degradation::mark_primitive_degraded(
-                        &self.db,
-                        id.branch_id,
-                        strata_core::contract::PrimitiveType::Vector,
-                        &id.name,
-                        strata_core::PrimitiveDegradedReason::ConfigMismatch,
-                        format!("{e}"),
-                    );
-                    continue;
+                    let err =
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            &self.db,
+                            id.branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &id.name,
+                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            format!("{e}"),
+                        )
+                        .map(|entry| entry.to_error())
+                        .unwrap_or_else(|| {
+                            strata_core::StrataError::serialization(format!(
+                                "corrupt vector record during reload: {e}"
+                            ))
+                        });
+                    return Err(VectorError::Degraded(Box::new(err)));
                 }
             };
 
@@ -385,11 +392,35 @@ impl VectorStore {
             } else if vec_record.embedding.is_empty() {
                 continue; // legacy empty-embedding record — skip
             } else {
-                let _ = backend.insert_with_id_and_timestamp(
+                if let Err(e) = backend.insert_with_id_and_timestamp(
                     vid,
                     &vec_record.embedding,
                     vec_record.created_at,
-                );
+                ) {
+                    warn!(
+                        target: "strata::vector",
+                        collection = %id.name,
+                        vector_id = vec_record.vector_id,
+                        error = %e,
+                        "Failed to insert vector during reload; marking collection degraded"
+                    );
+                    let err =
+                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            &self.db,
+                            id.branch_id,
+                            strata_core::contract::PrimitiveType::Vector,
+                            &id.name,
+                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            format!("{e}"),
+                        )
+                        .map(|entry| entry.to_error())
+                        .unwrap_or_else(|| {
+                            strata_core::StrataError::serialization(format!(
+                                "failed to insert vector during reload: {e}"
+                            ))
+                        });
+                    return Err(VectorError::Degraded(Box::new(err)));
+                }
             }
 
             // Populate inline metadata for O(1) search resolution
