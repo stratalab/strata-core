@@ -32,6 +32,7 @@ use strata_engine::database::observers::ObserverError;
 use strata_engine::{
     Database, PrimitiveDegradationRegistry, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
 };
+use strata_engine::{SearchRequest, Searchable};
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)
@@ -155,6 +156,14 @@ fn small_vector_config() -> VectorConfig {
         metric: DistanceMetric::Cosine,
         storage_dtype: StorageDtype::F32,
     }
+}
+
+fn vector_search_request(branch: &str) -> SearchRequest {
+    SearchRequest::new(resolve(branch), "")
+        .with_mode(strata_engine::search::SearchMode::Vector)
+        .with_precomputed_embedding(vec![1.0, 0.0, 0.0])
+        .with_space("default")
+        .with_k(5)
 }
 
 // =============================================================================
@@ -358,6 +367,99 @@ fn vector_lazy_reload_corruption_fails_closed_on_triggering_read() {
                 && e.reason == PrimitiveDegradedReason::ConfigMismatch),
         "triggering lazy reload must record degradation for reporting too"
     );
+}
+
+#[test]
+fn vector_searchable_fails_closed_on_corrupt_system_collection_config() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    test_db
+        .vector()
+        .create_system_collection(resolve("main"), "_system_embed_kv", small_vector_config())
+        .expect("create system collection");
+    test_db
+        .vector()
+        .system_insert_with_source(
+            resolve("main"),
+            "_system_embed_kv",
+            "shadow-k1",
+            &[1.0, 0.0, 0.0],
+            None,
+            strata_core::EntityRef::kv(resolve("main"), "default", "real-k1"),
+        )
+        .expect("insert system vector");
+
+    poison_vector_config(
+        &test_db.db,
+        "main",
+        strata_engine::system_space::SYSTEM_SPACE,
+        "_system_embed_kv",
+    );
+
+    let err = Searchable::search(&test_db.vector(), &vector_search_request("main"))
+        .expect_err("branch-visible vector search must fail closed on corrupt system collection");
+    match err {
+        StrataError::PrimitiveDegraded {
+            primitive,
+            name,
+            reason,
+            ..
+        } => {
+            assert_eq!(primitive, PrimitiveType::Vector);
+            assert_eq!(name, "_system_embed_kv");
+            assert_eq!(reason, PrimitiveDegradedReason::ConfigDecodeFailure);
+        }
+        other => panic!("expected PrimitiveDegraded, got {other:?}"),
+    }
+}
+
+#[test]
+fn vector_searchable_fails_closed_on_lazy_reloaded_corrupt_system_vector_row() {
+    let test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    test_db
+        .vector()
+        .create_system_collection(resolve("main"), "_system_embed_kv", small_vector_config())
+        .expect("create system collection");
+    test_db
+        .vector()
+        .system_insert_with_source(
+            resolve("main"),
+            "_system_embed_kv",
+            "shadow-k1",
+            &[1.0, 0.0, 0.0],
+            None,
+            strata_core::EntityRef::kv(resolve("main"), "default", "real-k1"),
+        )
+        .expect("insert system vector");
+
+    poison_vector_record(
+        &test_db.db,
+        "main",
+        strata_engine::system_space::SYSTEM_SPACE,
+        "_system_embed_kv",
+        "shadow-k1",
+    );
+    test_db
+        .vector()
+        .purge_collections_in_branch(resolve("main"))
+        .expect("evict in-memory backends");
+
+    let err = Searchable::search(&test_db.vector(), &vector_search_request("main"))
+        .expect_err("branch-visible vector search must fail closed on lazy reload corruption");
+    match err {
+        StrataError::PrimitiveDegraded {
+            primitive,
+            name,
+            reason,
+            ..
+        } => {
+            assert_eq!(primitive, PrimitiveType::Vector);
+            assert_eq!(name, "_system_embed_kv");
+            assert_eq!(reason, PrimitiveDegradedReason::ConfigMismatch);
+        }
+        other => panic!("expected PrimitiveDegraded, got {other:?}"),
+    }
 }
 
 // =============================================================================

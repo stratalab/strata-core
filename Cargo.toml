@@ -186,6 +186,7 @@ chrono = { workspace = true }
 serde = { workspace = true }
 rustc-hash = { workspace = true }
 parking_lot = { workspace = true }
+proptest = { workspace = true }
 # Internal crates for testing only
 strata-core = { path = "crates/core" }
 strata-storage = { path = "crates/storage" }

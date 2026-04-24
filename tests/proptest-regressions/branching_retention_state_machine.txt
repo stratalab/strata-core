@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc cad6a42ea17fcf5becc8f3d0500edf66a9aa795707bfbfdd6d23dba4c9f0b594 # shrinks to ops = [RewriteMain, Gc, MaterializeFeature, RewriteMain, RewriteMain, RecreateMain, ForkFeature]
+cc 4ee3b0b441a308857c85f233ae6069a0e874fbb490e8aab6bb668f5ce68774bf # shrinks to ops = [ForkFeature, DeleteMain, RecreateMain]
+cc b553d1f6d4599e3cec42f3a66824dfe163194e8d55ab130b0ce5636200b50d39 # shrinks to ops = [RewriteMain, RewriteMain, ForkFeature, Reopen]
+cc fe055756468c9a34156790bfac11035153978621e00f634a65102906f047e1ec # shrinks to ops = [RewriteMain, ForkFeature, RecreateMain, RewriteMain, Reopen]

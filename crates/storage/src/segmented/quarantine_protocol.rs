@@ -131,6 +131,17 @@ pub struct StorageBranchRetention {
     /// inherited-layer manifest references. Retained until the
     /// descendant releases (release-at-clear-or-materialize).
     pub shared_bytes: u64,
+    /// Descendant-held bytes that are no longer owned by this branch's
+    /// current manifest.
+    ///
+    /// This is the same-name recreate / deleted-parent-with-live-child
+    /// shape: the bytes still live under this branch directory and are
+    /// still manifest-reachable through a descendant inherited layer,
+    /// but they belong to an older lifecycle instance rather than the
+    /// current live manifest. Engine-layer attribution must surface
+    /// these as orphan storage, not as `shared_bytes` on the current
+    /// live branch entry.
+    pub detached_shared_bytes: u64,
     /// Bytes visible to this branch through inherited-layer manifests;
     /// the bytes physically live under the source branch's directory.
     pub inherited_layer_bytes: u64,
@@ -152,6 +163,7 @@ impl StorageBranchRetention {
             branch_id,
             exclusive_bytes: 0,
             shared_bytes: 0,
+            detached_shared_bytes: 0,
             inherited_layer_bytes: 0,
             inherited_layers: Vec::new(),
             quarantined_bytes: 0,
@@ -480,6 +492,7 @@ impl SegmentedStore {
         let views_by_id: HashMap<BranchId, &RetentionBranchDirView> =
             views.iter().map(|view| (view.branch_id, view)).collect();
         let descendant_held = descendant_held_filenames_by_source(&views);
+        let manifest_live_filenames = manifest_live_filenames_from_views(&views);
         let recovery_health = self.last_recovery_health.load();
         let legacy_fallback_branches = branches_with_legacy_no_manifest_fallback(&recovery_health);
 
@@ -487,6 +500,7 @@ impl SegmentedStore {
             let mut accounted_top_level: HashSet<String> = HashSet::new();
             let mut exclusive_bytes = 0u64;
             let mut shared_bytes = 0u64;
+            let mut detached_shared_bytes = 0u64;
             let shared_filenames = descendant_held.get(&view.branch_id);
 
             if let Some(manifest) = view.manifest.as_ref() {
@@ -548,7 +562,7 @@ impl SegmentedStore {
                 // it routes old files through reclaim, so raw disk presence
                 // alone must not inflate `exclusive_bytes` / `shared_bytes`.
                 if shared_filenames.is_some_and(|filenames| filenames.contains(&file.filename)) {
-                    shared_bytes += file.size;
+                    detached_shared_bytes += file.size;
                 }
             }
 
@@ -584,13 +598,18 @@ impl SegmentedStore {
                 }
             }
 
+            let empty_live_filenames = HashSet::new();
             let (quarantined_bytes, quarantined_segment_count) = quarantine_stats_from_state(
                 view.branch_id,
                 view.quarantine.as_ref().expect("quarantine loaded"),
+                manifest_live_filenames
+                    .get(&view.branch_id)
+                    .unwrap_or(&empty_live_filenames),
             )?;
 
             if exclusive_bytes == 0
                 && shared_bytes == 0
+                && detached_shared_bytes == 0
                 && inherited_layer_bytes == 0
                 && quarantined_bytes == 0
             {
@@ -601,6 +620,7 @@ impl SegmentedStore {
                 branch_id: view.branch_id,
                 exclusive_bytes,
                 shared_bytes,
+                detached_shared_bytes,
                 inherited_layer_bytes,
                 inherited_layers,
                 quarantined_bytes,
@@ -1010,6 +1030,7 @@ fn branches_with_legacy_no_manifest_fallback(health: &RecoveryHealth) -> HashSet
 fn quarantine_stats_from_state(
     branch_id: BranchId,
     state: &BranchQuarantineState,
+    manifest_live_filenames: &HashSet<String>,
 ) -> StorageResult<(u64, usize)> {
     match &state.manifest {
         None => {
@@ -1029,25 +1050,64 @@ fn quarantine_stats_from_state(
                 .map(|entry| entry.filename.clone())
                 .collect();
             let files_present: HashSet<String> = state.files_on_disk.keys().cloned().collect();
-            if inventory_filenames != files_present {
-                return Err(StorageError::QuarantineReconciliationFailed {
-                    branch_id,
-                    reason: "inventory does not match on-disk quarantine contents".to_string(),
-                });
+
+            for filename in &files_present {
+                if !inventory_filenames.contains(filename) {
+                    return Err(StorageError::QuarantineReconciliationFailed {
+                        branch_id,
+                        reason: "inventory does not match on-disk quarantine contents".to_string(),
+                    });
+                }
             }
 
+            let mut retained_entry_count = 0usize;
             let total = manifest
                 .entries
                 .iter()
+                .filter(|entry| {
+                    if files_present.contains(&entry.filename) {
+                        retained_entry_count += 1;
+                        return true;
+                    }
+
+                    if manifest_live_filenames.contains(&entry.filename) {
+                        // This is the same mismatch reopen reconciliation
+                        // refuses: inventory claims quarantine membership for a
+                        // file still reachable from a live manifest.
+                        return true;
+                    }
+
+                    // Benign stale entry: publish happened, but rename never
+                    // completed (or purge already removed the file). Reopen
+                    // reconciliation drops these entries in place; the
+                    // in-session report path should not fail closed on the same
+                    // state.
+                    false
+                })
                 .map(|entry| {
+                    if !files_present.contains(&entry.filename)
+                        && manifest_live_filenames.contains(&entry.filename)
+                    {
+                        return Err(StorageError::QuarantineReconciliationFailed {
+                            branch_id,
+                            reason: "inventory does not match on-disk quarantine contents"
+                                .to_string(),
+                        });
+                    }
                     state
                         .files_on_disk
                         .get(&entry.filename)
                         .copied()
-                        .unwrap_or(0)
+                        .ok_or_else(|| StorageError::QuarantineReconciliationFailed {
+                            branch_id,
+                            reason: "inventory does not match on-disk quarantine contents"
+                                .to_string(),
+                        })
                 })
+                .collect::<StorageResult<Vec<_>>>()?
+                .into_iter()
                 .sum();
-            Ok((total, manifest.entries.len()))
+            Ok((total, retained_entry_count))
         }
     }
 }

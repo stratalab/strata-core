@@ -169,6 +169,46 @@ fn reopen_drops_stale_inventory_entries_without_degrade() {
         .expect("healthy gc after silent reconcile");
 }
 
+/// The in-session retention/report path must treat the same stale inventory
+/// shape as benign. Recovery reconciliation rewrites these entries away on
+/// reopen, but callers must not get `RetentionReportUnavailable` simply
+/// because publish happened and rename never did.
+#[test]
+fn retention_snapshot_ignores_stale_missing_quarantine_inventory_entries() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("k"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let b_dir = branch_dir_for(dir.path(), branch());
+    write_quarantine_manifest(
+        &b_dir,
+        &[QuarantineEntry {
+            segment_id: 0xdead,
+            filename: "phantom.sst".to_string(),
+        }],
+    )
+    .unwrap();
+
+    let snapshot = store
+        .retention_snapshot()
+        .expect("stale inventory entries without quarantine files must not fail the read path");
+    let entry = snapshot
+        .iter()
+        .find(|entry| entry.branch_id == branch())
+        .expect("live branch must still appear in the retention snapshot");
+
+    assert_eq!(
+        entry.quarantined_bytes, 0,
+        "stale inventory entries must not inflate quarantined byte attribution",
+    );
+    assert_eq!(
+        entry.quarantined_segment_count, 0,
+        "stale inventory entries must not inflate quarantined segment counts",
+    );
+}
+
 /// After reclaim has driven the quarantine inventory empty, subsequent
 /// reopens must leave a clean slate: no leftover `quarantine.manifest`,
 /// no `__quarantine__/` directory, healthy recovery. Pins idempotency.
