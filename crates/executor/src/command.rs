@@ -2484,6 +2484,74 @@ impl Command {
         }
     }
 
+    /// Fill in a caller-provided default space for any data command where the
+    /// space is omitted.
+    pub fn resolve_space_defaults_with(&mut self, default_space: &str) {
+        macro_rules! resolve_space {
+            ($space:expr) => {
+                if $space.is_none() {
+                    *$space = Some(default_space.to_string());
+                }
+            };
+        }
+
+        match self {
+            Command::KvPut { space, .. }
+            | Command::KvBatchPut { space, .. }
+            | Command::KvBatchGet { space, .. }
+            | Command::KvBatchDelete { space, .. }
+            | Command::KvBatchExists { space, .. }
+            | Command::KvGet { space, .. }
+            | Command::KvDelete { space, .. }
+            | Command::KvList { space, .. }
+            | Command::KvGetv { space, .. }
+            | Command::KvScan { space, .. }
+            | Command::JsonSet { space, .. }
+            | Command::JsonBatchSet { space, .. }
+            | Command::JsonBatchGet { space, .. }
+            | Command::JsonBatchDelete { space, .. }
+            | Command::JsonGet { space, .. }
+            | Command::JsonGetv { space, .. }
+            | Command::JsonDelete { space, .. }
+            | Command::JsonList { space, .. }
+            | Command::EventAppend { space, .. }
+            | Command::EventBatchAppend { space, .. }
+            | Command::EventGet { space, .. }
+            | Command::EventGetByType { space, .. }
+            | Command::EventLen { space, .. }
+            | Command::EventRange { space, .. }
+            | Command::EventRangeByTime { space, .. }
+            | Command::EventListTypes { space, .. }
+            | Command::EventList { space, .. }
+            | Command::VectorUpsert { space, .. }
+            | Command::VectorGet { space, .. }
+            | Command::VectorGetv { space, .. }
+            | Command::VectorDelete { space, .. }
+            | Command::VectorQuery { space, .. }
+            | Command::VectorCreateCollection { space, .. }
+            | Command::VectorDeleteCollection { space, .. }
+            | Command::VectorListCollections { space, .. }
+            | Command::VectorCollectionStats { space, .. }
+            | Command::VectorBatchUpsert { space, .. }
+            | Command::VectorBatchGet { space, .. }
+            | Command::VectorBatchDelete { space, .. }
+            | Command::Search { space, .. }
+            | Command::KvCount { space, .. }
+            | Command::JsonCount { space, .. }
+            | Command::KvSample { space, .. }
+            | Command::JsonSample { space, .. }
+            | Command::JsonCreateIndex { space, .. }
+            | Command::JsonDropIndex { space, .. }
+            | Command::JsonListIndexes { space, .. }
+            | Command::VectorSample { space, .. }
+            | Command::DbExport { space, .. }
+            | Command::ArrowImport { space, .. } => {
+                resolve_space!(space);
+            }
+            _ => {}
+        }
+    }
+
     /// Fill in missing branches/spaces using the legacy literal `"default"`
     /// branch name.
     ///

@@ -51,6 +51,12 @@ pub struct GraphStore {
     db: Arc<Database>,
 }
 
+/// Canonical primitive-facing name for the graph store.
+///
+/// `GraphStore` remains as a compatibility name while the workspace is
+/// normalized around a single primitive vocabulary.
+pub type PrimitiveGraphStore = GraphStore;
+
 impl GraphStore {
     /// Create a new GraphStore backed by the given database.
     pub fn new(db: Arc<Database>) -> Self {

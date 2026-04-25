@@ -308,17 +308,16 @@ fn default_branch_always_works() {
 // ============================================================================
 // Branch DAG: executor-path end-to-end
 //
-// This test proves that fork / merge operations going through the executor
-// API (`Strata::branches().fork()`, `Strata::branches().merge()`) record DAG
-// events. The mirror engine-direct tests live in
-// `tests/integration/branching.rs::dag_*`. After PR "branch DAG: close
-// engine bypass", both code paths must produce identical DAG state.
+// This test proves that fork / merge operations executed through the public
+// executor surface record DAG events. The mirror engine-direct tests live in
+// `tests/integration/branching.rs::dag_*`. Both code paths must produce
+// identical DAG state.
 // ============================================================================
 
 #[test]
 fn dag_records_via_executor_api() {
     use strata_core::branch_dag::SYSTEM_BRANCH;
-    use strata_executor::Strata;
+    use strata_executor::{MergeStrategy, Session, Strata};
     use strata_graph::types::{Direction, NodeData};
     use strata_graph::GraphStore;
 
@@ -333,19 +332,28 @@ fn dag_records_via_executor_api() {
     // as forkable.
     db.kv_put("seed", strata_core::Value::Int(1)).unwrap();
 
-    // Fork via executor API.
-    db.branches().fork("default", "exec_fork").unwrap();
+    let mut session = Session::new(db.database());
+    session
+        .execute(Command::BranchFork {
+            source: "default".into(),
+            destination: "exec_fork".into(),
+            message: None,
+            creator: None,
+        })
+        .unwrap();
 
-    // Diverge on the fork and merge back.
     db.set_branch("exec_fork").unwrap();
     db.kv_put("only_in_fork", strata_core::Value::Int(99))
         .unwrap();
-    db.branches()
-        .merge(
-            "exec_fork",
-            "default",
-            strata_executor::MergeStrategy::LastWriterWins,
-        )
+
+    session
+        .execute(Command::BranchMerge {
+            source: "exec_fork".into(),
+            target: "default".into(),
+            strategy: MergeStrategy::LastWriterWins,
+            message: None,
+            creator: None,
+        })
         .unwrap();
 
     // Query the DAG via the GraphStore on the underlying Database. This is

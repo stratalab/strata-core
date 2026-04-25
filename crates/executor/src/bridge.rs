@@ -1,88 +1,75 @@
-//! Bridge module: direct access to engine primitives.
-//!
-//! This module replaces the `strata-api` SubstrateImpl dependency with direct
-//! engine primitive access. It provides:
-//!
-//! - [`Primitives`]: Holds engine primitives + database reference
-//! - [`to_core_branch_id`]: Converts executor's string-based BranchId to core BranchId
-//! - Validation helpers: Key, stream, event payload, collection name validation
-//! - Type conversion helpers: Value ↔ JsonValue, DistanceMetric, etc.
-
 use std::sync::Arc;
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
 use strata_core::limits::Limits;
 use strata_core::primitives::json::{JsonPath, JsonValue};
-use strata_core::{StrataError, StrataResult, Value};
-use strata_engine::{
-    Database, EventLog as PrimitiveEventLog, JsonStore as PrimitiveJsonStore,
-    KVStore as PrimitiveKVStore, SpaceIndex as PrimitiveSpaceIndex,
+use strata_core::{
+    validate_space_name, StrataError, StrataResult, Value, VersionedValue as CoreVersionedValue,
 };
-use strata_graph::GraphStore;
+use strata_engine::{
+    BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog,
+    JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
+    SpaceIndex as PrimitiveSpaceIndex,
+};
+use strata_graph::PrimitiveGraphStore;
+use strata_security::AccessMode;
 use strata_vector::VectorStore as PrimitiveVectorStore;
 
-use crate::types::BranchId;
+use crate::{
+    BranchId, BranchStatus, Command, DatabaseInfo, DistanceMetric, Error, FilterOp, MetadataFilter,
+    Result, VersionedValue,
+};
 
-// =============================================================================
-// Primitives
-// =============================================================================
+const RESERVED_KEY_PREFIX: &str = "_strata/";
 
-/// Direct access to all engine primitives.
-///
-/// Replaces `SubstrateImpl` from `strata-api`. Holds references to the database
-/// and all engine primitive stores, enabling direct engine calls without the API layer.
 #[derive(Clone)]
-pub struct Primitives {
-    /// The underlying database
-    pub db: Arc<Database>,
-    /// KV primitive
-    pub kv: PrimitiveKVStore,
-    /// JSON primitive
-    pub json: PrimitiveJsonStore,
-    /// Event primitive
-    pub event: PrimitiveEventLog,
-    /// Vector primitive
-    pub vector: PrimitiveVectorStore,
-    /// Space primitive
-    pub space: PrimitiveSpaceIndex,
-    /// Graph primitive
-    pub graph: GraphStore,
-    /// Size limits for keys, values, and vectors
-    pub limits: Limits,
+pub(crate) struct Primitives {
+    pub(crate) db: Arc<Database>,
+    pub(crate) kv: PrimitiveKVStore,
+    pub(crate) json: PrimitiveJsonStore,
+    pub(crate) event: PrimitiveEventLog,
+    pub(crate) vector: PrimitiveVectorStore,
+    pub(crate) space: PrimitiveSpaceIndex,
+    pub(crate) graph: PrimitiveGraphStore,
+    pub(crate) limits: Limits,
 }
 
 impl Primitives {
-    /// Create primitives from a database instance.
-    pub fn new(db: Arc<Database>) -> Self {
+    pub(crate) fn new(db: Arc<Database>) -> Self {
         Self {
             kv: PrimitiveKVStore::new(db.clone()),
             json: PrimitiveJsonStore::new(db.clone()),
             event: PrimitiveEventLog::new(db.clone()),
             vector: PrimitiveVectorStore::new(db.clone()),
             space: PrimitiveSpaceIndex::new(db.clone()),
-            graph: GraphStore::new(db.clone()),
+            graph: PrimitiveGraphStore::new(db.clone()),
             db,
             limits: Limits::default(),
         }
     }
 }
 
-// =============================================================================
-// BranchId Conversion
-// =============================================================================
+pub(crate) fn remap<T, U>(value: T, what: &'static str) -> Result<U>
+where
+    T: Serialize,
+    U: DeserializeOwned,
+{
+    let bytes = rmp_serde::to_vec_named(&value).map_err(|error| Error::Internal {
+        reason: format!("failed to encode {what}: {error}"),
+        hint: None,
+    })?;
+    rmp_serde::from_slice(&bytes).map_err(|error| Error::Internal {
+        reason: format!("failed to decode {what}: {error}"),
+        hint: None,
+    })
+}
 
-/// Convert executor's string-based BranchId to core BranchId.
-///
-/// Delegates to the canonical [`strata_core::BranchId::from_user_name`]
-/// derivation. The algorithm is identical to the pre-B2 inline body:
-///
-/// - `"default"` → nil UUID (all zeros)
-/// - Valid UUID string → parsed UUID bytes, except the reserved nil-UUID
-///   default-branch alias which is rejected as invalid input
-/// - Any other string → deterministic UUID-v5 over the canonical namespace
-///
-/// This is the executor's adapter from user-facing branch names to the
-/// engine's canonical [`strata_core::types::BranchId`].
-pub fn to_core_branch_id(branch: &BranchId) -> crate::Result<strata_core::types::BranchId> {
+pub(crate) fn remap_error(error: strata_executor_legacy::Error) -> Error {
+    remap(error, "executor error").unwrap_or_else(|fallback| fallback)
+}
+
+pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types::BranchId> {
     if strata_core::branch::aliases_default_branch_sentinel(branch.as_str()) {
         return Err(StrataError::invalid_input(
             "branch name aliases reserved default-branch sentinel",
@@ -95,23 +82,69 @@ pub fn to_core_branch_id(branch: &BranchId) -> crate::Result<strata_core::types:
     ))
 }
 
-// =============================================================================
-// Validation Helpers
-// =============================================================================
+pub(crate) fn runtime_default_branch(db: &Database) -> BranchId {
+    BranchId::from(
+        db.default_branch_name()
+            .unwrap_or_else(|| "default".to_string()),
+    )
+}
 
-/// Reserved key prefix that users cannot use.
-const RESERVED_KEY_PREFIX: &str = "_strata/";
+pub(crate) fn access_denied(db: &Database, command: &str) -> Error {
+    let hint = if db.is_follower() {
+        Some(
+            "This database is a read-only follower. Writes must go through the primary instance."
+                .to_string(),
+        )
+    } else {
+        Some("Database is in read-only mode.".to_string())
+    };
+    Error::AccessDenied {
+        command: command.to_string(),
+        hint,
+    }
+}
 
-/// Validate a KV/JSON key.
-///
-/// Keys must be non-empty, contain no NUL bytes, not start with `_strata/`,
-/// and not exceed the configured maximum key length.
-pub fn validate_key(key: &str) -> StrataResult<()> {
+pub(crate) fn is_read_only(access_mode: AccessMode) -> bool {
+    matches!(access_mode, AccessMode::ReadOnly)
+}
+
+pub(crate) fn is_local_executor_command(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::Ping
+            | Command::Info
+            | Command::Health
+            | Command::Metrics
+            | Command::Flush
+            | Command::Compact
+    )
+}
+
+pub(crate) fn extract_version(v: &strata_core::Version) -> u64 {
+    match v {
+        strata_core::Version::Txn(n)
+        | strata_core::Version::Sequence(n)
+        | strata_core::Version::Counter(n) => *n,
+    }
+}
+
+pub(crate) fn to_versioned_value(v: CoreVersionedValue) -> VersionedValue {
+    VersionedValue {
+        value: v.value,
+        version: extract_version(&v.version),
+        timestamp: v.timestamp.into(),
+    }
+}
+
+pub(crate) fn from_engine_branch_status(_status: EngineBranchStatus) -> BranchStatus {
+    BranchStatus::Active
+}
+
+pub(crate) fn validate_key(key: &str) -> StrataResult<()> {
     validate_key_with_limits(key, &Limits::default())
 }
 
-/// Validate a KV/JSON key against specific limits.
-pub fn validate_key_with_limits(key: &str, limits: &Limits) -> StrataResult<()> {
+pub(crate) fn validate_key_with_limits(key: &str, limits: &Limits) -> StrataResult<()> {
     if key.is_empty() {
         return Err(StrataError::invalid_input("Key must not be empty"));
     }
@@ -130,27 +163,23 @@ pub fn validate_key_with_limits(key: &str, limits: &Limits) -> StrataResult<()> 
     Ok(())
 }
 
-/// Validate a value against size limits.
-pub fn validate_value(value: &Value, limits: &Limits) -> StrataResult<()> {
-    limits.validate_value(value).map_err(limit_error_to_strata)
+pub(crate) fn validate_value(value: &Value, limits: &Limits) -> StrataResult<()> {
+    limits
+        .validate_value(value)
+        .map_err(|e| StrataError::capacity_exceeded(e.reason_code(), e.max(), e.actual()))
 }
 
-/// Validate a vector against dimension limits.
-pub fn validate_vector(vec: &[f32], limits: &Limits) -> StrataResult<()> {
-    limits.validate_vector(vec).map_err(limit_error_to_strata)
+pub(crate) fn validate_vector(vector: &[f32], limits: &Limits) -> StrataResult<()> {
+    limits
+        .validate_vector(vector)
+        .map_err(|e| StrataError::capacity_exceeded(e.reason_code(), e.max(), e.actual()))
 }
 
-/// Convert a `LimitError` to a `StrataError`.
-fn limit_error_to_strata(e: strata_core::limits::LimitError) -> StrataError {
-    StrataError::capacity_exceeded(e.reason_code(), e.max(), e.actual())
-}
-/// Check if a collection name is internal (starts with `_`).
 pub(crate) fn is_internal_collection(name: &str) -> bool {
     name.starts_with('_')
 }
 
-/// Validate that a collection name is not internal.
-pub fn validate_not_internal_collection(name: &str) -> StrataResult<()> {
+pub(crate) fn validate_not_internal_collection(name: &str) -> StrataResult<()> {
     if is_internal_collection(name) {
         return Err(StrataError::invalid_input(format!(
             "Collection '{}' is internal and cannot be accessed directly",
@@ -160,31 +189,24 @@ pub fn validate_not_internal_collection(name: &str) -> StrataResult<()> {
     Ok(())
 }
 
-// =============================================================================
-// Type Conversion: Value ↔ JsonValue
-// =============================================================================
-
-/// Convert `strata_core::Value` to `JsonValue` for the JSON primitive.
-pub fn value_to_json(value: Value) -> StrataResult<JsonValue> {
+pub(crate) fn value_to_json(value: Value) -> StrataResult<JsonValue> {
     let json_val = value_to_serde_json(value)?;
     Ok(JsonValue::from(json_val))
 }
 
-/// Convert `JsonValue` back to `strata_core::Value`.
-pub fn json_to_value(json: JsonValue) -> StrataResult<Value> {
+pub(crate) fn json_to_value(json: JsonValue) -> StrataResult<Value> {
     let serde_val: serde_json::Value = json.into();
     serde_json_to_value(serde_val)
 }
 
-/// Convert a Value to serde_json::Value without serde's tagged enum format.
 fn value_to_serde_json(value: Value) -> StrataResult<serde_json::Value> {
     use serde_json::Map;
-    use serde_json::Value as JV;
+    use serde_json::Value as Json;
 
     match value {
-        Value::Null => Ok(JV::Null),
-        Value::Bool(b) => Ok(JV::Bool(b)),
-        Value::Int(i) => Ok(JV::Number(i.into())),
+        Value::Null => Ok(Json::Null),
+        Value::Bool(b) => Ok(Json::Bool(b)),
+        Value::Int(i) => Ok(Json::Number(i.into())),
         Value::Float(f) => {
             if f.is_infinite() || f.is_nan() {
                 return Err(StrataError::serialization(format!(
@@ -193,40 +215,39 @@ fn value_to_serde_json(value: Value) -> StrataResult<serde_json::Value> {
                 )));
             }
             serde_json::Number::from_f64(f)
-                .map(JV::Number)
+                .map(Json::Number)
                 .ok_or_else(|| {
                     StrataError::serialization(format!("Cannot convert {} to JSON number", f))
                 })
         }
-        Value::String(s) => Ok(JV::String(s)),
+        Value::String(s) => Ok(Json::String(s)),
         Value::Bytes(b) => {
             use base64::Engine;
             let encoded = base64::engine::general_purpose::STANDARD.encode(&b);
-            Ok(JV::String(format!("__bytes__:{}", encoded)))
+            Ok(Json::String(format!("__bytes__:{}", encoded)))
         }
         Value::Array(arr) => {
-            let converted: Result<Vec<_>, _> =
+            let converted: std::result::Result<Vec<_>, _> =
                 (*arr).into_iter().map(value_to_serde_json).collect();
-            Ok(JV::Array(converted?))
+            Ok(Json::Array(converted?))
         }
         Value::Object(obj) => {
             let mut map = Map::new();
             for (k, v) in *obj {
                 map.insert(k, value_to_serde_json(v)?);
             }
-            Ok(JV::Object(map))
+            Ok(Json::Object(map))
         }
     }
 }
 
-/// Convert serde_json::Value to Value without serde deserialization.
 fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
-    use serde_json::Value as JV;
+    use serde_json::Value as Json;
 
     match json {
-        JV::Null => Ok(Value::Null),
-        JV::Bool(b) => Ok(Value::Bool(b)),
-        JV::Number(n) => {
+        Json::Null => Ok(Value::Null),
+        Json::Bool(b) => Ok(Value::Bool(b)),
+        Json::Number(n) => {
             if let Some(i) = n.as_i64() {
                 Ok(Value::Int(i))
             } else if let Some(f) = n.as_f64() {
@@ -238,7 +259,7 @@ fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
                 )))
             }
         }
-        JV::String(s) => {
+        Json::String(s) => {
             if let Some(encoded) = s.strip_prefix("__bytes__:") {
                 use base64::Engine;
                 let bytes = base64::engine::general_purpose::STANDARD
@@ -251,11 +272,12 @@ fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
                 Ok(Value::String(s))
             }
         }
-        JV::Array(arr) => {
-            let converted: Result<Vec<_>, _> = arr.into_iter().map(serde_json_to_value).collect();
+        Json::Array(arr) => {
+            let converted: std::result::Result<Vec<_>, _> =
+                arr.into_iter().map(serde_json_to_value).collect();
             Ok(Value::array(converted?))
         }
-        JV::Object(obj) => {
+        Json::Object(obj) => {
             let mut map = std::collections::HashMap::new();
             for (k, v) in obj {
                 map.insert(k, serde_json_to_value(v)?);
@@ -265,104 +287,60 @@ fn serde_json_to_value(json: serde_json::Value) -> StrataResult<Value> {
     }
 }
 
-/// Parse a string path to JsonPath.
-///
-/// Supports standard JSONPath `$` prefix:
-/// - `"$"` or `""` → root
-/// - `"$.name"` → field access (strips `$` prefix)
-/// - `"$[0]"` → array index (strips `$` prefix)
-/// - `"name"` or `".name"` → field access (no prefix)
-pub fn parse_path(path: &str) -> StrataResult<JsonPath> {
-    if path.is_empty() || path == "$" {
-        return Ok(JsonPath::root());
-    }
-    // Strip leading "$" so "$.name" → ".name", "$[0]" → "[0]"
-    let normalized = path.strip_prefix('$').unwrap_or(path);
-    normalized
-        .parse()
-        .map_err(|e| StrataError::invalid_input(format!("Invalid JSON path '{}': {:?}", path, e)))
+pub(crate) fn value_to_serde_json_public(value: Value) -> StrataResult<serde_json::Value> {
+    value_to_serde_json(value)
 }
 
-// =============================================================================
-// Version Helpers
-// =============================================================================
-
-/// Extract u64 from a Version enum.
-pub fn extract_version(v: &strata_core::Version) -> u64 {
-    match v {
-        strata_core::Version::Txn(n) => *n,
-        strata_core::Version::Sequence(n) => *n,
-        strata_core::Version::Counter(n) => *n,
-    }
+pub(crate) fn serde_json_to_value_public(json: serde_json::Value) -> StrataResult<Value> {
+    serde_json_to_value(json)
 }
 
-/// Convert a `Versioned<Value>` to executor's `VersionedValue`.
-pub fn to_versioned_value(v: strata_core::Versioned<Value>) -> crate::types::VersionedValue {
-    crate::types::VersionedValue {
-        value: v.value,
-        version: extract_version(&v.version),
-        timestamp: v.timestamp.into(),
-    }
-}
-
-// =============================================================================
-// DistanceMetric Conversion
-// =============================================================================
-
-/// Convert executor DistanceMetric to engine DistanceMetric.
-pub fn to_engine_metric(metric: crate::types::DistanceMetric) -> strata_vector::DistanceMetric {
+pub(crate) fn to_engine_metric(metric: DistanceMetric) -> strata_vector::DistanceMetric {
     match metric {
-        crate::types::DistanceMetric::Cosine => strata_vector::DistanceMetric::Cosine,
-        crate::types::DistanceMetric::Euclidean => strata_vector::DistanceMetric::Euclidean,
-        crate::types::DistanceMetric::DotProduct => strata_vector::DistanceMetric::DotProduct,
+        DistanceMetric::Cosine => strata_vector::DistanceMetric::Cosine,
+        DistanceMetric::Euclidean => strata_vector::DistanceMetric::Euclidean,
+        DistanceMetric::DotProduct => strata_vector::DistanceMetric::DotProduct,
     }
 }
 
-/// Convert engine DistanceMetric to executor DistanceMetric.
-pub fn from_engine_metric(metric: strata_vector::DistanceMetric) -> crate::types::DistanceMetric {
+pub(crate) fn from_engine_metric(metric: strata_vector::DistanceMetric) -> DistanceMetric {
     match metric {
-        strata_vector::DistanceMetric::Cosine => crate::types::DistanceMetric::Cosine,
-        strata_vector::DistanceMetric::Euclidean => crate::types::DistanceMetric::Euclidean,
-        strata_vector::DistanceMetric::DotProduct => crate::types::DistanceMetric::DotProduct,
+        strata_vector::DistanceMetric::Cosine => DistanceMetric::Cosine,
+        strata_vector::DistanceMetric::Euclidean => DistanceMetric::Euclidean,
+        strata_vector::DistanceMetric::DotProduct => DistanceMetric::DotProduct,
     }
 }
 
-// =============================================================================
-// SearchFilter Conversion
-// =============================================================================
-
-/// Convert executor MetadataFilter list to engine MetadataFilter.
-pub fn to_engine_filter(
-    filters: &[crate::types::MetadataFilter],
+pub(crate) fn to_engine_filter(
+    filters: &[MetadataFilter],
 ) -> Option<strata_vector::MetadataFilter> {
     if filters.is_empty() {
         return None;
     }
 
     let mut engine_filter = strata_vector::MetadataFilter::new();
-
-    for f in filters {
-        let scalar = value_to_json_scalar(&f.value);
-        match f.op {
-            crate::types::FilterOp::Eq => {
-                engine_filter.equals.insert(f.field.clone(), scalar);
+    for filter in filters {
+        let scalar = value_to_json_scalar(&filter.value);
+        match filter.op {
+            FilterOp::Eq => {
+                engine_filter.equals.insert(filter.field.clone(), scalar);
             }
             _ => {
-                let engine_op = match f.op {
-                    crate::types::FilterOp::Eq => strata_vector::FilterOp::Eq,
-                    crate::types::FilterOp::Ne => strata_vector::FilterOp::Ne,
-                    crate::types::FilterOp::Gt => strata_vector::FilterOp::Gt,
-                    crate::types::FilterOp::Gte => strata_vector::FilterOp::Gte,
-                    crate::types::FilterOp::Lt => strata_vector::FilterOp::Lt,
-                    crate::types::FilterOp::Lte => strata_vector::FilterOp::Lte,
-                    crate::types::FilterOp::In => strata_vector::FilterOp::In,
-                    crate::types::FilterOp::Contains => strata_vector::FilterOp::Contains,
+                let op = match filter.op {
+                    FilterOp::Eq => strata_vector::FilterOp::Eq,
+                    FilterOp::Ne => strata_vector::FilterOp::Ne,
+                    FilterOp::Gt => strata_vector::FilterOp::Gt,
+                    FilterOp::Gte => strata_vector::FilterOp::Gte,
+                    FilterOp::Lt => strata_vector::FilterOp::Lt,
+                    FilterOp::Lte => strata_vector::FilterOp::Lte,
+                    FilterOp::In => strata_vector::FilterOp::In,
+                    FilterOp::Contains => strata_vector::FilterOp::Contains,
                 };
                 engine_filter
                     .conditions
                     .push(strata_vector::FilterCondition {
-                        field: f.field.clone(),
-                        op: engine_op,
+                        field: filter.field.clone(),
+                        op,
                         value: scalar,
                     });
             }
@@ -376,275 +354,113 @@ pub fn to_engine_filter(
     }
 }
 
-/// Convert a Value to a JsonScalar for vector metadata filtering.
 fn value_to_json_scalar(value: &Value) -> strata_vector::JsonScalar {
     match value {
         Value::Null => strata_vector::JsonScalar::Null,
-        Value::Bool(b) => strata_vector::JsonScalar::Bool(*b),
-        Value::Int(i) => strata_vector::JsonScalar::Number(*i as f64),
-        Value::Float(f) => strata_vector::JsonScalar::Number(*f),
-        Value::String(s) => strata_vector::JsonScalar::String(s.clone()),
+        Value::Bool(boolean) => strata_vector::JsonScalar::Bool(*boolean),
+        Value::Int(integer) => strata_vector::JsonScalar::Number(*integer as f64),
+        Value::Float(float) => strata_vector::JsonScalar::Number(*float),
+        Value::String(string) => strata_vector::JsonScalar::String(string.clone()),
         _ => strata_vector::JsonScalar::Null,
     }
 }
 
-// =============================================================================
-// BranchStatus Conversion
-// =============================================================================
+pub(crate) fn parse_path(path: &str) -> StrataResult<JsonPath> {
+    if path.is_empty() || path == "$" {
+        return Ok(JsonPath::root());
+    }
 
-/// Convert engine BranchStatus to executor BranchStatus.
-pub fn from_engine_branch_status(
-    status: strata_engine::BranchStatus,
-) -> crate::types::BranchStatus {
-    match status {
-        strata_engine::BranchStatus::Active => crate::types::BranchStatus::Active,
+    let normalized = path.strip_prefix('$').unwrap_or(path);
+    normalized
+        .parse()
+        .map_err(|e| StrataError::invalid_input(format!("Invalid JSON path '{}': {:?}", path, e)))
+}
+
+pub(crate) fn transaction_already_active() -> Error {
+    Error::TransactionAlreadyActive {
+        hint: Some(
+            "Commit or rollback the active transaction before starting another one.".to_string(),
+        ),
     }
 }
 
-// =============================================================================
-// Value ↔ serde_json::Value for vector metadata
-// =============================================================================
-
-/// Convert `Value` to `serde_json::Value` for vector metadata storage.
-pub fn value_to_serde_json_public(value: Value) -> StrataResult<serde_json::Value> {
-    value_to_serde_json(value)
+pub(crate) fn transaction_not_active() -> Error {
+    Error::TransactionNotActive {
+        hint: Some(
+            "Use TxnBegin to begin a transaction before issuing transaction control commands."
+                .to_string(),
+        ),
+    }
 }
 
-/// Convert `serde_json::Value` to `Value` for vector metadata retrieval.
-pub fn serde_json_to_value_public(json: serde_json::Value) -> StrataResult<Value> {
-    serde_json_to_value(json)
+pub(crate) fn transaction_branch_mismatch(
+    command_branch: &BranchId,
+    txn_branch: &BranchId,
+) -> Error {
+    Error::InvalidInput {
+        reason: format!(
+            "command targets branch '{}' while the active transaction is bound to '{}'",
+            command_branch, txn_branch
+        ),
+        hint: Some(
+            "Commit or roll back the active transaction before using a different branch."
+                .to_string(),
+        ),
+    }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub(crate) fn validate_branch_exists(db: &Arc<Database>, branch: &BranchId) -> Result<()> {
+    if db.branches().exists(branch.as_str()).map_err(Error::from)? {
+        Ok(())
+    } else {
+        Err(Error::BranchNotFound {
+            branch: branch.to_string(),
+            hint: None,
+        })
+    }
+}
 
-    #[test]
-    fn test_to_core_branch_id_default() {
-        let branch = BranchId::from("default");
-        let core_id = to_core_branch_id(&branch).unwrap();
-        assert_eq!(core_id.as_bytes(), &[0u8; 16]);
+pub(crate) fn require_branch_exists(p: &Arc<Primitives>, branch: &BranchId) -> Result<()> {
+    let default_branch =
+        p.db.default_branch_name()
+            .unwrap_or_else(|| "default".to_string());
+    if default_branch == branch.as_str() {
+        return Ok(());
     }
 
-    #[test]
-    fn test_to_core_branch_id_uuid() {
-        let branch = BranchId::from("f47ac10b-58cc-4372-a567-0e02b2c3d479");
-        let core_id = to_core_branch_id(&branch).unwrap();
-        let expected = uuid::Uuid::parse_str("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
-        assert_eq!(core_id.as_bytes(), expected.as_bytes());
+    if p.db
+        .branches()
+        .exists(branch.as_str())
+        .map_err(Error::from)?
+    {
+        Ok(())
+    } else {
+        Err(Error::BranchNotFound {
+            branch: branch.to_string(),
+            hint: None,
+        })
     }
+}
 
-    #[test]
-    fn test_to_core_branch_id_name_generates_v5_uuid() {
-        // Non-UUID names generate a deterministic UUID v5
-        let branch = BranchId::from("not-a-valid-id");
-        let result = to_core_branch_id(&branch);
-        assert!(
-            result.is_ok(),
-            "Arbitrary names should generate valid v5 UUIDs"
-        );
+pub(crate) fn validate_session_space(space: &str) -> Result<()> {
+    validate_space_name(space).map_err(|reason| Error::InvalidInput { reason, hint: None })
+}
 
-        // Same name should produce same UUID (deterministic)
-        let branch2 = BranchId::from("not-a-valid-id");
-        let result2 = to_core_branch_id(&branch2).unwrap();
-        assert_eq!(result.unwrap().as_bytes(), result2.as_bytes());
-    }
+pub(crate) fn database_info(db: &Arc<Database>, default_branch: &BranchId) -> DatabaseInfo {
+    let branch_count = db
+        .branches()
+        .list()
+        .map(|ids| {
+            let has_default = ids.iter().any(|id| id == default_branch.as_str());
+            ids.len() as u64 + u64::from(!has_default)
+        })
+        .unwrap_or(0);
 
-    #[test]
-    fn test_validate_key_valid() {
-        assert!(validate_key("hello").is_ok());
-        assert!(validate_key("a/b/c").is_ok());
-    }
-
-    #[test]
-    fn test_validate_key_empty() {
-        assert!(validate_key("").is_err());
-    }
-
-    #[test]
-    fn test_validate_key_reserved() {
-        assert!(validate_key("_strata/internal").is_err());
-    }
-
-    #[test]
-    fn test_validate_key_nul() {
-        assert!(validate_key("hello\0world").is_err());
-    }
-
-    #[test]
-    fn test_validate_key_too_long() {
-        let long_key = "a".repeat(1025);
-        assert!(validate_key(&long_key).is_err());
-    }
-
-    #[test]
-    fn test_value_json_roundtrip() {
-        let value = Value::Int(42);
-        let json = value_to_json(value).unwrap();
-        let restored = json_to_value(json).unwrap();
-        assert_eq!(restored, Value::Int(42));
-    }
-
-    #[test]
-    fn test_extract_version_variants() {
-        use strata_core::Version;
-        assert_eq!(extract_version(&Version::Txn(42)), 42);
-        assert_eq!(extract_version(&Version::Sequence(100)), 100);
-        assert_eq!(extract_version(&Version::Counter(7)), 7);
-    }
-
-    // =========================================================================
-    // B1 characterization: byte-stable executor → core BranchId derivation.
-    //
-    // Companion to crates/engine/tests/branch_id_characterization.rs (which
-    // locks the engine path) and to crates/core/src/branch.rs tests (which
-    // lock the canonical core derivation). These tests pin the EXECUTOR
-    // path. After B2, all three share the one canonical derivation in
-    // `strata_core::BranchId::from_user_name`, but the executor keeps its
-    // own anchor table so the "both local anchor tables changed together"
-    // regression hole stays closed.
-    //
-    // Keep the LOCKED_INPUTS / HARDCODED_ANCHORS arrays IDENTICAL to the
-    // engine-side test. Drift between the two is a parity break.
-    // =========================================================================
-
-    /// Locked baseline for the branch-namespace constant, mirroring the
-    /// `BRANCH_NAMESPACE` bytes in `strata_core::branch` and the engine-side
-    /// anchors in `crates/engine/tests/branch_id_characterization.rs`. Drift
-    /// here is a BREAKING compatibility change.
-    const B1_BRANCH_NAMESPACE_BYTES: [u8; 16] = [
-        0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30,
-        0xc8,
-    ];
-
-    /// Locked input set. MUST stay identical to the engine-side
-    /// `LOCKED_INPUTS` in `crates/engine/tests/branch_id_characterization.rs`.
-    const B1_LOCKED_INPUTS: &[&str] = &[
-        "default",
-        "main",
-        "production",
-        "feature/abc",
-        "_system_",
-        "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-    ];
-
-    /// Hardcoded anchors — MUST match the engine-side
-    /// `HARDCODED_ANCHORS` exactly. Drift = parity break = B2 cannot collapse
-    /// the two derivations without renaming branches in existing databases.
-    const B1_HARDCODED_ANCHORS: &[(&str, [u8; 16])] = &[
-        ("default", [0u8; 16]),
-        (
-            "main",
-            [
-                0x1f, 0x64, 0xc0, 0x67, 0xac, 0xf2, 0x50, 0x34, 0xa5, 0xd0, 0x92, 0xd5, 0x76, 0x41,
-                0x38, 0xec,
-            ],
-        ),
-        (
-            "_system_",
-            [
-                0x0d, 0x39, 0x06, 0xa0, 0xd8, 0x09, 0x58, 0x17, 0xb9, 0x0b, 0x09, 0xb6, 0x0e, 0x63,
-                0xc9, 0x7d,
-            ],
-        ),
-        (
-            "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            [
-                0xf4, 0x7a, 0xc1, 0x0b, 0x58, 0xcc, 0x43, 0x72, 0xa5, 0x67, 0x0e, 0x02, 0xb2, 0xc3,
-                0xd4, 0x79,
-            ],
-        ),
-    ];
-
-    #[test]
-    fn b1_executor_to_core_branch_id_matches_hardcoded_anchors() {
-        for &(name, expected) in B1_HARDCODED_ANCHORS {
-            let actual = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
-            assert_eq!(
-                actual, expected,
-                "to_core_branch_id({name:?}) drifted from its hardcoded anchor.\n\
-                 This is a BREAKING compatibility change AND a parity break\n\
-                 with the engine-side resolve_branch_name. See\n\
-                 crates/engine/tests/branch_id_characterization.rs for the\n\
-                 corresponding engine assertions.\n\
-                 expected {expected:02x?}\n\
-                 actual   {actual:02x?}"
-            );
-        }
-    }
-
-    /// The canonical namespace lives in `strata_core::branch` as of B2.
-    /// This test locks the executor path end-to-end against the B1 bytes:
-    /// any drift in the core namespace constant, the v5 input ordering, or
-    /// the executor's call into `BranchId::from_user_name` is caught here.
-    #[test]
-    fn b1_executor_branch_namespace_is_locked_in_core() {
-        let sample = "b1-executor-namespace-sample";
-        let ns = uuid::Uuid::from_bytes(B1_BRANCH_NAMESPACE_BYTES);
-        let expected = *uuid::Uuid::new_v5(&ns, sample.as_bytes()).as_bytes();
-        let actual = *to_core_branch_id(&BranchId::from(sample))
-            .unwrap()
-            .as_bytes();
-        assert_eq!(
-            actual, expected,
-            "Executor path drifted from the locked B1 BRANCH_NAMESPACE \
-             bytes. The canonical constant now lives in `strata_core::branch` \
-             — this failure means the core namespace changed. BREAKING \
-             compatibility change."
-        );
-    }
-
-    /// Cross-implementation parity oracle: `to_core_branch_id` MUST match
-    /// the documented algorithm byte-for-byte.
-    #[test]
-    fn b1_executor_to_core_branch_id_matches_documented_algorithm() {
-        for &name in B1_LOCKED_INPUTS {
-            let expected = if name == "default" {
-                [0u8; 16]
-            } else if let Ok(u) = uuid::Uuid::parse_str(name) {
-                *u.as_bytes()
-            } else {
-                let ns = uuid::Uuid::from_bytes(B1_BRANCH_NAMESPACE_BYTES);
-                *uuid::Uuid::new_v5(&ns, name.as_bytes()).as_bytes()
-            };
-            let actual = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
-            assert_eq!(
-                actual, expected,
-                "to_core_branch_id({name:?}) drifted from documented algorithm"
-            );
-        }
-    }
-
-    /// Direct parity lock with the engine-side implementation. This closes
-    /// the "both local anchor tables changed together" hole: executor and
-    /// engine must agree on the exact bytes for the same shared inputs.
-    #[test]
-    fn b1_executor_to_core_branch_id_matches_engine_resolve_branch_name() {
-        for &name in B1_LOCKED_INPUTS {
-            let executor = *to_core_branch_id(&BranchId::from(name)).unwrap().as_bytes();
-            let engine = *strata_engine::primitives::resolve_branch_name(name).as_bytes();
-            assert_eq!(
-                executor, engine,
-                "executor/engine branch-id parity drifted for {name:?}\n\
-                 executor {executor:02x?}\n\
-                 engine   {engine:02x?}"
-            );
-        }
-    }
-
-    #[test]
-    fn b2_executor_to_core_branch_id_rejects_reserved_default_branch_aliases() {
-        for name in [
-            "00000000-0000-0000-0000-000000000000",
-            "00000000000000000000000000000000",
-            "00000000-0000-0000-0000-000000000000"
-                .to_uppercase()
-                .as_str(),
-        ] {
-            let err = to_core_branch_id(&BranchId::from(name)).unwrap_err();
-            assert!(err
-                .to_string()
-                .contains("aliases reserved default-branch sentinel"));
-        }
+    DatabaseInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: db.uptime_secs(),
+        branch_count,
+        total_keys: db.approximate_total_keys(),
+        default_branch: default_branch.as_str().to_string(),
     }
 }

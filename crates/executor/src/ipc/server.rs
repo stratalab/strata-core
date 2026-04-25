@@ -1,8 +1,3 @@
-//! IPC server that listens on a Unix domain socket.
-//!
-//! The server holds the database and handles commands from multiple clients.
-//! Each client connection gets its own `Session` for transaction isolation.
-
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixListener;
@@ -14,13 +9,12 @@ use std::thread::{self, JoinHandle};
 use strata_engine::Database;
 use strata_security::AccessMode;
 
-use crate::Session;
+use crate::{Error, Session};
 
 use super::protocol::{self, Request, Response};
 use super::wire;
 
-/// IPC server that listens on a Unix domain socket and dispatches
-/// commands to the database via per-connection sessions.
+/// IPC server that listens on a Unix domain socket and serves executor commands.
 pub struct IpcServer {
     socket_path: PathBuf,
     pid_path: PathBuf,
@@ -29,46 +23,27 @@ pub struct IpcServer {
 }
 
 impl IpcServer {
-    /// Start the IPC server, binding to `<data_dir>/strata.sock`.
-    ///
-    /// Spawns a listener thread that accepts connections. Each connection
-    /// gets a dedicated handler thread with its own `Session`.
+    /// Start a server bound to `<data_dir>/strata.sock`.
     pub fn start(data_dir: &Path, db: Arc<Database>, access_mode: AccessMode) -> io::Result<Self> {
         let socket_path = data_dir.join("strata.sock");
         let pid_path = data_dir.join("strata.pid");
 
-        // Remove stale socket if it exists
         if socket_path.exists() {
             std::fs::remove_file(&socket_path)?;
         }
 
         let listener = UnixListener::bind(&socket_path)?;
-        // Restrict socket to owner-only access. This is an embedded database
-        // IPC mechanism, not a network server — only the owning user's
-        // processes should be able to connect.
         std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
         listener.set_nonblocking(true)?;
 
-        // Write PID file (owner-only permissions)
         std::fs::write(&pid_path, std::process::id().to_string())?;
         std::fs::set_permissions(&pid_path, std::fs::Permissions::from_mode(0o600))?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
-        let shutdown_clone = shutdown.clone();
-        let socket_path_clone = socket_path.clone();
-
-        let listener_handle =
-            thread::Builder::new()
-                .name("ipc-listener".into())
-                .spawn(move || {
-                    Self::listener_loop(
-                        listener,
-                        db,
-                        access_mode,
-                        shutdown_clone,
-                        socket_path_clone,
-                    );
-                })?;
+        let listener_shutdown = shutdown.clone();
+        let listener_handle = thread::Builder::new()
+            .name("ipc-listener".into())
+            .spawn(move || Self::listener_loop(listener, db, access_mode, listener_shutdown))?;
 
         Ok(Self {
             socket_path,
@@ -78,37 +53,38 @@ impl IpcServer {
         })
     }
 
-    /// The socket path this server is listening on.
+    /// Return the socket path for the running server.
     pub fn socket_path(&self) -> &Path {
         &self.socket_path
     }
 
-    /// Signal the server to stop and wait for it to finish.
+    /// Signal the server to stop and wait for the listener thread to exit.
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::SeqCst);
         if let Some(handle) = self.listener_handle.take() {
             let _ = handle.join();
         }
+        self.cleanup_files();
     }
 
-    /// Stop a server by PID file. Sends SIGTERM to the process and cleans up.
+    /// Stop a running server using the PID and socket files in `data_dir`.
     pub fn stop(data_dir: &Path) -> io::Result<()> {
         let pid_path = data_dir.join("strata.pid");
         let socket_path = data_dir.join("strata.sock");
 
         if pid_path.exists() {
-            let pid_str = std::fs::read_to_string(&pid_path)?;
-            if let Ok(pid) = pid_str.trim().parse::<i32>() {
-                // Send SIGTERM
+            let pid = std::fs::read_to_string(&pid_path)?
+                .trim()
+                .parse::<i32>()
+                .ok();
+            if let Some(pid) = pid {
                 unsafe {
                     libc::kill(pid, libc::SIGTERM);
                 }
-                // Brief wait for process to exit
                 for _ in 0..20 {
-                    unsafe {
-                        if libc::kill(pid, 0) != 0 {
-                            break;
-                        }
+                    let alive = unsafe { libc::kill(pid, 0) == 0 };
+                    if !alive {
+                        break;
                     }
                     thread::sleep(std::time::Duration::from_millis(100));
                 }
@@ -123,7 +99,6 @@ impl IpcServer {
         Ok(())
     }
 
-    /// Maximum number of concurrent handler threads.
     const MAX_CONNECTIONS: usize = 128;
 
     fn listener_loop(
@@ -131,60 +106,54 @@ impl IpcServer {
         db: Arc<Database>,
         access_mode: AccessMode,
         shutdown: Arc<AtomicBool>,
-        _socket_path: PathBuf,
     ) {
-        let mut handler_threads: Vec<JoinHandle<()>> = Vec::new();
+        let mut handlers = Vec::new();
 
         while !shutdown.load(Ordering::SeqCst) {
             match listener.accept() {
-                Ok((stream, _addr)) => {
-                    // Reap finished threads before checking capacity
-                    handler_threads.retain(|h| !h.is_finished());
-
-                    if handler_threads.len() >= Self::MAX_CONNECTIONS {
+                Ok((stream, _)) => {
+                    handlers.retain(|handle: &JoinHandle<()>| !handle.is_finished());
+                    if handlers.len() >= Self::MAX_CONNECTIONS {
                         tracing::warn!(
                             "IPC connection limit reached ({}), rejecting connection",
-                            Self::MAX_CONNECTIONS,
+                            Self::MAX_CONNECTIONS
                         );
                         drop(stream);
                         continue;
                     }
 
-                    // Set a read timeout so handler threads can check the
-                    // shutdown flag periodically instead of blocking forever.
-                    stream.set_nonblocking(false).ok();
-                    stream
-                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
-                        .ok();
-                    let db = db.clone();
-                    let shutdown = shutdown.clone();
+                    let _ = stream.set_nonblocking(false);
+                    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+
+                    let handler_db = db.clone();
+                    let handler_shutdown = shutdown.clone();
                     match thread::Builder::new()
                         .name("ipc-handler".into())
                         .spawn(move || {
-                            Self::handle_connection(stream, db, access_mode, shutdown);
+                            Self::handle_connection(
+                                stream,
+                                handler_db,
+                                access_mode,
+                                handler_shutdown,
+                            );
                         }) {
-                        Ok(handle) => {
-                            handler_threads.push(handle);
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to spawn IPC handler thread: {}", e);
-                        }
+                        Ok(handle) => handlers.push(handle),
+                        Err(error) => tracing::warn!("Failed to spawn IPC handler thread: {error}"),
                     }
                 }
-                Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(std::time::Duration::from_millis(50));
                 }
-                Err(e) => {
+                Err(error) => {
                     if !shutdown.load(Ordering::SeqCst) {
-                        tracing::warn!("IPC accept error: {}", e);
+                        tracing::warn!("IPC accept error: {error}");
                     }
                     break;
                 }
             }
         }
 
-        // Wait for all handler threads to finish on shutdown
-        for handle in handler_threads {
+        for handle in handlers {
             let _ = handle.join();
         }
     }
@@ -196,7 +165,7 @@ impl IpcServer {
         shutdown: Arc<AtomicBool>,
     ) {
         let stream_clone = match stream.try_clone() {
-            Ok(s) => s,
+            Ok(stream_clone) => stream_clone,
             Err(_) => return,
         };
         let mut reader = io::BufReader::new(stream_clone);
@@ -209,44 +178,44 @@ impl IpcServer {
             }
 
             let frame = match wire::read_frame(&mut reader) {
-                Ok(f) => f,
-                Err(ref e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                Err(ref e)
-                    if e.kind() == io::ErrorKind::WouldBlock
-                        || e.kind() == io::ErrorKind::TimedOut =>
+                Ok(frame) => frame,
+                Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(error)
+                    if error.kind() == io::ErrorKind::WouldBlock
+                        || error.kind() == io::ErrorKind::TimedOut =>
                 {
-                    // Read timeout — check shutdown flag and loop
                     continue;
                 }
                 Err(_) => break,
             };
 
             let request: Request = match protocol::decode(&frame) {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!("IPC decode error: {}", e);
+                Ok(request) => request,
+                Err(error) => {
+                    tracing::warn!("IPC decode error: {error}");
                     break;
                 }
             };
 
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let result = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 session.execute(request.command)
-            }));
-
-            let result = match result {
-                Ok(r) => r,
-                Err(e) => {
-                    let msg = if let Some(s) = e.downcast_ref::<&str>() {
-                        s.to_string()
-                    } else if let Some(s) = e.downcast_ref::<String>() {
-                        s.clone()
+            })) {
+                Ok(result) => result,
+                Err(payload) => {
+                    let message = if let Some(text) = payload.downcast_ref::<&str>() {
+                        text.to_string()
+                    } else if let Some(text) = payload.downcast_ref::<String>() {
+                        text.clone()
                     } else {
                         "unknown panic".to_string()
                     };
-                    tracing::error!("IPC handler panicked: {}", msg);
-                    Err(crate::Error::Internal {
-                        reason: format!("Server handler panicked: {}", msg),
-                        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+                    tracing::error!("IPC handler panicked: {message}");
+                    Err(Error::Internal {
+                        reason: format!("Server handler panicked: {message}"),
+                        hint: Some(
+                            "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues"
+                                .to_string(),
+                        ),
                     })
                 }
             };
@@ -255,11 +224,10 @@ impl IpcServer {
                 id: request.id,
                 result,
             };
-
             let payload = match protocol::encode(&response) {
-                Ok(p) => p,
-                Err(e) => {
-                    tracing::warn!("IPC encode error: {}", e);
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!("IPC encode error: {error}");
                     break;
                 }
             };
@@ -269,6 +237,11 @@ impl IpcServer {
             }
         }
     }
+
+    fn cleanup_files(&self) {
+        let _ = std::fs::remove_file(&self.socket_path);
+        let _ = std::fs::remove_file(&self.pid_path);
+    }
 }
 
 impl Drop for IpcServer {
@@ -277,7 +250,6 @@ impl Drop for IpcServer {
         if let Some(handle) = self.listener_handle.take() {
             let _ = handle.join();
         }
-        let _ = std::fs::remove_file(&self.socket_path);
-        let _ = std::fs::remove_file(&self.pid_path);
+        self.cleanup_files();
     }
 }

@@ -10,7 +10,7 @@ use strata_engine::recipe_store;
 use strata_engine::search::recipe::Recipe;
 
 /// Set a named recipe on a branch.
-pub fn recipe_set(
+pub(crate) fn recipe_set(
     p: &Arc<Primitives>,
     branch: BranchId,
     name: String,
@@ -38,7 +38,7 @@ pub fn recipe_set(
 }
 
 /// Get a named recipe from a branch.
-pub fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
+pub(crate) fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     let recipe =
         recipe_store::get_recipe(&p.db, branch_id, &name).map_err(|e| Error::Internal {
@@ -58,7 +58,7 @@ pub fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result
 }
 
 /// Get the default recipe, auto-creating with built-in defaults if absent.
-pub fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+pub(crate) fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     let recipe =
         recipe_store::get_default_recipe(&p.db, branch_id).map_err(|e| Error::Internal {
@@ -73,7 +73,7 @@ pub fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Outpu
 }
 
 /// Delete a named recipe from a branch.
-pub fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
+pub(crate) fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     recipe_store::delete_recipe(&p.db, branch_id, &name).map_err(|e| {
         // InvalidInput from recipe_store means built-in protection
@@ -93,7 +93,7 @@ pub fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String) -> Res
 }
 
 /// List all recipe names on a branch.
-pub fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+pub(crate) fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     let names = recipe_store::list_recipes(&p.db, branch_id).map_err(|e| Error::Internal {
         reason: e.to_string(),
@@ -105,7 +105,7 @@ pub fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
 /// Seed built-in recipes to the `_system_` branch.
 ///
 /// Idempotent: safe to call multiple times.
-pub fn recipe_seed(p: &Arc<Primitives>) -> Result<Output> {
+pub(crate) fn recipe_seed(p: &Arc<Primitives>) -> Result<Output> {
     recipe_store::seed_builtin_recipes(&p.db).map_err(|e| Error::Internal {
         reason: format!("Failed to seed built-in recipes: {}", e),
         hint: None,

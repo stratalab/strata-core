@@ -15,69 +15,10 @@ security (leaf, used by engine)
 The `engine` crate is the authority layer. The `executor` crate is a thin transport/session
 adapter — it must never own semantics.
 
-## Active Program: Architecture + Quality Cleanup
-
-This repository is executing a bounded cleanup program defined by 10 scope documents,
-2 guardrail documents, and 1 execution plan framework. **Every conversation must respect
-the constraints below.**
-
-### Program Corpus (normative — do not contradict)
-
-Architecture scopes:
-- `docs/design/architecture-cleanup/runtime-consolidation-scope.md`
-- `docs/design/architecture-cleanup/durability-recovery-scope.md`
-- `docs/design/architecture-cleanup/branch-primitives-scope.md`
-- `docs/design/architecture-cleanup/product-control-surface-scope.md`
-- `docs/design/architecture-cleanup/search-intelligence-inference-scope.md`
-
-Quality scopes:
-- `docs/design/quality-cleanup/workspace-foundation-scope.md`
-- `docs/design/quality-cleanup/error-taxonomy-scope.md`
-- `docs/design/quality-cleanup/type-safety-scope.md`
-- `docs/design/quality-cleanup/visibility-and-module-structure-scope.md`
-- `docs/design/quality-cleanup/test-coverage-scope.md`
-
-Guardrails:
-- `docs/design/architecture-cleanup/non-regression-requirements.md`
-- `docs/design/architecture-cleanup/implementation-quality-guidelines.md`
-
-Planning:
-- `docs/design/architecture-cleanup/master-execution-plan-framework.md`
-- `docs/design/post-cleanup/post-cleanup-closeout-framework.md`
-
-Branching tranche (B5 retention / GC corpus — normative for B5.1+):
-- `docs/design/branching/branching-gc/b5-phasing-plan.md`
-- `docs/design/branching/branching-gc/branching-retention-contract.md`
-- `docs/design/branching/branching-gc/branching-b5-verification-spec.md`
-- `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
-
----
-
-## Active Tranche
-
-> **UPDATE THIS SECTION when starting a new tranche via `/tranche-setup`.**
-
-```
-tranche: 2
-name: Runtime Authority
-change_class: cutover
-assurance_class: S4
-benchmark_required: true
-```
-
-> **Tranche 4 closed under the narrowed B6 acceptance** — see
-> `docs/design/branching/tranche-4-closeout.md` for the 8-bar evidence
-> map, invariant re-audit, benchmark delta, the dedicated follower/race
-> evidence that complements the unified history lane, and the
-> explicitly-deferred items (typed lineage variant; cleanup-debt
-> programmatic surface).
-
----
-
 ## Hard Architectural Rules
 
-These are locked decisions from the scope documents. Violating any of these requires a
-formal scope amendment to the owning document — not just a code change.
+These are locked invariants of the codebase. Violating any of these requires explicit
+reviewer approval — not just a code change.
 
 ### Authority Rules
 
@@ -139,8 +80,8 @@ formal scope amendment to the owning document — not just a code change.
 
 ## Engine Public API Surface (D4)
 
-Adding a new public type to `strata_engine` requires a cross-scope amendment to ALL FIVE
-architecture scope documents. The current allowed surface:
+Adding a new public type to `strata_engine` requires explicit reviewer approval. The
+current allowed surface:
 
 **Runtime:** `Database`, `DatabaseMode`, `OpenSpec`, `Transaction`,
 `Subsystem` trait, `CommitObserver`/`CommitInfo`, `ReplayObserver`/`ReplayInfo`,
@@ -189,8 +130,8 @@ architecture scope documents. The current allowed surface:
   storage format, or public semantic changes. Benchmark must show no regression.
 - **Cutover:** Old path deleted only after parity tests + parity benchmarks exist and
   new path is exercised by acceptance suite.
-- **Intentional semantic change:** Only with scope authorization. Old/new behavior stated.
-  Acceptance suite updated. Baseline benchmarks updated. Explicit reviewer approval.
+- **Intentional semantic change:** Old/new behavior stated. Acceptance suite updated.
+  Baseline benchmarks updated. Explicit reviewer approval.
 
 ### Assurance Classes
 
@@ -237,7 +178,7 @@ only informally.
 - Mix unrelated changes in one PR
 - Add process-global semantic state
 - Suppress errors without a rationale comment (`let _ =`, `.ok()`, `.unwrap_or_default()`)
-- Add `pub` to items not on the D4 surface without a scope amendment
+- Add `pub` to items not on the D4 surface without reviewer approval
 - Skip benchmarks for PRs touching storage/engine/runtime
 
 ### Prefer
@@ -275,7 +216,7 @@ cargo hack check --workspace --feature-powerset --depth 2
 cargo run --release -p strata-benchmarks --bin regression -- --quick          # quick (~1s)
 cargo run --release -p strata-benchmarks --bin regression                     # full (redb 5M, ycsb 100K, beir 4 datasets)
 cargo run --release -p strata-benchmarks --bin regression -- --capture-baseline  # save baseline
-cargo run --release -p strata-benchmarks --bin regression -- --tranche 2 --epic "RC-1"  # with metadata
+cargo run --release -p strata-benchmarks --bin regression -- --tranche N --epic "ID"  # with metadata
 
 # Full comparison benchmarks (vs rocksdb, redb, sqlite, etc.)
 cargo bench -p strata-benchmarks --bench redb_benchmark
@@ -296,15 +237,13 @@ The DAG is strict and CI-enforced. Never introduce:
 
 ## Skills Reference
 
-The following slash commands are available for the cleanup program:
-
 | Skill | When to use |
 |-------|------------|
-| `/tranche-setup` | Start of each tranche — updates this file's Active Tranche section |
-| `/epic-setup` | Start of each epic — extracts scope phases, builds task checklist |
-| `/program-check` | Before commit — cross-scope invariant verification |
-| `/regression-check` | After epic — runs redb/ycsb/beir benchmarks against baseline |
-| `/scope-review` | Before PR — reviews diff against scope locked decisions |
-| `/tranche-gate` | End of tranche — full exit-criteria check |
-| `/acceptance-matrix` | Anytime — read/update acceptance-matrix.toml |
-| `/review` | Anytime — general code review (already exists) |
+| `/implement` | TDD-driven feature implementation from a GitHub issue |
+| `/epic-implement` | Create a branch and execute tasks from an epic implementation plan |
+| `/epic-verify` | Verify epic changes — quick (pre-commit) or full (pre-PR) |
+| `/tranche-setup` | Initialize a tranche and update this file |
+| `/tranche-verify` | End-of-tranche gate — verify all epics complete, benchmarks pass |
+| `/invariant-check` | Run the engine invariant catalog at `docs/ENGINE_INVARIANTS.md` |
+| `/audit-fix` | Fix a bug found during a formal audit (pass the issue number) |
+| `/review` | General code review |

@@ -5,7 +5,7 @@
 
 use crate::common::*;
 use strata_core::Value;
-use strata_executor::{BranchId, Command, DistanceMetric, Error, Output};
+use strata_executor::{BranchId, Command, DistanceMetric, Error, Executor, Output, ScanDirection};
 
 // ============================================================================
 // Database Commands
@@ -263,6 +263,123 @@ fn kv_delete_returns_bool() {
     }
 }
 
+#[test]
+fn kv_batch_scan_count_and_sample_return_structured_results() {
+    let executor = create_executor();
+
+    let output = executor
+        .execute(Command::KvBatchPut {
+            branch: None,
+            space: None,
+            entries: vec![
+                strata_executor::BatchKvEntry {
+                    key: "scan:01".into(),
+                    value: Value::Int(1),
+                },
+                strata_executor::BatchKvEntry {
+                    key: "scan:02".into(),
+                    value: Value::Int(2),
+                },
+                strata_executor::BatchKvEntry {
+                    key: "scan:03".into(),
+                    value: Value::Int(3),
+                },
+            ],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 3);
+            assert!(results.iter().all(|result| result.version.is_some()));
+            assert!(results.iter().all(|result| result.error.is_none()));
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::KvBatchGet {
+            branch: None,
+            space: None,
+            keys: vec!["scan:01".into(), "scan:03".into(), "scan:missing".into()],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchGetResults(results) => {
+            assert_eq!(results.len(), 3);
+            assert_eq!(results[0].value, Some(Value::Int(1)));
+            assert_eq!(results[1].value, Some(Value::Int(3)));
+            assert_eq!(results[2].value, None);
+            assert!(results.iter().all(|result| result.error.is_none()));
+        }
+        other => panic!("Expected BatchGetResults, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::KvScan {
+            branch: None,
+            space: None,
+            start: Some("scan:02".into()),
+            limit: Some(2),
+        })
+        .unwrap();
+
+    match output {
+        Output::KvScanResult(entries) => {
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0], ("scan:02".into(), Value::Int(2)));
+            assert_eq!(entries[1], ("scan:03".into(), Value::Int(3)));
+        }
+        other => panic!("Expected KvScanResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::KvCount {
+            branch: None,
+            space: None,
+            prefix: Some("scan:".into()),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Uint(3)));
+
+    let output = executor
+        .execute(Command::KvSample {
+            branch: None,
+            space: None,
+            prefix: Some("scan:".into()),
+            count: Some(2),
+        })
+        .unwrap();
+
+    match output {
+        Output::SampleResult { total_count, items } => {
+            assert_eq!(total_count, 3);
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().all(|item| item.key.starts_with("scan:")));
+        }
+        other => panic!("Expected SampleResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::KvBatchDelete {
+            branch: None,
+            space: None,
+            keys: vec!["scan:01".into(), "scan:missing".into()],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert!(results[0].version.is_some());
+            assert!(results[0].error.is_none());
+            assert!(results[1].error.is_none());
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+}
+
 // ============================================================================
 // Event Commands
 // ============================================================================
@@ -322,6 +439,86 @@ fn event_len_returns_count() {
     match output {
         Output::Uint(count) => assert_eq!(count, 5),
         _ => panic!("Expected Uint output"),
+    }
+}
+
+#[test]
+fn event_range_and_type_listing_return_structured_results() {
+    let executor = create_executor();
+
+    for (event_type, value) in [("alpha", 1), ("beta", 2), ("alpha", 3)] {
+        executor
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: event_type.into(),
+                payload: event_payload("value", Value::Int(value)),
+            })
+            .unwrap();
+    }
+
+    let output = executor
+        .execute(Command::EventRange {
+            branch: None,
+            space: None,
+            start_seq: 0,
+            end_seq: None,
+            limit: Some(1),
+            direction: ScanDirection::Forward,
+            event_type: Some("alpha".into()),
+        })
+        .unwrap();
+
+    match output {
+        Output::EventRangeResult {
+            events,
+            has_more,
+            next_cursor,
+        } => {
+            assert_eq!(events.len(), 1);
+            assert!(has_more);
+            assert!(next_cursor.is_some());
+        }
+        other => panic!("Expected EventRangeResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::EventRangeByTime {
+            branch: None,
+            space: None,
+            start_ts: 0,
+            end_ts: Some(u64::MAX),
+            limit: Some(10),
+            direction: ScanDirection::Forward,
+            event_type: Some("alpha".into()),
+        })
+        .unwrap();
+
+    match output {
+        Output::EventRangeResult {
+            events, has_more, ..
+        } => {
+            assert_eq!(events.len(), 2);
+            assert!(!has_more);
+        }
+        other => panic!("Expected EventRangeResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::EventListTypes {
+            branch: None,
+            space: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::Keys(types) => {
+            assert_eq!(types.len(), 2);
+            assert!(types.contains(&"alpha".to_string()));
+            assert!(types.contains(&"beta".to_string()));
+        }
+        other => panic!("Expected Keys output, got {:?}", other),
     }
 }
 
@@ -469,6 +666,407 @@ fn vector_list_collections() {
     }
 }
 
+#[test]
+fn vector_writes_register_space_and_require_existing_branch() {
+    let executor = create_executor();
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "embeddings".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: Some("embeddings".into()),
+            collection: "docs".into(),
+            dimension: 3,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "embeddings".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+
+    let error = executor
+        .execute(Command::VectorUpsert {
+            branch: Some(BranchId::from("missing-branch")),
+            space: Some("embeddings".into()),
+            collection: "docs".into(),
+            key: "doc1".into(),
+            vector: vec![1.0, 2.0, 3.0],
+            metadata: None,
+        })
+        .expect_err("vector writes on missing branches must fail");
+
+    assert!(matches!(error, Error::BranchNotFound { .. }));
+}
+
+#[test]
+fn vector_query_sees_latest_overwrite_on_disk_backed_executor() {
+    use strata_engine::database::OpenSpec;
+    use strata_engine::{Database, SearchSubsystem};
+    use strata_vector::VectorSubsystem;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vector_overwrite_executor.strata");
+    let db = Database::open_runtime(
+        OpenSpec::primary(&path)
+            .with_subsystem(VectorSubsystem)
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+    let executor = Executor::new(db);
+
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            dimension: 3,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            key: "doc1".into(),
+            vector: vec![1.0, 2.0, 3.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            key: "doc1".into(),
+            vector: vec![3.0, 4.0, 5.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    let fetched = executor
+        .execute(Command::VectorGet {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            key: "doc1".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match fetched {
+        Output::VectorData(Some(data)) => {
+            assert_eq!(data.data.embedding, vec![3.0, 4.0, 5.0]);
+        }
+        _ => panic!(
+            "Expected VectorData(Some(..)) after overwrite, got {:?}",
+            fetched
+        ),
+    }
+
+    let output = executor
+        .execute(Command::VectorQuery {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            query: vec![3.0, 4.0, 5.0],
+            k: 10,
+            filter: None,
+            metric: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorMatches(matches) => {
+            assert!(
+                !matches.is_empty(),
+                "overwrite query should still return the updated vector"
+            );
+            assert_eq!(
+                matches[0].key, "doc1",
+                "exact query against overwritten vector should return doc1 first"
+            );
+        }
+        _ => panic!("Expected VectorMatches output"),
+    }
+}
+
+#[test]
+fn vector_query_keeps_overwritten_key_visible_after_batch_upsert() {
+    use strata_engine::database::OpenSpec;
+    use strata_engine::{Database, SearchSubsystem};
+    use strata_vector::VectorSubsystem;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vector_overwrite_batch_executor.strata");
+    let db = Database::open_runtime(
+        OpenSpec::primary(&path)
+            .with_subsystem(VectorSubsystem)
+            .with_subsystem(SearchSubsystem),
+    )
+    .unwrap();
+    let executor = Executor::new(db);
+
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            dimension: 3,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            key: "doc1".into(),
+            vector: vec![1.0, 2.0, 3.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            key: "doc1".into(),
+            vector: vec![3.0, 4.0, 5.0],
+            metadata: None,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorBatchUpsert {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            entries: vec![
+                strata_executor::BatchVectorEntry {
+                    key: "doc2".into(),
+                    vector: vec![5.0, 6.0, 7.0],
+                    metadata: None,
+                },
+                strata_executor::BatchVectorEntry {
+                    key: "doc3".into(),
+                    vector: vec![7.0, 8.0, 9.0],
+                    metadata: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::VectorQuery {
+            branch: None,
+            space: None,
+            collection: "docs".into(),
+            query: vec![3.0, 4.0, 5.0],
+            k: 10,
+            filter: None,
+            metric: None,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::VectorMatches(matches) => {
+            assert!(
+                matches.iter().any(|m| m.key == "doc1"),
+                "batch-upsert after overwrite must not hide doc1 from search; got {:?}",
+                matches
+            );
+        }
+        _ => panic!("Expected VectorMatches output"),
+    }
+}
+
+#[test]
+fn vector_advanced_commands_expose_direct_results() {
+    let executor = create_executor();
+
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            dimension: 3,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: Some(Value::object(
+                [("kind".to_string(), Value::String("seed".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            key: "v1".into(),
+            vector: vec![0.0, 1.0, 0.0],
+            metadata: Some(Value::object(
+                [("kind".to_string(), Value::String("updated".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::VectorBatchUpsert {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            entries: vec![
+                strata_executor::BatchVectorEntry {
+                    key: "v2".into(),
+                    vector: vec![0.0, 0.0, 1.0],
+                    metadata: None,
+                },
+                strata_executor::BatchVectorEntry {
+                    key: "v3".into(),
+                    vector: vec![1.0, 1.0, 0.0],
+                    metadata: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::VectorGetv {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            key: "v1".into(),
+        })
+        .unwrap();
+    match output {
+        Output::VectorVersionHistory(Some(history)) => {
+            assert!(
+                history.len() >= 2,
+                "updated vector should expose multiple versions"
+            );
+        }
+        other => panic!("Expected VectorVersionHistory, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::VectorCollectionStats {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+        })
+        .unwrap();
+    match output {
+        Output::VectorCollectionList(collections) => {
+            assert_eq!(collections.len(), 1);
+            assert_eq!(collections[0].name, "advanced");
+            assert_eq!(collections[0].count, 3);
+        }
+        other => panic!("Expected VectorCollectionList, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::VectorBatchGet {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            keys: vec!["v1".into(), "v2".into(), "missing".into()],
+        })
+        .unwrap();
+    match output {
+        Output::BatchVectorGetResults(values) => {
+            assert_eq!(values.len(), 3);
+            assert!(values[0].is_some());
+            assert!(values[1].is_some());
+            assert!(values[2].is_none());
+        }
+        other => panic!("Expected BatchVectorGetResults, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::VectorSample {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            count: Some(2),
+        })
+        .unwrap();
+    match output {
+        Output::SampleResult { total_count, items } => {
+            assert_eq!(total_count, 3);
+            assert_eq!(items.len(), 2);
+        }
+        other => panic!("Expected SampleResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::VectorBatchDelete {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+            keys: vec!["v2".into(), "missing".into()],
+        })
+        .unwrap();
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].version, Some(0));
+            assert_eq!(results[1].version, None);
+            assert!(results.iter().all(|result| result.error.is_none()));
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::VectorDeleteCollection {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+
+    let output = executor
+        .execute(Command::VectorDeleteCollection {
+            branch: None,
+            space: Some("vectors".into()),
+            collection: "advanced".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+}
+
 // ============================================================================
 // Branch Commands
 // ============================================================================
@@ -569,6 +1167,40 @@ fn branch_list_returns_branches() {
 }
 
 #[test]
+fn branch_list_excludes_system_branch() {
+    let db = create_db();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let executor = Executor::new(db);
+
+    executor
+        .execute(Command::BranchCreate {
+            branch_id: Some("visible-branch".into()),
+            metadata: None,
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::BranchList {
+            state: None,
+            limit: Some(100),
+            offset: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::BranchInfoList(branches) => {
+            assert!(branches
+                .iter()
+                .any(|branch| branch.info.id.as_str() == "visible-branch"));
+            assert!(branches
+                .iter()
+                .all(|branch| !branch.info.id.as_str().starts_with("_system")));
+        }
+        other => panic!("Expected BranchInfoList output, got {:?}", other),
+    }
+}
+
+#[test]
 fn branch_delete_removes_branch() {
     let executor = create_executor();
 
@@ -634,6 +1266,280 @@ fn branch_exists_returns_bool() {
     assert!(matches!(output, Output::Bool(true)));
 }
 
+#[test]
+fn branch_power_commands_round_trip_and_bundle_portability() {
+    let source_dir = tempfile::tempdir().unwrap();
+    let source_path = source_dir.path().join("branch_power_source.strata");
+    let source_db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::primary(&source_path)
+            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_vector::VectorSubsystem)
+            .with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
+    let executor = Executor::new(source_db);
+
+    let bundle_dir = tempfile::tempdir().unwrap();
+    let bundle_path = bundle_dir.path().join("feature.branchbundle.tar.zst");
+
+    let imported_dir = tempfile::tempdir().unwrap();
+    let imported_path = imported_dir.path().join("branch_power_imported.strata");
+    let imported_db = strata_engine::Database::open_runtime(
+        strata_engine::database::OpenSpec::primary(&imported_path)
+            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_vector::VectorSubsystem)
+            .with_subsystem(strata_engine::SearchSubsystem),
+    )
+    .unwrap();
+    let imported_executor = Executor::new(imported_db);
+
+    executor
+        .execute(Command::BranchCreate {
+            branch_id: Some("mainline".into()),
+            metadata: None,
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("mainline")),
+            space: None,
+            key: "shared".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::BranchFork {
+            source: "mainline".into(),
+            destination: "feature".into(),
+            message: None,
+            creator: None,
+        })
+        .unwrap();
+    match output {
+        Output::BranchForked(info) => {
+            assert_eq!(info.source, "mainline");
+            assert_eq!(info.destination, "feature");
+        }
+        other => panic!("Expected BranchForked, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "shared".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "only_feature".into(),
+            value: Value::Int(9),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::BranchDiff {
+            branch_a: "mainline".into(),
+            branch_b: "feature".into(),
+            filter_primitives: None,
+            filter_spaces: None,
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::BranchDiff(diff) => {
+            assert_eq!(diff.summary.total_added, 1);
+            assert_eq!(diff.summary.total_modified, 1);
+        }
+        other => panic!("Expected BranchDiff, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::BranchDiffThreeWay {
+            branch_a: "mainline".into(),
+            branch_b: "feature".into(),
+        })
+        .unwrap();
+    match output {
+        Output::ThreeWayDiff(diff) => {
+            assert_eq!(diff.source, "mainline");
+            assert_eq!(diff.target, "feature");
+            assert!(!diff.entries.is_empty());
+        }
+        other => panic!("Expected ThreeWayDiff, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::BranchMergeBase {
+            branch_a: "mainline".into(),
+            branch_b: "feature".into(),
+        })
+        .unwrap();
+    match output {
+        Output::MergeBaseInfo(Some(info)) => {
+            assert_eq!(info.branch, "mainline");
+        }
+        other => panic!("Expected MergeBaseInfo(Some(..)), got {:?}", other),
+    }
+
+    let merge_version = match executor
+        .execute(Command::BranchMerge {
+            source: "feature".into(),
+            target: "mainline".into(),
+            strategy: strata_engine::MergeStrategy::LastWriterWins,
+            message: None,
+            creator: None,
+        })
+        .unwrap()
+    {
+        Output::BranchMerged(info) => {
+            assert_eq!(info.source, "feature");
+            assert_eq!(info.target, "mainline");
+            assert_eq!(info.keys_applied, 2);
+            info.merge_version
+                .expect("merge should return a merge version")
+        }
+        other => panic!("Expected BranchMerged, got {:?}", other),
+    };
+
+    let output = executor
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("mainline")),
+            space: None,
+            key: "shared".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::MaybeVersioned(Some(vv)) => assert_eq!(vv.value, Value::Int(2)),
+        other => panic!("Expected merged shared value, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::BranchRevert {
+            branch: "mainline".into(),
+            from_version: merge_version,
+            to_version: merge_version,
+        })
+        .unwrap();
+    match output {
+        Output::BranchReverted(info) => {
+            assert!(info.keys_reverted >= 1);
+        }
+        other => panic!("Expected BranchReverted, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("mainline")),
+            space: None,
+            key: "shared".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::MaybeVersioned(Some(vv)) => assert_eq!(vv.value, Value::Int(1)),
+        other => panic!("Expected reverted shared value, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::BranchCherryPick {
+            source: "feature".into(),
+            target: "mainline".into(),
+            keys: Some(vec![("default".into(), "shared".into())]),
+            filter_spaces: None,
+            filter_keys: None,
+            filter_primitives: None,
+        })
+        .unwrap();
+    match output {
+        Output::BranchCherryPicked(info) => {
+            assert_eq!(info.keys_applied, 1);
+        }
+        other => panic!("Expected BranchCherryPicked, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::BranchExport {
+            branch_id: "feature".into(),
+            path: bundle_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    match output {
+        Output::BranchExported(result) => {
+            assert_eq!(result.branch_id, "feature");
+            assert_eq!(result.path, bundle_path.to_string_lossy());
+        }
+        other => panic!("Expected BranchExported, got {:?}", other),
+    }
+    assert!(
+        bundle_path.exists(),
+        "branch export should create a bundle file"
+    );
+
+    let output = executor
+        .execute(Command::BranchBundleValidate {
+            path: bundle_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    match output {
+        Output::BundleValidated(result) => {
+            assert_eq!(result.branch_id, "feature");
+            assert!(result.checksums_valid);
+        }
+        other => panic!("Expected BundleValidated, got {:?}", other),
+    }
+
+    let output = imported_executor
+        .execute(Command::BranchImport {
+            path: bundle_path.to_string_lossy().into_owned(),
+        })
+        .unwrap();
+    match output {
+        Output::BranchImported(result) => {
+            assert_eq!(result.branch_id, "feature");
+            assert!(result.keys_written >= 1);
+        }
+        other => panic!("Expected BranchImported, got {:?}", other),
+    }
+
+    let output = imported_executor
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "shared".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::MaybeVersioned(Some(vv)) => assert_eq!(vv.value, Value::Int(2)),
+        other => panic!("Expected imported feature branch value, got {:?}", other),
+    }
+}
+
+#[test]
+fn reserved_system_branch_is_rejected_by_public_executor() {
+    let db = create_db();
+    strata_graph::branch_dag::init_system_branch(&db);
+    let executor = Executor::new(db);
+
+    let error = executor
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("_system")),
+            space: None,
+            key: "secret".into(),
+            as_of: None,
+        })
+        .expect_err("system branch access should be rejected");
+
+    assert!(matches!(error, Error::InvalidInput { .. }));
+}
+
 // ============================================================================
 // Default Branch Resolution
 // ============================================================================
@@ -669,6 +1575,644 @@ fn commands_with_none_branch_use_default() {
             assert_eq!(val, Value::String("value".into()));
         }
         _ => panic!("Expected to find value in default branch"),
+    }
+}
+
+// ============================================================================
+// Graph Commands
+// ============================================================================
+
+#[test]
+fn graph_commands_register_space_and_expose_direct_results() {
+    let executor = create_executor();
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "graphs".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    let output = executor
+        .execute(Command::GraphCreate {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Unit));
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "graphs".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+
+    let output = executor
+        .execute(Command::GraphList {
+            branch: None,
+            space: Some("graphs".into()),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(graphs) => assert!(graphs.contains(&"demo".to_string())),
+        other => panic!("Expected graph key list, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::GraphAddNode {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: Some(Value::object(
+                [("name".to_string(), Value::String("Alice".into()))]
+                    .into_iter()
+                    .collect(),
+            )),
+            object_type: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphAddNode {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            node_id: "acme".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphAddEdge {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            src: "alice".into(),
+            dst: "acme".into(),
+            edge_type: "WORKS_AT".into(),
+            weight: None,
+            properties: None,
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphGetNode {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            node_id: "alice".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    let output = executor
+        .execute(Command::GraphListNodes {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::Keys(nodes) => {
+            assert!(nodes.contains(&"alice".to_string()));
+            assert!(nodes.contains(&"acme".to_string()));
+        }
+        other => panic!("Expected node list, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphNeighbors {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            node_id: "alice".into(),
+            direction: None,
+            edge_type: None,
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::GraphNeighbors(neighbors) => {
+            assert_eq!(neighbors.len(), 1);
+            assert_eq!(neighbors[0].node_id, "acme");
+        }
+        other => panic!("Expected graph neighbors, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphBfs {
+            branch: None,
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            start: "alice".into(),
+            max_depth: 8,
+            max_nodes: None,
+            edge_types: None,
+            direction: None,
+        })
+        .unwrap();
+    match output {
+        Output::GraphBfs(result) => {
+            assert_eq!(result.visited.first().map(String::as_str), Some("alice"));
+            assert!(result.visited.iter().any(|node| node == "acme"));
+        }
+        other => panic!("Expected GraphBfs, got {:?}", other),
+    }
+}
+
+#[test]
+fn graph_writes_require_existing_branch() {
+    let executor = create_executor();
+
+    let error = executor
+        .execute(Command::GraphCreate {
+            branch: Some(BranchId::from("missing-branch")),
+            space: Some("graphs".into()),
+            graph: "demo".into(),
+            cascade_policy: None,
+        })
+        .expect_err("graph writes on missing branches must fail");
+
+    assert!(matches!(error, Error::BranchNotFound { .. }));
+}
+
+#[test]
+fn graph_advanced_commands_expose_direct_results() {
+    let executor = create_executor();
+    let space = Some("graphs-advanced".to_string());
+    let graph = "ontology-demo".to_string();
+
+    executor
+        .execute(Command::GraphCreate {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            cascade_policy: Some("detach".into()),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphGetMeta {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    executor
+        .execute(Command::GraphDefineObjectType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            definition: Value::object(
+                [
+                    ("name".to_string(), Value::String("Person".into())),
+                    (
+                        "properties".to_string(),
+                        Value::object(std::collections::HashMap::new()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphDefineObjectType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            definition: Value::object(
+                [
+                    ("name".to_string(), Value::String("Temp".into())),
+                    (
+                        "properties".to_string(),
+                        Value::object(std::collections::HashMap::new()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphGetObjectType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            name: "Person".into(),
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    let output = executor
+        .execute(Command::GraphListObjectTypes {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(types) => {
+            assert!(types.contains(&"Person".to_string()));
+            assert!(types.contains(&"Temp".to_string()));
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::GraphDefineLinkType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            definition: Value::object(
+                [
+                    ("name".to_string(), Value::String("KNOWS".into())),
+                    ("source".to_string(), Value::String("Person".into())),
+                    ("target".to_string(), Value::String("Person".into())),
+                    (
+                        "properties".to_string(),
+                        Value::object(std::collections::HashMap::new()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphDefineLinkType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            definition: Value::object(
+                [
+                    ("name".to_string(), Value::String("TEMP_LINK".into())),
+                    ("source".to_string(), Value::String("Person".into())),
+                    ("target".to_string(), Value::String("Person".into())),
+                    (
+                        "properties".to_string(),
+                        Value::object(std::collections::HashMap::new()),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphGetLinkType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            name: "KNOWS".into(),
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    let output = executor
+        .execute(Command::GraphListLinkTypes {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(types) => {
+            assert!(types.contains(&"KNOWS".to_string()));
+            assert!(types.contains(&"TEMP_LINK".to_string()));
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::GraphDeleteLinkType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            name: "TEMP_LINK".into(),
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphDeleteObjectType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            name: "Temp".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::GraphBulkInsert {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            nodes: vec![
+                strata_executor::BulkGraphNode {
+                    node_id: "alice".into(),
+                    entity_ref: None,
+                    properties: None,
+                    object_type: Some("Person".into()),
+                },
+                strata_executor::BulkGraphNode {
+                    node_id: "bob".into(),
+                    entity_ref: None,
+                    properties: None,
+                    object_type: Some("Person".into()),
+                },
+                strata_executor::BulkGraphNode {
+                    node_id: "carol".into(),
+                    entity_ref: None,
+                    properties: None,
+                    object_type: Some("Person".into()),
+                },
+            ],
+            edges: vec![
+                strata_executor::BulkGraphEdge {
+                    src: "alice".into(),
+                    dst: "bob".into(),
+                    edge_type: "KNOWS".into(),
+                    weight: None,
+                    properties: None,
+                },
+                strata_executor::BulkGraphEdge {
+                    src: "bob".into(),
+                    dst: "carol".into(),
+                    edge_type: "KNOWS".into(),
+                    weight: None,
+                    properties: None,
+                },
+            ],
+            chunk_size: Some(2),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphBulkInsert {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            nodes: vec![strata_executor::BulkGraphNode {
+                node_id: "dave".into(),
+                entity_ref: None,
+                properties: None,
+                object_type: Some("Person".into()),
+            }],
+            edges: vec![],
+            chunk_size: Some(1),
+        })
+        .unwrap();
+    match output {
+        Output::GraphBulkInsertResult {
+            nodes_inserted,
+            edges_inserted,
+        } => {
+            assert_eq!(nodes_inserted, 1);
+            assert_eq!(edges_inserted, 0);
+        }
+        other => panic!("Expected GraphBulkInsertResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphListNodesPaginated {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            limit: 2,
+            cursor: None,
+        })
+        .unwrap();
+    let next_cursor = match output {
+        Output::GraphPage { items, next_cursor } => {
+            assert_eq!(items.len(), 2);
+            assert!(next_cursor.is_some());
+            next_cursor
+        }
+        other => panic!("Expected GraphPage, got {:?}", other),
+    };
+
+    let output = executor
+        .execute(Command::GraphListNodesPaginated {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            limit: 2,
+            cursor: next_cursor,
+        })
+        .unwrap();
+    match output {
+        Output::GraphPage { items, .. } => {
+            assert!(!items.is_empty());
+        }
+        other => panic!("Expected GraphPage, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphNodesByType {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            object_type: "Person".into(),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(nodes) => {
+            assert!(nodes.contains(&"alice".to_string()));
+            assert!(nodes.contains(&"dave".to_string()));
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::GraphFreezeOntology {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphOntologyStatus {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    let output = executor
+        .execute(Command::GraphOntologySummary {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    assert!(is_some_value(&output));
+
+    let output = executor
+        .execute(Command::GraphListOntologyTypes {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(types) => {
+            assert!(types.contains(&"Person".to_string()));
+            assert!(types.contains(&"KNOWS".to_string()));
+        }
+        other => panic!("Expected Keys, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphWcc {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            top_n: Some(3),
+            include_all: Some(true),
+        })
+        .unwrap();
+    match output {
+        Output::GraphGroupSummary(summary) => {
+            assert_eq!(summary.algorithm, "wcc");
+            assert_eq!(summary.node_count, 4);
+            assert!(summary.group_count >= 2);
+            assert!(summary.all.is_some());
+        }
+        other => panic!("Expected GraphGroupSummary, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphCdlp {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            max_iterations: 8,
+            direction: Some("both".into()),
+            top_n: Some(3),
+            include_all: Some(true),
+        })
+        .unwrap();
+    match output {
+        Output::GraphGroupSummary(summary) => {
+            assert_eq!(summary.algorithm, "cdlp");
+            assert_eq!(summary.node_count, 4);
+            assert!(summary.all.is_some());
+        }
+        other => panic!("Expected GraphGroupSummary, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphPagerank {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            damping: None,
+            max_iterations: Some(16),
+            tolerance: None,
+            top_n: Some(3),
+            include_all: Some(true),
+        })
+        .unwrap();
+    match output {
+        Output::GraphScoreSummary(summary) => {
+            assert_eq!(summary.algorithm, "pagerank");
+            assert_eq!(summary.node_count, 4);
+            assert!(!summary.top_nodes.is_empty());
+            assert!(summary.all.is_some());
+        }
+        other => panic!("Expected GraphScoreSummary, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphLcc {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            top_n: Some(3),
+            include_all: Some(true),
+        })
+        .unwrap();
+    match output {
+        Output::GraphScoreSummary(summary) => {
+            assert_eq!(summary.algorithm, "lcc");
+            assert_eq!(summary.node_count, 4);
+            assert!(summary.global_clustering_coefficient.is_some());
+            assert!(summary.zero_count.is_some());
+        }
+        other => panic!("Expected GraphScoreSummary, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphSssp {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            source: "alice".into(),
+            direction: Some("both".into()),
+            top_n: Some(3),
+            include_all: Some(true),
+        })
+        .unwrap();
+    match output {
+        Output::GraphScoreSummary(summary) => {
+            assert_eq!(summary.algorithm, "sssp");
+            assert_eq!(summary.source.as_deref(), Some("alice"));
+            assert!(summary.farthest.is_some());
+            assert!(summary.all.is_some());
+        }
+        other => panic!("Expected GraphScoreSummary, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::GraphRemoveEdge {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            src: "alice".into(),
+            dst: "bob".into(),
+            edge_type: "KNOWS".into(),
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphRemoveNode {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+            node_id: "dave".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::GraphDelete {
+            branch: None,
+            space: space.clone(),
+            graph: graph.clone(),
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::GraphList {
+            branch: None,
+            space,
+        })
+        .unwrap();
+    match output {
+        Output::Keys(graphs) => assert!(!graphs.contains(&graph)),
+        other => panic!("Expected Keys, got {:?}", other),
     }
 }
 
@@ -850,6 +2394,509 @@ fn json_set_and_delete_return_structured_results() {
         }
         _ => panic!("Expected DeleteResult, got {:?}", output),
     }
+}
+
+#[test]
+fn json_list_count_sample_and_index_commands_return_expected_shapes() {
+    let executor = create_executor();
+
+    for (key, value) in [("doc:01", "alice"), ("doc:02", "bob"), ("doc:03", "carol")] {
+        executor
+            .execute(Command::JsonSet {
+                branch: None,
+                space: None,
+                key: key.into(),
+                path: "$".into(),
+                value: Value::object(
+                    [("name".to_string(), Value::String(value.into()))]
+                        .into_iter()
+                        .collect(),
+                ),
+            })
+            .unwrap();
+    }
+
+    let output = executor
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: Some("doc:".into()),
+            cursor: None,
+            limit: 2,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::JsonListResult {
+            keys,
+            has_more,
+            cursor,
+        } => {
+            assert_eq!(keys, vec!["doc:01".to_string(), "doc:02".to_string()]);
+            assert!(has_more);
+            assert!(cursor.is_some());
+        }
+        other => panic!("Expected JsonListResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::JsonCount {
+            branch: None,
+            space: None,
+            prefix: Some("doc:".into()),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Uint(3)));
+
+    let output = executor
+        .execute(Command::JsonSample {
+            branch: None,
+            space: None,
+            prefix: Some("doc:".into()),
+            count: Some(2),
+        })
+        .unwrap();
+
+    match output {
+        Output::SampleResult { total_count, items } => {
+            assert_eq!(total_count, 3);
+            assert_eq!(items.len(), 2);
+            assert!(items.iter().all(|item| item.key.starts_with("doc:")));
+        }
+        other => panic!("Expected SampleResult, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::JsonCreateIndex {
+            branch: None,
+            space: None,
+            name: "people_name".into(),
+            field_path: "$.name".into(),
+            index_type: "tag".into(),
+        })
+        .unwrap();
+
+    match output {
+        Output::Maybe(Some(Value::String(json))) => {
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            assert_eq!(value["name"], "people_name");
+        }
+        other => panic!("Expected serialized index definition, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::JsonListIndexes {
+            branch: None,
+            space: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::Maybe(Some(Value::String(json))) => {
+            let value: serde_json::Value = serde_json::from_str(&json).unwrap();
+            let entries = value.as_array().expect("index list should be an array");
+            assert_eq!(entries.len(), 1);
+            assert_eq!(entries[0]["name"], "people_name");
+        }
+        other => panic!("Expected serialized index list, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::JsonDropIndex {
+            branch: None,
+            space: None,
+            name: "people_name".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+}
+
+#[test]
+fn space_create_exists_and_list_round_trip() {
+    let executor = create_executor();
+
+    let output = executor
+        .execute(Command::SpaceCreate {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Unit));
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+
+    let output = executor
+        .execute(Command::SpaceList { branch: None })
+        .unwrap();
+    match output {
+        Output::SpaceList(spaces) => {
+            assert!(spaces.contains(&"analytics".to_string()));
+        }
+        other => panic!("Expected SpaceList, got {:?}", other),
+    }
+}
+
+#[test]
+fn space_delete_force_removes_space_data_and_metadata() {
+    let executor = create_executor();
+
+    executor
+        .execute(Command::SpaceCreate {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "user:1".into(),
+            value: Value::String("Alice".into()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::JsonSet {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "doc:1".into(),
+            path: "$".into(),
+            value: Value::object(
+                [("name".to_string(), Value::String("Alice".into()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        })
+        .unwrap();
+    executor
+        .execute(Command::EventAppend {
+            branch: None,
+            space: Some("analytics".into()),
+            event_type: "user.created".into(),
+            payload: Value::object([("id".to_string(), Value::Int(1))].into_iter().collect()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: Some("analytics".into()),
+            collection: "embeddings".into(),
+            dimension: 4,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: Some("analytics".into()),
+            collection: "embeddings".into(),
+            key: "user:1".into(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphCreate {
+            branch: None,
+            space: Some("analytics".into()),
+            graph: "people".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphAddNode {
+            branch: None,
+            space: Some("analytics".into()),
+            graph: "people".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    let error = executor
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "analytics".into(),
+            force: false,
+        })
+        .expect_err("non-empty spaces should require force");
+    assert!(matches!(error, Error::ConstraintViolation { .. }));
+
+    let output = executor
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "analytics".into(),
+            force: true,
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Unit));
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    let output = executor
+        .execute(Command::KvGet {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "user:1".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        output,
+        Output::Maybe(None) | Output::MaybeVersioned(None)
+    ));
+
+    let output = executor
+        .execute(Command::JsonGet {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "doc:1".into(),
+            path: "$".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(matches!(
+        output,
+        Output::Maybe(None) | Output::MaybeVersioned(None)
+    ));
+
+    let output = executor
+        .execute(Command::EventLen {
+            branch: None,
+            space: Some("analytics".into()),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Uint(0)));
+
+    let output = executor
+        .execute(Command::VectorListCollections {
+            branch: None,
+            space: Some("analytics".into()),
+        })
+        .unwrap();
+    match output {
+        Output::VectorCollectionList(collections) => assert!(collections.is_empty()),
+        other => panic!("Expected empty vector collection list, got {:?}", other),
+    }
+
+    let output = executor
+        .execute(Command::GraphList {
+            branch: None,
+            space: Some("analytics".into()),
+        })
+        .unwrap();
+    match output {
+        Output::Keys(graphs) => assert!(graphs.is_empty()),
+        other => panic!("Expected empty graph list, got {:?}", other),
+    }
+
+    let error = executor
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "default".into(),
+            force: true,
+        })
+        .expect_err("default space should be protected");
+    assert!(matches!(error, Error::ConstraintViolation { .. }));
+}
+
+#[test]
+fn describe_reports_default_space_counts_and_available_spaces() {
+    let executor = create_executor();
+
+    executor
+        .execute(Command::SpaceCreate {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "default:key".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "analytics:key".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+    executor
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc:1".into(),
+            path: "$".into(),
+            value: Value::object(
+                [("kind".to_string(), Value::String("default".into()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        })
+        .unwrap();
+    executor
+        .execute(Command::JsonSet {
+            branch: None,
+            space: Some("analytics".into()),
+            key: "doc:2".into(),
+            path: "$".into(),
+            value: Value::object(
+                [("kind".to_string(), Value::String("analytics".into()))]
+                    .into_iter()
+                    .collect(),
+            ),
+        })
+        .unwrap();
+    executor
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "default.created".into(),
+            payload: Value::object([("id".to_string(), Value::Int(1))].into_iter().collect()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::EventAppend {
+            branch: None,
+            space: Some("analytics".into()),
+            event_type: "analytics.created".into(),
+            payload: Value::object([("id".to_string(), Value::Int(2))].into_iter().collect()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::VectorCreateCollection {
+            branch: None,
+            space: None,
+            collection: "embeddings".into(),
+            dimension: 4,
+            metric: DistanceMetric::Cosine,
+        })
+        .unwrap();
+    executor
+        .execute(Command::VectorUpsert {
+            branch: None,
+            space: None,
+            collection: "embeddings".into(),
+            key: "v1".into(),
+            vector: vec![1.0, 0.0, 0.0, 0.0],
+            metadata: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphCreate {
+            branch: None,
+            space: None,
+            graph: "demo".into(),
+            cascade_policy: None,
+        })
+        .unwrap();
+    executor
+        .execute(Command::GraphAddNode {
+            branch: None,
+            space: None,
+            graph: "demo".into(),
+            node_id: "alice".into(),
+            entity_ref: None,
+            properties: None,
+            object_type: None,
+        })
+        .unwrap();
+
+    let output = executor
+        .execute(Command::Describe { branch: None })
+        .unwrap();
+
+    match output {
+        Output::Described(description) => {
+            assert_eq!(description.branch, "default");
+            assert!(description.branches.contains(&"default".to_string()));
+            assert!(description.spaces.contains(&"default".to_string()));
+            assert!(description.spaces.contains(&"analytics".to_string()));
+            assert_eq!(description.primitives.kv.count, 1);
+            assert_eq!(description.primitives.json.count, 1);
+            assert_eq!(description.primitives.events.count, 1);
+            assert_eq!(description.primitives.vector.collections.len(), 1);
+            assert_eq!(
+                description.primitives.vector.collections[0].name,
+                "embeddings"
+            );
+            assert_eq!(description.primitives.graph.graphs.len(), 1);
+            assert_eq!(description.primitives.graph.graphs[0].name, "demo");
+            assert!(description.capabilities.vector_query);
+        }
+        other => panic!("Expected DescribeResult, got {:?}", other),
+    }
+}
+
+#[test]
+fn json_index_commands_do_not_register_space_as_a_side_effect() {
+    let db = create_db();
+    let executor = Executor::new(db);
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "ghost".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    let error = executor
+        .execute(Command::JsonCreateIndex {
+            branch: None,
+            space: Some("ghost".into()),
+            name: "ghost_index".into(),
+            field_path: "$.name".into(),
+            index_type: "bogus".into(),
+        })
+        .expect_err("invalid index types should still fail");
+    assert!(matches!(error, Error::InvalidInput { .. }));
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "ghost".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    let output = executor
+        .execute(Command::JsonDropIndex {
+            branch: None,
+            space: Some("ghost".into()),
+            name: "ghost_index".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
+
+    let output = executor
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "ghost".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
 }
 
 // ============================================================================

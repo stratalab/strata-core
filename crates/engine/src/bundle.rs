@@ -60,8 +60,10 @@ pub struct ImportInfo {
 /// Information about a bundle (from validation)
 #[derive(Debug, Clone)]
 pub struct BundleInfo {
-    /// Branch ID from the bundle
+    /// Internal branch identifier from the bundle metadata
     pub branch_id: String,
+    /// User-visible branch name from the bundle metadata
+    pub branch_name: String,
     /// Format version of the bundle
     pub format_version: u32,
     /// Number of transaction payloads
@@ -328,6 +330,7 @@ pub fn validate_bundle(path: &Path) -> StrataResult<BundleInfo> {
 
     Ok(BundleInfo {
         branch_id: verify.branch_id,
+        branch_name: verify.branch_name,
         format_version: verify.format_version,
         entry_count: verify.wal_entry_count,
         checksums_valid: verify.checksums_valid,
@@ -473,6 +476,7 @@ mod tests {
 
         let info = validate_bundle(&path).unwrap();
         assert!(!info.branch_id.is_empty());
+        assert_eq!(info.branch_name, "validate-branch");
         assert!(info.checksums_valid);
     }
 

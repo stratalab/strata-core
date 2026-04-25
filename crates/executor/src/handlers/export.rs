@@ -117,35 +117,32 @@ fn collect_graph(
     p: &Arc<Primitives>,
     branch_id: strata_core::types::BranchId,
     space: &str,
+    graph: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
 ) -> Result<Vec<ExportRow>> {
-    let graphs = convert_result(p.graph.list_graphs(branch_id, space))?;
     let max = limit.map(|l| l as usize).unwrap_or(usize::MAX);
     let mut rows = Vec::new();
 
-    for graph_name in &graphs {
+    let nodes = convert_result(p.graph.list_nodes(branch_id, space, graph))?;
+    for node_id in nodes {
         if let Some(pfx) = prefix {
-            if !graph_name.starts_with(pfx) {
+            if !node_id.starts_with(pfx) {
                 continue;
             }
         }
-        let nodes = convert_result(p.graph.list_nodes(branch_id, space, graph_name))?;
-        for node_id in nodes {
-            if rows.len() >= max {
-                return Ok(rows);
-            }
-            if let Some(data) =
-                convert_result(p.graph.get_node(branch_id, space, graph_name, &node_id))?
-            {
-                let key = format!("{}/{}", graph_name, node_id);
-                let value = serde_json::to_string(&data)
-                    .map(Value::String)
-                    .unwrap_or(Value::Null);
-                rows.push(ExportRow { key, value });
-            }
+        if rows.len() >= max {
+            return Ok(rows);
+        }
+        if let Some(data) = convert_result(p.graph.get_node(branch_id, space, graph, &node_id))? {
+            let key = format!("{}/{}", graph, node_id);
+            let value = serde_json::to_string(&data)
+                .map(Value::String)
+                .unwrap_or(Value::Null);
+            rows.push(ExportRow { key, value });
         }
     }
+
     Ok(rows)
 }
 
@@ -365,7 +362,7 @@ fn render_jsonl(rows: &[ExportRow]) -> String {
 
 /// Handle DbExport command.
 #[allow(clippy::too_many_arguments)]
-pub fn db_export(
+pub(crate) fn db_export(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,
@@ -435,7 +432,16 @@ pub fn db_export(
         ExportPrimitive::Kv => collect_kv(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Json => collect_json(p, branch_id, &space, prefix.as_deref(), limit)?,
         ExportPrimitive::Events => collect_events(p, branch_id, &space, limit)?,
-        ExportPrimitive::Graph => collect_graph(p, branch_id, &space, prefix.as_deref(), limit)?,
+        ExportPrimitive::Graph => collect_graph(
+            p,
+            branch_id,
+            &space,
+            graph
+                .as_deref()
+                .expect("graph export validates --graph before data collection"),
+            prefix.as_deref(),
+            limit,
+        )?,
         ExportPrimitive::Vector => {
             return Err(Error::InvalidInput {
                 reason: "Vector export requires the 'arrow' feature and --output <FILE>".into(),

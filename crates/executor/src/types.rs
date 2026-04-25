@@ -392,7 +392,7 @@ pub struct BranchImportResult {
 /// Information about bundle validation
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BundleValidateResult {
-    /// Branch identifier found in the bundle.
+    /// User-visible branch identifier found in the bundle.
     pub branch_id: String,
     /// Bundle format version.
     pub format_version: u32,

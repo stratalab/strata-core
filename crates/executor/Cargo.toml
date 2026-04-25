@@ -7,60 +7,43 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 publish = false
-description = "Command execution layer for Strata database"
+description = "Public command boundary for Strata"
 
 [lints]
 workspace = true
 
 [features]
 default = []
-embed = ["strata-intelligence/embed", "strata-engine/embed"]
-expand = ["strata-search/expand"]
-rerank = ["strata-search/rerank"]
-# Cloud generation providers — forwarded through intelligence to inference
-anthropic = ["embed", "strata-intelligence/anthropic"]
-openai = ["embed", "strata-intelligence/openai"]
-google = ["embed", "strata-intelligence/google"]
-# Arrow-based import/export (Parquet, CSV, JSONL)
-arrow = ["dep:arrow", "dep:parquet"]
+embed = [
+    "strata-executor-legacy/embed",
+    "strata-intelligence/embed",
+    "strata-engine/embed",
+]
+expand = ["strata-executor-legacy/expand", "strata-search/expand"]
+rerank = ["strata-executor-legacy/rerank", "strata-search/rerank"]
+anthropic = ["strata-executor-legacy/anthropic", "embed", "strata-intelligence/anthropic"]
+openai = ["strata-executor-legacy/openai", "embed", "strata-intelligence/openai"]
+google = ["strata-executor-legacy/google", "embed", "strata-intelligence/google"]
+arrow = ["strata-executor-legacy/arrow", "dep:arrow", "dep:parquet"]
 
 [dependencies]
-# Internal crates
+strata-executor-legacy = { path = "../executor-legacy" }
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
-strata-vector = { path = "../vector" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-security = { path = "../security" }
-
-# Serialization
+strata-vector = { path = "../vector" }
+rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-rmp-serde = { workspace = true }
-
-# Error handling
-thiserror = { workspace = true }
-
-# Encoding
-base64 = { workspace = true }
-
-# UUIDs for RunId
-uuid = { workspace = true }
-
-# Datetime parsing
-chrono = { workspace = true }
-
-# String similarity
 strsim = { workspace = true }
-
-# Logging
+thiserror = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
 tracing = { workspace = true }
-
-# Unix signals for IPC server
 libc = { workspace = true }
-
-# Arrow interoperability (optional)
 arrow = { workspace = true, optional = true }
 parquet = { workspace = true, optional = true }
 

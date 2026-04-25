@@ -9,7 +9,7 @@ use crate::{Error, Output, Result};
 /// Handle ArrowImport command.
 #[cfg(feature = "arrow")]
 #[allow(clippy::too_many_arguments)]
-pub fn arrow_import(
+pub(crate) fn arrow_import(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,
@@ -23,8 +23,7 @@ pub fn arrow_import(
     use std::path::Path;
 
     use crate::arrow::{detect_format, read_file, resolve_mapping, ImportPrimitive};
-    use crate::bridge::to_core_branch_id;
-    use crate::handlers::require_branch_exists;
+    use crate::bridge::{require_branch_exists, to_core_branch_id};
 
     require_branch_exists(p, &branch)?;
     let branch_id = to_core_branch_id(&branch)?;
@@ -100,7 +99,7 @@ pub fn arrow_import(
 /// Handle ArrowImport when the arrow feature is not enabled.
 #[cfg(not(feature = "arrow"))]
 #[allow(clippy::too_many_arguments)]
-pub fn arrow_import(
+pub(crate) fn arrow_import(
     _p: &Arc<Primitives>,
     _branch: BranchId,
     _space: String,

@@ -363,6 +363,11 @@ fn dimension_mismatch_includes_collection_context() {
                 "hint should name the collection, got: {}",
                 hint
             );
+            assert!(
+                !hint.contains("MiniLM") && !hint.contains("BERT") && !hint.contains("OpenAI"),
+                "hint should not guess model names, got: {}",
+                hint
+            );
         }
         other => panic!("Expected DimensionMismatch with hint, got {:?}", other),
     }

@@ -1,10 +1,11 @@
-//! Database-level command handlers (describe, ping, info, flush, compact).
-
 use std::sync::Arc;
 
 use tracing::warn;
 
-use crate::bridge::{from_engine_metric, is_internal_collection, to_core_branch_id, Primitives};
+use crate::bridge::{
+    from_engine_metric, is_internal_collection, require_branch_exists, to_core_branch_id,
+    Primitives,
+};
 use crate::convert::convert_result;
 use crate::types::{
     BranchId, CapabilitySummary, ConfigSummary, CountSummary, DescribeResult, GraphSummary,
@@ -12,58 +13,45 @@ use crate::types::{
 };
 use crate::{Output, Result};
 
-/// Build a structured snapshot of the database for agent introspection.
-///
-/// All data collection is best-effort: if a primitive fails, use zero/empty
-/// defaults so that one failure never blocks the entire describe.
-pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+pub(crate) fn describe(primitives: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
+    require_branch_exists(primitives, &branch)?;
     let branch_id = to_core_branch_id(&branch)?;
 
-    // -- Version, path, follower --
     let version = env!("CARGO_PKG_VERSION").to_string();
-    let path = p.db.data_dir().to_string_lossy().to_string();
-    let follower = p.db.is_follower();
+    let path = primitives.db.data_dir().to_string_lossy().to_string();
+    let follower = primitives.db.is_follower();
 
-    // -- Branches --
-    // list_branches() only returns explicitly-created branches; the executor
-    // still exposes an effective default branch even when it was not
-    // explicitly created, so ensure it appears in the list.
-    let mut branches = p.db.branches().list().unwrap_or_else(|e| {
-        warn!("describe: list_branches failed: {}", e);
+    let mut branches = primitives.db.branches().list().unwrap_or_else(|error| {
+        warn!("describe: failed to list branches: {error}");
         Vec::new()
     });
-    let default_branch =
-        p.db.default_branch_name()
-            .unwrap_or_else(|| "default".to_string());
+    let default_branch = primitives
+        .db
+        .default_branch_name()
+        .unwrap_or_else(|| "default".to_string());
     if !branches.contains(&default_branch) {
         branches.insert(0, default_branch);
     }
 
-    // -- Spaces --
-    let spaces = p.space.list(branch_id).unwrap_or_else(|e| {
-        warn!("describe: list spaces failed: {}", e);
+    let spaces = primitives.space.list(branch_id).unwrap_or_else(|error| {
+        warn!("describe: failed to list spaces: {error}");
         Vec::new()
     });
 
     let default_space = "default";
 
-    // -- KV count --
-    let kv_count = convert_result(p.kv.list(&branch_id, default_space, None))
+    let kv_count = convert_result(primitives.kv.list(&branch_id, default_space, None))
         .map(|keys| keys.len() as u64)
-        .unwrap_or_else(|e| {
-            warn!("describe: kv list failed: {}", e);
+        .unwrap_or_else(|error| {
+            warn!("describe: failed to list kv keys: {error}");
             0
         });
 
-    // -- JSON count --
-    // Count documents by paginating with a reasonable batch size.
-    // json.list() pre-allocates Vec::with_capacity(limit+1), so passing a
-    // huge limit (like u32::MAX) causes a multi-GB allocation that OOMs on CI.
     let json_count = {
         let mut total = 0u64;
         let mut cursor: Option<String> = None;
         loop {
-            match convert_result(p.json.list(
+            match convert_result(primitives.json.list(
                 &branch_id,
                 default_space,
                 None,
@@ -73,12 +61,12 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
                 Ok(result) => {
                     total += result.doc_ids.len() as u64;
                     match result.next_cursor {
-                        Some(c) => cursor = Some(c),
+                        Some(next) => cursor = Some(next),
                         None => break,
                     }
                 }
-                Err(e) => {
-                    warn!("describe: json list failed: {}", e);
+                Err(error) => {
+                    warn!("describe: failed to list json docs: {error}");
                     total = 0;
                     break;
                 }
@@ -87,69 +75,60 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
         total
     };
 
-    // -- Event count --
-    let event_count = convert_result(p.event.len(&branch_id, default_space)).unwrap_or_else(|e| {
-        warn!("describe: event len failed: {}", e);
-        0
-    });
+    let event_count = convert_result(primitives.event.len(&branch_id, default_space))
+        .unwrap_or_else(|error| {
+            warn!("describe: failed to read event length: {error}");
+            0
+        });
 
-    // -- Vector collections --
-    let vector_collections = p
+    let vector_collections = primitives
         .vector
         .list_collections(branch_id, default_space)
-        .map(|colls| {
-            colls
+        .map(|collections| {
+            collections
                 .into_iter()
-                .filter(|c| !is_internal_collection(&c.name))
-                .map(|c| VectorCollectionSummary {
-                    name: c.name,
-                    dimension: c.config.dimension,
-                    metric: from_engine_metric(c.config.metric),
-                    count: c.count as u64,
+                .filter(|info| !is_internal_collection(&info.name))
+                .map(|info| VectorCollectionSummary {
+                    name: info.name,
+                    dimension: info.config.dimension,
+                    metric: from_engine_metric(info.config.metric),
+                    count: info.count as u64,
                 })
                 .collect::<Vec<_>>()
         })
-        .unwrap_or_else(|e| {
-            warn!("describe: vector list_collections failed: {}", e);
+        .unwrap_or_else(|error| {
+            warn!("describe: failed to list vector collections: {error}");
             Vec::new()
         });
 
-    // -- Graphs --
-    // Graphs honor `current_space`. `describe` summarizes the default
-    // space's graphs (where Strata API code lands by default). Multi-space
-    // describe — aggregating graphs across every space with data — is a
-    // separate concern; if you want to describe a different space's
-    // graphs, query it explicitly via `Strata::graph_*` after
-    // `set_space(...)`.
-    let graph_space = "default";
-    let graph_names = p
+    let graph_names = primitives
         .graph
-        .list_graphs(branch_id, graph_space)
-        .unwrap_or_else(|e| {
-            warn!("describe: list_graphs failed: {}", e);
+        .list_graphs(branch_id, default_space)
+        .unwrap_or_else(|error| {
+            warn!("describe: failed to list graphs: {error}");
             Vec::new()
         });
 
-    let graphs: Vec<GraphSummaryEntry> = graph_names
+    let graphs = graph_names
         .into_iter()
         .map(|name| {
-            let stats = p
+            let stats = primitives
                 .graph
-                .snapshot_stats(branch_id, graph_space, &name)
-                .unwrap_or_else(|e| {
-                    warn!("describe: snapshot_stats for '{}' failed: {}", name, e);
+                .snapshot_stats(branch_id, default_space, &name)
+                .unwrap_or_else(|error| {
+                    warn!("describe: failed to read graph stats for '{name}': {error}");
                     strata_graph::types::GraphStats {
                         node_count: 0,
                         edge_count: 0,
                     }
                 });
-            let object_types = p
+            let object_types = primitives
                 .graph
-                .list_object_types(branch_id, graph_space, &name)
+                .list_object_types(branch_id, default_space, &name)
                 .unwrap_or_default();
-            let link_types = p
+            let link_types = primitives
                 .graph
-                .list_link_types(branch_id, graph_space, &name)
+                .list_link_types(branch_id, default_space, &name)
                 .unwrap_or_default();
             GraphSummaryEntry {
                 name,
@@ -159,39 +138,34 @@ pub fn describe(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
                 link_types,
             }
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    // -- Config --
-    let cfg = p.db.config();
-    let config = ConfigSummary {
-        provider: cfg.provider.clone(),
-        default_model: cfg.default_model.clone(),
-        auto_embed: cfg.auto_embed,
-        embed_model: cfg.embed_model.clone(),
-        durability: cfg.durability.clone(),
+    let config = {
+        let cfg = primitives.db.config();
+        ConfigSummary {
+            provider: cfg.provider.clone(),
+            default_model: cfg.default_model.clone(),
+            auto_embed: cfg.auto_embed,
+            embed_model: cfg.embed_model.clone(),
+            durability: cfg.durability.clone(),
+        }
     };
 
-    // -- Capabilities --
-    let search =
-        p.db.extension::<strata_engine::search::InvertedIndex>()
-            .map(|idx| idx.is_enabled())
-            .unwrap_or(false);
-
-    let has_vector_collections = !vector_collections.is_empty();
-
-    let generation = cfg.default_model.is_some();
-
     let capabilities = CapabilitySummary {
-        search,
-        vector_query: has_vector_collections,
-        generation,
-        auto_embed: cfg.auto_embed,
+        search: primitives
+            .db
+            .extension::<strata_engine::search::InvertedIndex>()
+            .map(|index| index.is_enabled())
+            .unwrap_or(false),
+        vector_query: !vector_collections.is_empty(),
+        generation: config.default_model.is_some(),
+        auto_embed: config.auto_embed,
     };
 
     Ok(Output::Described(DescribeResult {
         version,
         path,
-        branch: branch.0,
+        branch: branch.to_string(),
         branches,
         spaces,
         follower,

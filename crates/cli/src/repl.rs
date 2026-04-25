@@ -128,7 +128,7 @@ mod tests {
     fn cache_app() -> CliApp {
         let db = Strata::cache().expect("cache db should open");
         let default_branch = db.current_branch().to_string();
-        let session = db.session();
+        let session = db.session().expect("session should open");
         let context = Context::new(
             default_branch.clone(),
             default_branch,

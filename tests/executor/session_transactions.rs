@@ -43,6 +43,53 @@ fn begin_starts_transaction() {
 }
 
 #[test]
+fn explicit_transaction_branch_controls_omitted_commands() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+
+    let mut session = Session::new(db.clone());
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("feature")),
+            options: None,
+        })
+        .unwrap();
+
+    assert_eq!(session.current_branch(), "feature");
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "txn_branch_key".into(),
+            value: Value::Int(7),
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    let mut verifier = Session::new(db);
+    let default_output = verifier
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("default")),
+            space: None,
+            key: "txn_branch_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(is_none_value(&default_output));
+
+    let feature_output = verifier
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "txn_branch_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(extract_maybe_value(feature_output), Some(Value::Int(7)));
+}
+
+#[test]
 fn commit_ends_transaction() {
     let mut session = create_session();
 
@@ -85,6 +132,37 @@ fn rollback_ends_transaction() {
 }
 
 #[test]
+fn transaction_rejects_explicit_branch_mismatch() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+    db.branches().create("other").unwrap();
+
+    let mut session = Session::new(db);
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("feature")),
+            options: None,
+        })
+        .unwrap();
+
+    let error = session
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("other")),
+            space: None,
+            key: "wrong_branch".into(),
+            value: Value::Int(1),
+        })
+        .expect_err("mismatched branch should be rejected while the transaction is active");
+
+    match error {
+        strata_executor::Error::InvalidInput { reason, .. } => {
+            assert!(reason.contains("active transaction is bound"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
 fn txn_info_returns_info_when_active() {
     let mut session = create_session();
 
@@ -109,6 +187,29 @@ fn txn_info_returns_info_when_active() {
         }
         _ => panic!("Expected TxnInfo(Some) when transaction active"),
     }
+}
+
+#[test]
+fn set_branch_rejects_missing_branch() {
+    let mut session = create_session();
+    let error = session
+        .set_branch("missing")
+        .expect_err("set_branch should validate existence");
+
+    match error {
+        strata_executor::Error::BranchNotFound { branch, .. } => assert_eq!(branch, "missing"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn set_space_rejects_invalid_name() {
+    let mut session = create_session();
+    let error = session
+        .set_space("not allowed")
+        .expect_err("set_space should validate the name");
+
+    assert!(matches!(error, strata_executor::Error::InvalidInput { .. }));
 }
 
 // ============================================================================

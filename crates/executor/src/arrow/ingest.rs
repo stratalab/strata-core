@@ -81,6 +81,7 @@ pub fn ingest_kv(
         }
 
         if !entries.is_empty() {
+            register_space(p, branch_id, space)?;
             let count = entries.len() as u64;
             convert_result(p.kv.batch_put(&branch_id, space, entries))?;
             result.rows_imported += count;
@@ -152,6 +153,7 @@ pub fn ingest_json(
         }
 
         if !entries.is_empty() {
+            register_space(p, branch_id, space)?;
             let count = entries.len() as u64;
             convert_result(p.json.batch_set_or_create(&branch_id, space, entries))?;
             result.rows_imported += count;
@@ -222,6 +224,7 @@ pub fn ingest_vector(
 
             // Auto-create collection on first valid embedding (need dimension).
             if !collection_created {
+                register_space(p, branch_id, space)?;
                 auto_create_collection(p, branch_id, space, collection, embedding.len())?;
                 collection_created = true;
             }
@@ -333,6 +336,11 @@ fn auto_create_collection(
         branch_id,
     )?;
 
+    Ok(())
+}
+
+fn register_space(p: &Arc<Primitives>, branch_id: BranchId, space: &str) -> Result<()> {
+    convert_result(p.space.register(branch_id, space))?;
     Ok(())
 }
 
