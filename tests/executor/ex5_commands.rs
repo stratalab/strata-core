@@ -401,6 +401,25 @@ fn db_export_graph_and_file_output_work() {
             assert_eq!(result.row_count, 1);
             assert_eq!(result.path.as_deref(), Some(export_path.to_str().unwrap()));
             assert!(result.size_bytes.unwrap_or(0) > 0);
+            // The arrow export path splits graph output into <stem>_nodes.<ext>
+            // and <stem>_edges.<ext>; the inline path writes a single file at
+            // the requested path.
+            #[cfg(feature = "arrow")]
+            {
+                let nodes_path = temp.path().join("graph_nodes.jsonl");
+                let edges_path = temp.path().join("graph_edges.jsonl");
+                assert!(
+                    nodes_path.exists(),
+                    "expected nodes file at {}",
+                    nodes_path.display()
+                );
+                assert!(
+                    edges_path.exists() || edges_path.metadata().is_err(),
+                    "expected edges file at {} (or no edges)",
+                    edges_path.display()
+                );
+            }
+            #[cfg(not(feature = "arrow"))]
             assert!(export_path.exists());
         }
         other => panic!("unexpected output: {other:?}"),

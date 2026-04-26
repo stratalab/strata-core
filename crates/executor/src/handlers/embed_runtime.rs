@@ -58,7 +58,7 @@ pub(crate) fn embed_status(primitives: &Arc<Primitives>) -> EmbedStatusInfo {
     #[cfg(feature = "embed")]
     {
         let status = strata_intelligence::embed::runtime::embed_status(&primitives.db);
-        return EmbedStatusInfo {
+        EmbedStatusInfo {
             auto_embed: status.auto_embed,
             batch_size: status.batch_size,
             pending: status.pending,
@@ -67,7 +67,7 @@ pub(crate) fn embed_status(primitives: &Arc<Primitives>) -> EmbedStatusInfo {
             total_failed: status.total_failed,
             scheduler_queue_depth: status.scheduler_queue_depth,
             scheduler_active_tasks: status.scheduler_active_tasks,
-        };
+        }
     }
 
     #[cfg(not(feature = "embed"))]

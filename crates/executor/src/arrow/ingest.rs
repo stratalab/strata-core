@@ -340,6 +340,12 @@ fn auto_create_collection(
 }
 
 fn register_space(p: &Arc<Primitives>, branch_id: BranchId, space: &str) -> Result<()> {
+    // The implicit "default" and "_system_" spaces are always discoverable via
+    // `SpaceIndex::exists` without metadata, so skip the empty registration
+    // transaction that would otherwise burn a storage version per ingest call.
+    if space == "default" || space == strata_engine::system_space::SYSTEM_SPACE {
+        return Ok(());
+    }
     convert_result(p.space.register(branch_id, space))?;
     Ok(())
 }

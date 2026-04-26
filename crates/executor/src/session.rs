@@ -27,7 +27,9 @@ pub struct Session {
 }
 
 enum SessionBackend {
-    Local(LocalSession),
+    // `LocalSession` carries an engine `Transaction` and effects ledger;
+    // it dwarfs `IpcClient`, so box it to keep the enum compact.
+    Local(Box<LocalSession>),
     Ipc(IpcClient),
 }
 
@@ -182,7 +184,7 @@ impl Session {
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
         let current_branch = runtime_default_branch(&db);
         Self {
-            backend: SessionBackend::Local(LocalSession::new(db.clone())),
+            backend: SessionBackend::Local(Box::new(LocalSession::new(db.clone()))),
             executor: Some(Executor::new_with_mode(db, access_mode)),
             access_mode,
             current_branch,
@@ -198,7 +200,7 @@ impl Session {
         current_space: impl Into<String>,
     ) -> Self {
         Self {
-            backend: SessionBackend::Local(LocalSession::new(db.clone())),
+            backend: SessionBackend::Local(Box::new(LocalSession::new(db.clone()))),
             executor: Some(Executor::new_with_mode(db, access_mode)),
             access_mode,
             current_branch: current_branch.into(),
