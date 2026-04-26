@@ -6,7 +6,10 @@ use strata_engine::{
     CherryPickFilter, DiffFilter, DiffOptions, ForkOptions, MergeBaseInfo, MergeOptions,
 };
 
-use crate::bridge::{extract_version, from_engine_branch_status, Primitives};
+use crate::bridge::{
+    branch_is_reserved, extract_version, from_engine_branch_status, reject_reserved_branch_name,
+    Primitives,
+};
 use crate::convert::convert_result;
 use crate::{
     BranchExportResult, BranchId, BranchImportResult, BranchInfo, BranchStatus,
@@ -47,7 +50,7 @@ pub(crate) fn create(
 }
 
 pub(crate) fn get(db: &Arc<strata_engine::Database>, branch: BranchId) -> Result<Output> {
-    if branch.as_str().starts_with("_system") {
+    if branch_is_reserved(branch.as_str()) {
         return Ok(Output::MaybeBranchInfo(None));
     }
     let value = convert_result(db.branches().info_versioned(branch.as_str()))?;
@@ -65,7 +68,7 @@ pub(crate) fn list(
     let ids = convert_result(db.branches().list())?;
     let branches = ids
         .into_iter()
-        .filter(|id| !id.starts_with("_system"))
+        .filter(|id| !branch_is_reserved(id))
         .filter_map(|id| db.branches().info_versioned(&id).ok().flatten())
         .map(versioned_to_branch_info)
         .skip(offset.unwrap_or(0) as usize);
@@ -79,7 +82,7 @@ pub(crate) fn list(
 }
 
 pub(crate) fn exists(db: &Arc<strata_engine::Database>, branch: BranchId) -> Result<Output> {
-    if branch.as_str().starts_with("_system") {
+    if branch_is_reserved(branch.as_str()) {
         return Ok(Output::Bool(false));
     }
     let exists = convert_result(db.branches().exists(branch.as_str()))?;
@@ -98,8 +101,8 @@ pub(crate) fn fork(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    reject_reserved_name(&source)?;
-    reject_reserved_name(&destination)?;
+    reject_reserved_branch_name(&source)?;
+    reject_reserved_branch_name(&destination)?;
 
     let options = match (&message, &creator) {
         (Some(message), Some(creator)) => ForkOptions::default()
@@ -126,8 +129,8 @@ pub(crate) fn diff(
     filter_spaces: Option<Vec<String>>,
     as_of: Option<u64>,
 ) -> Result<Output> {
-    reject_reserved_name(&branch_a)?;
-    reject_reserved_name(&branch_b)?;
+    reject_reserved_branch_name(&branch_a)?;
+    reject_reserved_branch_name(&branch_b)?;
 
     let has_filter = filter_primitives.is_some() || filter_spaces.is_some();
     let options = DiffOptions {
@@ -154,8 +157,8 @@ pub(crate) fn merge(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    reject_reserved_name(&source)?;
-    reject_reserved_name(&target)?;
+    reject_reserved_branch_name(&source)?;
+    reject_reserved_branch_name(&target)?;
 
     let mut options = MergeOptions::with_strategy(strategy);
     if let Some(message) = &message {
@@ -178,8 +181,8 @@ pub(crate) fn diff_three_way(
     branch_a: String,
     branch_b: String,
 ) -> Result<Output> {
-    reject_reserved_name(&branch_a)?;
-    reject_reserved_name(&branch_b)?;
+    reject_reserved_branch_name(&branch_a)?;
+    reject_reserved_branch_name(&branch_b)?;
 
     let result = convert_result(primitives.db.branches().diff3(&branch_a, &branch_b))?;
     Ok(Output::ThreeWayDiff(result))
@@ -190,8 +193,8 @@ pub(crate) fn merge_base(
     branch_a: String,
     branch_b: String,
 ) -> Result<Output> {
-    reject_reserved_name(&branch_a)?;
-    reject_reserved_name(&branch_b)?;
+    reject_reserved_branch_name(&branch_a)?;
+    reject_reserved_branch_name(&branch_b)?;
 
     let merge_base = convert_result(primitives.db.branches().merge_base(&branch_a, &branch_b))?;
     let info = merge_base.map(|base| MergeBaseInfo {
@@ -207,7 +210,7 @@ pub(crate) fn revert(
     from_version: u64,
     to_version: u64,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let info = convert_result(primitives.db.branches().revert(
         &branch,
@@ -226,8 +229,8 @@ pub(crate) fn cherry_pick(
     filter_keys: Option<Vec<String>>,
     filter_primitives: Option<Vec<strata_core::PrimitiveType>>,
 ) -> Result<Output> {
-    reject_reserved_name(&source)?;
-    reject_reserved_name(&target)?;
+    reject_reserved_branch_name(&source)?;
+    reject_reserved_branch_name(&target)?;
 
     let info = convert_result(if let Some(keys) = keys {
         primitives
@@ -253,7 +256,7 @@ pub(crate) fn export_bundle(
     branch_id: String,
     path: String,
 ) -> Result<Output> {
-    reject_reserved_name(&branch_id)?;
+    reject_reserved_branch_name(&branch_id)?;
 
     let export_path = std::path::Path::new(&path);
     let info = strata_engine::bundle::export_branch(&primitives.db, &branch_id, export_path)
@@ -312,7 +315,7 @@ pub(crate) fn tag_create(
     message: Option<String>,
     creator: Option<String>,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let info = convert_result(primitives.db.branches().tag(
         &branch,
@@ -329,14 +332,14 @@ pub(crate) fn tag_delete(
     branch: String,
     name: String,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let deleted = convert_result(primitives.db.branches().untag(&branch, &name))?;
     Ok(Output::Bool(deleted))
 }
 
 pub(crate) fn tag_list(primitives: &Arc<Primitives>, branch: String) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let tags = convert_result(primitives.db.branches().list_tags(&branch))?;
     Ok(Output::TagList(tags))
@@ -347,7 +350,7 @@ pub(crate) fn tag_resolve(
     branch: String,
     name: String,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let tag = convert_result(primitives.db.branches().resolve_tag(&branch, &name))?;
     Ok(Output::MaybeTag(tag))
@@ -361,7 +364,7 @@ pub(crate) fn note_add(
     author: Option<String>,
     metadata: Option<strata_core::Value>,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let note = convert_result(primitives.db.branches().add_note(
         &branch,
@@ -378,7 +381,7 @@ pub(crate) fn note_get(
     branch: String,
     version: Option<u64>,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let notes = convert_result(primitives.db.branches().get_notes(&branch, version))?;
     Ok(Output::NoteList(notes))
@@ -389,7 +392,7 @@ pub(crate) fn note_delete(
     branch: String,
     version: u64,
 ) -> Result<Output> {
-    reject_reserved_name(&branch)?;
+    reject_reserved_branch_name(&branch)?;
 
     let deleted = convert_result(
         primitives
@@ -398,17 +401,4 @@ pub(crate) fn note_delete(
             .delete_note(&branch, CommitVersion(version)),
     )?;
     Ok(Output::Bool(deleted))
-}
-
-fn reject_reserved_name(branch: &str) -> Result<()> {
-    if branch.starts_with("_system") {
-        return Err(crate::Error::InvalidInput {
-            reason: format!("Branch '{}' is reserved for system use", branch),
-            hint: Some(
-                "Branches starting with '_system' are internal and cannot be accessed directly."
-                    .to_string(),
-            ),
-        });
-    }
-    Ok(())
 }

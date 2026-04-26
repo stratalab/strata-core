@@ -3035,6 +3035,185 @@ fn kv_batch_validation_contract_is_preserved_in_transaction() {
     session.execute(Command::TxnRollback).unwrap();
 }
 
+#[test]
+fn kv_read_contract_is_preserved_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "alpha".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "beta".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    let invalid_get = session
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "_strata/bad".into(),
+            as_of: None,
+        })
+        .expect_err("transactional KvGet should preserve key validation");
+    assert!(matches!(
+        invalid_get,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    let invalid_list = session
+        .execute(Command::KvList {
+            branch: None,
+            space: None,
+            prefix: Some("_strata/bad".into()),
+            cursor: None,
+            limit: None,
+            as_of: None,
+        })
+        .expect_err("transactional KvList should preserve prefix validation");
+    assert!(matches!(
+        invalid_list,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    let paged = session
+        .execute(Command::KvList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: Some(1),
+            as_of: None,
+        })
+        .unwrap();
+    match paged {
+        Output::KeysPage {
+            keys,
+            has_more,
+            cursor,
+        } => {
+            assert_eq!(keys.len(), 1);
+            assert!(has_more);
+            assert!(cursor.is_some());
+        }
+        other => panic!("Expected KeysPage, got {:?}", other),
+    }
+
+    let invalid_scan = session
+        .execute(Command::KvScan {
+            branch: None,
+            space: None,
+            start: Some("_strata/bad".into()),
+            limit: None,
+        })
+        .expect_err("transactional KvScan should preserve start-key validation");
+    assert!(matches!(
+        invalid_scan,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_read_contract_is_preserved_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "profile".to_string(),
+                Value::object(std::collections::HashMap::from([(
+                    "name".to_string(),
+                    Value::String("Alice".into()),
+                )])),
+            )])),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.name".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::MaybeVersioned(Some(vv)) => {
+            assert_eq!(vv.value, Value::String("Alice".into()));
+            assert!(vv.version > 0);
+            assert!(vv.timestamp > 0);
+        }
+        other => panic!("Expected MaybeVersioned(Some(_)), got {:?}", other),
+    }
+
+    let output = session
+        .execute(Command::JsonBatchGet {
+            branch: None,
+            space: None,
+            entries: vec![strata_executor::BatchJsonGetEntry {
+                key: "doc".into(),
+                path: "profile.name".into(),
+            }],
+        })
+        .unwrap();
+    match output {
+        Output::BatchGetResults(results) => {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].value, Some(Value::String("Alice".into())));
+            assert!(results[0].version.is_some());
+            assert!(results[0].timestamp.is_some());
+            assert!(results[0].error.is_none());
+        }
+        other => panic!("Expected BatchGetResults, got {:?}", other),
+    }
+
+    let invalid_list = session
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: Some("_strata/bad".into()),
+            cursor: None,
+            limit: 10,
+            as_of: None,
+        })
+        .expect_err("transactional JsonList should preserve prefix validation");
+    assert!(matches!(
+        invalid_list,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
 // ============================================================================
 // Cross-Primitive Atomicity Tests
 // ============================================================================

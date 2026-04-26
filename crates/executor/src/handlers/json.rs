@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
+use strata_core::types::Namespace;
 use strata_engine::primitives::json::index::IndexType;
+use strata_engine::transaction::context::Transaction as ScopedTransaction;
+use strata_engine::transaction_ops::TransactionOps as _;
+use strata_engine::TransactionContext;
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, require_branch_exists, to_core_branch_id,
@@ -8,6 +12,7 @@ use crate::bridge::{
 };
 use crate::convert::convert_result;
 use crate::handlers::embed_runtime;
+use crate::session::TxnSideEffects;
 use crate::{
     BatchGetItemResult, BatchItemResult, BranchId, Output, Result, SampleItem, Value,
     VersionedValue,
@@ -405,6 +410,275 @@ pub(crate) fn batch_delete(
     }
 
     Ok(Output::BatchResults(results))
+}
+
+pub(crate) fn execute_in_txn(
+    primitives: &Arc<Primitives>,
+    ctx: &mut TransactionContext,
+    namespace: Arc<Namespace>,
+    space: &str,
+    command: crate::Command,
+    effects: &mut TxnSideEffects,
+) -> Result<Output> {
+    match command {
+        crate::Command::JsonGet { key, path, .. } => {
+            convert_result(validate_key(&key))?;
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let path = convert_result(parse_path(&path))?;
+            let result = txn.json_get(&key).map_err(crate::Error::from)?;
+            Ok(Output::MaybeVersioned(match result {
+                Some(value) => match strata_core::get_at_path(&value.value, &path) {
+                    Some(selected) => Some(VersionedValue {
+                        value: convert_result(json_to_value(selected.clone()))?,
+                        version: extract_version(&value.version),
+                        timestamp: value.timestamp.into(),
+                    }),
+                    None => None,
+                },
+                None => None,
+            }))
+        }
+        crate::Command::JsonSet {
+            key, path, value, ..
+        } => {
+            convert_result(validate_key(&key))?;
+            convert_result(validate_value(&value, &primitives.limits))?;
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let path = convert_result(parse_path(&path))?;
+            let value = convert_result(value_to_json(value))?;
+            let version = txn
+                .json_set(&key, &path, value)
+                .map_err(crate::Error::from)?;
+            effects.record_json(space, &key);
+            Ok(Output::WriteResult {
+                key,
+                version: extract_version(&version),
+            })
+        }
+        crate::Command::JsonDelete { key, path, .. } => {
+            convert_result(validate_key(&key))?;
+            let path = convert_result(parse_path(&path))?;
+            if path.is_root() {
+                let mut txn = ScopedTransaction::new(ctx, namespace);
+                let deleted = txn.json_delete(&key).map_err(crate::Error::from)?;
+                if deleted {
+                    effects.record_json(space, &key);
+                }
+                Ok(Output::DeleteResult { key, deleted })
+            } else {
+                let mut txn = ScopedTransaction::new(ctx, namespace);
+                let Some(mut doc) = txn
+                    .json_get_path(&key, &strata_core::JsonPath::root())
+                    .map_err(crate::Error::from)?
+                else {
+                    return Ok(Output::DeleteResult {
+                        key,
+                        deleted: false,
+                    });
+                };
+
+                let deleted = match strata_core::delete_at_path(&mut doc, &path) {
+                    Ok(Some(_)) => true,
+                    Ok(None) | Err(strata_core::JsonPathError::NotFound) => false,
+                    Err(error) => {
+                        return Err(crate::Error::InvalidInput {
+                            reason: error.to_string(),
+                            hint: None,
+                        });
+                    }
+                };
+
+                if deleted {
+                    txn.json_set(&key, &strata_core::JsonPath::root(), doc)
+                        .map_err(crate::Error::from)?;
+                    effects.record_json(space, &key);
+                }
+
+                Ok(Output::DeleteResult { key, deleted })
+            }
+        }
+        crate::Command::JsonList {
+            prefix,
+            cursor,
+            limit,
+            ..
+        } => {
+            if let Some(prefix) = &prefix {
+                if !prefix.is_empty() {
+                    convert_result(validate_key(prefix))?;
+                }
+            }
+            let prefix_key = match prefix {
+                Some(ref prefix) => strata_core::types::Key::new_json(namespace.clone(), prefix),
+                None => strata_core::types::Key::new(
+                    namespace.clone(),
+                    strata_core::types::TypeTag::Json,
+                    vec![],
+                ),
+            };
+            let entries = ctx.scan_prefix(&prefix_key).map_err(crate::Error::from)?;
+            let mut keys: Vec<String> = entries
+                .into_iter()
+                .filter_map(|(key, _)| key.user_key_string())
+                .collect();
+            if let Some(ref cursor) = cursor {
+                keys.retain(|key| key.as_str() > cursor.as_str());
+            }
+            let has_more = keys.len() > limit as usize;
+            keys.truncate(limit as usize);
+            let next_cursor = if has_more { keys.last().cloned() } else { None };
+            Ok(Output::JsonListResult {
+                keys,
+                has_more,
+                cursor: next_cursor,
+            })
+        }
+        crate::Command::JsonBatchSet { entries, .. } => {
+            let mut results = vec![
+                BatchItemResult {
+                    version: None,
+                    error: None,
+                };
+                entries.len()
+            ];
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            for (index, entry) in entries.into_iter().enumerate() {
+                if let Err(error) = validate_key(&entry.key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                if let Err(error) = validate_value(&entry.value, &primitives.limits) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                let path = match parse_path(&entry.path) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        results[index].error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                let value = match value_to_json(entry.value) {
+                    Ok(value) => value,
+                    Err(error) => {
+                        results[index].error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                match txn.json_set(&entry.key, &path, value) {
+                    Ok(version) => {
+                        results[index].version = Some(extract_version(&version));
+                        effects.record_json(space, &entry.key);
+                    }
+                    Err(error) => results[index].error = Some(error.to_string()),
+                }
+            }
+            Ok(Output::BatchResults(results))
+        }
+        crate::Command::JsonBatchGet { entries, .. } => {
+            let mut results = vec![
+                BatchGetItemResult {
+                    value: None,
+                    version: None,
+                    timestamp: None,
+                    error: None,
+                };
+                entries.len()
+            ];
+            for (index, entry) in entries.into_iter().enumerate() {
+                if let Err(error) = validate_key(&entry.key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                let output = match execute_in_txn(
+                    primitives,
+                    ctx,
+                    namespace.clone(),
+                    space,
+                    crate::Command::JsonGet {
+                        branch: None,
+                        space: Some(space.to_string()),
+                        key: entry.key,
+                        path: entry.path,
+                        as_of: None,
+                    },
+                    effects,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        results[index].error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                match output {
+                    Output::Maybe(Some(value)) => results[index].value = Some(value),
+                    Output::Maybe(None) => {}
+                    Output::MaybeVersioned(Some(value)) => {
+                        results[index].value = Some(value.value);
+                        results[index].version = Some(value.version);
+                        results[index].timestamp = Some(value.timestamp);
+                    }
+                    Output::MaybeVersioned(None) => {}
+                    other => {
+                        results[index].error = Some(format!(
+                            "unexpected output for JsonBatchGet entry: {other:?}"
+                        ));
+                    }
+                }
+            }
+            Ok(Output::BatchGetResults(results))
+        }
+        crate::Command::JsonBatchDelete { entries, .. } => {
+            let mut results = vec![
+                BatchItemResult {
+                    version: None,
+                    error: None,
+                };
+                entries.len()
+            ];
+            for (index, entry) in entries.into_iter().enumerate() {
+                if let Err(error) = validate_key(&entry.key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                let output = match execute_in_txn(
+                    primitives,
+                    ctx,
+                    namespace.clone(),
+                    space,
+                    crate::Command::JsonDelete {
+                        branch: None,
+                        space: Some(space.to_string()),
+                        key: entry.key,
+                        path: entry.path,
+                    },
+                    effects,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        results[index].error = Some(error.to_string());
+                        continue;
+                    }
+                };
+                match output {
+                    Output::DeleteResult { deleted, .. } if deleted => {
+                        results[index].version = Some(0)
+                    }
+                    Output::DeleteResult { .. } => {}
+                    other => {
+                        results[index].error = Some(format!(
+                            "unexpected output for JsonBatchDelete entry: {other:?}"
+                        ));
+                    }
+                }
+            }
+            Ok(Output::BatchResults(results))
+        }
+        other => Err(crate::Error::Internal {
+            reason: format!("unexpected JSON transaction command: {}", other.name()),
+            hint: None,
+        }),
+    }
 }
 
 pub(crate) fn list(

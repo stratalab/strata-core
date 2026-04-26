@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
+use strata_core::types::{Key, Namespace, TypeTag};
+use strata_engine::transaction::context::Transaction as ScopedTransaction;
+use strata_engine::transaction_ops::TransactionOps as _;
+use strata_engine::TransactionContext;
+
 use crate::bridge::{
     extract_version, require_branch_exists, to_core_branch_id, to_versioned_value, validate_key,
     validate_value, Primitives,
 };
 use crate::convert::convert_result;
 use crate::handlers::embed_runtime;
+use crate::session::TxnSideEffects;
 use crate::{BatchGetItemResult, BatchItemResult, BranchId, Output, Result, SampleItem};
 
 fn page_keys(mut keys: Vec<String>, cursor: Option<&str>, limit: Option<u64>) -> Output {
@@ -456,4 +462,174 @@ pub(crate) fn sample(
         .map(|(key, value)| SampleItem { key, value })
         .collect();
     Ok(Output::SampleResult { total_count, items })
+}
+
+pub(crate) fn execute_in_txn(
+    primitives: &Arc<Primitives>,
+    ctx: &mut TransactionContext,
+    namespace: Arc<Namespace>,
+    space: &str,
+    command: crate::Command,
+    effects: &mut TxnSideEffects,
+) -> Result<Output> {
+    match command {
+        crate::Command::KvGet { key, .. } => {
+            convert_result(validate_key(&key))?;
+            let full_key = Key::new_kv(namespace, &key);
+            let result = ctx.get(&full_key).map_err(crate::Error::from)?;
+            Ok(Output::Maybe(result))
+        }
+        crate::Command::KvList {
+            prefix,
+            cursor,
+            limit,
+            ..
+        } => {
+            if let Some(prefix) = &prefix {
+                if !prefix.is_empty() {
+                    convert_result(validate_key(prefix))?;
+                }
+            }
+            let prefix_key = match prefix {
+                Some(ref prefix) => Key::new_kv(namespace.clone(), prefix),
+                None => Key::new(namespace.clone(), TypeTag::KV, vec![]),
+            };
+            let entries = ctx.scan_prefix(&prefix_key).map_err(crate::Error::from)?;
+            let mut keys: Vec<String> = entries
+                .into_iter()
+                .filter_map(|(key, _)| key.user_key_string())
+                .collect();
+            keys.sort();
+            keys.dedup();
+            Ok(page_keys(keys, cursor.as_deref(), limit))
+        }
+        crate::Command::KvScan { start, limit, .. } => {
+            if let Some(start) = &start {
+                convert_result(validate_key(start))?;
+            }
+            let prefix_key = Key::new(namespace, TypeTag::KV, vec![]);
+            let entries = ctx.scan_prefix(&prefix_key).map_err(crate::Error::from)?;
+            let mut pairs: Vec<(String, strata_core::Value)> = entries
+                .into_iter()
+                .filter_map(|(key, value)| key.user_key_string().map(|key| (key, value)))
+                .collect();
+            pairs.sort_by(|left, right| left.0.cmp(&right.0));
+            if let Some(start) = start {
+                pairs.retain(|(key, _)| key.as_str() >= start.as_str());
+            }
+            if let Some(limit) = limit {
+                pairs.truncate(limit as usize);
+            }
+            Ok(Output::KvScanResult(pairs))
+        }
+        crate::Command::KvPut { key, value, .. } => {
+            convert_result(validate_key(&key))?;
+            convert_result(validate_value(&value, &primitives.limits))?;
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let version = txn.kv_put(&key, value).map_err(crate::Error::from)?;
+            effects.record_kv(space, &key);
+            Ok(Output::WriteResult {
+                key,
+                version: extract_version(&version),
+            })
+        }
+        crate::Command::KvDelete { key, .. } => {
+            convert_result(validate_key(&key))?;
+            let full_key = Key::new_kv(namespace, &key);
+            let existed = ctx.exists(&full_key).map_err(crate::Error::from)?;
+            ctx.delete(full_key).map_err(crate::Error::from)?;
+            if existed {
+                effects.record_kv(space, &key);
+            }
+            Ok(Output::DeleteResult {
+                key,
+                deleted: existed,
+            })
+        }
+        crate::Command::KvBatchPut { entries, .. } => {
+            let mut results = vec![
+                BatchItemResult {
+                    version: None,
+                    error: None,
+                };
+                entries.len()
+            ];
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            for (index, entry) in entries.into_iter().enumerate() {
+                if let Err(error) = validate_key(&entry.key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                if let Err(error) = validate_value(&entry.value, &primitives.limits) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                if let Err(error) = txn.kv_put(&entry.key, entry.value) {
+                    results[index].error = Some(error.to_string());
+                } else {
+                    effects.record_kv(space, &entry.key);
+                }
+            }
+            Ok(Output::BatchResults(results))
+        }
+        crate::Command::KvBatchGet { keys, .. } => {
+            let mut results = vec![
+                BatchGetItemResult {
+                    value: None,
+                    version: None,
+                    timestamp: None,
+                    error: None,
+                };
+                keys.len()
+            ];
+            for (index, key) in keys.into_iter().enumerate() {
+                if let Err(error) = validate_key(&key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                let full_key = Key::new_kv(namespace.clone(), &key);
+                let value = ctx.get(&full_key).map_err(crate::Error::from)?;
+                results[index].value = value;
+            }
+            Ok(Output::BatchGetResults(results))
+        }
+        crate::Command::KvBatchDelete { keys, .. } => {
+            let mut results = vec![
+                BatchItemResult {
+                    version: None,
+                    error: None,
+                };
+                keys.len()
+            ];
+            for (index, key) in keys.into_iter().enumerate() {
+                if let Err(error) = validate_key(&key) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                let full_key = Key::new_kv(namespace.clone(), &key);
+                let existed = ctx.exists(&full_key).map_err(crate::Error::from)?;
+                if let Err(error) = ctx.delete(full_key) {
+                    results[index].error = Some(error.to_string());
+                } else if existed {
+                    effects.record_kv(space, &key);
+                }
+            }
+            Ok(Output::BatchResults(results))
+        }
+        crate::Command::KvBatchExists { keys, .. } => {
+            let mut values = Vec::with_capacity(keys.len());
+            for key in &keys {
+                convert_result(validate_key(key))?;
+            }
+            for key in keys {
+                let full_key = Key::new_kv(namespace.clone(), &key);
+                values.push(ctx.exists(&full_key).map_err(crate::Error::from)?);
+            }
+            Ok(Output::BoolList(values))
+        }
+        other => Err(crate::Error::Internal {
+            reason: format!("unexpected KV transaction command: {}", other.name()),
+            hint: None,
+        }),
+    }
 }

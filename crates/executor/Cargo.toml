@@ -14,17 +14,13 @@ workspace = true
 
 [features]
 default = []
-embed = [
-    "strata-executor-legacy/embed",
-    "strata-intelligence/embed",
-    "strata-engine/embed",
-]
-expand = ["strata-executor-legacy/expand", "strata-search/expand"]
-rerank = ["strata-executor-legacy/rerank", "strata-search/rerank"]
-anthropic = ["strata-executor-legacy/anthropic", "embed", "strata-intelligence/anthropic"]
-openai = ["strata-executor-legacy/openai", "embed", "strata-intelligence/openai"]
-google = ["strata-executor-legacy/google", "embed", "strata-intelligence/google"]
-arrow = ["strata-executor-legacy/arrow", "dep:arrow", "dep:parquet"]
+embed = ["strata-intelligence/embed", "strata-engine/embed"]
+expand = ["strata-search/expand"]
+rerank = ["strata-search/rerank"]
+anthropic = ["embed", "strata-intelligence/anthropic"]
+openai = ["embed", "strata-intelligence/openai"]
+google = ["embed", "strata-intelligence/google"]
+arrow = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
 strata-executor-legacy = { path = "../executor-legacy" }

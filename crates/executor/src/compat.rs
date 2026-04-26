@@ -5,7 +5,7 @@ use strata_core::validate_space_name;
 use strata_engine::{Database, HealthReport, SystemMetrics};
 use strata_security::{AccessMode, OpenOptions};
 
-use crate::bridge::remap_error;
+use crate::bridge::remap;
 use crate::ipc::IpcClient;
 use crate::{BranchId, Command, DatabaseInfo, Error, Executor, Output, Result, Session, Value};
 
@@ -31,8 +31,7 @@ impl Strata {
     /// Open a database with explicit options.
     pub fn open_with<P: AsRef<Path>>(path: P, options: OpenOptions) -> Result<Self> {
         let data_dir = path.as_ref().to_path_buf();
-        let legacy =
-            strata_executor_legacy::Strata::open_with(&data_dir, options).map_err(remap_error)?;
+        let legacy = open_with_legacy_bootstrap(&data_dir, options)?;
         let access_mode = legacy.access_mode();
         if legacy.is_ipc() {
             drop(legacy);
@@ -51,7 +50,7 @@ impl Strata {
 
     /// Open an ephemeral in-memory database.
     pub fn cache() -> Result<Self> {
-        let legacy = strata_executor_legacy::Strata::cache().map_err(remap_error)?;
+        let legacy = cache_with_legacy_bootstrap()?;
         let access_mode = legacy.access_mode();
         let db = legacy.database();
         drop(legacy);
@@ -339,6 +338,21 @@ impl Strata {
             other => Err(unexpected_output("BranchExists", other)),
         }
     }
+}
+
+fn open_with_legacy_bootstrap(
+    data_dir: &Path,
+    options: OpenOptions,
+) -> Result<strata_executor_legacy::Strata> {
+    strata_executor_legacy::Strata::open_with(data_dir, options).map_err(legacy_bootstrap_error)
+}
+
+fn cache_with_legacy_bootstrap() -> Result<strata_executor_legacy::Strata> {
+    strata_executor_legacy::Strata::cache().map_err(legacy_bootstrap_error)
+}
+
+fn legacy_bootstrap_error(error: strata_executor_legacy::Error) -> Error {
+    remap(error, "legacy bootstrap error").unwrap_or_else(|fallback| fallback)
 }
 
 fn extract_version(command: &str, output: Output) -> Result<u64> {

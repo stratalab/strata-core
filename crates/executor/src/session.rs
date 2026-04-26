@@ -1,30 +1,20 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_core::types::{Key, Namespace, TypeTag};
-use strata_engine::transaction::context::Transaction as ScopedTransaction;
-use strata_engine::transaction_ops::TransactionOps as _;
+use strata_core::types::Namespace;
 use strata_engine::{Database, Transaction, TransactionContext};
-use strata_graph::ext::GraphStoreExt;
-use strata_graph::types::{Direction, EdgeData, GraphMeta, NodeData};
 use strata_security::AccessMode;
-use strata_vector::ext::VectorStoreExt;
 
 use crate::bridge::{
-    access_denied, bypasses_active_transaction, extract_version, is_read_only, json_to_value,
-    parse_path, runtime_default_branch, serde_json_to_value_public, to_core_branch_id,
-    to_versioned_value, transaction_already_active, transaction_branch_mismatch,
-    transaction_not_active, validate_branch_exists, validate_key, validate_not_internal_collection,
-    validate_session_space, validate_value, value_to_json, value_to_serde_json_public, Primitives,
+    access_denied, bypasses_active_transaction, is_read_only, json_to_value,
+    reject_reserved_branch, runtime_default_branch, to_core_branch_id, transaction_already_active,
+    transaction_branch_mismatch, transaction_not_active, validate_branch_exists,
+    validate_session_space, Primitives,
 };
 use crate::convert::convert_result;
-use crate::handlers::embed_runtime;
-use crate::handlers::reject_system_branch;
+use crate::handlers::{embed_runtime, event, graph, json, kv, vector};
 use crate::ipc::IpcClient;
-use crate::{
-    BatchGetItemResult, BatchItemResult, BranchId, Command, Error, Executor, GraphNeighborHit,
-    Output, Result, TransactionInfo, TxnStatus, VectorData, VersionedValue, VersionedVectorData,
-};
+use crate::{BranchId, Command, Error, Executor, Output, Result, TransactionInfo, TxnStatus};
 
 /// Stateful command session with executor-managed defaults and transactions.
 pub struct Session {
@@ -254,7 +244,7 @@ impl Session {
         command.resolve_space_defaults_with(&self.current_space);
         command.resolve_defaults_with(self.effective_branch());
         if let Some(branch) = command.resolved_branch() {
-            reject_system_branch(branch)?;
+            reject_reserved_branch(branch)?;
         }
 
         let txn_command = match &command {
@@ -516,36 +506,6 @@ fn command_space(command: &Command) -> String {
     }
 }
 
-fn parse_direction(s: Option<&str>) -> Result<Direction> {
-    match s {
-        None | Some("outgoing") => Ok(Direction::Outgoing),
-        Some("incoming") => Ok(Direction::Incoming),
-        Some("both") => Ok(Direction::Both),
-        Some(other) => Err(Error::InvalidInput {
-            reason: format!(
-                "Invalid direction '{}'. Must be 'outgoing', 'incoming', or 'both'.",
-                other
-            ),
-            hint: None,
-        }),
-    }
-}
-
-fn parse_cascade_policy(s: Option<&str>) -> Result<strata_graph::types::CascadePolicy> {
-    match s {
-        None | Some("ignore") => Ok(strata_graph::types::CascadePolicy::Ignore),
-        Some("cascade") => Ok(strata_graph::types::CascadePolicy::Cascade),
-        Some("detach") => Ok(strata_graph::types::CascadePolicy::Detach),
-        Some(other) => Err(Error::InvalidInput {
-            reason: format!(
-                "Invalid cascade_policy '{}'. Must be 'cascade', 'detach', or 'ignore'.",
-                other
-            ),
-            hint: None,
-        }),
-    }
-}
-
 fn dispatch_in_txn(
     executor: &Executor,
     ctx: &mut TransactionContext,
@@ -568,782 +528,49 @@ fn dispatch_in_txn(
         | Command::GraphNeighbors { as_of: Some(_), .. }
         | Command::VectorGet { as_of: Some(_), .. } => executor.execute(command),
 
-        Command::KvGet { key, .. } => {
-            let full_key = Key::new_kv(namespace, &key);
-            let result = ctx.get(&full_key).map_err(Error::from)?;
-            Ok(Output::Maybe(result))
+        other @ Command::KvGet { .. }
+        | other @ Command::KvList { .. }
+        | other @ Command::KvScan { .. }
+        | other @ Command::KvPut { .. }
+        | other @ Command::KvDelete { .. }
+        | other @ Command::KvBatchPut { .. }
+        | other @ Command::KvBatchGet { .. }
+        | other @ Command::KvBatchDelete { .. }
+        | other @ Command::KvBatchExists { .. } => {
+            kv::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
         }
-        Command::KvList {
-            prefix,
-            cursor,
-            limit,
-            ..
-        } => {
-            let prefix_key = match prefix {
-                Some(ref prefix) => Key::new_kv(namespace.clone(), prefix),
-                None => Key::new(namespace.clone(), TypeTag::KV, vec![]),
-            };
-            let entries = ctx.scan_prefix(&prefix_key).map_err(Error::from)?;
-            let keys: Vec<String> = entries
-                .into_iter()
-                .filter_map(|(key, _)| key.user_key_string())
-                .collect();
-            if let Some(limit) = limit {
-                let start = if let Some(ref cursor) = cursor {
-                    keys.iter()
-                        .position(|key| key > cursor)
-                        .unwrap_or(keys.len())
-                } else {
-                    0
-                };
-                let end = std::cmp::min(start + limit as usize, keys.len());
-                Ok(Output::Keys(keys[start..end].to_vec()))
-            } else {
-                Ok(Output::Keys(keys))
-            }
+        other @ Command::JsonGet { .. }
+        | other @ Command::JsonSet { .. }
+        | other @ Command::JsonDelete { .. }
+        | other @ Command::JsonList { .. }
+        | other @ Command::JsonBatchSet { .. }
+        | other @ Command::JsonBatchGet { .. }
+        | other @ Command::JsonBatchDelete { .. } => {
+            json::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
         }
-        Command::KvScan { start, limit, .. } => {
-            let prefix_key = Key::new(namespace, TypeTag::KV, vec![]);
-            let entries = ctx.scan_prefix(&prefix_key).map_err(Error::from)?;
-            let iter = entries
-                .into_iter()
-                .filter_map(|(key, value)| key.user_key_string().map(|key| (key, value)));
-            let iter: Box<dyn Iterator<Item = (String, strata_core::Value)>> =
-                if let Some(start) = start {
-                    Box::new(iter.skip_while(move |(key, _)| key.as_str() < start.as_str()))
-                } else {
-                    Box::new(iter)
-                };
-            let pairs: Vec<(String, strata_core::Value)> = if let Some(limit) = limit {
-                iter.take(limit as usize).collect()
-            } else {
-                iter.collect()
-            };
-            Ok(Output::KvScanResult(pairs))
+        other @ Command::EventAppend { .. }
+        | other @ Command::EventGet { .. }
+        | other @ Command::EventGetByType { .. }
+        | other @ Command::EventLen { .. }
+        | other @ Command::EventBatchAppend { .. } => {
+            event::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
         }
-        Command::KvPut { key, value, .. } => {
-            convert_result(validate_key(&key))?;
-            convert_result(validate_value(&value, &executor.primitives().limits))?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let version = txn.kv_put(&key, value).map_err(Error::from)?;
-            effects.record_kv(space, &key);
-            Ok(Output::WriteResult {
-                key,
-                version: extract_version(&version),
-            })
+        other @ Command::GraphCreate { .. }
+        | other @ Command::GraphAddNode { .. }
+        | other @ Command::GraphGetNode { .. }
+        | other @ Command::GraphRemoveNode { .. }
+        | other @ Command::GraphListNodes { .. }
+        | other @ Command::GraphGetMeta { .. }
+        | other @ Command::GraphList { .. }
+        | other @ Command::GraphAddEdge { .. }
+        | other @ Command::GraphRemoveEdge { .. }
+        | other @ Command::GraphNeighbors { .. } => {
+            graph::execute_in_txn(executor.primitives(), ctx, branch_id, space, other)
         }
-        Command::KvDelete { key, .. } => {
-            convert_result(validate_key(&key))?;
-            let full_key = Key::new_kv(namespace, &key);
-            let existed = ctx.exists(&full_key).map_err(Error::from)?;
-            ctx.delete(full_key).map_err(Error::from)?;
-            if existed {
-                effects.record_kv(space, &key);
-            }
-            Ok(Output::DeleteResult {
-                key,
-                deleted: existed,
-            })
-        }
-        Command::KvBatchPut { entries, .. } => {
-            let mut results = vec![
-                BatchItemResult {
-                    version: None,
-                    error: None,
-                };
-                entries.len()
-            ];
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            for (index, entry) in entries.into_iter().enumerate() {
-                if let Err(error) = validate_key(&entry.key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                if let Err(error) = validate_value(&entry.value, &executor.primitives().limits) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                if let Err(error) = txn.kv_put(&entry.key, entry.value) {
-                    results[index].error = Some(error.to_string());
-                } else {
-                    effects.record_kv(space, &entry.key);
-                }
-            }
-            Ok(Output::BatchResults(results))
-        }
-        Command::KvBatchGet { keys, .. } => {
-            let mut results = vec![
-                BatchGetItemResult {
-                    value: None,
-                    version: None,
-                    timestamp: None,
-                    error: None,
-                };
-                keys.len()
-            ];
-            for (index, key) in keys.into_iter().enumerate() {
-                if let Err(error) = validate_key(&key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                let full_key = Key::new_kv(namespace.clone(), &key);
-                let value = ctx.get(&full_key).map_err(Error::from)?;
-                results[index].value = value;
-            }
-            Ok(Output::BatchGetResults(results))
-        }
-        Command::KvBatchDelete { keys, .. } => {
-            let mut results = vec![
-                BatchItemResult {
-                    version: None,
-                    error: None,
-                };
-                keys.len()
-            ];
-            for (index, key) in keys.into_iter().enumerate() {
-                if let Err(error) = validate_key(&key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                let full_key = Key::new_kv(namespace.clone(), &key);
-                let existed = ctx.exists(&full_key).map_err(Error::from)?;
-                if let Err(error) = ctx.delete(full_key) {
-                    results[index].error = Some(error.to_string());
-                } else if existed {
-                    effects.record_kv(space, &key);
-                }
-            }
-            Ok(Output::BatchResults(results))
-        }
-        Command::KvBatchExists { keys, .. } => {
-            let mut values = Vec::with_capacity(keys.len());
-            for key in &keys {
-                convert_result(validate_key(key))?;
-            }
-            for key in keys {
-                let full_key = Key::new_kv(namespace.clone(), &key);
-                values.push(ctx.exists(&full_key).map_err(Error::from)?);
-            }
-            Ok(Output::BoolList(values))
-        }
-
-        Command::JsonGet { key, path, .. } => {
-            convert_result(validate_key(&key))?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let path = convert_result(parse_path(&path))?;
-            let result = txn.json_get_path(&key, &path).map_err(Error::from)?;
-            Ok(Output::Maybe(match result {
-                Some(value) => Some(convert_result(json_to_value(value))?),
-                None => None,
-            }))
-        }
-        Command::JsonSet {
-            key, path, value, ..
-        } => {
-            convert_result(validate_key(&key))?;
-            convert_result(validate_value(&value, &executor.primitives().limits))?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let path = convert_result(parse_path(&path))?;
-            let value = convert_result(value_to_json(value))?;
-            let version = txn.json_set(&key, &path, value).map_err(Error::from)?;
-            effects.record_json(space, &key);
-            Ok(Output::WriteResult {
-                key,
-                version: extract_version(&version),
-            })
-        }
-        Command::JsonDelete { key, path, .. } => {
-            convert_result(validate_key(&key))?;
-            let path = convert_result(parse_path(&path))?;
-            if path.is_root() {
-                let mut txn = ScopedTransaction::new(ctx, namespace);
-                let deleted = txn.json_delete(&key).map_err(Error::from)?;
-                if deleted {
-                    effects.record_json(space, &key);
-                }
-                Ok(Output::DeleteResult { key, deleted })
-            } else {
-                let mut txn = ScopedTransaction::new(ctx, namespace);
-                let Some(mut doc) = txn
-                    .json_get_path(&key, &strata_core::JsonPath::root())
-                    .map_err(Error::from)?
-                else {
-                    return Ok(Output::DeleteResult {
-                        key,
-                        deleted: false,
-                    });
-                };
-
-                let deleted = match strata_core::delete_at_path(&mut doc, &path) {
-                    Ok(Some(_)) => true,
-                    Ok(None) | Err(strata_core::JsonPathError::NotFound) => false,
-                    Err(error) => {
-                        return Err(Error::InvalidInput {
-                            reason: error.to_string(),
-                            hint: None,
-                        });
-                    }
-                };
-
-                if deleted {
-                    txn.json_set(&key, &strata_core::JsonPath::root(), doc)
-                        .map_err(Error::from)?;
-                    effects.record_json(space, &key);
-                }
-
-                Ok(Output::DeleteResult { key, deleted })
-            }
-        }
-        Command::JsonList {
-            prefix,
-            cursor,
-            limit,
-            ..
-        } => {
-            let prefix_key = match prefix {
-                Some(ref prefix) => Key::new_json(namespace.clone(), prefix),
-                None => Key::new(namespace.clone(), TypeTag::Json, vec![]),
-            };
-            let entries = ctx.scan_prefix(&prefix_key).map_err(Error::from)?;
-            let mut keys: Vec<String> = entries
-                .into_iter()
-                .filter_map(|(key, _)| key.user_key_string())
-                .collect();
-            if let Some(ref cursor) = cursor {
-                keys.retain(|key| key.as_str() > cursor.as_str());
-            }
-            let has_more = keys.len() > limit as usize;
-            keys.truncate(limit as usize);
-            let next_cursor = if has_more { keys.last().cloned() } else { None };
-            Ok(Output::JsonListResult {
-                keys,
-                has_more,
-                cursor: next_cursor,
-            })
-        }
-        Command::JsonBatchSet { entries, .. } => {
-            let mut results = vec![
-                BatchItemResult {
-                    version: None,
-                    error: None,
-                };
-                entries.len()
-            ];
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            for (index, entry) in entries.into_iter().enumerate() {
-                if let Err(error) = validate_key(&entry.key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                if let Err(error) = validate_value(&entry.value, &executor.primitives().limits) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                let path = match parse_path(&entry.path) {
-                    Ok(path) => path,
-                    Err(error) => {
-                        results[index].error = Some(error.to_string());
-                        continue;
-                    }
-                };
-                let value = match value_to_json(entry.value) {
-                    Ok(value) => value,
-                    Err(error) => {
-                        results[index].error = Some(error.to_string());
-                        continue;
-                    }
-                };
-                match txn.json_set(&entry.key, &path, value) {
-                    Ok(version) => {
-                        results[index].version = Some(extract_version(&version));
-                        effects.record_json(space, &entry.key);
-                    }
-                    Err(error) => results[index].error = Some(error.to_string()),
-                }
-            }
-            Ok(Output::BatchResults(results))
-        }
-        Command::JsonBatchGet { entries, .. } => {
-            let mut results = vec![
-                BatchGetItemResult {
-                    value: None,
-                    version: None,
-                    timestamp: None,
-                    error: None,
-                };
-                entries.len()
-            ];
-            for (index, entry) in entries.into_iter().enumerate() {
-                if let Err(error) = validate_key(&entry.key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                let output = match dispatch_in_txn(
-                    executor,
-                    ctx,
-                    namespace.clone(),
-                    branch_id,
-                    space,
-                    Command::JsonGet {
-                        branch: None,
-                        space: Some(space.to_string()),
-                        key: entry.key,
-                        path: entry.path,
-                        as_of: None,
-                    },
-                    effects,
-                ) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        results[index].error = Some(error.to_string());
-                        continue;
-                    }
-                };
-                match output {
-                    Output::Maybe(Some(value)) => results[index].value = Some(value),
-                    Output::Maybe(None) => {}
-                    Output::MaybeVersioned(Some(value)) => {
-                        results[index].value = Some(value.value);
-                        results[index].version = Some(value.version);
-                        results[index].timestamp = Some(value.timestamp);
-                    }
-                    Output::MaybeVersioned(None) => {}
-                    other => {
-                        results[index].error = Some(format!(
-                            "unexpected output for JsonBatchGet entry: {other:?}"
-                        ));
-                    }
-                }
-            }
-            Ok(Output::BatchGetResults(results))
-        }
-        Command::JsonBatchDelete { entries, .. } => {
-            let mut results = vec![
-                BatchItemResult {
-                    version: None,
-                    error: None,
-                };
-                entries.len()
-            ];
-            for (index, entry) in entries.into_iter().enumerate() {
-                if let Err(error) = validate_key(&entry.key) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                let output = match dispatch_in_txn(
-                    executor,
-                    ctx,
-                    namespace.clone(),
-                    branch_id,
-                    space,
-                    Command::JsonDelete {
-                        branch: None,
-                        space: Some(space.to_string()),
-                        key: entry.key,
-                        path: entry.path,
-                    },
-                    effects,
-                ) {
-                    Ok(output) => output,
-                    Err(error) => {
-                        results[index].error = Some(error.to_string());
-                        continue;
-                    }
-                };
-                match output {
-                    Output::DeleteResult { deleted, .. } if deleted => {
-                        results[index].version = Some(0)
-                    }
-                    Output::DeleteResult { .. } => {}
-                    other => {
-                        results[index].error = Some(format!(
-                            "unexpected output for JsonBatchDelete entry: {other:?}"
-                        ));
-                    }
-                }
-            }
-            Ok(Output::BatchResults(results))
-        }
-
-        Command::EventAppend {
-            event_type,
-            payload,
-            ..
-        } => {
-            convert_result(validate_value(&payload, &executor.primitives().limits))?;
-            validate_event_type_input(&event_type)?;
-            validate_event_payload_input(&payload)?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let version = txn
-                .event_append(&event_type, payload)
-                .map_err(Error::from)?;
-            let sequence = extract_version(&version);
-            effects.record_event(space, sequence);
-            Ok(Output::EventAppendResult {
-                sequence,
-                event_type,
-            })
-        }
-        Command::EventGet { sequence, .. } => {
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let result = txn.event_get(sequence).map_err(Error::from)?;
-            Ok(Output::MaybeVersioned(result.map(|value| {
-                to_versioned_value(strata_core::Versioned::new(
-                    value.value.payload.clone(),
-                    value.version,
-                ))
-            })))
-        }
-        Command::EventGetByType {
-            event_type,
-            limit,
-            after_sequence,
-            ..
-        } => {
-            let prefix = Key::new_event_type_idx_prefix(namespace.clone(), &event_type);
-            let index_entries = ctx.scan_prefix(&prefix).map_err(Error::from)?;
-            let mut events = Vec::new();
-            for (index_key, _) in index_entries {
-                let user_key = &index_key.user_key;
-                if user_key.len() < 8 {
-                    continue;
-                }
-                let bytes: [u8; 8] = user_key[user_key.len() - 8..]
-                    .try_into()
-                    .expect("sequence suffix should be eight bytes");
-                let sequence = u64::from_be_bytes(bytes);
-                if after_sequence.is_some_and(|after| sequence <= after) {
-                    continue;
-                }
-                let event_key = Key::new_event(namespace.clone(), sequence);
-                if let Some(strata_core::Value::String(json)) =
-                    ctx.get(&event_key).map_err(Error::from)?
-                {
-                    let event: strata_core::Event =
-                        serde_json::from_str(&json).map_err(|error| Error::Serialization {
-                            reason: format!("corrupt event at sequence {}: {}", sequence, error),
-                        })?;
-                    events.push(VersionedValue {
-                        value: event.payload.clone(),
-                        version: sequence,
-                        timestamp: event.timestamp.into(),
-                    });
-                }
-                if limit.is_some_and(|limit| events.len() >= limit as usize) {
-                    break;
-                }
-            }
-            Ok(Output::VersionedValues(events))
-        }
-        Command::EventLen { .. } => {
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            let len = txn.event_len().map_err(Error::from)?;
-            Ok(Output::Uint(len))
-        }
-        Command::EventBatchAppend { entries, .. } => {
-            let mut results = vec![
-                BatchItemResult {
-                    version: None,
-                    error: None,
-                };
-                entries.len()
-            ];
-            let mut txn = ScopedTransaction::new(ctx, namespace);
-            for (index, entry) in entries.into_iter().enumerate() {
-                if let Err(error) = validate_value(&entry.payload, &executor.primitives().limits) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                if let Err(error) = validate_event_type_input(&entry.event_type) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                if let Err(error) = validate_event_payload_input(&entry.payload) {
-                    results[index].error = Some(error.to_string());
-                    continue;
-                }
-                match txn.event_append(&entry.event_type, entry.payload) {
-                    Ok(version) => {
-                        let sequence = extract_version(&version);
-                        results[index].version = Some(sequence);
-                        effects.record_event(space, sequence);
-                    }
-                    Err(error) => results[index].error = Some(error.to_string()),
-                }
-            }
-            Ok(Output::BatchResults(results))
-        }
-
-        Command::GraphCreate {
-            graph,
-            cascade_policy,
-            ..
-        } => {
-            let policy = parse_cascade_policy(cascade_policy.as_deref())?;
-            let meta = GraphMeta {
-                cascade_policy: policy,
-                ..Default::default()
-            };
-            convert_result(ctx.graph_create(branch_id, space, &graph, meta))?;
-            Ok(Output::Unit)
-        }
-        Command::GraphAddNode {
-            graph,
-            node_id,
-            entity_ref,
-            properties,
-            object_type,
-            ..
-        } => {
-            let properties = properties
-                .map(value_to_serde_json_public)
-                .transpose()
-                .map_err(Error::from)?;
-            let data = NodeData {
-                entity_ref,
-                properties,
-                object_type,
-            };
-            let backend_state = convert_result(executor.primitives().graph.state())?;
-            let created = convert_result(ctx.graph_add_node(
-                branch_id,
-                space,
-                &graph,
-                &node_id,
-                &data,
-                &backend_state,
-            ))?;
-            Ok(Output::GraphWriteResult { node_id, created })
-        }
-        Command::GraphGetNode { graph, node_id, .. } => {
-            let node = convert_result(ctx.graph_get_node(branch_id, space, &graph, &node_id))?;
-            match node {
-                Some(data) => {
-                    let json =
-                        serde_json::to_value(&data).map_err(|error| Error::Serialization {
-                            reason: error.to_string(),
-                        })?;
-                    Ok(Output::Maybe(Some(convert_result(
-                        serde_json_to_value_public(json),
-                    )?)))
-                }
-                None => Ok(Output::Maybe(None)),
-            }
-        }
-        Command::GraphRemoveNode { graph, node_id, .. } => {
-            let backend_state = convert_result(executor.primitives().graph.state())?;
-            convert_result(ctx.graph_remove_node(
-                branch_id,
-                space,
-                &graph,
-                &node_id,
-                &backend_state,
-            ))?;
-            Ok(Output::Unit)
-        }
-        Command::GraphListNodes { graph, .. } => {
-            let nodes = convert_result(ctx.graph_list_nodes(branch_id, space, &graph))?;
-            Ok(Output::Keys(nodes))
-        }
-        Command::GraphGetMeta { graph, .. } => {
-            let meta = convert_result(ctx.graph_get_meta(branch_id, space, &graph))?;
-            match meta {
-                Some(meta) => {
-                    let json =
-                        serde_json::to_value(&meta).map_err(|error| Error::Serialization {
-                            reason: error.to_string(),
-                        })?;
-                    Ok(Output::Maybe(Some(convert_result(
-                        serde_json_to_value_public(json),
-                    )?)))
-                }
-                None => Ok(Output::Maybe(None)),
-            }
-        }
-        Command::GraphList { .. } => {
-            let graphs = convert_result(ctx.graph_list(branch_id, space))?;
-            Ok(Output::Keys(graphs))
-        }
-        Command::GraphAddEdge {
-            graph,
-            src,
-            dst,
-            edge_type,
-            weight,
-            properties,
-            ..
-        } => {
-            let properties = properties
-                .map(value_to_serde_json_public)
-                .transpose()
-                .map_err(Error::from)?;
-            let data = EdgeData {
-                weight: weight.unwrap_or(1.0),
-                properties,
-            };
-            let created = convert_result(
-                ctx.graph_add_edge(branch_id, space, &graph, &src, &dst, &edge_type, &data),
-            )?;
-            Ok(Output::GraphEdgeWriteResult {
-                src,
-                dst,
-                edge_type,
-                created,
-            })
-        }
-        Command::GraphRemoveEdge {
-            graph,
-            src,
-            dst,
-            edge_type,
-            ..
-        } => {
-            convert_result(
-                ctx.graph_remove_edge(branch_id, space, &graph, &src, &dst, &edge_type),
-            )?;
-            Ok(Output::Unit)
-        }
-        Command::GraphNeighbors {
-            graph,
-            node_id,
-            direction,
-            edge_type,
-            ..
-        } => {
-            let direction = parse_direction(direction.as_deref())?;
-            let neighbors = match direction {
-                Direction::Outgoing => convert_result(ctx.graph_outgoing_neighbors(
-                    branch_id,
-                    space,
-                    &graph,
-                    &node_id,
-                    edge_type.as_deref(),
-                ))?,
-                Direction::Incoming => convert_result(ctx.graph_incoming_neighbors(
-                    branch_id,
-                    space,
-                    &graph,
-                    &node_id,
-                    edge_type.as_deref(),
-                ))?,
-                Direction::Both => {
-                    let mut outgoing = convert_result(ctx.graph_outgoing_neighbors(
-                        branch_id,
-                        space,
-                        &graph,
-                        &node_id,
-                        edge_type.as_deref(),
-                    ))?;
-                    let incoming = convert_result(ctx.graph_incoming_neighbors(
-                        branch_id,
-                        space,
-                        &graph,
-                        &node_id,
-                        edge_type.as_deref(),
-                    ))?;
-                    outgoing.extend(incoming);
-                    outgoing
-                }
-            };
-            Ok(Output::GraphNeighbors(
-                neighbors
-                    .into_iter()
-                    .map(|neighbor| GraphNeighborHit {
-                        node_id: neighbor.node_id,
-                        edge_type: neighbor.edge_type,
-                        weight: neighbor.edge_data.weight,
-                    })
-                    .collect(),
-            ))
-        }
-
-        Command::VectorUpsert {
-            collection,
-            key,
-            vector,
-            metadata,
-            ..
-        } => {
-            validate_not_internal_collection(&collection).map_err(Error::from)?;
-            let primitives = executor.primitives();
-            primitives
-                .vector
-                .ensure_collection_loaded(branch_id, space, &collection)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let metadata = metadata
-                .map(value_to_serde_json_public)
-                .transpose()
-                .map_err(Error::from)?;
-            let state = primitives
-                .vector
-                .state()
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let (version, _) = ctx
-                .vector_upsert(
-                    branch_id,
-                    space,
-                    &collection,
-                    &key,
-                    &vector,
-                    metadata,
-                    None,
-                    &state,
-                )
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            Ok(Output::VectorWriteResult {
-                collection,
-                key,
-                version: extract_version(&version),
-            })
-        }
-        Command::VectorDelete {
-            collection, key, ..
-        } => {
-            validate_not_internal_collection(&collection).map_err(Error::from)?;
-            let primitives = executor.primitives();
-            primitives
-                .vector
-                .ensure_collection_loaded(branch_id, space, &collection)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let state = primitives
-                .vector
-                .state()
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let (deleted, _) = ctx
-                .vector_delete(branch_id, space, &collection, &key, &state)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            Ok(Output::VectorDeleteResult {
-                collection,
-                key,
-                deleted,
-            })
-        }
-        Command::VectorGet {
-            collection, key, ..
-        } => {
-            let record = ctx
-                .vector_get(branch_id, space, &collection, &key)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            match record {
-                Some(record) => {
-                    let version = extract_version(&strata_core::Version::counter(record.version));
-                    let metadata = record
-                        .metadata
-                        .map(serde_json_to_value_public)
-                        .transpose()
-                        .map_err(Error::from)?;
-                    Ok(Output::VectorData(Some(VersionedVectorData {
-                        key,
-                        data: VectorData {
-                            embedding: record.embedding,
-                            metadata,
-                        },
-                        version,
-                        timestamp: record.updated_at,
-                    })))
-                }
-                None => Ok(Output::VectorData(None)),
-            }
+        other @ Command::VectorUpsert { .. }
+        | other @ Command::VectorDelete { .. }
+        | other @ Command::VectorGet { .. } => {
+            vector::execute_in_txn(executor.primitives(), ctx, branch_id, space, other)
         }
 
         other => executor.execute(other),
@@ -1351,22 +578,22 @@ fn dispatch_in_txn(
 }
 
 #[derive(Default)]
-struct TxnSideEffects {
+pub(crate) struct TxnSideEffects {
     kv: BTreeSet<(String, String)>,
     json: BTreeSet<(String, String)>,
     events: BTreeSet<(String, u64)>,
 }
 
 impl TxnSideEffects {
-    fn record_kv(&mut self, space: &str, key: &str) {
+    pub(crate) fn record_kv(&mut self, space: &str, key: &str) {
         self.kv.insert((space.to_string(), key.to_string()));
     }
 
-    fn record_json(&mut self, space: &str, key: &str) {
+    pub(crate) fn record_json(&mut self, space: &str, key: &str) {
         self.json.insert((space.to_string(), key.to_string()));
     }
 
-    fn record_event(&mut self, space: &str, sequence: u64) {
+    pub(crate) fn record_event(&mut self, space: &str, sequence: u64) {
         self.events.insert((space.to_string(), sequence));
     }
 }
@@ -1572,50 +799,6 @@ fn apply_event_post_commit(
     Ok(())
 }
 
-fn validate_event_type_input(event_type: &str) -> Result<()> {
-    if event_type.is_empty() {
-        return Err(Error::InvalidInput {
-            reason: "Event type must not be empty".to_string(),
-            hint: None,
-        });
-    }
-    if event_type.len() > 256 {
-        return Err(Error::InvalidInput {
-            reason: format!(
-                "Event type is too long: {} bytes (max 256)",
-                event_type.len()
-            ),
-            hint: None,
-        });
-    }
-    Ok(())
-}
-
-fn validate_event_payload_input(payload: &strata_core::Value) -> Result<()> {
-    if !matches!(payload, strata_core::Value::Object(_)) {
-        return Err(Error::InvalidInput {
-            reason: "Event payload must be an object".to_string(),
-            hint: None,
-        });
-    }
-    if contains_non_finite_float(payload) {
-        return Err(Error::InvalidInput {
-            reason: "Event payload must not contain non-finite floats".to_string(),
-            hint: None,
-        });
-    }
-    Ok(())
-}
-
-fn contains_non_finite_float(value: &strata_core::Value) -> bool {
-    match value {
-        strata_core::Value::Float(f) => !f.is_finite(),
-        strata_core::Value::Object(map) => map.values().any(contains_non_finite_float),
-        strata_core::Value::Array(values) => values.iter().any(contains_non_finite_float),
-        _ => false,
-    }
-}
-
 #[derive(Clone)]
 enum TxnCommand {
     Begin(BranchId),
@@ -1629,9 +812,11 @@ enum TxnCommand {
 mod tests {
     use std::sync::Arc;
 
+    use strata_core::types::Key;
     use strata_core::Value;
     use strata_security::AccessMode;
 
+    use super::SessionBackend;
     use crate::{Command, Error, Output, Session, Strata};
 
     fn test_db() -> Arc<strata_engine::Database> {
@@ -1824,5 +1009,67 @@ mod tests {
             .expect_err("system branch transactions should be rejected");
 
         assert!(matches!(error, Error::InvalidInput { .. }));
+    }
+
+    #[test]
+    fn commit_does_not_report_failure_after_durable_commit() {
+        let db = test_db();
+        let branch = crate::bridge::runtime_default_branch(&db);
+        let branch_id =
+            crate::bridge::to_core_branch_id(&branch).expect("default branch should parse");
+
+        let corrupt_json_key = Key::new_json(
+            Arc::new(strata_core::types::Namespace::for_branch_space(
+                branch_id, "default",
+            )),
+            "corrupt-json",
+        );
+        db.transaction(branch_id, |txn| {
+            txn.put(corrupt_json_key.clone(), Value::Bytes(vec![0xff, 0x00]))
+        })
+        .expect("corrupt fixture should be written directly");
+
+        let mut session = Session::new(db.clone());
+        session
+            .execute(Command::TxnBegin {
+                branch: Some("main".into()),
+                options: None,
+            })
+            .expect("transaction should begin");
+        session
+            .execute(Command::KvPut {
+                branch: None,
+                space: None,
+                key: "durable".into(),
+                value: Value::String("committed".into()),
+            })
+            .expect("txn kv put should succeed");
+
+        let SessionBackend::Local(local) = &mut session.backend else {
+            panic!("test uses a local session backend");
+        };
+        local.effects.record_json("default", "corrupt-json");
+
+        let result = session.execute(Command::TxnCommit);
+        assert!(
+            result.is_ok(),
+            "post-commit side-effect replay should not flip a durable commit into an error: {result:?}"
+        );
+
+        let committed = Session::new(db)
+            .execute(Command::KvGet {
+                branch: Some("main".into()),
+                space: Some("default".into()),
+                key: "durable".into(),
+                as_of: None,
+            })
+            .expect("committed value should remain readable");
+        match committed {
+            Output::Maybe(Some(Value::String(value))) => assert_eq!(value, "committed"),
+            Output::MaybeVersioned(Some(versioned)) => {
+                assert_eq!(versioned.value, Value::String("committed".into()))
+            }
+            other => panic!("unexpected committed read output: {other:?}"),
+        }
     }
 }

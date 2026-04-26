@@ -1,11 +1,17 @@
 use std::sync::Arc;
 
+use strata_core::types::Namespace;
+use strata_engine::transaction::context::Transaction as ScopedTransaction;
+use strata_engine::transaction_ops::TransactionOps as _;
+use strata_engine::TransactionContext;
+
 use crate::bridge::{
     extract_version, require_branch_exists, to_core_branch_id, validate_value, Primitives,
 };
 use crate::convert::convert_result;
 use crate::handlers::embed_runtime;
-use crate::{BatchItemResult, BranchId, Output, Result, ScanDirection, VersionedValue};
+use crate::session::TxnSideEffects;
+use crate::{BatchItemResult, BranchId, Error, Output, Result, ScanDirection, VersionedValue};
 
 pub(crate) fn batch_append(
     primitives: &Arc<Primitives>,
@@ -30,6 +36,14 @@ pub(crate) fn batch_append(
 
     for (index, entry) in entries.into_iter().enumerate() {
         if let Err(error) = validate_value(&entry.payload, &primitives.limits) {
+            results[index].error = Some(error.to_string());
+            continue;
+        }
+        if let Err(error) = validate_event_type_input(&entry.event_type) {
+            results[index].error = Some(error.to_string());
+            continue;
+        }
+        if let Err(error) = validate_event_payload_input(&entry.payload) {
             results[index].error = Some(error.to_string());
             continue;
         }
@@ -80,6 +94,180 @@ pub(crate) fn batch_append(
     Ok(Output::BatchResults(results))
 }
 
+pub(crate) fn execute_in_txn(
+    primitives: &Arc<Primitives>,
+    ctx: &mut TransactionContext,
+    namespace: Arc<Namespace>,
+    space: &str,
+    command: crate::Command,
+    effects: &mut TxnSideEffects,
+) -> Result<Output> {
+    match command {
+        crate::Command::EventAppend {
+            event_type,
+            payload,
+            ..
+        } => {
+            convert_result(validate_value(&payload, &primitives.limits))?;
+            validate_event_type_input(&event_type)?;
+            validate_event_payload_input(&payload)?;
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let version = txn
+                .event_append(&event_type, payload)
+                .map_err(crate::Error::from)?;
+            let sequence = extract_version(&version);
+            effects.record_event(space, sequence);
+            Ok(Output::EventAppendResult {
+                sequence,
+                event_type,
+            })
+        }
+        crate::Command::EventGet { sequence, .. } => {
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let result = txn.event_get(sequence).map_err(crate::Error::from)?;
+            Ok(Output::MaybeVersioned(result.map(|value| {
+                crate::bridge::to_versioned_value(strata_core::Versioned::new(
+                    value.value.payload.clone(),
+                    value.version,
+                ))
+            })))
+        }
+        crate::Command::EventGetByType {
+            event_type,
+            limit,
+            after_sequence,
+            ..
+        } => {
+            let prefix =
+                strata_core::types::Key::new_event_type_idx_prefix(namespace.clone(), &event_type);
+            let index_entries = ctx.scan_prefix(&prefix).map_err(crate::Error::from)?;
+            let mut events = Vec::new();
+            for (index_key, _) in index_entries {
+                let user_key = &index_key.user_key;
+                if user_key.len() < 8 {
+                    continue;
+                }
+                let bytes: [u8; 8] = user_key[user_key.len() - 8..]
+                    .try_into()
+                    .expect("sequence suffix should be eight bytes");
+                let sequence = u64::from_be_bytes(bytes);
+                if after_sequence.is_some_and(|after| sequence <= after) {
+                    continue;
+                }
+                let event_key = strata_core::types::Key::new_event(namespace.clone(), sequence);
+                if let Some(strata_core::Value::String(json)) =
+                    ctx.get(&event_key).map_err(crate::Error::from)?
+                {
+                    let event: strata_core::Event =
+                        serde_json::from_str(&json).map_err(|error| {
+                            crate::Error::Serialization {
+                                reason: format!(
+                                    "corrupt event at sequence {}: {}",
+                                    sequence, error
+                                ),
+                            }
+                        })?;
+                    events.push(VersionedValue {
+                        value: event.payload.clone(),
+                        version: sequence,
+                        timestamp: event.timestamp.into(),
+                    });
+                }
+                if limit.is_some_and(|limit| events.len() >= limit as usize) {
+                    break;
+                }
+            }
+            Ok(Output::VersionedValues(events))
+        }
+        crate::Command::EventLen { .. } => {
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let len = txn.event_len().map_err(crate::Error::from)?;
+            Ok(Output::Uint(len))
+        }
+        crate::Command::EventBatchAppend { entries, .. } => {
+            let mut results = vec![
+                BatchItemResult {
+                    version: None,
+                    error: None,
+                };
+                entries.len()
+            ];
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            for (index, entry) in entries.into_iter().enumerate() {
+                if let Err(error) = validate_value(&entry.payload, &primitives.limits) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                if let Err(error) = validate_event_type_input(&entry.event_type) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                if let Err(error) = validate_event_payload_input(&entry.payload) {
+                    results[index].error = Some(error.to_string());
+                    continue;
+                }
+                match txn.event_append(&entry.event_type, entry.payload) {
+                    Ok(version) => {
+                        let sequence = extract_version(&version);
+                        results[index].version = Some(sequence);
+                        effects.record_event(space, sequence);
+                    }
+                    Err(error) => results[index].error = Some(error.to_string()),
+                }
+            }
+            Ok(Output::BatchResults(results))
+        }
+        other => Err(crate::Error::Internal {
+            reason: format!("unexpected event transaction command: {}", other.name()),
+            hint: None,
+        }),
+    }
+}
+
+fn validate_event_type_input(event_type: &str) -> Result<()> {
+    if event_type.trim().is_empty() {
+        return Err(Error::InvalidInput {
+            reason: "event_type must not be empty".to_string(),
+            hint: None,
+        });
+    }
+    if event_type.len() > 256 {
+        return Err(Error::InvalidInput {
+            reason: format!(
+                "event_type exceeds the maximum length of 256 characters (got {})",
+                event_type.len()
+            ),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+fn validate_event_payload_input(payload: &strata_core::Value) -> Result<()> {
+    if !matches!(payload, strata_core::Value::Object(_)) {
+        return Err(Error::InvalidInput {
+            reason: "event payload must be a JSON object".to_string(),
+            hint: None,
+        });
+    }
+    if contains_non_finite_float(payload) {
+        return Err(Error::InvalidInput {
+            reason: "event payload must not contain non-finite floats".to_string(),
+            hint: None,
+        });
+    }
+    Ok(())
+}
+
+fn contains_non_finite_float(value: &strata_core::Value) -> bool {
+    match value {
+        strata_core::Value::Float(v) => !v.is_finite(),
+        strata_core::Value::Array(values) => values.iter().any(contains_non_finite_float),
+        strata_core::Value::Object(map) => map.values().any(contains_non_finite_float),
+        _ => false,
+    }
+}
+
 pub(crate) fn append(
     primitives: &Arc<Primitives>,
     branch: BranchId,
@@ -90,6 +278,8 @@ pub(crate) fn append(
     require_branch_exists(primitives, &branch)?;
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_value(&payload, &primitives.limits))?;
+    validate_event_type_input(&event_type)?;
+    validate_event_payload_input(&payload)?;
     let text = embed_runtime::extract_text(&payload);
     let version = convert_result(primitives.event.append(
         &branch_id,

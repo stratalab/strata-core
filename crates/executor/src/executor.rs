@@ -1,17 +1,15 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use strata_engine::Database;
 use strata_security::AccessMode;
 
 use crate::bridge::{
-    access_denied, database_info, is_read_only, remap, remap_error, runtime_default_branch,
-    Primitives,
+    access_denied, database_info, is_read_only, reject_reserved_branch, requires_session,
+    runtime_default_branch, session_required, Primitives,
 };
 use crate::handlers::{
     arrow_import, branch, config, configure_model, database, embed, embed_runtime, event, export,
-    generate, graph, json, kv, maintenance, models, recipe, reject_system_branch, search, space,
-    space_delete, vector,
+    generate, graph, json, kv, maintenance, models, recipe, search, space, space_delete, vector,
 };
 use crate::{BranchId, Command, Error, Output, Result};
 
@@ -19,18 +17,8 @@ use crate::{BranchId, Command, Error, Output, Result};
 pub struct Executor {
     db: Arc<Database>,
     primitives: Arc<Primitives>,
-    backend: strata_executor_legacy::Executor,
     access_mode: AccessMode,
     default_branch: BranchId,
-    embed_refresh_state: Arc<EmbedRefreshState>,
-    embed_refresh_handle: Option<std::thread::JoinHandle<()>>,
-}
-
-const EMBED_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
-
-struct EmbedRefreshState {
-    mu: std::sync::Mutex<bool>,
-    cond: std::sync::Condvar,
 }
 
 impl Executor {
@@ -43,53 +31,12 @@ impl Executor {
     pub fn new_with_mode(db: Arc<Database>, access_mode: AccessMode) -> Self {
         let default_branch = runtime_default_branch(&db);
         let primitives = Arc::new(Primitives::new(db.clone()));
-        let backend = strata_executor_legacy::Executor::new_with_mode(db.clone(), access_mode);
-        let embed_refresh_state = Arc::new(EmbedRefreshState {
-            mu: std::sync::Mutex::new(false),
-            cond: std::sync::Condvar::new(),
-        });
-        let embed_refresh_handle = Some(Self::spawn_embed_refresh_thread(
-            &primitives,
-            &embed_refresh_state,
-        ));
         Self {
             db,
             primitives,
-            backend,
             access_mode,
             default_branch,
-            embed_refresh_state,
-            embed_refresh_handle,
         }
-    }
-
-    fn spawn_embed_refresh_thread(
-        primitives: &Arc<Primitives>,
-        state: &Arc<EmbedRefreshState>,
-    ) -> std::thread::JoinHandle<()> {
-        let primitives = Arc::clone(primitives);
-        let state = Arc::clone(state);
-        std::thread::Builder::new()
-            .name("strata-embed-refresh".into())
-            .spawn(move || {
-                let mut guard = state.mu.lock().unwrap_or_else(|e| e.into_inner());
-                while !*guard {
-                    let (next_guard, _) = state
-                        .cond
-                        .wait_timeout(guard, EMBED_REFRESH_INTERVAL)
-                        .unwrap_or_else(|e| e.into_inner());
-                    guard = next_guard;
-                    if *guard || !primitives.db.auto_embed_enabled() {
-                        continue;
-                    }
-                    let task_primitives = Arc::clone(&primitives);
-                    let scheduler = primitives.db.scheduler();
-                    let _ = scheduler.submit(strata_engine::TaskPriority::Normal, move || {
-                        embed_runtime::flush_embed_buffer(&task_primitives)
-                    });
-                }
-            })
-            .expect("failed to spawn embed refresh thread")
     }
 
     /// Execute a command and return its structured result.
@@ -100,17 +47,13 @@ impl Executor {
 
         command.resolve_defaults_with(&self.default_branch);
         if let Some(branch) = command.resolved_branch() {
-            reject_system_branch(branch)?;
+            reject_reserved_branch(branch)?;
         }
-        if self.requires_legacy_compat(&command) {
-            return self.execute_legacy(command);
+        if requires_session(&command) {
+            return Err(session_required(command.name()));
         }
 
-        if self.supports_local_execution(&command) {
-            self.execute_local(command)
-        } else {
-            self.execute_legacy(command)
-        }
+        self.execute_local(command)
     }
 
     /// Return the executor access mode.
@@ -1417,182 +1360,6 @@ impl Executor {
     pub fn default_branch(&self) -> &BranchId {
         &self.default_branch
     }
-
-    fn supports_local_execution(&self, command: &Command) -> bool {
-        matches!(
-            command,
-            Command::Ping
-                | Command::Info
-                | Command::Health
-                | Command::Metrics
-                | Command::Flush
-                | Command::Compact
-                | Command::BranchCreate { .. }
-                | Command::BranchGet { .. }
-                | Command::BranchList { .. }
-                | Command::BranchExists { .. }
-                | Command::BranchDelete { .. }
-                | Command::BranchFork { .. }
-                | Command::BranchDiff { .. }
-                | Command::BranchMerge { .. }
-                | Command::BranchDiffThreeWay { .. }
-                | Command::BranchMergeBase { .. }
-                | Command::BranchRevert { .. }
-                | Command::BranchCherryPick { .. }
-                | Command::BranchExport { .. }
-                | Command::BranchImport { .. }
-                | Command::BranchBundleValidate { .. }
-                | Command::TagCreate { .. }
-                | Command::TagDelete { .. }
-                | Command::TagList { .. }
-                | Command::TagResolve { .. }
-                | Command::NoteAdd { .. }
-                | Command::NoteGet { .. }
-                | Command::NoteDelete { .. }
-                | Command::SpaceList { .. }
-                | Command::SpaceCreate { .. }
-                | Command::SpaceExists { .. }
-                | Command::KvPut { .. }
-                | Command::KvGet { .. }
-                | Command::KvDelete { .. }
-                | Command::KvList { .. }
-                | Command::KvScan { .. }
-                | Command::KvBatchPut { .. }
-                | Command::KvBatchGet { .. }
-                | Command::KvBatchDelete { .. }
-                | Command::KvBatchExists { .. }
-                | Command::KvGetv { .. }
-                | Command::KvCount { .. }
-                | Command::KvSample { .. }
-                | Command::JsonSet { .. }
-                | Command::JsonGet { .. }
-                | Command::JsonDelete { .. }
-                | Command::JsonGetv { .. }
-                | Command::JsonBatchSet { .. }
-                | Command::JsonBatchGet { .. }
-                | Command::JsonBatchDelete { .. }
-                | Command::JsonList { .. }
-                | Command::JsonCount { .. }
-                | Command::JsonSample { .. }
-                | Command::JsonCreateIndex { .. }
-                | Command::JsonDropIndex { .. }
-                | Command::JsonListIndexes { .. }
-                | Command::EventBatchAppend { .. }
-                | Command::EventAppend { .. }
-                | Command::EventGet { .. }
-                | Command::EventGetByType { .. }
-                | Command::EventLen { .. }
-                | Command::EventRange { .. }
-                | Command::EventRangeByTime { .. }
-                | Command::EventListTypes { .. }
-                | Command::EventList { .. }
-                | Command::VectorUpsert { .. }
-                | Command::VectorGet { .. }
-                | Command::VectorDelete { .. }
-                | Command::VectorGetv { .. }
-                | Command::VectorQuery { .. }
-                | Command::VectorCreateCollection { .. }
-                | Command::VectorDeleteCollection { .. }
-                | Command::VectorListCollections { .. }
-                | Command::VectorCollectionStats { .. }
-                | Command::VectorBatchUpsert { .. }
-                | Command::VectorBatchGet { .. }
-                | Command::VectorBatchDelete { .. }
-                | Command::VectorSample { .. }
-                | Command::GraphCreate { .. }
-                | Command::GraphDelete { .. }
-                | Command::GraphList { .. }
-                | Command::GraphGetMeta { .. }
-                | Command::GraphAddNode { .. }
-                | Command::GraphGetNode { .. }
-                | Command::GraphRemoveNode { .. }
-                | Command::GraphListNodes { .. }
-                | Command::GraphListNodesPaginated { .. }
-                | Command::GraphAddEdge { .. }
-                | Command::GraphRemoveEdge { .. }
-                | Command::GraphNeighbors { .. }
-                | Command::GraphBulkInsert { .. }
-                | Command::GraphBfs { .. }
-                | Command::GraphDefineObjectType { .. }
-                | Command::GraphGetObjectType { .. }
-                | Command::GraphListObjectTypes { .. }
-                | Command::GraphDeleteObjectType { .. }
-                | Command::GraphDefineLinkType { .. }
-                | Command::GraphGetLinkType { .. }
-                | Command::GraphListLinkTypes { .. }
-                | Command::GraphDeleteLinkType { .. }
-                | Command::GraphFreezeOntology { .. }
-                | Command::GraphOntologyStatus { .. }
-                | Command::GraphOntologySummary { .. }
-                | Command::GraphListOntologyTypes { .. }
-                | Command::GraphNodesByType { .. }
-                | Command::GraphWcc { .. }
-                | Command::GraphCdlp { .. }
-                | Command::GraphPagerank { .. }
-                | Command::GraphLcc { .. }
-                | Command::GraphSssp { .. }
-                | Command::RetentionApply { .. }
-                | Command::RetentionStats { .. }
-                | Command::RetentionPreview { .. }
-                | Command::TimeRange { .. }
-                | Command::DbExport { .. }
-                | Command::ArrowImport { .. }
-                | Command::ConfigureModel { .. }
-                | Command::Search { .. }
-                | Command::Embed { .. }
-                | Command::EmbedBatch { .. }
-                | Command::ModelsList
-                | Command::ModelsPull { .. }
-                | Command::Generate { .. }
-                | Command::Tokenize { .. }
-                | Command::Detokenize { .. }
-                | Command::GenerateUnload { .. }
-                | Command::ModelsLocal
-                | Command::EmbedStatus
-                | Command::ReindexEmbeddings { .. }
-                | Command::ConfigGet
-                | Command::ConfigureSet { .. }
-                | Command::ConfigureGetKey { .. }
-                | Command::ConfigSetAutoEmbed { .. }
-                | Command::AutoEmbedStatus
-                | Command::DurabilityCounters
-                | Command::RecipeSet { .. }
-                | Command::RecipeGet { .. }
-                | Command::RecipeGetDefault { .. }
-                | Command::RecipeList { .. }
-                | Command::RecipeDelete { .. }
-                | Command::RecipeSeed
-                | Command::Describe { .. }
-                | Command::SpaceDelete { .. }
-        )
-    }
-
-    fn requires_legacy_compat(&self, _command: &Command) -> bool {
-        false
-    }
-
-    fn execute_legacy(&self, command: Command) -> Result<Output> {
-        let command = remap(command, "command")?;
-        let output = self.backend.execute(command).map_err(remap_error)?;
-        remap(output, "command output")
-    }
-}
-
-impl Drop for Executor {
-    fn drop(&mut self) {
-        let mut shutdown = self
-            .embed_refresh_state
-            .mu
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        *shutdown = true;
-        self.embed_refresh_state.cond.notify_all();
-        drop(shutdown);
-
-        if let Some(handle) = self.embed_refresh_handle.take() {
-            let _ = handle.join();
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1620,6 +1387,23 @@ mod tests {
             .expect_err("read-only executor should reject transaction begin");
 
         assert!(matches!(error, Error::AccessDenied { .. }));
+    }
+
+    #[test]
+    fn transaction_commands_require_a_session() {
+        let executor = Executor::new(test_db());
+        let error = executor
+            .execute(Command::TxnBegin {
+                branch: None,
+                options: None,
+            })
+            .expect_err("direct executor transactions should be rejected");
+
+        assert!(matches!(error, Error::InvalidInput { .. }));
+        assert!(
+            format!("{error:?}").contains("requires a session"),
+            "unexpected error: {error:?}",
+        );
     }
 
     #[test]

@@ -1,6 +1,8 @@
 use std::sync::Arc;
 
 use strata_core::primitives::VectorConfig;
+use strata_engine::TransactionContext;
+use strata_vector::ext::VectorStoreExt;
 
 use crate::bridge::{
     extract_version, from_engine_metric, require_branch_exists, serde_json_to_value_public,
@@ -555,6 +557,112 @@ pub(crate) fn sample(
     }
 
     Ok(Output::SampleResult { total_count, items })
+}
+
+pub(crate) fn execute_in_txn(
+    primitives: &Arc<Primitives>,
+    ctx: &mut TransactionContext,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    command: crate::Command,
+) -> Result<Output> {
+    match command {
+        crate::Command::VectorUpsert {
+            collection,
+            key,
+            vector,
+            metadata,
+            ..
+        } => {
+            convert_result(validate_not_internal_collection(&collection))?;
+            convert_result(validate_key(&key))?;
+            convert_result(validate_vector(&vector, &primitives.limits))?;
+            primitives
+                .vector
+                .ensure_collection_loaded(branch_id, space, &collection)
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            let metadata = metadata
+                .map(value_to_serde_json_public)
+                .transpose()
+                .map_err(Error::from)?;
+            let state = primitives
+                .vector
+                .state()
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            let (version, _) = ctx
+                .vector_upsert(
+                    branch_id,
+                    space,
+                    &collection,
+                    &key,
+                    &vector,
+                    metadata,
+                    None,
+                    &state,
+                )
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            Ok(Output::VectorWriteResult {
+                collection,
+                key,
+                version: extract_version(&version),
+            })
+        }
+        crate::Command::VectorDelete {
+            collection, key, ..
+        } => {
+            convert_result(validate_not_internal_collection(&collection))?;
+            convert_result(validate_key(&key))?;
+            primitives
+                .vector
+                .ensure_collection_loaded(branch_id, space, &collection)
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            let state = primitives
+                .vector
+                .state()
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            let (deleted, _) = ctx
+                .vector_delete(branch_id, space, &collection, &key, &state)
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            Ok(Output::VectorDeleteResult {
+                collection,
+                key,
+                deleted,
+            })
+        }
+        crate::Command::VectorGet {
+            collection, key, ..
+        } => {
+            convert_result(validate_not_internal_collection(&collection))?;
+            convert_result(validate_key(&key))?;
+            let record = ctx
+                .vector_get(branch_id, space, &collection, &key)
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            match record {
+                Some(record) => {
+                    let version = extract_version(&strata_core::Version::counter(record.version));
+                    let metadata = record
+                        .metadata
+                        .map(serde_json_to_value_public)
+                        .transpose()
+                        .map_err(Error::from)?;
+                    Ok(Output::VectorData(Some(VersionedVectorData {
+                        key,
+                        data: VectorData {
+                            embedding: record.embedding,
+                            metadata,
+                        },
+                        version,
+                        timestamp: record.updated_at,
+                    })))
+                }
+                None => Ok(Output::VectorData(None)),
+            }
+        }
+        other => Err(Error::Internal {
+            reason: format!("unexpected vector transaction command: {}", other.name()),
+            hint: None,
+        }),
+    }
 }
 
 fn prepare_space_write(primitives: &Arc<Primitives>, branch: &BranchId, space: &str) -> Result<()> {

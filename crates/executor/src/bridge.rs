@@ -22,6 +22,7 @@ use crate::{
 };
 
 const RESERVED_KEY_PREFIX: &str = "_strata/";
+const RESERVED_BRANCH_PREFIX: &str = "_system";
 
 #[derive(Clone)]
 pub(crate) struct Primitives {
@@ -65,10 +66,6 @@ where
     })
 }
 
-pub(crate) fn remap_error(error: strata_executor_legacy::Error) -> Error {
-    remap(error, "executor error").unwrap_or_else(|fallback| fallback)
-}
-
 pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types::BranchId> {
     if strata_core::branch::aliases_default_branch_sentinel(branch.as_str()) {
         return Err(StrataError::invalid_input(
@@ -108,6 +105,17 @@ pub(crate) fn is_read_only(access_mode: AccessMode) -> bool {
     matches!(access_mode, AccessMode::ReadOnly)
 }
 
+pub(crate) fn requires_session(command: &Command) -> bool {
+    matches!(
+        command,
+        Command::TxnBegin { .. }
+            | Command::TxnCommit
+            | Command::TxnRollback
+            | Command::TxnInfo
+            | Command::TxnIsActive
+    )
+}
+
 pub(crate) fn bypasses_active_transaction(command: &Command) -> bool {
     matches!(
         command,
@@ -130,6 +138,34 @@ pub(crate) fn bypasses_active_transaction(command: &Command) -> bool {
             | Command::NoteGet { .. }
             | Command::NoteDelete { .. }
     )
+}
+
+pub(crate) fn session_required(command: &str) -> Error {
+    Error::InvalidInput {
+        reason: format!("{command} requires a session"),
+        hint: Some("Use Session::execute for transaction-scoped commands.".to_string()),
+    }
+}
+
+pub(crate) fn branch_is_reserved(branch: &str) -> bool {
+    branch.starts_with(RESERVED_BRANCH_PREFIX)
+}
+
+pub(crate) fn reject_reserved_branch(branch: &BranchId) -> Result<()> {
+    reject_reserved_branch_name(branch.as_str())
+}
+
+pub(crate) fn reject_reserved_branch_name(branch: &str) -> Result<()> {
+    if branch_is_reserved(branch) {
+        return Err(Error::InvalidInput {
+            reason: format!("Branch '{branch}' is reserved for system use"),
+            hint: Some(
+                "Branches starting with '_system' are internal and cannot be accessed directly."
+                    .to_string(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 pub(crate) fn extract_version(v: &strata_core::Version) -> u64 {

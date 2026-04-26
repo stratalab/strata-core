@@ -1,6 +1,13 @@
 use std::sync::Arc;
 
-use crate::bridge::{require_branch_exists, to_core_branch_id, Primitives};
+use strata_engine::TransactionContext;
+use strata_graph::ext::GraphStoreExt;
+use strata_graph::types::{Direction, EdgeData, GraphMeta, NodeData};
+
+use crate::bridge::{
+    require_branch_exists, serde_json_to_value_public, to_core_branch_id,
+    value_to_serde_json_public, Primitives,
+};
 use crate::convert::convert_result;
 use crate::{BranchId, BulkGraphEdge, BulkGraphNode, Output, Result, Value};
 
@@ -422,4 +429,233 @@ fn prepare_space_write(primitives: &Arc<Primitives>, branch: &BranchId, space: &
     let branch_id = to_core_branch_id(branch)?;
     convert_result(primitives.space.register(branch_id, space))?;
     Ok(())
+}
+
+pub(crate) fn execute_in_txn(
+    primitives: &Arc<Primitives>,
+    ctx: &mut TransactionContext,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    command: crate::Command,
+) -> Result<Output> {
+    match command {
+        crate::Command::GraphCreate {
+            graph,
+            cascade_policy,
+            ..
+        } => {
+            let policy = parse_cascade_policy(cascade_policy.as_deref())?;
+            let meta = GraphMeta {
+                cascade_policy: policy,
+                ..Default::default()
+            };
+            convert_result(ctx.graph_create(branch_id, space, &graph, meta))?;
+            Ok(Output::Unit)
+        }
+        crate::Command::GraphAddNode {
+            graph,
+            node_id,
+            entity_ref,
+            properties,
+            object_type,
+            ..
+        } => {
+            let properties = properties
+                .map(value_to_serde_json_public)
+                .transpose()
+                .map_err(crate::Error::from)?;
+            let data = NodeData {
+                entity_ref,
+                properties,
+                object_type,
+            };
+            let backend_state = convert_result(primitives.graph.state())?;
+            let created = convert_result(ctx.graph_add_node(
+                branch_id,
+                space,
+                &graph,
+                &node_id,
+                &data,
+                &backend_state,
+            ))?;
+            Ok(Output::GraphWriteResult { node_id, created })
+        }
+        crate::Command::GraphGetNode { graph, node_id, .. } => {
+            let node = convert_result(ctx.graph_get_node(branch_id, space, &graph, &node_id))?;
+            match node {
+                Some(data) => {
+                    let json = serde_json::to_value(&data).map_err(|error| {
+                        crate::Error::Serialization {
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    Ok(Output::Maybe(Some(convert_result(
+                        serde_json_to_value_public(json),
+                    )?)))
+                }
+                None => Ok(Output::Maybe(None)),
+            }
+        }
+        crate::Command::GraphRemoveNode { graph, node_id, .. } => {
+            let backend_state = convert_result(primitives.graph.state())?;
+            convert_result(ctx.graph_remove_node(
+                branch_id,
+                space,
+                &graph,
+                &node_id,
+                &backend_state,
+            ))?;
+            Ok(Output::Unit)
+        }
+        crate::Command::GraphListNodes { graph, .. } => {
+            let nodes = convert_result(ctx.graph_list_nodes(branch_id, space, &graph))?;
+            Ok(Output::Keys(nodes))
+        }
+        crate::Command::GraphGetMeta { graph, .. } => {
+            let meta = convert_result(ctx.graph_get_meta(branch_id, space, &graph))?;
+            match meta {
+                Some(meta) => {
+                    let json = serde_json::to_value(&meta).map_err(|error| {
+                        crate::Error::Serialization {
+                            reason: error.to_string(),
+                        }
+                    })?;
+                    Ok(Output::Maybe(Some(convert_result(
+                        serde_json_to_value_public(json),
+                    )?)))
+                }
+                None => Ok(Output::Maybe(None)),
+            }
+        }
+        crate::Command::GraphList { .. } => {
+            let graphs = convert_result(ctx.graph_list(branch_id, space))?;
+            Ok(Output::Keys(graphs))
+        }
+        crate::Command::GraphAddEdge {
+            graph,
+            src,
+            dst,
+            edge_type,
+            weight,
+            properties,
+            ..
+        } => {
+            let properties = properties
+                .map(value_to_serde_json_public)
+                .transpose()
+                .map_err(crate::Error::from)?;
+            let data = EdgeData {
+                weight: weight.unwrap_or(1.0),
+                properties,
+            };
+            let created = convert_result(
+                ctx.graph_add_edge(branch_id, space, &graph, &src, &dst, &edge_type, &data),
+            )?;
+            Ok(Output::GraphEdgeWriteResult {
+                src,
+                dst,
+                edge_type,
+                created,
+            })
+        }
+        crate::Command::GraphRemoveEdge {
+            graph,
+            src,
+            dst,
+            edge_type,
+            ..
+        } => {
+            convert_result(
+                ctx.graph_remove_edge(branch_id, space, &graph, &src, &dst, &edge_type),
+            )?;
+            Ok(Output::Unit)
+        }
+        crate::Command::GraphNeighbors {
+            graph,
+            node_id,
+            direction,
+            edge_type,
+            ..
+        } => {
+            let direction = parse_direction(direction.as_deref())?;
+            let neighbors = match direction {
+                Direction::Outgoing => convert_result(ctx.graph_outgoing_neighbors(
+                    branch_id,
+                    space,
+                    &graph,
+                    &node_id,
+                    edge_type.as_deref(),
+                ))?,
+                Direction::Incoming => convert_result(ctx.graph_incoming_neighbors(
+                    branch_id,
+                    space,
+                    &graph,
+                    &node_id,
+                    edge_type.as_deref(),
+                ))?,
+                Direction::Both => {
+                    let mut outgoing = convert_result(ctx.graph_outgoing_neighbors(
+                        branch_id,
+                        space,
+                        &graph,
+                        &node_id,
+                        edge_type.as_deref(),
+                    ))?;
+                    let incoming = convert_result(ctx.graph_incoming_neighbors(
+                        branch_id,
+                        space,
+                        &graph,
+                        &node_id,
+                        edge_type.as_deref(),
+                    ))?;
+                    outgoing.extend(incoming);
+                    outgoing
+                }
+            };
+            Ok(Output::GraphNeighbors(
+                neighbors
+                    .into_iter()
+                    .map(|neighbor| crate::GraphNeighborHit {
+                        node_id: neighbor.node_id,
+                        edge_type: neighbor.edge_type,
+                        weight: neighbor.edge_data.weight,
+                    })
+                    .collect(),
+            ))
+        }
+        other => Err(crate::Error::Internal {
+            reason: format!("unexpected graph transaction command: {}", other.name()),
+            hint: None,
+        }),
+    }
+}
+
+fn parse_direction(direction: Option<&str>) -> Result<Direction> {
+    match direction {
+        None | Some("outgoing") => Ok(Direction::Outgoing),
+        Some("incoming") => Ok(Direction::Incoming),
+        Some("both") => Ok(Direction::Both),
+        Some(other) => Err(crate::Error::InvalidInput {
+            reason: format!(
+                "Invalid direction '{}'. Must be 'outgoing', 'incoming', or 'both'.",
+                other
+            ),
+            hint: None,
+        }),
+    }
+}
+
+fn parse_cascade_policy(s: Option<&str>) -> Result<strata_graph::types::CascadePolicy> {
+    match s {
+        None | Some("ignore") => Ok(strata_graph::types::CascadePolicy::Ignore),
+        Some("cascade") => Ok(strata_graph::types::CascadePolicy::Cascade),
+        Some("detach") => Ok(strata_graph::types::CascadePolicy::Detach),
+        Some(other) => Err(crate::Error::InvalidInput {
+            reason: format!(
+                "Invalid cascade_policy '{}'. Must be 'cascade', 'detach', or 'ignore'.",
+                other
+            ),
+            hint: None,
+        }),
+    }
 }

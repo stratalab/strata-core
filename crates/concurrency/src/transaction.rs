@@ -44,6 +44,16 @@ impl StoredJsonDoc {
         }
     }
 
+    fn from_legacy_value(id: impl Into<String>, value: JsonValue) -> Self {
+        Self {
+            id: id.into(),
+            value,
+            version: 1,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
+
     fn touch(&mut self) {
         self.version += 1;
         self.updated_at = current_time_micros();
@@ -67,9 +77,19 @@ fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult
                 rmp_serde::from_slice::<StoredJsonDoc>(payload)
                     .map_err(|e| StrataError::serialization(e.to_string()))
             };
+            let decode_legacy_doc = |payload: &[u8]| {
+                let doc = decode_doc(payload)?;
+                if fallback_id.is_empty() || doc.id == fallback_id {
+                    Ok(doc)
+                } else {
+                    Err(StrataError::serialization(
+                        "legacy JsonDoc id mismatch".to_string(),
+                    ))
+                }
+            };
             let decode_value = |payload: &[u8]| {
                 rmp_serde::from_slice::<JsonValue>(payload)
-                    .map(|value| StoredJsonDoc::new(fallback_id, value))
+                    .map(|value| StoredJsonDoc::from_legacy_value(fallback_id, value))
                     .map_err(|e| StrataError::serialization(e.to_string()))
             };
 
@@ -78,7 +98,7 @@ fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult
                     .or_else(|_| decode_doc(bytes))
                     .or_else(|_| decode_value(bytes))
             } else {
-                decode_doc(bytes).or_else(|_| decode_value(bytes))
+                decode_legacy_doc(bytes).or_else(|_| decode_value(bytes))
             }
         }
         other => Err(StrataError::invalid_input(format!(
@@ -2397,9 +2417,75 @@ mod tests {
             )
             .unwrap();
 
+        let stored = store
+            .get_versioned(&key, CommitVersion(5))
+            .unwrap()
+            .expect("legacy raw JSON should be present");
+        let doc = deserialize_stored_json_doc(&stored.value, "doc1").unwrap();
+        assert_eq!(doc.id, "doc1");
+        assert_eq!(doc.value, JsonValue::from(2));
+        assert_eq!(doc.version, 1);
+        assert_eq!(doc.created_at, 0);
+        assert_eq!(doc.updated_at, 0);
+
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
         let value = txn.json_get_document(&key).unwrap();
         assert_eq!(value, Some(JsonValue::from(2)));
+    }
+
+    #[test]
+    fn test_json_get_reads_legacy_raw_json_object_with_doc_like_keys_as_user_data() {
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_json_key(&ns, "doc1");
+        let store = Arc::new(SegmentedStore::new());
+        let raw = rmp_serde::to_vec(&JsonValue::from_value(serde_json::json!({
+            "id": "embedded-id",
+            "value": { "payload": "user-data" },
+            "version": 7,
+            "created_at": 100u64,
+            "updated_at": 200u64
+        })))
+        .unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Bytes(raw),
+                CommitVersion(5),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let stored = store
+            .get_versioned(&key, CommitVersion(5))
+            .unwrap()
+            .expect("legacy raw JSON should be present");
+        let doc = deserialize_stored_json_doc(&stored.value, "doc1").unwrap();
+        assert_eq!(doc.id, "doc1");
+        assert_eq!(
+            doc.value,
+            JsonValue::from_value(serde_json::json!({
+                "id": "embedded-id",
+                "value": { "payload": "user-data" },
+                "version": 7,
+                "created_at": 100u64,
+                "updated_at": 200u64
+            }))
+        );
+
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
+        let value = txn.json_get_document(&key).unwrap();
+        assert_eq!(
+            value,
+            Some(JsonValue::from_value(serde_json::json!({
+                "id": "embedded-id",
+                "value": { "payload": "user-data" },
+                "version": 7,
+                "created_at": 100u64,
+                "updated_at": 200u64
+            })))
+        );
     }
 
     #[test]

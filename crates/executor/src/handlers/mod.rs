@@ -19,21 +19,6 @@ pub(crate) mod space;
 pub(crate) mod space_delete;
 pub(crate) mod vector;
 
-use crate::{BranchId, Error, Result};
-
-pub(crate) fn reject_system_branch(branch: &BranchId) -> Result<()> {
-    if branch.as_str().starts_with("_system") {
-        return Err(Error::InvalidInput {
-            reason: format!("Branch '{}' is reserved for system use", branch.as_str()),
-            hint: Some(
-                "Branches starting with '_system' are internal and cannot be accessed directly."
-                    .to_string(),
-            ),
-        });
-    }
-    Ok(())
-}
-
 pub(crate) fn sample_indices(total: usize, count: usize) -> Vec<usize> {
     if total == 0 || count == 0 {
         return Vec::new();
