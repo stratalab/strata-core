@@ -108,7 +108,7 @@ pub(crate) fn is_read_only(access_mode: AccessMode) -> bool {
     matches!(access_mode, AccessMode::ReadOnly)
 }
 
-pub(crate) fn is_local_executor_command(command: &Command) -> bool {
+pub(crate) fn bypasses_active_transaction(command: &Command) -> bool {
     matches!(
         command,
         Command::Ping
@@ -117,6 +117,18 @@ pub(crate) fn is_local_executor_command(command: &Command) -> bool {
             | Command::Metrics
             | Command::Flush
             | Command::Compact
+            | Command::Describe { .. }
+            | Command::SpaceList { .. }
+            | Command::SpaceCreate { .. }
+            | Command::SpaceExists { .. }
+            | Command::SpaceDelete { .. }
+            | Command::TagCreate { .. }
+            | Command::TagDelete { .. }
+            | Command::TagList { .. }
+            | Command::TagResolve { .. }
+            | Command::NoteAdd { .. }
+            | Command::NoteGet { .. }
+            | Command::NoteDelete { .. }
     )
 }
 

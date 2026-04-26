@@ -7,9 +7,10 @@
 //! See `docs/architecture/M2_TRANSACTION_SEMANTICS.md` for the full specification.
 
 use crate::validation::{validate_transaction, ValidationResult};
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
 use strata_core::traits::{Storage, WriteMode};
@@ -19,6 +20,80 @@ use strata_core::StrataError;
 use strata_core::StrataResult;
 use strata_core::{Version, Versioned, VersionedValue};
 use strata_storage::SegmentedStore;
+
+const JSON_DOC_FORMAT_VERSION: u8 = 0x02;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct StoredJsonDoc {
+    id: String,
+    value: JsonValue,
+    version: u64,
+    created_at: u64,
+    updated_at: u64,
+}
+
+impl StoredJsonDoc {
+    fn new(id: impl Into<String>, value: JsonValue) -> Self {
+        let now = current_time_micros();
+        Self {
+            id: id.into(),
+            value,
+            version: 1,
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn touch(&mut self) {
+        self.version += 1;
+        self.updated_at = current_time_micros();
+    }
+}
+
+fn current_time_micros() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_micros() as u64
+}
+
+fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult<StoredJsonDoc> {
+    match value {
+        Value::Bytes(bytes) if bytes.is_empty() => {
+            Err(StrataError::serialization("empty JsonDoc bytes"))
+        }
+        Value::Bytes(bytes) => {
+            let decode_doc = |payload: &[u8]| {
+                rmp_serde::from_slice::<StoredJsonDoc>(payload)
+                    .map_err(|e| StrataError::serialization(e.to_string()))
+            };
+            let decode_value = |payload: &[u8]| {
+                rmp_serde::from_slice::<JsonValue>(payload)
+                    .map(|value| StoredJsonDoc::new(fallback_id, value))
+                    .map_err(|e| StrataError::serialization(e.to_string()))
+            };
+
+            if bytes[0] == JSON_DOC_FORMAT_VERSION {
+                decode_doc(&bytes[1..])
+                    .or_else(|_| decode_doc(bytes))
+                    .or_else(|_| decode_value(bytes))
+            } else {
+                decode_doc(bytes).or_else(|_| decode_value(bytes))
+            }
+        }
+        other => Err(StrataError::invalid_input(format!(
+            "expected bytes for JsonDoc, got {other:?}"
+        ))),
+    }
+}
+
+fn serialize_stored_json_doc(doc: &StoredJsonDoc) -> StrataResult<Value> {
+    let payload = rmp_serde::to_vec(doc).map_err(|e| StrataError::serialization(e.to_string()))?;
+    let mut bytes = Vec::with_capacity(1 + payload.len());
+    bytes.push(JSON_DOC_FORMAT_VERSION);
+    bytes.extend_from_slice(&payload);
+    Ok(Value::Bytes(bytes))
+}
 
 /// Error type for commit failures
 ///
@@ -1824,34 +1899,64 @@ impl TransactionContext {
         })?;
 
         for (key, patches) in patches_by_key {
-            // Read the base document from the snapshot.
-            let mut doc: JsonValue =
-                if let Some(vv) = store.get_versioned(&key, self.start_version)? {
-                    match &vv.value {
-                        Value::Bytes(b) => rmp_serde::from_slice(b).map_err(|e| {
-                            StrataError::internal(format!(
-                                "Failed to deserialize JSON document for materialization: {}",
-                                e
-                            ))
-                        })?,
-                        _ => JsonValue::object(),
-                    }
-                } else {
-                    JsonValue::object()
-                };
+            let doc_id = key.user_key_string().ok_or_else(|| {
+                StrataError::internal("JSON materialization requires a string document id")
+            })?;
+            let mut base_doc = store
+                .get_versioned(&key, self.start_version)?
+                .map(|vv| deserialize_stored_json_doc(&vv.value, &doc_id))
+                .transpose()?;
 
-            apply_patches(&mut doc, &patches).map_err(|e| {
+            let has_set_patch = patches
+                .iter()
+                .any(|patch| matches!(patch, JsonPatch::Set { .. }));
+            let delete_document = patches.iter().fold(false, |deleted, patch| match patch {
+                JsonPatch::Delete { path } if path.is_root() => true,
+                JsonPatch::Set { path, .. } if path.is_root() => false,
+                _ => deleted,
+            });
+
+            if delete_document {
+                self.write_set.remove(&key);
+                self.delete_set.insert(key);
+                continue;
+            }
+
+            if base_doc.is_none() && !has_set_patch {
+                continue;
+            }
+
+            let existing = base_doc.is_some();
+            let mut doc = base_doc
+                .take()
+                .unwrap_or_else(|| StoredJsonDoc::new(&doc_id, JsonValue::object()));
+
+            apply_patches(&mut doc.value, &patches).map_err(|e| {
                 StrataError::internal(format!("Failed to apply JSON patches: {}", e))
             })?;
-
-            let doc_bytes = rmp_serde::to_vec(&doc).map_err(|e| {
-                StrataError::internal(format!(
-                    "Failed to serialize materialized JSON document: {}",
-                    e
-                ))
+            doc.value.validate().map_err(|e| {
+                StrataError::invalid_input(format!("JSON document exceeds limits: {}", e))
             })?;
 
-            self.write_set.insert(key, Value::Bytes(doc_bytes));
+            let version_bumps = if existing {
+                patches
+                    .iter()
+                    .filter(|patch| !matches!(patch, JsonPatch::Delete { path } if path.is_root()))
+                    .count()
+            } else {
+                patches
+                    .iter()
+                    .filter(|patch| !matches!(patch, JsonPatch::Delete { path } if path.is_root()))
+                    .count()
+                    .saturating_sub(1)
+            };
+            for _ in 0..version_bumps {
+                doc.touch();
+            }
+
+            let doc_value = serialize_stored_json_doc(&doc)?;
+            self.delete_set.remove(&key);
+            self.write_set.insert(key, doc_value);
         }
 
         Ok(())
@@ -2113,13 +2218,13 @@ impl JsonStoreExt for TransactionContext {
             }
         };
 
-        // Deserialize using MessagePack
-        let doc_value: JsonValue = rmp_serde::from_slice(doc_bytes).map_err(|e| {
-            StrataError::invalid_input(format!("Failed to deserialize JSON document: {}", e))
-        })?;
+        let doc = deserialize_stored_json_doc(
+            &Value::Bytes(doc_bytes.clone()),
+            &key.user_key_string().unwrap_or_default(),
+        )?;
 
         // Get value at path
-        Ok(get_at_path(&doc_value, path).cloned())
+        Ok(get_at_path(&doc.value, path).cloned())
     }
 
     fn json_set(&mut self, key: &Key, path: &JsonPath, value: JsonValue) -> StrataResult<()> {
@@ -2209,6 +2314,10 @@ mod tests {
         Key::new(ns.clone(), TypeTag::KV, name.as_bytes().to_vec())
     }
 
+    fn test_json_key(ns: &Arc<Namespace>, name: &str) -> Key {
+        Key::new_json(ns.clone(), name)
+    }
+
     /// Create a store with a single key-value at the given version.
     fn store_with_key(key: &Key, value: Value, version: u64) -> Arc<SegmentedStore> {
         let store = Arc::new(SegmentedStore::new());
@@ -2227,6 +2336,70 @@ mod tests {
     /// Create an empty store (no data).
     fn empty_store() -> Arc<SegmentedStore> {
         Arc::new(SegmentedStore::new())
+    }
+
+    #[test]
+    fn test_json_get_reads_committed_json_doc_shape() {
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_json_key(&ns, "doc1");
+        let store = Arc::new(SegmentedStore::new());
+        let doc = StoredJsonDoc::new("doc1", JsonValue::from("hello"));
+        let stored = serialize_stored_json_doc(&doc).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                stored,
+                CommitVersion(5),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
+        let value = txn.json_get_document(&key).unwrap();
+        assert_eq!(value, Some(JsonValue::from("hello")));
+    }
+
+    #[test]
+    fn test_materialize_json_writes_emits_json_doc_shape() {
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_json_key(&ns, "doc1");
+        let store = empty_store();
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
+
+        txn.json_set(&key, &JsonPath::root(), JsonValue::from("hello"))
+            .unwrap();
+        txn.materialize_json_writes().unwrap();
+
+        let stored = txn.write_set.get(&key).expect("materialized JSON write");
+        let doc = deserialize_stored_json_doc(stored, "doc1").unwrap();
+        assert_eq!(doc.id, "doc1");
+        assert_eq!(doc.value, JsonValue::from("hello"));
+        assert_eq!(doc.version, 1);
+    }
+
+    #[test]
+    fn test_json_get_reads_legacy_raw_json_value_when_first_byte_matches_doc_version() {
+        let branch_id = BranchId::new();
+        let ns = test_namespace_for(branch_id);
+        let key = test_json_key(&ns, "doc1");
+        let store = Arc::new(SegmentedStore::new());
+        let raw = rmp_serde::to_vec(&JsonValue::from(2)).unwrap();
+        store
+            .put_with_version_mode(
+                key.clone(),
+                Value::Bytes(raw),
+                CommitVersion(5),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
+        let value = txn.json_get_document(&key).unwrap();
+        assert_eq!(value, Some(JsonValue::from(2)));
     }
 
     #[test]

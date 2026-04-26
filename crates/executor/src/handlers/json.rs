@@ -7,6 +7,7 @@ use crate::bridge::{
     validate_key, validate_value, value_to_json, Primitives,
 };
 use crate::convert::convert_result;
+use crate::handlers::embed_runtime;
 use crate::{
     BatchGetItemResult, BatchItemResult, BranchId, Output, Result, SampleItem, Value,
     VersionedValue,
@@ -35,11 +36,12 @@ pub(crate) fn set(
 
     let path = convert_result(parse_path(&path))?;
     let value = convert_result(value_to_json(value))?;
-    let (version, _) = convert_result(
+    let (version, full_doc) = convert_result(
         primitives
             .json
             .set_or_create(&branch_id, &space, &key, &path, value),
     )?;
+    embed_doc_value(primitives, branch_id, &space, &key, full_doc);
 
     Ok(Output::WriteResult {
         key,
@@ -103,13 +105,25 @@ pub(crate) fn delete(
 
     if path.is_root() {
         let deleted = convert_result(primitives.json.destroy(&branch_id, &space, &key))?;
+        if deleted {
+            embed_runtime::maybe_remove_embedding(
+                primitives,
+                branch_id,
+                &space,
+                embed_runtime::SHADOW_JSON,
+                &key,
+            );
+        }
         Ok(Output::DeleteResult { key, deleted })
     } else {
         match primitives
             .json
             .delete_at_path(&branch_id, &space, &key, &path)
         {
-            Ok(_) => Ok(Output::DeleteResult { key, deleted: true }),
+            Ok(_) => {
+                embed_full_doc(primitives, branch_id, &space, &key);
+                Ok(Output::DeleteResult { key, deleted: true })
+            }
             Err(error) => {
                 let error = crate::Error::from(error);
                 let is_missing = matches!(&error, crate::Error::InvalidInput { reason, .. } if reason.contains("not found"));
@@ -216,6 +230,13 @@ pub(crate) fn batch_set(
 
     for (engine_index, (result_index, _, _, _)) in valid_entries.iter().enumerate() {
         results[*result_index].version = Some(extract_version(&engine_results[engine_index].0));
+        embed_doc_value(
+            primitives,
+            branch_id,
+            &space,
+            &valid_entries[engine_index].1,
+            engine_results[engine_index].1.clone(),
+        );
     }
 
     Ok(Output::BatchResults(results))
@@ -326,6 +347,13 @@ pub(crate) fn batch_delete(
         for (engine_index, (result_index, _)) in valid_doc_ids.iter().enumerate() {
             if destroyed[engine_index] {
                 results[*result_index].version = Some(0);
+                embed_runtime::maybe_remove_embedding(
+                    primitives,
+                    branch_id,
+                    &space,
+                    embed_runtime::SHADOW_JSON,
+                    &valid_doc_ids[engine_index].1,
+                );
             }
         }
         return Ok(Output::BatchResults(results));
@@ -363,7 +391,15 @@ pub(crate) fn batch_delete(
 
     for (engine_index, (result_index, _, _)) in valid_entries.iter().enumerate() {
         match &engine_results[engine_index] {
-            Ok(version) => results[*result_index].version = Some(extract_version(version)),
+            Ok(version) => {
+                results[*result_index].version = Some(extract_version(version));
+                embed_full_doc(
+                    primitives,
+                    branch_id,
+                    &space,
+                    &valid_entries[engine_index].1,
+                );
+            }
             Err(error) => results[*result_index].error = Some(error.to_string()),
         }
     }
@@ -410,6 +446,69 @@ pub(crate) fn list(
         has_more: result.next_cursor.is_some(),
         cursor: result.next_cursor,
     })
+}
+
+fn embed_doc_value(
+    primitives: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    key: &str,
+    json_value: strata_core::primitives::json::JsonValue,
+) {
+    if let Ok(value) = json_to_value(json_value) {
+        if let Some(text) = embed_runtime::extract_text(&value) {
+            embed_runtime::maybe_embed_text(
+                primitives,
+                branch_id,
+                space,
+                embed_runtime::SHADOW_JSON,
+                key,
+                &text,
+                strata_core::EntityRef::json(branch_id, space, key),
+            );
+        } else {
+            embed_runtime::maybe_remove_embedding(
+                primitives,
+                branch_id,
+                space,
+                embed_runtime::SHADOW_JSON,
+                key,
+            );
+        }
+    } else {
+        embed_runtime::maybe_remove_embedding(
+            primitives,
+            branch_id,
+            space,
+            embed_runtime::SHADOW_JSON,
+            key,
+        );
+    }
+}
+
+fn embed_full_doc(
+    primitives: &Arc<Primitives>,
+    branch_id: strata_core::types::BranchId,
+    space: &str,
+    key: &str,
+) {
+    use strata_core::primitives::json::JsonPath;
+
+    match primitives
+        .json
+        .get(&branch_id, space, key, &JsonPath::root())
+    {
+        Ok(Some(json_value)) => embed_doc_value(primitives, branch_id, space, key, json_value),
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(
+                target: "strata::embed",
+                key = key,
+                error = %error,
+                "Failed to read document after JSON mutation"
+            );
+        }
+    }
 }
 
 pub(crate) fn count(

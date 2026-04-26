@@ -304,6 +304,102 @@ pub(crate) fn validate_bundle(path: String) -> Result<Output> {
     }))
 }
 
+pub(crate) fn tag_create(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    name: String,
+    version: Option<u64>,
+    message: Option<String>,
+    creator: Option<String>,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let info = convert_result(primitives.db.branches().tag(
+        &branch,
+        &name,
+        version,
+        message.as_deref(),
+        creator.as_deref(),
+    ))?;
+    Ok(Output::TagCreated(info))
+}
+
+pub(crate) fn tag_delete(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    name: String,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let deleted = convert_result(primitives.db.branches().untag(&branch, &name))?;
+    Ok(Output::Bool(deleted))
+}
+
+pub(crate) fn tag_list(primitives: &Arc<Primitives>, branch: String) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let tags = convert_result(primitives.db.branches().list_tags(&branch))?;
+    Ok(Output::TagList(tags))
+}
+
+pub(crate) fn tag_resolve(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    name: String,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let tag = convert_result(primitives.db.branches().resolve_tag(&branch, &name))?;
+    Ok(Output::MaybeTag(tag))
+}
+
+pub(crate) fn note_add(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    version: u64,
+    message: String,
+    author: Option<String>,
+    metadata: Option<strata_core::Value>,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let note = convert_result(primitives.db.branches().add_note(
+        &branch,
+        CommitVersion(version),
+        &message,
+        author.as_deref(),
+        metadata,
+    ))?;
+    Ok(Output::NoteAdded(note))
+}
+
+pub(crate) fn note_get(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    version: Option<u64>,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let notes = convert_result(primitives.db.branches().get_notes(&branch, version))?;
+    Ok(Output::NoteList(notes))
+}
+
+pub(crate) fn note_delete(
+    primitives: &Arc<Primitives>,
+    branch: String,
+    version: u64,
+) -> Result<Output> {
+    reject_reserved_name(&branch)?;
+
+    let deleted = convert_result(
+        primitives
+            .db
+            .branches()
+            .delete_note(&branch, CommitVersion(version)),
+    )?;
+    Ok(Output::Bool(deleted))
+}
+
 fn reject_reserved_name(branch: &str) -> Result<()> {
     if branch.starts_with("_system") {
         return Err(crate::Error::InvalidInput {

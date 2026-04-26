@@ -232,14 +232,16 @@ pub(crate) fn search(
         None
     };
 
-    let (embedding_pending, embedding_total) = match crate::handlers::embed_runtime::embed_status(p)
-    {
-        Ok(embed_status) if embed_status.auto_embed && embed_status.pending > 0 => (
-            Some(embed_status.pending as u64),
-            Some(embed_status.total_queued),
-        ),
-        _ => (None, None),
-    };
+    let embed_status = crate::handlers::embed_runtime::embed_status(p);
+    let (embedding_pending, embedding_total) =
+        if embed_status.auto_embed && embed_status.pending > 0 {
+            (
+                Some(embed_status.pending as u64),
+                Some(embed_status.total_queued),
+            )
+        } else {
+            (None, None)
+        };
 
     // Split the rag_answer into the executor-level AnswerResponse + stats
     // fields. The intelligence-layer RagAnswer carries both the user-visible

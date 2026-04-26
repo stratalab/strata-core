@@ -13,6 +13,8 @@ mod adversarial;
 mod branch_invariants;
 mod command_dispatch;
 mod error_handling;
+mod ex10_commands;
+mod ex11_commands;
 mod ex5_commands;
 mod serialization;
 mod session_transactions;

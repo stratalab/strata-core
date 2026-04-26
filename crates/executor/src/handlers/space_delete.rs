@@ -4,6 +4,7 @@ use strata_core::types::{Key, Namespace, TypeTag};
 
 use crate::bridge::{require_branch_exists, to_core_branch_id, Primitives};
 use crate::convert::convert_result;
+use crate::handlers::embed_runtime;
 use crate::{BranchId, Error, Output, Result};
 
 pub(crate) fn delete(
@@ -48,6 +49,22 @@ pub(crate) fn delete(
         Ok(())
     }))?;
 
+    if let Ok(index) = primitives
+        .db
+        .extension::<strata_engine::search::InvertedIndex>()
+    {
+        let removed = index.remove_documents_in_space(branch_id, &space);
+        if removed > 0 {
+            tracing::info!(
+                target: "strata::space",
+                branch_id = %branch_id,
+                space = space.as_str(),
+                removed,
+                "Removed search documents during space delete"
+            );
+        }
+    }
+
     if let Err(error) = primitives
         .vector
         .purge_collections_in_space(branch_id, &space)
@@ -60,6 +77,8 @@ pub(crate) fn delete(
             "Failed to purge vector collections during space delete"
         );
     }
+
+    embed_runtime::delete_shadow_embeddings_for_space(primitives, branch_id, &space);
 
     convert_result(primitives.space.delete(branch_id, &space))?;
     Ok(Output::Unit)

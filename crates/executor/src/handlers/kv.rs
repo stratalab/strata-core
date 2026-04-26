@@ -5,6 +5,7 @@ use crate::bridge::{
     validate_value, Primitives,
 };
 use crate::convert::convert_result;
+use crate::handlers::embed_runtime;
 use crate::{BatchGetItemResult, BatchItemResult, BranchId, Output, Result, SampleItem};
 
 fn page_keys(mut keys: Vec<String>, cursor: Option<&str>, limit: Option<u64>) -> Output {
@@ -41,8 +42,28 @@ pub(crate) fn put(
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
     convert_result(validate_value(&value, &primitives.limits))?;
+    let text = embed_runtime::extract_text(&value);
 
     let version = convert_result(primitives.kv.put(&branch_id, &space, &key, value))?;
+    if let Some(text) = text.as_deref() {
+        embed_runtime::maybe_embed_text(
+            primitives,
+            branch_id,
+            &space,
+            embed_runtime::SHADOW_KV,
+            &key,
+            text,
+            strata_core::EntityRef::kv(branch_id, &space, &key),
+        );
+    } else {
+        embed_runtime::maybe_remove_embedding(
+            primitives,
+            branch_id,
+            &space,
+            embed_runtime::SHADOW_KV,
+            &key,
+        );
+    }
     Ok(Output::WriteResult {
         key,
         version: extract_version(&version),
@@ -82,6 +103,15 @@ pub(crate) fn delete(
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_key(&key))?;
     let deleted = convert_result(primitives.kv.delete(&branch_id, &space, &key))?;
+    if deleted {
+        embed_runtime::maybe_remove_embedding(
+            primitives,
+            branch_id,
+            &space,
+            embed_runtime::SHADOW_KV,
+            &key,
+        );
+    }
     Ok(Output::DeleteResult { key, deleted })
 }
 
@@ -198,6 +228,11 @@ pub(crate) fn batch_put(
         return Ok(Output::BatchResults(results));
     }
 
+    let embed_data: Vec<(usize, String, Option<String>)> = valid_entries
+        .iter()
+        .map(|(index, key, value)| (*index, key.clone(), embed_runtime::extract_text(value)))
+        .collect();
+
     let engine_entries: Vec<(String, strata_core::Value)> = valid_entries
         .iter()
         .map(|(_, key, value)| (key.clone(), value.clone()))
@@ -207,7 +242,32 @@ pub(crate) fn batch_put(
 
     for (engine_index, (result_index, _, _)) in valid_entries.iter().enumerate() {
         match &engine_results[engine_index] {
-            Ok(version) => results[*result_index].version = Some(extract_version(version)),
+            Ok(version) => {
+                results[*result_index].version = Some(extract_version(version));
+                if let Some(text) = embed_data[engine_index].2.as_deref() {
+                    embed_runtime::maybe_embed_text(
+                        primitives,
+                        branch_id,
+                        &space,
+                        embed_runtime::SHADOW_KV,
+                        &embed_data[engine_index].1,
+                        text,
+                        strata_core::EntityRef::kv(
+                            branch_id,
+                            &space,
+                            embed_data[engine_index].1.as_str(),
+                        ),
+                    );
+                } else {
+                    embed_runtime::maybe_remove_embedding(
+                        primitives,
+                        branch_id,
+                        &space,
+                        embed_runtime::SHADOW_KV,
+                        &embed_data[engine_index].1,
+                    );
+                }
+            }
             Err(error) => results[*result_index].error = Some(error.clone()),
         }
     }
@@ -303,6 +363,13 @@ pub(crate) fn batch_delete(
     for (engine_index, (result_index, _)) in valid_keys.iter().enumerate() {
         if engine_results[engine_index] {
             results[*result_index].version = Some(0);
+            embed_runtime::maybe_remove_embedding(
+                primitives,
+                branch_id,
+                &space,
+                embed_runtime::SHADOW_KV,
+                &valid_keys[engine_index].1,
+            );
         }
     }
 

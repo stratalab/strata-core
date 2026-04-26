@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use strata_engine::Database;
 use strata_security::AccessMode;
@@ -21,6 +22,15 @@ pub struct Executor {
     backend: strata_executor_legacy::Executor,
     access_mode: AccessMode,
     default_branch: BranchId,
+    embed_refresh_state: Arc<EmbedRefreshState>,
+    embed_refresh_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+const EMBED_REFRESH_INTERVAL: Duration = Duration::from_secs(1);
+
+struct EmbedRefreshState {
+    mu: std::sync::Mutex<bool>,
+    cond: std::sync::Condvar,
 }
 
 impl Executor {
@@ -34,13 +44,52 @@ impl Executor {
         let default_branch = runtime_default_branch(&db);
         let primitives = Arc::new(Primitives::new(db.clone()));
         let backend = strata_executor_legacy::Executor::new_with_mode(db.clone(), access_mode);
+        let embed_refresh_state = Arc::new(EmbedRefreshState {
+            mu: std::sync::Mutex::new(false),
+            cond: std::sync::Condvar::new(),
+        });
+        let embed_refresh_handle = Some(Self::spawn_embed_refresh_thread(
+            &primitives,
+            &embed_refresh_state,
+        ));
         Self {
             db,
             primitives,
             backend,
             access_mode,
             default_branch,
+            embed_refresh_state,
+            embed_refresh_handle,
         }
+    }
+
+    fn spawn_embed_refresh_thread(
+        primitives: &Arc<Primitives>,
+        state: &Arc<EmbedRefreshState>,
+    ) -> std::thread::JoinHandle<()> {
+        let primitives = Arc::clone(primitives);
+        let state = Arc::clone(state);
+        std::thread::Builder::new()
+            .name("strata-embed-refresh".into())
+            .spawn(move || {
+                let mut guard = state.mu.lock().unwrap_or_else(|e| e.into_inner());
+                while !*guard {
+                    let (next_guard, _) = state
+                        .cond
+                        .wait_timeout(guard, EMBED_REFRESH_INTERVAL)
+                        .unwrap_or_else(|e| e.into_inner());
+                    guard = next_guard;
+                    if *guard || !primitives.db.auto_embed_enabled() {
+                        continue;
+                    }
+                    let task_primitives = Arc::clone(&primitives);
+                    let scheduler = primitives.db.scheduler();
+                    let _ = scheduler.submit(strata_engine::TaskPriority::Normal, move || {
+                        embed_runtime::flush_embed_buffer(&task_primitives)
+                    });
+                }
+            })
+            .expect("failed to spawn embed refresh thread")
     }
 
     /// Execute a command and return its structured result.
@@ -73,6 +122,10 @@ impl Executor {
         &self.db
     }
 
+    pub(crate) fn primitives(&self) -> &Arc<Primitives> {
+        &self.primitives
+    }
+
     pub(crate) fn execute_local(&self, command: Command) -> Result<Output> {
         match command {
             Command::Ping => Ok(Output::Pong {
@@ -85,6 +138,8 @@ impl Executor {
             Command::Health => Ok(Output::Health(self.db.health())),
             Command::Metrics => Ok(Output::Metrics(self.db.metrics())),
             Command::Flush => {
+                embed_runtime::flush_embed_buffer(&self.primitives);
+                self.db.scheduler().drain();
                 self.db.flush().map_err(Error::from)?;
                 Ok(Output::Unit)
             }
@@ -167,6 +222,33 @@ impl Executor {
             }
             Command::BranchImport { path } => branch::import_bundle(&self.primitives, path),
             Command::BranchBundleValidate { path } => branch::validate_bundle(path),
+            Command::TagCreate {
+                branch,
+                name,
+                version,
+                message,
+                creator,
+            } => branch::tag_create(&self.primitives, branch, name, version, message, creator),
+            Command::TagDelete { branch, name } => {
+                branch::tag_delete(&self.primitives, branch, name)
+            }
+            Command::TagList { branch } => branch::tag_list(&self.primitives, branch),
+            Command::TagResolve { branch, name } => {
+                branch::tag_resolve(&self.primitives, branch, name)
+            }
+            Command::NoteAdd {
+                branch,
+                version,
+                message,
+                author,
+                metadata,
+            } => branch::note_add(&self.primitives, branch, version, message, author, metadata),
+            Command::NoteGet { branch, version } => {
+                branch::note_get(&self.primitives, branch, version)
+            }
+            Command::NoteDelete { branch, version } => {
+                branch::note_delete(&self.primitives, branch, version)
+            }
             Command::SpaceList { branch } => space::list(
                 &self.primitives,
                 branch.unwrap_or_else(|| self.default_branch.clone()),
@@ -1278,9 +1360,9 @@ impl Executor {
                 generate::detokenize(&self.primitives, model, ids)
             }
             Command::GenerateUnload { model } => generate::generate_unload(&self.primitives, model),
-            Command::EmbedStatus => {
-                embed_runtime::embed_status(&self.primitives).map(Output::EmbedStatus)
-            }
+            Command::EmbedStatus => Ok(Output::EmbedStatus(embed_runtime::embed_status(
+                &self.primitives,
+            ))),
             Command::ReindexEmbeddings { branch } => embed_runtime::reindex_embeddings(
                 &self.primitives,
                 branch.unwrap_or_else(|| self.default_branch.clone()),
@@ -1360,6 +1442,13 @@ impl Executor {
                 | Command::BranchExport { .. }
                 | Command::BranchImport { .. }
                 | Command::BranchBundleValidate { .. }
+                | Command::TagCreate { .. }
+                | Command::TagDelete { .. }
+                | Command::TagList { .. }
+                | Command::TagResolve { .. }
+                | Command::NoteAdd { .. }
+                | Command::NoteGet { .. }
+                | Command::NoteDelete { .. }
                 | Command::SpaceList { .. }
                 | Command::SpaceCreate { .. }
                 | Command::SpaceExists { .. }
@@ -1478,25 +1567,7 @@ impl Executor {
         )
     }
 
-    fn requires_legacy_compat(&self, command: &Command) -> bool {
-        if self.db.auto_embed_enabled() {
-            return matches!(
-                command,
-                Command::Flush
-                    | Command::KvPut { .. }
-                    | Command::KvDelete { .. }
-                    | Command::KvBatchPut { .. }
-                    | Command::KvBatchDelete { .. }
-                    | Command::JsonSet { .. }
-                    | Command::JsonDelete { .. }
-                    | Command::JsonBatchSet { .. }
-                    | Command::JsonBatchDelete { .. }
-                    | Command::EventAppend { .. }
-                    | Command::EventBatchAppend { .. }
-                    | Command::SpaceDelete { .. }
-            );
-        }
-
+    fn requires_legacy_compat(&self, _command: &Command) -> bool {
         false
     }
 
@@ -1504,6 +1575,23 @@ impl Executor {
         let command = remap(command, "command")?;
         let output = self.backend.execute(command).map_err(remap_error)?;
         remap(output, "command output")
+    }
+}
+
+impl Drop for Executor {
+    fn drop(&mut self) {
+        let mut shutdown = self
+            .embed_refresh_state
+            .mu
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *shutdown = true;
+        self.embed_refresh_state.cond.notify_all();
+        drop(shutdown);
+
+        if let Some(handle) = self.embed_refresh_handle.take() {
+            let _ = handle.join();
+        }
     }
 }
 
@@ -1567,15 +1655,28 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_commands_use_legacy_path_without_local_masking() {
+    fn branch_metadata_executes_on_local_path() {
         let executor = Executor::new(test_db());
+        let tag_name = format!("local-tag-{}", uuid::Uuid::new_v4());
+        executor
+            .execute(Command::TagCreate {
+                branch: "default".into(),
+                name: tag_name.clone(),
+                version: None,
+                message: None,
+                creator: None,
+            })
+            .expect("branch metadata commands should execute locally");
+
         let output = executor
             .execute(Command::TagList {
                 branch: "default".into(),
             })
-            .expect("legacy-only commands should still execute");
-
-        assert!(matches!(output, Output::TagList(_)));
+            .expect("branch metadata list should execute locally");
+        match output {
+            Output::TagList(tags) => assert!(tags.iter().any(|tag| tag.name == tag_name)),
+            other => panic!("unexpected output: {other:?}"),
+        }
     }
 
     #[test]

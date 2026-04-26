@@ -4,6 +4,7 @@ use crate::bridge::{
     extract_version, require_branch_exists, to_core_branch_id, validate_value, Primitives,
 };
 use crate::convert::convert_result;
+use crate::handlers::embed_runtime;
 use crate::{BatchItemResult, BranchId, Output, Result, ScanDirection, VersionedValue};
 
 pub(crate) fn batch_append(
@@ -39,6 +40,11 @@ pub(crate) fn batch_append(
         return Ok(Output::BatchResults(results));
     }
 
+    let embed_data: Vec<(usize, Option<String>)> = valid_entries
+        .iter()
+        .map(|(index, _, payload)| (*index, embed_runtime::extract_text(payload)))
+        .collect();
+
     let engine_entries: Vec<_> = valid_entries
         .iter()
         .map(|(_, event_type, payload)| (event_type.clone(), payload.clone()))
@@ -51,7 +57,22 @@ pub(crate) fn batch_append(
 
     for (engine_index, (result_index, _, _)) in valid_entries.iter().enumerate() {
         match &engine_results[engine_index] {
-            Ok(version) => results[*result_index].version = Some(extract_version(version)),
+            Ok(version) => {
+                let sequence = extract_version(version);
+                results[*result_index].version = Some(sequence);
+                if let Some(text) = embed_data[engine_index].1.as_deref() {
+                    let event_key = sequence.to_string();
+                    embed_runtime::maybe_embed_text(
+                        primitives,
+                        branch_id,
+                        &space,
+                        embed_runtime::SHADOW_EVENT,
+                        &event_key,
+                        text,
+                        strata_core::EntityRef::event(branch_id, &space, sequence),
+                    );
+                }
+            }
             Err(error) => results[*result_index].error = Some(error.clone()),
         }
     }
@@ -69,14 +90,28 @@ pub(crate) fn append(
     require_branch_exists(primitives, &branch)?;
     let branch_id = to_core_branch_id(&branch)?;
     convert_result(validate_value(&payload, &primitives.limits))?;
+    let text = embed_runtime::extract_text(&payload);
     let version = convert_result(primitives.event.append(
         &branch_id,
         &space,
         &event_type,
         payload,
     ))?;
+    let sequence = extract_version(&version);
+    if let Some(text) = text.as_deref() {
+        let event_key = sequence.to_string();
+        embed_runtime::maybe_embed_text(
+            primitives,
+            branch_id,
+            &space,
+            embed_runtime::SHADOW_EVENT,
+            &event_key,
+            text,
+            strata_core::EntityRef::event(branch_id, &space, sequence),
+        );
+    }
     Ok(Output::EventAppendResult {
-        sequence: extract_version(&version),
+        sequence,
         event_type,
     })
 }

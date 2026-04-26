@@ -5,7 +5,12 @@
 
 use crate::common::*;
 use strata_core::Value;
-use strata_executor::{BranchId, Command, DistanceMetric, Error, Executor, Output, ScanDirection};
+use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
+use strata_engine::system_space::SYSTEM_SPACE;
+use strata_executor::{
+    BranchId, Command, DistanceMetric, Error, Executor, Output, ScanDirection, SearchQuery,
+};
+use strata_vector::{DistanceMetric as VectorDistanceMetric, VectorConfig, VectorStore};
 
 // ============================================================================
 // Database Commands
@@ -2713,6 +2718,202 @@ fn space_delete_force_removes_space_data_and_metadata() {
         })
         .expect_err("default space should be protected");
     assert!(matches!(error, Error::ConstraintViolation { .. }));
+}
+
+#[test]
+fn space_delete_force_clears_search_hits_for_deleted_space_only() {
+    let executor = create_executor();
+
+    executor.execute(Command::RecipeSeed).unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("tenant_x".into()),
+            key: "shared".into(),
+            value: Value::String("phase4 isolation marker".into()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("tenant_y".into()),
+            key: "shared".into(),
+            value: Value::String("phase4 isolation marker".into()),
+        })
+        .unwrap();
+
+    let search = |space: &str| {
+        executor
+            .execute(Command::Search {
+                branch: None,
+                space: Some(space.to_string()),
+                search: SearchQuery {
+                    query: "isolation".into(),
+                    recipe: Some(serde_json::Value::String("keyword".into())),
+                    precomputed_embedding: None,
+                    k: Some(10),
+                    as_of: None,
+                    diff: None,
+                },
+            })
+            .unwrap()
+    };
+
+    match search("tenant_x") {
+        Output::SearchResults { hits, .. } => assert_eq!(hits.len(), 1),
+        other => panic!("Expected search results for tenant_x, got {:?}", other),
+    }
+    match search("tenant_y") {
+        Output::SearchResults { hits, .. } => assert_eq!(hits.len(), 1),
+        other => panic!("Expected search results for tenant_y, got {:?}", other),
+    }
+
+    executor
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "tenant_x".into(),
+            force: true,
+        })
+        .unwrap();
+
+    match search("tenant_x") {
+        Output::SearchResults { hits, .. } => assert!(hits.is_empty()),
+        other => panic!(
+            "Expected search results for tenant_x after delete, got {:?}",
+            other
+        ),
+    }
+    match search("tenant_y") {
+        Output::SearchResults { hits, .. } => assert_eq!(hits.len(), 1),
+        other => panic!(
+            "Expected search results for tenant_y after delete, got {:?}",
+            other
+        ),
+    }
+}
+
+#[test]
+fn space_delete_force_clears_shadow_embeddings() {
+    let db = create_db();
+    let executor = Executor::new(db.clone());
+    let vector = VectorStore::new(db);
+    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("tenant_x".into()),
+            key: "k1".into(),
+            value: Value::String("phase4 shadow seed kv".into()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::JsonSet {
+            branch: None,
+            space: Some("tenant_x".into()),
+            key: "d1".into(),
+            path: "$".into(),
+            value: Value::String("phase4 shadow seed json".into()),
+        })
+        .unwrap();
+    executor
+        .execute(Command::EventAppend {
+            branch: None,
+            space: Some("tenant_x".into()),
+            event_type: "seed".into(),
+            payload: event_payload("data", Value::String("phase4 shadow seed event".into())),
+        })
+        .unwrap();
+    executor
+        .execute(Command::KvPut {
+            branch: None,
+            space: Some("tenant_y".into()),
+            key: "k1".into(),
+            value: Value::String("phase4 sibling kv".into()),
+        })
+        .unwrap();
+
+    let config = VectorConfig::new(4, VectorDistanceMetric::Cosine).unwrap();
+    vector
+        .create_system_collection(core_branch, SHADOW_KV, config.clone())
+        .unwrap();
+    vector
+        .create_system_collection(core_branch, SHADOW_JSON, config.clone())
+        .unwrap();
+    vector
+        .create_system_collection(core_branch, SHADOW_EVENT, config)
+        .unwrap();
+
+    let kv_x = "tenant_x\x1fk1".to_string();
+    let json_x = "tenant_x\x1fd1".to_string();
+    let event_x = "tenant_x\x1f0".to_string();
+    let kv_y = "tenant_y\x1fk1".to_string();
+
+    vector
+        .system_insert_with_source(
+            core_branch,
+            SHADOW_KV,
+            &kv_x,
+            &[1.0, 0.0, 0.0, 0.0],
+            None,
+            strata_core::EntityRef::kv(core_branch, "tenant_x", "k1"),
+        )
+        .unwrap();
+    vector
+        .system_insert_with_source(
+            core_branch,
+            SHADOW_JSON,
+            &json_x,
+            &[0.0, 1.0, 0.0, 0.0],
+            None,
+            strata_core::EntityRef::json(core_branch, "tenant_x", "d1"),
+        )
+        .unwrap();
+    vector
+        .system_insert_with_source(
+            core_branch,
+            SHADOW_EVENT,
+            &event_x,
+            &[0.0, 0.0, 1.0, 0.0],
+            None,
+            strata_core::EntityRef::event(core_branch, "tenant_x", 0),
+        )
+        .unwrap();
+    vector
+        .system_insert_with_source(
+            core_branch,
+            SHADOW_KV,
+            &kv_y,
+            &[0.0, 0.0, 0.0, 1.0],
+            None,
+            strata_core::EntityRef::kv(core_branch, "tenant_y", "k1"),
+        )
+        .unwrap();
+
+    executor
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "tenant_x".into(),
+            force: true,
+        })
+        .unwrap();
+
+    let kv_after = vector
+        .list_keys(core_branch, SYSTEM_SPACE, SHADOW_KV)
+        .unwrap();
+    let json_after = vector
+        .list_keys(core_branch, SYSTEM_SPACE, SHADOW_JSON)
+        .unwrap();
+    let event_after = vector
+        .list_keys(core_branch, SYSTEM_SPACE, SHADOW_EVENT)
+        .unwrap();
+
+    assert!(!kv_after.iter().any(|key| key.starts_with("tenant_x\x1f")));
+    assert!(!json_after.iter().any(|key| key.starts_with("tenant_x\x1f")));
+    assert!(!event_after
+        .iter()
+        .any(|key| key.starts_with("tenant_x\x1f")));
+    assert!(kv_after.iter().any(|key| key == &kv_y));
 }
 
 #[test]
