@@ -67,6 +67,22 @@ fn current_time_micros() -> u64 {
         .as_micros() as u64
 }
 
+/// Strict MessagePack decode that requires the input to be fully consumed.
+///
+/// Mirrors the engine-side helper: short garbage byte sequences must surface
+/// as errors instead of being silently interpreted as a leading scalar.
+fn decode_full_msgpack<T: serde::de::DeserializeOwned>(payload: &[u8]) -> StrataResult<T> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let value = rmp_serde::decode::from_read(&mut cursor)
+        .map_err(|e| StrataError::serialization(e.to_string()))?;
+    if (cursor.position() as usize) != payload.len() {
+        return Err(StrataError::serialization(
+            "trailing bytes after legacy JSON payload".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
 fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult<StoredJsonDoc> {
     match value {
         Value::Bytes(bytes) if bytes.is_empty() => {
@@ -88,9 +104,14 @@ fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult
                 }
             };
             let decode_value = |payload: &[u8]| {
-                rmp_serde::from_slice::<JsonValue>(payload)
-                    .map(|value| StoredJsonDoc::from_legacy_value(fallback_id, value))
-                    .map_err(|e| StrataError::serialization(e.to_string()))
+                // Strict-decode the legacy raw payload: require the
+                // MessagePack stream to consume the entire byte slice.
+                // Without this, garbage byte sequences like
+                // `[0, 1, 2, 3, 4, 5]` decode as a single positive fixint
+                // (the leading `0`) and silently mask real corruption as
+                // a "legacy" scalar document.
+                let value = decode_full_msgpack::<JsonValue>(payload)?;
+                Ok(StoredJsonDoc::from_legacy_value(fallback_id, value))
             };
 
             if bytes[0] == JSON_DOC_FORMAT_VERSION {

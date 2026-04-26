@@ -265,9 +265,14 @@ impl JsonStore {
                     }
                 };
                 let decode_value = |payload: &[u8]| {
-                    rmp_serde::from_slice::<JsonValue>(payload)
-                        .map(|value| JsonDoc::from_legacy_value(fallback_id, value))
-                        .map_err(|e| StrataError::serialization(e.to_string()))
+                    // Strict-decode the legacy raw payload: require the
+                    // MessagePack stream to consume the entire byte slice.
+                    // Without this, garbage byte sequences like
+                    // `[0, 1, 2, 3, 4, 5]` decode as a single positive
+                    // fixint (the leading `0`) and silently mask real
+                    // corruption as a "legacy" scalar document.
+                    let value = decode_full_msgpack::<JsonValue>(payload)?;
+                    Ok(JsonDoc::from_legacy_value(fallback_id, value))
                 };
 
                 if bytes[0] == Self::FORMAT_VERSION {
@@ -285,7 +290,27 @@ impl JsonStore {
     // ========================================================================
     // Document Operations
     // ========================================================================
+}
 
+/// Strict MessagePack decode that requires the input to be fully consumed.
+///
+/// `rmp_serde::from_slice` returns the first valid value and silently ignores
+/// any trailing bytes. For the legacy raw `JsonValue` fallback we want the
+/// opposite: short garbage byte sequences must surface as errors instead of
+/// being interpreted as the leading scalar.
+fn decode_full_msgpack<T: serde::de::DeserializeOwned>(payload: &[u8]) -> StrataResult<T> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let value = rmp_serde::decode::from_read(&mut cursor)
+        .map_err(|e| StrataError::serialization(e.to_string()))?;
+    if (cursor.position() as usize) != payload.len() {
+        return Err(StrataError::serialization(
+            "trailing bytes after legacy JSON payload".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+impl JsonStore {
     /// Create a new JSON document
     ///
     /// Creates a new document with version 1. Fails if a document with
