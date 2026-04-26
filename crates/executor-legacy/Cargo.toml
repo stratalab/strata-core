@@ -14,55 +14,22 @@ workspace = true
 
 [features]
 default = []
-embed = ["strata-intelligence/embed", "strata-engine/embed"]
-expand = ["strata-search/expand"]
-rerank = ["strata-search/rerank"]
-# Cloud generation providers — forwarded through intelligence to inference
-anthropic = ["embed", "strata-intelligence/anthropic"]
-openai = ["embed", "strata-intelligence/openai"]
-google = ["embed", "strata-intelligence/google"]
-# Arrow-based import/export (Parquet, CSV, JSONL)
-arrow = ["dep:arrow", "dep:parquet"]
+embed = []
+expand = []
+rerank = []
+anthropic = ["embed"]
+openai = ["embed"]
+google = ["embed"]
+arrow = []
 
 [dependencies]
-# Internal crates
 strata-core = { path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
 strata-vector = { path = "../vector" }
-strata-intelligence = { path = "../intelligence" }
-strata-search = { path = "../search" }
 strata-security = { path = "../security" }
-
-# Serialization
-serde = { workspace = true }
-serde_json = { workspace = true }
-rmp-serde = { workspace = true }
-
-# Error handling
 thiserror = { workspace = true }
-
-# Encoding
-base64 = { workspace = true }
-
-# UUIDs for RunId
-uuid = { workspace = true }
-
-# Datetime parsing
-chrono = { workspace = true }
-
-# String similarity
-strsim = { workspace = true }
-
-# Logging
 tracing = { workspace = true }
-
-# Unix signals for IPC server
-libc = { workspace = true }
-
-# Arrow interoperability (optional)
-arrow = { workspace = true, optional = true }
-parquet = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -5,7 +5,6 @@ use strata_core::validate_space_name;
 use strata_engine::{Database, HealthReport, SystemMetrics};
 use strata_security::{AccessMode, OpenOptions};
 
-use crate::bridge::remap;
 use crate::ipc::IpcClient;
 use crate::{BranchId, Command, DatabaseInfo, Error, Executor, Output, Result, Session, Value};
 
@@ -352,7 +351,12 @@ fn cache_with_legacy_bootstrap() -> Result<strata_executor_legacy::Strata> {
 }
 
 fn legacy_bootstrap_error(error: strata_executor_legacy::Error) -> Error {
-    remap(error, "legacy bootstrap error").unwrap_or_else(|fallback| fallback)
+    match error {
+        strata_executor_legacy::Error::Io { reason } => Error::Io { reason, hint: None },
+        strata_executor_legacy::Error::Internal { reason } => {
+            Error::Internal { reason, hint: None }
+        }
+    }
 }
 
 fn extract_version(command: &str, output: Output) -> Result<u64> {
@@ -381,7 +385,6 @@ mod tests {
     use strata_engine::{Database, SearchSubsystem};
     use strata_vector::VectorSubsystem;
 
-    use crate::bridge::remap;
     use crate::{
         AccessMode, BranchId, Command, Error, Executor, IpcServer, Output, Session, Strata,
     };
@@ -405,48 +408,6 @@ mod tests {
         )
         .expect("disk database should open");
         (dir, db)
-    }
-
-    #[test]
-    fn command_remap_preserves_non_finite_floats() {
-        let command = Command::VectorUpsert {
-            branch: None,
-            space: None,
-            collection: "embeddings".into(),
-            key: "row-1".into(),
-            vector: vec![f32::NAN, f32::INFINITY, f32::NEG_INFINITY],
-            metadata: Some(Value::Float(f64::NAN)),
-        };
-
-        let legacy: strata_executor_legacy::Command =
-            remap(command.clone(), "command").expect("command should encode");
-        let roundtrip: Command = remap(legacy, "command").expect("command should decode");
-
-        match roundtrip {
-            Command::VectorUpsert {
-                vector, metadata, ..
-            } => {
-                assert!(vector[0].is_nan());
-                assert!(vector[1].is_infinite() && vector[1].is_sign_positive());
-                assert!(vector[2].is_infinite() && vector[2].is_sign_negative());
-                match metadata {
-                    Some(Value::Float(value)) => assert!(value.is_nan()),
-                    other => panic!("unexpected metadata: {other:?}"),
-                }
-            }
-            other => panic!("unexpected roundtrip command: {other:?}"),
-        }
-    }
-
-    #[test]
-    fn output_remap_preserves_bytes() {
-        let output = Output::Maybe(Some(Value::Bytes(vec![0, 1, 2, 255])));
-
-        let legacy: strata_executor_legacy::Output =
-            remap(output.clone(), "output").expect("output should encode");
-        let roundtrip: Output = remap(legacy, "output").expect("output should decode");
-
-        assert_eq!(roundtrip, output);
     }
 
     #[test]

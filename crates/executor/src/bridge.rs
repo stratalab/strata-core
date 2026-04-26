@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use strata_core::limits::Limits;
 use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::{
@@ -49,21 +47,6 @@ impl Primitives {
             limits: Limits::default(),
         }
     }
-}
-
-pub(crate) fn remap<T, U>(value: T, what: &'static str) -> Result<U>
-where
-    T: Serialize,
-    U: DeserializeOwned,
-{
-    let bytes = rmp_serde::to_vec_named(&value).map_err(|error| Error::Internal {
-        reason: format!("failed to encode {what}: {error}"),
-        hint: None,
-    })?;
-    rmp_serde::from_slice(&bytes).map_err(|error| Error::Internal {
-        reason: format!("failed to decode {what}: {error}"),
-        hint: None,
-    })
 }
 
 pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types::BranchId> {
