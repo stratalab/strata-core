@@ -34,19 +34,20 @@ pub mod index;
 
 use crate::database::Database;
 use crate::primitives::extensions::JsonStoreExt;
+use crate::semantics::json::{
+    delete_at_path, get_at_path, set_at_path, JsonLimitError, JsonPath, JsonValue,
+};
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::primitives::json::{
-    delete_at_path, get_at_path, set_at_path, JsonLimitError, JsonPath, JsonValue,
-};
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::{StrataResult, VersionedHistory};
+use strata_core::VersionedHistory;
+use strata_storage::{Key, Namespace};
 
 // =============================================================================
 // Limit Validation Helpers
@@ -76,7 +77,7 @@ fn limit_error_to_error(e: JsonLimitError) -> StrataError {
 ///
 /// ```text
 /// use strata_engine::JsonDoc;
-/// use strata_core::primitives::json::JsonValue;
+/// use strata_engine::JsonValue;
 ///
 /// let doc = JsonDoc::new("my-document", JsonValue::from(42i64));
 /// assert_eq!(doc.version, 1);
@@ -168,10 +169,8 @@ impl JsonDoc {
 /// # Example
 ///
 /// ```text
-/// use strata_primitives::JsonStore;
-/// use crate::database::Database;
-/// use strata_core::types::BranchId;
-/// use strata_core::primitives::json::JsonValue;
+/// use strata_core::BranchId;
+/// use strata_engine::{Database, JsonStore, JsonValue};
 ///
 /// let db = Database::cache()?;
 /// let json = JsonStore::new(db);
@@ -440,7 +439,6 @@ impl JsonStore {
         use strata_core::contract::Versioned;
 
         let key = self.key_for(branch_id, space, doc_id);
-        use strata_core::Storage;
         match self.db.storage().get_versioned(&key, CommitVersion::MAX)? {
             Some(vv) => {
                 let doc = Self::deserialize_doc_with_fallback_id(&vv.value, doc_id)?;
@@ -1534,10 +1532,7 @@ impl JsonStore {
 
 impl JsonStore {
     /// BM25 search via InvertedIndex — same pattern as KV.
-    fn search_bm25(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search_bm25(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
 
@@ -1627,10 +1622,7 @@ impl JsonStore {
 }
 
 impl crate::search::Searchable for JsonStore {
-    fn search(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{EntityRef, SearchHit, SearchStats, SortDirection};
         use std::collections::HashSet;
         use std::time::Instant;
@@ -2966,7 +2958,7 @@ mod tests {
     fn test_incremental_sets_enforce_size_limit() {
         // Each individual value is small, but accumulated document exceeds limits.
         // Post-mutation validation must catch this.
-        use strata_core::primitives::json::MAX_DOCUMENT_SIZE;
+        use crate::MAX_DOCUMENT_SIZE;
 
         let db = Database::cache().unwrap();
         let store = JsonStore::new(db);
@@ -3166,7 +3158,7 @@ mod tests {
     // Scenario 4: Path at exactly MAX_PATH_LENGTH (256 segments) boundary
     #[test]
     fn test_path_at_max_length_boundary() {
-        use strata_core::primitives::json::MAX_PATH_LENGTH;
+        use crate::MAX_PATH_LENGTH;
 
         // Build a path with exactly MAX_PATH_LENGTH segments — should succeed
         let mut path = JsonPath::root();

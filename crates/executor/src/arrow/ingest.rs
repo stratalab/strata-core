@@ -5,10 +5,9 @@ use std::sync::Arc;
 use arrow::array::{self, Array};
 use arrow::record_batch::RecordBatch;
 
-use strata_core::primitives::json::{JsonPath, JsonValue};
-use strata_core::primitives::{DistanceMetric, StorageDtype, VectorConfig};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_engine::{DistanceMetric, JsonPath, JsonValue, StorageDtype, VectorConfig};
 
 use super::schema::{arrow_to_value, row_to_json, ImportMapping};
 use crate::bridge::Primitives;

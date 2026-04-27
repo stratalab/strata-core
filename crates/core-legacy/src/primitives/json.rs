@@ -432,8 +432,8 @@ pub enum PathParseError {
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::PathSegment;
+/// ```text
+/// use strata_engine::PathSegment;
 ///
 /// let key = PathSegment::Key("name".to_string());
 /// let idx = PathSegment::Index(0);
@@ -476,8 +476,8 @@ impl fmt::Display for PathSegment {
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::JsonPath;
+/// ```text
+/// use strata_engine::JsonPath;
 ///
 /// // Create paths
 /// let root = JsonPath::root();
@@ -859,8 +859,8 @@ impl fmt::Display for JsonPath {
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonPatch, JsonPath, JsonValue};
+/// ```text
+/// use strata_engine::{JsonPatch, JsonPath, JsonValue};
 ///
 /// // Create patches
 /// let set = JsonPatch::set("user.name", JsonValue::from("Alice"));
@@ -1035,8 +1035,8 @@ pub enum JsonPathError {
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, JsonPath, get_at_path};
+/// ```text
+/// use strata_engine::{JsonPath, JsonValue, get_at_path};
 ///
 /// let json: JsonValue = serde_json::json!({
 ///     "user": {
@@ -1101,8 +1101,8 @@ pub fn get_at_path<'a>(value: &'a JsonValue, path: &JsonPath) -> Option<&'a Json
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, JsonPath, get_at_path_mut};
+/// ```text
+/// use strata_engine::{JsonPath, JsonValue, get_at_path_mut};
 ///
 /// let mut json: JsonValue = serde_json::json!({
 ///     "user": {
@@ -1117,7 +1117,7 @@ pub fn get_at_path<'a>(value: &'a JsonValue, path: &JsonPath) -> Option<&'a Json
 /// }
 ///
 /// // Verify the change
-/// use strata_core::primitives::json::get_at_path;
+/// use strata_engine::get_at_path;
 /// let name = get_at_path(&json, &path).unwrap();
 /// assert_eq!(name.as_str(), Some("Bob"));
 /// ```
@@ -1167,8 +1167,8 @@ pub fn get_at_path_mut<'a>(value: &'a mut JsonValue, path: &JsonPath) -> Option<
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, JsonPath, set_at_path, get_at_path};
+/// ```text
+/// use strata_engine::{JsonPath, JsonValue, get_at_path, set_at_path};
 ///
 /// // Set value at nested path, creating intermediate objects
 /// let mut json = JsonValue::object();
@@ -1324,8 +1324,8 @@ fn value_type_name(value: &serde_json::Value) -> &'static str {
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, JsonPath, delete_at_path, get_at_path};
+/// ```text
+/// use strata_engine::{JsonValue, delete_at_path, get_at_path};
 ///
 /// // Delete object key
 /// let mut json: JsonValue = r#"{"name": "Alice", "age": 30}"#.parse().unwrap();
@@ -1413,8 +1413,8 @@ pub fn delete_at_path(
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, JsonPath, JsonPatch, apply_patches, get_at_path};
+/// ```text
+/// use strata_engine::{JsonPatch, JsonValue, apply_patches, get_at_path};
 ///
 /// let mut json = JsonValue::object();
 ///
@@ -1463,8 +1463,8 @@ pub fn apply_patches(root: &mut JsonValue, patches: &[JsonPatch]) -> Result<(), 
 ///
 /// # Examples
 ///
-/// ```
-/// use strata_core::primitives::json::{JsonValue, merge_patch};
+/// ```text
+/// use strata_engine::{JsonValue, merge_patch};
 ///
 /// // Merge objects
 /// let mut target: JsonValue = serde_json::json!({"a": 1, "b": 2}).into();

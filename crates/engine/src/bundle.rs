@@ -17,16 +17,17 @@
 use crate::branch_ops::branch_control_store::BranchControlStore;
 use crate::database::Database;
 use crate::primitives::branch::BranchIndex;
+use crate::{StrataError, StrataResult};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
-use strata_core::types::{BranchId, Key, TypeTag};
-use strata_core::{StrataError, StrataResult};
+use strata_core::types::BranchId;
 use strata_durability::branch_bundle::{
     BranchBundleReader, BranchBundleWriter, BranchlogPayload, BundleBranchInfo, ExportOptions,
 };
+use strata_storage::{Key, TypeTag};
 use tracing::info;
 
 // =============================================================================
@@ -357,7 +358,7 @@ mod tests {
         AncestryEntry, BranchDagError, BranchDagHook, DagEvent, DagEventKind, MergeBaseResult,
     };
     use std::sync::Arc;
-    use strata_core::types::Namespace;
+    use strata_storage::Namespace;
     use tempfile::TempDir;
 
     #[derive(Default)]

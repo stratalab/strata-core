@@ -1,23 +1,20 @@
-//! Tripwire test that counts known transitional branch-truth shapes
-//! across the workspace and compares against a locked snapshot, per
-//! epic B1 of the branching execution plan
-//! (`docs/design/branching/branching-execution-plan.md`).
+//! Inventory test that counts known branch-structure patterns across the
+//! workspace and compares them against a locked snapshot.
 //!
 //! ## How it works
 //!
 //! For each pattern in `LOCKED_PATTERNS`, the test walks production `*.rs`
 //! files under `crates/**/src/**` and `src/**` (skipping `tests/`,
 //! `benches/`, `target/`, `benchmarks/`, `.git/`, `.claude/`) and counts
-//! substring matches in code, not comments. The totals are compared against the snapshot at
-//! `tests/integration/data/branching_transitional_shapes.json`.
+//! substring matches in code, not comments. The totals are compared against the
+//! snapshot at `tests/integration/data/branching_shape_inventory.json`.
 //!
 //! Drift in either direction fails the test:
 //!
 //! - **count went up**  → someone added a new violation; either fix it or
 //!   bump the snapshot if the addition is intentional and acknowledged.
-//! - **count went down** → someone removed a transitional shape (good!);
-//!   bump the snapshot to acknowledge the cleanup so the new lower count
-//!   becomes the floor.
+//! - **count went down** → someone reduced the pattern count;
+//!   bump the snapshot so the new lower count becomes the floor.
 //!
 //! On first capture, set `STRATA_GUARDRAIL_CAPTURE=1` and run the test —
 //! it writes the snapshot from observation rather than asserting against
@@ -25,20 +22,17 @@
 //!
 //! ## What's tracked today
 //!
-//! - `BRANCH_NAMESPACE` const sites — collapsed by B2 to the single
-//!   canonical declaration in `crates/core/src/branch.rs`. The guardrail
-//!   is kept (value = 1) so any future second site is caught immediately.
-//! - `merge_base_override` occurrences — the executor → engine override
-//!   plumbing B3 removes when lineage moves into `BranchControlStore`.
-//! - `MergeStrategy::LastWriterWins` literals — B5 renames to a name
-//!   that matches runtime behavior (per Lockstep Set 5 in the plan).
-//! - `BranchId::new()` random-construction sites — proxy for places where
-//!   a generation-aware identity will be needed once B3 lands `BranchRef`.
+//! - `BRANCH_NAMESPACE` const sites — expected to remain at a single
+//!   canonical declaration.
+//! - `merge_base_override` occurrences — explicit merge-base override wiring.
+//! - `MergeStrategy::LastWriterWins` literals — runtime-visible merge policy
+//!   naming sites.
+//! - `BranchId::new()` random-construction sites — useful for tracking where
+//!   tests or helpers create fresh branch ids.
 //!
 //! These are intentionally **production-code** tripwires. Characterization
-//! tests cover public behavior; this guardrail is meant to measure
-//! transitional implementation shapes, so comment text and test-only
-//! references must not move the baseline.
+//! tests cover public behavior; this guardrail measures implementation
+//! patterns, so comment text and test-only references must not move the baseline.
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -49,7 +43,7 @@ use std::path::{Component, Path, PathBuf};
 // Patterns
 // =============================================================================
 
-/// One transitional shape to track.
+/// One tracked branch-structure pattern.
 struct Pattern {
     /// Stable key written into the snapshot JSON.
     snapshot_key: &'static str,
@@ -65,30 +59,28 @@ const LOCKED_PATTERNS: &[Pattern] = &[
         // Trailing `:` so we match only `const BRANCH_NAMESPACE: <ty> = ...`
         // declarations, not test fixtures named `BRANCH_NAMESPACE_BYTES`.
         needle: "const BRANCH_NAMESPACE:",
-        rationale: "B2 collapsed the duplicated BRANCH_NAMESPACE consts \
-                    (engine + executor) into one canonical declaration in \
-                    strata_core::branch. The floor of 1 catches any \
-                    regression that would reintroduce a second site.",
+        rationale: "The codebase should keep a single canonical \
+                    BRANCH_NAMESPACE declaration. The floor of 1 catches any \
+                    regression that reintroduces a second site.",
     },
     Pattern {
         snapshot_key: "merge_base_override_occurrences",
         needle: "merge_base_override",
-        rationale: "B3 removes merge_base_override when lineage moves into the \
-                    engine-owned BranchControlStore. Each occurrence is a callsite \
-                    or signature B3 will rewrite.",
+        rationale: "Each occurrence marks a callsite or signature carrying an \
+                    explicit merge-base override.",
     },
     Pattern {
         snapshot_key: "merge_strategy_lastwriterwins_literals",
         needle: "MergeStrategy::LastWriterWins",
-        rationale: "B5 renames merge policy to match runtime behavior \
-                    (Lockstep Set 5). Each literal is a callsite to update.",
+        rationale: "Each literal marks a callsite that depends on the \
+                    current merge-policy name.",
     },
     Pattern {
         snapshot_key: "branch_id_random_new_sites",
         needle: "BranchId::new()",
-        rationale: "Random branch-id construction is incompatible with B3's \
-                    generation-safe BranchRef. Many of these are test fixtures \
-                    that will need to migrate to deterministic ids.",
+        rationale: "Random branch-id construction is worth tracking because \
+                    many of these sites are fixtures or helpers rather than \
+                    data-driven identifiers.",
     },
 ];
 
@@ -109,7 +101,7 @@ fn snapshot_path() -> PathBuf {
         .join("tests")
         .join("integration")
         .join("data")
-        .join("branching_transitional_shapes.json")
+        .join("branching_shape_inventory.json")
 }
 
 fn workspace_root() -> PathBuf {
@@ -269,14 +261,14 @@ fn measure_all() -> BTreeMap<String, u64> {
 /// and exits; otherwise, the test asserts the current measurements match
 /// the committed snapshot.
 #[test]
-fn branching_transitional_shapes_match_snapshot() {
+fn branching_shape_inventory_matches_snapshot() {
     let measured = measure_all();
     let path = snapshot_path();
 
     if std::env::var("STRATA_GUARDRAIL_CAPTURE").is_ok() {
         let snapshot = Snapshot {
             schema_version: 1,
-            description: "Locked counts of branching transitional shapes. \
+            description: "Locked counts of branching shape inventory. \
                           See tests/integration/branching_guardrails.rs for \
                           what each key tracks and why."
                 .to_string(),
@@ -324,10 +316,10 @@ fn branching_transitional_shapes_match_snapshot() {
         panic!(
             "Branching guardrail drift detected.\n\n\
              {drift_msg}\n\n\
-             If this is intentional cleanup or an acknowledged addition, update\n\
+             If this is an expected reduction or an acknowledged addition, update\n\
              the snapshot at {} by running:\n\
              \n  STRATA_GUARDRAIL_CAPTURE=1 cargo test -p stratadb --test integration \\\n    \
-                 branching_guardrails::branching_transitional_shapes_match_snapshot\n\
+                 branching_guardrails::branching_shape_inventory_matches_snapshot\n\
              \n\
              Then commit the updated JSON. The snapshot is the locked baseline.",
             path.display()

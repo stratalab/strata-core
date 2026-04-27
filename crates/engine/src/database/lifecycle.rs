@@ -1,12 +1,12 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
+use crate::{StrataError, StrataResult};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key};
-use strata_core::{StrataError, StrataResult};
+use strata_core::types::BranchId;
 use strata_durability::{ManifestError, ManifestManager};
+use strata_storage::Key;
 use tracing::{info, warn};
 
 use super::refresh::{

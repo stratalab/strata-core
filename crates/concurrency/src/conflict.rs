@@ -50,7 +50,8 @@ mod tests {
     use std::sync::Arc;
     use strata_core::id::CommitVersion;
     use strata_core::primitives::json::JsonPatch;
-    use strata_core::types::{BranchId, Key, Namespace};
+    use strata_core::BranchId;
+    use strata_storage::{Key, Namespace};
 
     fn test_key(doc: &str) -> Key {
         Key::new_json(Arc::new(Namespace::for_branch(BranchId::new())), doc)

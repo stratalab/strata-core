@@ -26,6 +26,9 @@ pub(crate) use dag_hooks::{
     with_branch_dag_hooks_suppressed,
 };
 
+use crate::branch_domain::{
+    BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
+};
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
 use crate::primitives::branch::BranchIndex;
@@ -36,17 +39,13 @@ use primitive_merge::{
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::StrataResult;
-use strata_core::{
-    BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, PrimitiveType, Version,
-    VersionedValue,
-};
+use strata_core::{PrimitiveType, Version, VersionedValue};
+use strata_storage::{Key, Namespace, TypeTag};
 use tracing::info;
 
 use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore, MergeBasePoint};
@@ -67,7 +66,7 @@ pub(crate) const DATA_TYPE_TAGS: [TypeTag; 5] = [
 ];
 
 /// The well-known branch name used for internal metadata (tags, notes).
-const SYSTEM_BRANCH: &str = "_system_";
+const SYSTEM_BRANCH: &str = crate::SYSTEM_BRANCH;
 
 fn tag_key(branch: &str, name: &str) -> String {
     format!("tag:{branch}:{name}")
@@ -1168,7 +1167,6 @@ fn cow_diff_branches(
     options: &DiffOptions,
     snapshot_version: CommitVersion,
 ) -> StrataResult<BranchDiffResult> {
-    use strata_core::Storage;
     let space_index = SpaceIndex::new(db.clone());
     let storage = db.storage();
 
@@ -3623,7 +3621,7 @@ pub(crate) fn cherry_pick_from_diff_expected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::Namespace;
+    use strata_storage::Namespace;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>) {

@@ -1,7 +1,4 @@
-//! Core traits for storage abstraction
-//!
-//! This module defines the Storage trait that enables swapping
-//! implementations without breaking upper layers.
+//! Shared storage abstraction traits and write semantics.
 
 use std::time::Duration;
 
@@ -10,31 +7,9 @@ use crate::error::StrataResult;
 use crate::id::CommitVersion;
 use crate::types::Key;
 use crate::value::Value;
+use strata_storage::Storage as StorageSurface;
+pub use strata_storage::WriteMode;
 
-/// Controls how a write interacts with existing versions of a key.
-///
-/// - `Append` (default): Standard MVCC — adds a new version, preserving history.
-/// - `KeepLast(n)`: Retention hint — at most `n` versions should be kept.
-///   The memtable always appends unconditionally; actual pruning happens at
-///   compaction time via `max_versions_per_key`. This mode is advisory:
-///   callers should not assume older versions are removed immediately.
-///   `KeepLast(1)` replaces the old `Replace` behavior.
-///   Use for internal data (e.g., graph adjacency lists) where unbounded
-///   version history wastes memory without providing value.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WriteMode {
-    /// Standard MVCC: push a new version onto the chain (keeps history)
-    #[default]
-    Append,
-    /// Retention hint: keep at most N versions. Pruning is deferred to
-    /// compaction — the write itself always appends a new version.
-    /// `KeepLast(1)` replaces the old `Replace` behavior.
-    /// `KeepLast(n)` for n > 1 keeps bounded history.
-    KeepLast(usize),
-}
-
-/// Storage abstraction for unified backend
-///
 /// This trait enables replacing the MVP BTreeMap+RwLock implementation
 /// with sharded, lock-free, or distributed storage without breaking
 /// upper layers (concurrency, primitives, engine).
@@ -252,6 +227,83 @@ pub trait Storage: Send + Sync {
     }
 }
 
+impl<T> Storage for T
+where
+    T: StorageSurface + Send + Sync + ?Sized,
+{
+    fn get_versioned(
+        &self,
+        key: &Key,
+        max_version: CommitVersion,
+    ) -> StrataResult<Option<VersionedValue>> {
+        StorageSurface::get_versioned(self, key, max_version).map_err(Into::into)
+    }
+
+    fn get_history(
+        &self,
+        key: &Key,
+        limit: Option<usize>,
+        before_version: Option<CommitVersion>,
+    ) -> StrataResult<Vec<VersionedValue>> {
+        StorageSurface::get_history(self, key, limit, before_version).map_err(Into::into)
+    }
+
+    fn scan_prefix(
+        &self,
+        prefix: &Key,
+        max_version: CommitVersion,
+    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+        StorageSurface::scan_prefix(self, prefix, max_version).map_err(Into::into)
+    }
+
+    fn current_version(&self) -> CommitVersion {
+        StorageSurface::current_version(self)
+    }
+
+    fn put_with_version_mode(
+        &self,
+        key: Key,
+        value: Value,
+        version: CommitVersion,
+        ttl: Option<Duration>,
+        mode: WriteMode,
+    ) -> StrataResult<()> {
+        StorageSurface::put_with_version_mode(self, key, value, version, ttl, mode)
+            .map_err(Into::into)
+    }
+
+    fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StrataResult<()> {
+        StorageSurface::delete_with_version(self, key, version).map_err(Into::into)
+    }
+
+    fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: CommitVersion,
+    ) -> StrataResult<()> {
+        StorageSurface::apply_batch(self, writes, version).map_err(Into::into)
+    }
+
+    fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StrataResult<()> {
+        StorageSurface::delete_batch(self, deletes, version).map_err(Into::into)
+    }
+
+    fn apply_writes_atomic(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        deletes: Vec<Key>,
+        version: CommitVersion,
+        put_ttls: &[u64],
+    ) -> StrataResult<()> {
+        StorageSurface::apply_writes_atomic(self, writes, deletes, version, put_ttls)
+            .map_err(Into::into)
+    }
+
+    fn get_version_only(&self, key: &Key) -> StrataResult<Option<CommitVersion>> {
+        StorageSurface::get_version_only(self, key).map_err(Into::into)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -264,6 +316,7 @@ mod tests {
         atomic::{AtomicU64, Ordering},
         RwLock,
     };
+    use strata_storage::{SegmentedStore, Storage as StorageSurface};
 
     // ====================================================================
     // Minimal mock implementations for behavioral testing
@@ -680,5 +733,93 @@ mod tests {
             .put_with_version_mode(key, Value::Null, CommitVersion(1), None, WriteMode::Append)
             .unwrap_err();
         assert!(err.is_storage_error());
+    }
+
+    #[test]
+    fn segmented_store_matches_core_storage_surface() {
+        let store = SegmentedStore::new();
+        let key = test_key(&test_ns(), "forwarded");
+        let version = CommitVersion(7);
+
+        let storage_view: &dyn StorageSurface = &store;
+        storage_view
+            .put_with_version_mode(key.clone(), Value::Int(7), version, None, WriteMode::Append)
+            .unwrap();
+
+        let legacy_view: &dyn Storage = &store;
+        let versioned = legacy_view
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .expect("value written through storage surface");
+
+        assert_eq!(versioned.value, Value::Int(7));
+        assert_eq!(versioned.version.as_u64(), version.as_u64());
+    }
+
+    #[test]
+    fn segmented_store_matches_storage_surface_after_legacy_write() {
+        let store = SegmentedStore::new();
+        let key = test_key(&test_ns(), "legacy-forwarded");
+        let version = CommitVersion(11);
+
+        let legacy_view: &dyn Storage = &store;
+        legacy_view
+            .put_with_version_mode(
+                key.clone(),
+                Value::String("from legacy".to_string()),
+                version,
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let storage_view: &dyn StorageSurface = &store;
+        let versioned = storage_view
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .expect("value written through legacy surface");
+
+        assert_eq!(versioned.value, Value::String("from legacy".to_string()));
+        assert_eq!(versioned.version.as_u64(), version.as_u64());
+    }
+
+    #[test]
+    fn segmented_store_history_and_scan_match_across_surfaces() {
+        let store = SegmentedStore::new();
+        let key = test_key(&test_ns(), "history-forwarded");
+        let prefix = Key::new_kv(key.namespace.clone(), b"history-");
+        let storage_view: &dyn StorageSurface = &store;
+
+        storage_view
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(1),
+                CommitVersion(1),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+        storage_view
+            .put_with_version_mode(
+                key.clone(),
+                Value::Int(2),
+                CommitVersion(2),
+                None,
+                WriteMode::Append,
+            )
+            .unwrap();
+
+        let legacy_view: &dyn Storage = &store;
+        let history = legacy_view.get_history(&key, None, None).unwrap();
+        let scan = legacy_view
+            .scan_prefix(&prefix, CommitVersion::MAX)
+            .unwrap();
+
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].value, Value::Int(2));
+        assert_eq!(history[1].value, Value::Int(1));
+        assert_eq!(scan.len(), 1);
+        assert_eq!(scan[0].0, key);
+        assert_eq!(scan[0].1.value, Value::Int(2));
     }
 }

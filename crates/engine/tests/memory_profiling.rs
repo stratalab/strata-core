@@ -4,11 +4,12 @@
 //! and TransactionContext footprint.
 
 use std::sync::Arc;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::Database;
 use strata_engine::SearchSubsystem;
+use strata_storage::{Key, Namespace};
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {

@@ -52,8 +52,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
 use strata_core::value::Value;
-use strata_core::{BranchRef, PrimitiveDegradedReason, StrataError};
-use strata_engine::{PrimitiveDegradationRegistry, ReclaimStatus};
+use strata_core::{PrimitiveDegradedReason, StrataError};
+use strata_engine::{BranchRef, PrimitiveDegradationRegistry, ReclaimStatus};
 use strata_graph::GraphSubsystem;
 use strata_vector::VectorSubsystem;
 

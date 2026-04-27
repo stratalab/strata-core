@@ -230,8 +230,9 @@ mod tests {
     use crate::branch_bundle::wal_log::BranchlogPayload;
     use std::io::Read;
     use std::sync::Arc;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_core::BranchId;
+    use strata_storage::{Key, Namespace, TypeTag};
     use tempfile::tempdir;
 
     fn make_test_branch_info() -> BundleBranchInfo {

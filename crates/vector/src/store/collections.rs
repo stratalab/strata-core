@@ -320,7 +320,7 @@ impl VectorStore {
         branch_id: BranchId,
         space: &str,
     ) -> VectorResult<Vec<CollectionInfo>> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::new_vector_config_prefix(namespace);
@@ -395,7 +395,7 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<bool> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = CommitVersion(self.db.storage().version());
@@ -417,7 +417,7 @@ impl VectorStore {
     ) -> VectorResult<Option<Versioned<CollectionInfo>>> {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
 
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
         let version = CommitVersion(self.db.storage().version());
 
         let Some(versioned_value) = self

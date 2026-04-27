@@ -32,7 +32,7 @@ pub use output::Output;
 pub use session::Session;
 pub use types::*;
 
-pub use strata_core::{Key, Namespace, Value};
+pub use strata_core::Value;
 pub use strata_engine::{
     apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware,
     BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
@@ -41,6 +41,7 @@ pub use strata_engine::{
     SystemMetrics, WalCounters,
 };
 pub use strata_security::{AccessMode, OpenOptions};
+pub use strata_storage::{Key, Namespace};
 
 /// Result type for executor operations.
 pub type Result<T> = std::result::Result<T, Error>;

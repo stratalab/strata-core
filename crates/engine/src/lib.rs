@@ -28,14 +28,23 @@
 //! components only.
 
 pub mod background;
+pub mod branch_domain;
 mod coordinator;
 pub mod database;
+pub mod error;
 pub mod instrumentation;
+pub mod limits;
 pub mod recovery;
+pub mod semantics;
 pub mod transaction;
 pub mod transaction_ops; // TransactionOps Trait Definition
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
+pub use branch_domain::{
+    is_system_branch, BranchControlRecord, BranchEventOffsets, BranchGeneration,
+    BranchLifecycleStatus, BranchRef, CherryPickRecord, DagBranchInfo, DagBranchStatus, DagEventId,
+    ForkAnchor, ForkRecord, MergeRecord, RevertRecord, BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
+};
 pub use coordinator::TransactionMetrics;
 pub use database::branch_service::{BranchService, ForkOptions, MergeOptions};
 pub use database::profile::{
@@ -51,8 +60,21 @@ pub use database::{
     StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus,
     SystemMetrics, WalWriterHealth,
 };
+pub use error::{StrataError, StrataResult};
 pub use instrumentation::PerfTrace;
+pub use limits::{LimitError, Limits};
 pub use recovery::Subsystem;
+pub use semantics::event::ChainVerification;
+pub use semantics::json::{
+    apply_patches, delete_at_path, get_at_path, get_at_path_mut, merge_patch, set_at_path,
+    JsonLimitError, JsonPatch, JsonPath, JsonPathError, JsonValue, PathParseError, PathSegment,
+    MAX_ARRAY_SIZE, MAX_DOCUMENT_SIZE, MAX_NESTING_DEPTH, MAX_PATH_LENGTH,
+};
+pub use semantics::value::extractable_text;
+pub use semantics::vector::{
+    CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
+    MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
+};
 pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
@@ -138,18 +160,6 @@ pub use branch_ops::{
 pub use branch_ops::primitive_merge::{
     GraphMergePlanFn, MergePlanCtx, PrimitiveMergePlan, VectorMergePostCommitFn,
     VectorMergePrecheckFn,
-};
-
-// Re-export branch_dag types from core at crate root for convenience
-pub use strata_core::branch_dag::{
-    is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
-    BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
-};
-
-// Re-export canonical branch-truth types (B2). `BranchId::from_user_name`
-// lives on the `BranchId` inherent impl and is reachable via `strata_core`.
-pub use strata_core::{
-    BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
 };
 
 #[cfg(feature = "perf-trace")]

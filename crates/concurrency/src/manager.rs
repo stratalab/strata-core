@@ -37,11 +37,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
-use strata_core::traits::Storage;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::now_micros;
 use strata_durability::wal::WalWriter;
+use strata_storage::Storage;
 
 // Thread-local reusable buffers for WAL record serialization.
 // After warmup, these grow to accommodate the largest record and are
@@ -923,13 +923,12 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
     use strata_durability::__internal::WalWriterEngineExt;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::layout::DatabaseLayout;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalReader};
-    use strata_storage::SegmentedStore;
+    use strata_storage::{Key, Namespace, SegmentedStore};
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
@@ -2234,8 +2233,7 @@ mod tests {
             &self,
             key: &Key,
             max_version: CommitVersion,
-        ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
-        {
+        ) -> strata_storage::StorageResult<Option<strata_core::contract::VersionedValue>> {
             self.inner.get_versioned(key, max_version)
         }
 
@@ -2244,7 +2242,7 @@ mod tests {
             key: &Key,
             limit: Option<usize>,
             before_version: Option<CommitVersion>,
-        ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
+        ) -> strata_storage::StorageResult<Vec<strata_core::contract::VersionedValue>> {
             self.inner.get_history(key, limit, before_version)
         }
 
@@ -2252,7 +2250,7 @@ mod tests {
             &self,
             prefix: &Key,
             max_version: CommitVersion,
-        ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
+        ) -> strata_storage::StorageResult<Vec<(Key, strata_core::contract::VersionedValue)>>
         {
             self.inner.scan_prefix(prefix, max_version)
         }
@@ -2267,8 +2265,8 @@ mod tests {
             value: Value,
             version: CommitVersion,
             ttl: Option<std::time::Duration>,
-            mode: strata_core::traits::WriteMode,
-        ) -> strata_core::error::StrataResult<()> {
+            mode: strata_storage::WriteMode,
+        ) -> strata_storage::StorageResult<()> {
             self.inner
                 .put_with_version_mode(key, value, version, ttl, mode)
         }
@@ -2277,17 +2275,17 @@ mod tests {
             &self,
             key: &Key,
             version: CommitVersion,
-        ) -> strata_core::error::StrataResult<()> {
+        ) -> strata_storage::StorageResult<()> {
             self.inner.delete_with_version(key, version)
         }
 
         fn apply_writes_atomic(
             &self,
-            writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
+            writes: Vec<(Key, Value, strata_storage::WriteMode)>,
             deletes: Vec<Key>,
             version: CommitVersion,
             put_ttls: &[u64],
-        ) -> strata_core::error::StrataResult<()> {
+        ) -> strata_storage::StorageResult<()> {
             // Signal that apply has started (version already allocated)
             self.apply_started.wait();
             // Delay to widen the in-flight window
@@ -2427,8 +2425,7 @@ mod tests {
             &self,
             key: &Key,
             max_version: CommitVersion,
-        ) -> strata_core::error::StrataResult<Option<strata_core::contract::VersionedValue>>
-        {
+        ) -> strata_storage::StorageResult<Option<strata_core::contract::VersionedValue>> {
             self.inner.get_versioned(key, max_version)
         }
 
@@ -2437,7 +2434,7 @@ mod tests {
             key: &Key,
             limit: Option<usize>,
             before_version: Option<CommitVersion>,
-        ) -> strata_core::error::StrataResult<Vec<strata_core::contract::VersionedValue>> {
+        ) -> strata_storage::StorageResult<Vec<strata_core::contract::VersionedValue>> {
             self.inner.get_history(key, limit, before_version)
         }
 
@@ -2445,7 +2442,7 @@ mod tests {
             &self,
             prefix: &Key,
             max_version: CommitVersion,
-        ) -> strata_core::error::StrataResult<Vec<(Key, strata_core::contract::VersionedValue)>>
+        ) -> strata_storage::StorageResult<Vec<(Key, strata_core::contract::VersionedValue)>>
         {
             self.inner.scan_prefix(prefix, max_version)
         }
@@ -2460,8 +2457,8 @@ mod tests {
             value: Value,
             version: CommitVersion,
             ttl: Option<std::time::Duration>,
-            mode: strata_core::traits::WriteMode,
-        ) -> strata_core::error::StrataResult<()> {
+            mode: strata_storage::WriteMode,
+        ) -> strata_storage::StorageResult<()> {
             self.inner
                 .put_with_version_mode(key, value, version, ttl, mode)
         }
@@ -2470,20 +2467,20 @@ mod tests {
             &self,
             key: &Key,
             version: CommitVersion,
-        ) -> strata_core::error::StrataResult<()> {
+        ) -> strata_storage::StorageResult<()> {
             self.inner.delete_with_version(key, version)
         }
 
         fn apply_writes_atomic(
             &self,
-            _writes: Vec<(Key, Value, strata_core::traits::WriteMode)>,
+            _writes: Vec<(Key, Value, strata_storage::WriteMode)>,
             _deletes: Vec<Key>,
             _version: CommitVersion,
             _put_ttls: &[u64],
-        ) -> strata_core::error::StrataResult<()> {
-            Err(strata_core::error::StrataError::storage(
+        ) -> strata_storage::StorageResult<()> {
+            Err(strata_storage::StorageError::Io(std::io::Error::other(
                 "simulated storage failure",
-            ))
+            )))
         }
     }
 

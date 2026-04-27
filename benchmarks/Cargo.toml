@@ -9,7 +9,7 @@ autobins = false
 
 [dependencies]
 stratadb = { path = "..", features = ["embed"] }
-strata-core = { path = "../crates/core" }
+strata-core = { package = "strata-core-legacy", path = "../crates/core-legacy" }
 strata-engine = { path = "../crates/engine" }
 # Required only for the B6 materialize smoke in `src/bin/regression.rs`:
 # `branches().fork()` installs a DAG hook via `GraphSubsystem::initialize`,

@@ -58,7 +58,7 @@ use crate::primitives::branch::resolve_branch_name;
 /// the DAG with `status = active`.
 ///
 /// Implementations MUST early-return for any name where
-/// `strata_core::branch_dag::is_system_branch(name)` is true. Otherwise the
+/// `strata_engine::is_system_branch(name)` is true. Otherwise the
 /// hook fires for `_system_` itself during `init_system_branch`, which runs
 /// before the `_branch_dag` graph exists — producing a noisy warning on every
 /// `Database::open`.

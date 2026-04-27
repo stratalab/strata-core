@@ -24,12 +24,13 @@ arrow = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
 strata-executor-legacy = { path = "../executor-legacy" }
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-security = { path = "../security" }
+strata-storage = { path = "../storage" }
 strata-vector = { path = "../vector" }
 rmp-serde = { workspace = true }
 serde = { workspace = true }

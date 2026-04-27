@@ -1,23 +1,21 @@
-//! Epic D3 recovery-parity tests.
+//! Recovery-parity tests.
 //!
-//! For each of the five MANIFEST failure shapes the D3 plan calls out
-//! (missing magic, checksum mismatch, codec id mismatch, unsupported
-//! version, truncated), assert that all three recovery entry points
+//! For each of the five MANIFEST failure shapes under test (missing magic,
+//! checksum mismatch, codec id mismatch, unsupported version, truncated),
+//! assert that all three recovery entry points
 //! surface the **same** `StrataError` variant:
 //!
 //! 1. Primary — `Database::open_runtime(OpenSpec::primary(path))`.
 //! 2. Follower — `Database::open_runtime(OpenSpec::follower(path))`.
 //! 3. Coordinator-only — `RecoveryCoordinator::new(layout, 0).plan_recovery("identity")`.
 //!
-//! Before D3, the coordinator-only leg diverged on codec mismatch
-//! (returned `StrataError::Corruption` while both engine paths returned
-//! `StrataError::IncompatibleReuse`). The one-line fix in
-//! `strata_concurrency::recovery::plan_recovery` closed that hole.
+//! The coordinator-only leg and the engine entry points must agree on the
+//! public error shape for each failure mode.
 //!
 //! # First-open safety regression
 //!
-//! Also pins the ordering invariant from the D3 plan (reviewer finding
-//! 3): codec validation runs before MANIFEST creation, so a brand-new
+//! Also pins the ordering invariant that codec validation runs before MANIFEST
+//! creation, so a brand-new
 //! database with an invalid codec id fails without persisting anything
 //! to disk.
 

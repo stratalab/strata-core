@@ -16,13 +16,6 @@
 //! - **VAL-4**: `Bytes` are not `String`
 //! - **VAL-5**: Float uses IEEE-754 equality: `NaN != NaN`, `-0.0 == 0.0`
 //!
-//! ## Migration Note
-//!
-//! - `Timestamp` is now in `contract::Timestamp` (microseconds, not seconds)
-//! - `VersionedValue` is now `contract::Versioned<Value>`
-//!
-//! Import from crate root: `use strata_core::{Timestamp, VersionedValue, Version};`
-
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -116,22 +109,6 @@ impl Value {
             Value::Bytes(_) => "Bytes",
             Value::Array(_) => "Array",
             Value::Object(_) => "Object",
-        }
-    }
-
-    /// Extract indexable text from this value for BM25 / full-text search.
-    ///
-    /// Returns `Some(text)` for values that produce meaningful text:
-    /// - `String` → the string itself
-    /// - `Int`, `Float`, `Array`, `Object` → JSON serialization
-    ///
-    /// Returns `None` for values with no useful textual representation:
-    /// - `Null`, `Bool`, `Bytes`
-    pub fn extractable_text(&self) -> Option<String> {
-        match self {
-            Value::String(s) => Some(s.clone()),
-            Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-            other => serde_json::to_string(other).ok(),
         }
     }
 
@@ -915,69 +892,5 @@ mod tests {
         let json = serde_json::json!(i64::MIN);
         let v: Value = json.into();
         assert_eq!(v, Value::Int(i64::MIN));
-    }
-
-    // ========== extractable_text tests ==========
-
-    #[test]
-    fn extractable_text_string() {
-        let v = Value::String("hello world".into());
-        assert_eq!(v.extractable_text(), Some("hello world".to_string()));
-    }
-
-    #[test]
-    fn extractable_text_empty_string() {
-        let v = Value::String(String::new());
-        assert_eq!(v.extractable_text(), Some(String::new()));
-    }
-
-    #[test]
-    fn extractable_text_null() {
-        assert_eq!(Value::Null.extractable_text(), None);
-    }
-
-    #[test]
-    fn extractable_text_bool() {
-        assert_eq!(Value::Bool(true).extractable_text(), None);
-        assert_eq!(Value::Bool(false).extractable_text(), None);
-    }
-
-    #[test]
-    fn extractable_text_bytes() {
-        assert_eq!(Value::Bytes(vec![1, 2, 3]).extractable_text(), None);
-    }
-
-    #[test]
-    fn extractable_text_int() {
-        let v = Value::Int(42);
-        let text = v.extractable_text().unwrap();
-        // Value enum serializes with variant tags: {"Int":42}
-        assert!(text.contains("42"));
-    }
-
-    #[test]
-    fn extractable_text_float() {
-        let v = Value::Float(2.5);
-        let text = v.extractable_text().unwrap();
-        assert!(text.contains("2.5"));
-    }
-
-    #[test]
-    fn extractable_text_array() {
-        let v = Value::array(vec![Value::Int(1), Value::Int(2)]);
-        let text = v.extractable_text().unwrap();
-        // JSON serialization of the array should contain the int values
-        assert!(text.contains('1'));
-        assert!(text.contains('2'));
-    }
-
-    #[test]
-    fn extractable_text_object() {
-        let mut m = HashMap::new();
-        m.insert("key".to_string(), Value::String("val".into()));
-        let v = Value::object(m);
-        let text = v.extractable_text().unwrap();
-        assert!(text.contains("key"));
-        assert!(text.contains("val"));
     }
 }

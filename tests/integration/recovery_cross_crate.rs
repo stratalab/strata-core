@@ -25,7 +25,7 @@ fn setup() -> (Arc<Database>, TempDir, BranchId) {
 /// is the only way to verify that the lower-layer registration helper
 /// actually fired.
 fn space_metadata_exists(db: &Arc<Database>, branch_id: BranchId, space: &str) -> bool {
-    use strata_core::types::Key;
+    use strata_storage::Key;
 
     db.transaction(branch_id, |txn| {
         let key = Key::new_space(branch_id, space);

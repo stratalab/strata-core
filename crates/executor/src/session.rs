@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_core::types::Namespace;
 use strata_engine::{Database, Transaction, TransactionContext};
 use strata_security::AccessMode;
+use strata_storage::Namespace;
 
 use crate::bridge::{
     access_denied, bypasses_active_transaction, is_read_only, json_to_value,
@@ -70,10 +70,10 @@ impl LocalSession {
                 Ok(Output::TxnCommitted { version })
             }
             Err(error) => match &error {
-                strata_core::StrataError::TransactionAborted { .. }
-                | strata_core::StrataError::Conflict { .. }
-                | strata_core::StrataError::VersionConflict { .. }
-                | strata_core::StrataError::WriteConflict { .. } => {
+                strata_engine::StrataError::TransactionAborted { .. }
+                | strata_engine::StrataError::Conflict { .. }
+                | strata_engine::StrataError::VersionConflict { .. }
+                | strata_engine::StrataError::WriteConflict { .. } => {
                     Err(Error::TransactionConflict {
                         reason: error.to_string(),
                         hint: Some(
@@ -82,8 +82,8 @@ impl LocalSession {
                         ),
                     })
                 }
-                strata_core::StrataError::Storage { .. }
-                | strata_core::StrataError::Corruption { .. } => Err(Error::Io {
+                strata_engine::StrataError::Storage { .. }
+                | strata_engine::StrataError::Corruption { .. } => Err(Error::Io {
                     reason: error.to_string(),
                     hint: None,
                 }),
@@ -639,7 +639,7 @@ fn apply_kv_post_commit(
     match convert_result(primitives.kv.get(&branch_id, space, key))? {
         Some(value) => {
             if index.is_enabled() {
-                if let Some(text) = value.extractable_text() {
+                if let Some(text) = strata_engine::search::extract_search_text(&value) {
                     index.index_document(&entity_ref, &text, None);
                 } else {
                     index.remove_document(&entity_ref);
@@ -753,10 +753,10 @@ fn read_committed_json_root(
     branch_id: strata_core::types::BranchId,
     space: &str,
     key: &str,
-) -> Result<Option<strata_core::JsonValue>> {
+) -> Result<Option<strata_engine::JsonValue>> {
     primitives
         .json
-        .get(&branch_id, space, key, &strata_core::JsonPath::root())
+        .get(&branch_id, space, key, &strata_engine::JsonPath::root())
         .map_err(Error::from)
 }
 
@@ -814,9 +814,9 @@ enum TxnCommand {
 mod tests {
     use std::sync::Arc;
 
-    use strata_core::types::Key;
     use strata_core::Value;
     use strata_security::AccessMode;
+    use strata_storage::{Key, Namespace};
 
     use super::SessionBackend;
     use crate::{Command, Error, Output, Session, Strata};
@@ -1021,9 +1021,7 @@ mod tests {
             crate::bridge::to_core_branch_id(&branch).expect("default branch should parse");
 
         let corrupt_json_key = Key::new_json(
-            Arc::new(strata_core::types::Namespace::for_branch_space(
-                branch_id, "default",
-            )),
+            Arc::new(Namespace::for_branch_space(branch_id, "default")),
             "corrupt-json",
         );
         db.transaction(branch_id, |txn| {

@@ -319,8 +319,7 @@ impl RecoveryCoordinator {
     /// - `StrataError::IncompatibleReuse` if the MANIFEST codec does not match
     ///   `expected_codec_id`. Codec mismatch is a configuration error, not
     ///   data corruption — the engine open paths at `database/open.rs` surface
-    ///   the same variant so the coordinator-only codepath agrees (Epic D3
-    ///   recovery-parity requirement).
+    ///   the same variant so the coordinator-only codepath agrees.
     pub fn plan_recovery(&self, expected_codec_id: &str) -> StrataResult<RecoveryPlan> {
         let manifest_path = self.layout.manifest_path();
         if !ManifestManager::exists(manifest_path) {
@@ -866,13 +865,13 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::traits::Storage;
-    use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
+    use strata_core::BranchId;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::format::WalRecord;
     use strata_durability::now_micros;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
+    use strata_storage::{Key, Namespace};
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {

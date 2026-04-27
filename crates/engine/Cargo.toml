@@ -18,7 +18,7 @@ embed = []       # Marker feature: auto-embed runtime is available
 test-support = []  # Expose test helpers for downstream crates
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-storage = { path = "../storage" }
 strata-concurrency = { path = "../concurrency" }
 strata-durability = { path = "../durability", features = ["engine-internal"] }

@@ -18,9 +18,10 @@ expand = ["dep:ureq"]
 rerank = ["dep:ureq"]
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
+strata-storage = { path = "../storage" }
 strata-vector = { path = "../vector" }
 rayon = { workspace = true }
 serde = { workspace = true }

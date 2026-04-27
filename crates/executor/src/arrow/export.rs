@@ -8,7 +8,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use strata_core::primitives::json::JsonPath;
+use strata_engine::JsonPath;
 
 use crate::bridge::{extract_version, Primitives};
 use crate::convert::convert_result;

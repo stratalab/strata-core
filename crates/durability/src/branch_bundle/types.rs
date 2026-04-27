@@ -5,7 +5,6 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
-use strata_core::BranchGeneration;
 
 /// Current BranchBundle format version
 pub const BRANCHBUNDLE_FORMAT_VERSION: u32 = 2;
@@ -146,7 +145,7 @@ pub struct BundleBranchInfo {
     /// defaults to `0` for those. On import, the target DB may discard
     /// the value if it already has any record for the same name (AD7).
     #[serde(default)]
-    pub generation: BranchGeneration,
+    pub generation: u64,
 }
 
 impl BundleBranchInfo {

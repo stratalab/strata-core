@@ -59,10 +59,12 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::{BranchControlRecord, BranchRef, StrataError, StrataResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult, VersionedValue};
+use strata_core::VersionedValue;
+use strata_storage::{Key, Namespace};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};
@@ -892,7 +894,7 @@ mod tests {
 
         // Commit should work
         let observer_event = super::super::observers::BranchOpEvent::create(
-            strata_core::BranchRef::new(BranchId::new(), 0),
+            BranchRef::new(BranchId::new(), 0),
             "test",
         );
         mutation.commit(observer_event);
@@ -914,7 +916,7 @@ mod tests {
 
         // Commit
         let observer_event = super::super::observers::BranchOpEvent::create(
-            strata_core::BranchRef::new(BranchId::new(), 0),
+            BranchRef::new(BranchId::new(), 0),
             "test",
         );
         mutation.commit(observer_event);
@@ -944,7 +946,7 @@ mod tests {
         assert!(!branch_index.exists("rollback-test").unwrap());
         let store = BranchControlStore::new(db.clone());
         let tombstone = store
-            .get_record(strata_core::BranchRef::new(
+            .get_record(crate::BranchRef::new(
                 resolve_branch_name("rollback-test"),
                 0,
             ))
@@ -952,7 +954,7 @@ mod tests {
             .expect("rollback should leave a tombstone control record");
         assert!(matches!(
             tombstone.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Deleted
+            crate::BranchLifecycleStatus::Deleted
         ));
     }
 
@@ -1001,15 +1003,12 @@ mod tests {
         assert!(!branch_index.exists("inject-test").unwrap());
         let store = BranchControlStore::new(db.clone());
         let tombstone = store
-            .get_record(strata_core::BranchRef::new(
-                resolve_branch_name("inject-test"),
-                0,
-            ))
+            .get_record(crate::BranchRef::new(resolve_branch_name("inject-test"), 0))
             .unwrap()
             .expect("rollback should leave a tombstone control record");
         assert!(matches!(
             tombstone.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Deleted
+            crate::BranchLifecycleStatus::Deleted
         ));
     }
 
@@ -1031,15 +1030,12 @@ mod tests {
         assert!(!branch_index.exists("abort-test").unwrap());
         let store = BranchControlStore::new(db.clone());
         let tombstone = store
-            .get_record(strata_core::BranchRef::new(
-                resolve_branch_name("abort-test"),
-                0,
-            ))
+            .get_record(crate::BranchRef::new(resolve_branch_name("abort-test"), 0))
             .unwrap()
             .expect("rollback should leave a tombstone control record");
         assert!(matches!(
             tombstone.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Deleted
+            crate::BranchLifecycleStatus::Deleted
         ));
     }
 
@@ -1123,15 +1119,12 @@ mod tests {
         assert!(!branch_index.exists("drop-test").unwrap());
         let store = BranchControlStore::new(db.clone());
         let tombstone = store
-            .get_record(strata_core::BranchRef::new(
-                resolve_branch_name("drop-test"),
-                0,
-            ))
+            .get_record(crate::BranchRef::new(resolve_branch_name("drop-test"), 0))
             .unwrap()
             .expect("rollback should leave a tombstone control record");
         assert!(matches!(
             tombstone.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Deleted
+            crate::BranchLifecycleStatus::Deleted
         ));
     }
 
@@ -1166,7 +1159,7 @@ mod tests {
             .expect("rollback restore must reactivate the control record");
         assert!(matches!(
             restored.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Active
+            crate::BranchLifecycleStatus::Active
         ));
         assert_eq!(restored.branch.generation, 0);
     }

@@ -6977,7 +6977,7 @@ fn dag_query_node(
     p: &AllPrimitives,
     name: &str,
 ) -> Option<strata_graph::types::NodeData> {
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     let node_id = dag_node_id_for_key(test_db, name);
     p.graph
@@ -6987,7 +6987,7 @@ fn dag_query_node(
 
 /// List all node IDs in the branch DAG graph.
 fn dag_list_nodes(p: &AllPrimitives) -> Vec<String> {
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     p.graph
         .list_nodes(system_id, "_graph_", "_branch_dag")
@@ -7002,7 +7002,7 @@ fn dag_outgoing(
     name: &str,
     edge_type: &str,
 ) -> Vec<strata_graph::types::Neighbor> {
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
     use strata_graph::types::Direction;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     let node_id = dag_node_id_for_key(test_db, name);
@@ -7377,7 +7377,7 @@ fn dag_records_branch_create_and_delete() {
     // by the captured BranchRef-keyed id because the control record is
     // tombstoned and the name-based resolver would fall back to the raw
     // name, which is no longer where the node lives.
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     let node = p
         .graph
@@ -7487,7 +7487,7 @@ fn dag_repeated_merge_advances_merge_base() {
 
 #[test]
 fn dag_skips_system_branch() {
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
@@ -7517,7 +7517,7 @@ fn dag_skips_system_branch() {
     let names = dag_list_nodes(&p);
     for n in &names {
         assert!(
-            !strata_core::branch_dag::is_system_branch(n),
+            !strata_engine::is_system_branch(n),
             "DAG must not contain any system-branch node, found: {n}"
         );
     }

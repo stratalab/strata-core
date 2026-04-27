@@ -177,7 +177,7 @@ fn test_event_log_chain_survives_recovery() {
     let hash1 = pre_event1.value.hash;
     let hash2 = pre_event2.value.hash;
 
-    // Verify event count before crash (verify_chain removed in MVP)
+    // Verify event count before crash.
     assert_eq!(event_log.len(&branch_id, "default").unwrap(), 3);
 
     // Simulate crash
@@ -189,7 +189,7 @@ fn test_event_log_chain_survives_recovery() {
         Database::open_runtime(OpenSpec::primary(&path).with_subsystem(SearchSubsystem)).unwrap();
     let event_log = EventLog::new(db.clone());
 
-    // Data is intact (verify_chain removed in MVP)
+    // Data is intact after reopen.
     assert_eq!(event_log.len(&branch_id, "default").unwrap(), 3);
 
     // Events readable with correct hashes
@@ -212,7 +212,7 @@ fn test_event_log_chain_survives_recovery() {
         .unwrap();
     assert!(matches!(v3, Version::Sequence(3))); // Not 0 (would be restart)
 
-    // Data still valid after new append (verify_chain removed in MVP)
+    // Data stays valid after a new append.
     assert_eq!(event_log.len(&branch_id, "default").unwrap(), 4);
 }
 
@@ -1100,9 +1100,8 @@ fn test_bm25_search_isolates_by_space_event() {
 /// vanish from BM25.
 #[test]
 fn test_json_survives_bm25_slow_path_rebuild() {
-    use strata_core::JsonValue;
     use strata_engine::search::Searchable;
-    use strata_engine::JsonStore;
+    use strata_engine::{JsonStore, JsonValue};
 
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
@@ -1168,10 +1167,9 @@ fn test_json_survives_bm25_slow_path_rebuild() {
 /// deserialization path.
 #[test]
 fn test_json_slow_path_skips_secondary_index_storage() {
-    use strata_core::JsonValue;
     use strata_engine::primitives::json::index::IndexType;
     use strata_engine::search::Searchable;
-    use strata_engine::JsonStore;
+    use strata_engine::{JsonStore, JsonValue};
 
     let temp_dir = TempDir::new().unwrap();
     let path = temp_dir.path().to_path_buf();
@@ -1282,7 +1280,7 @@ fn bypass_kv_put(
     value: Value,
 ) {
     use std::sync::Arc as StdArc;
-    use strata_core::types::{Key, Namespace, TypeTag};
+    use strata_storage::{Key, Namespace, TypeTag};
 
     let ns = StdArc::new(Namespace::for_branch_space(branch_id, space));
     let key = Key::new(ns, TypeTag::KV, user_key.to_vec());
@@ -1296,7 +1294,7 @@ fn bypass_kv_put(
 /// actually fired — the union path would otherwise mask a missing
 /// registration via the data scan.
 fn space_metadata_exists(db: &Arc<Database>, branch_id: BranchId, space: &str) -> bool {
-    use strata_core::types::Key;
+    use strata_storage::Key;
 
     db.transaction(branch_id, |txn| {
         let key = Key::new_space(branch_id, space);
@@ -1330,8 +1328,7 @@ fn test_kv_put_registers_space_at_engine_layer() {
 
 #[test]
 fn test_json_create_registers_space_at_engine_layer() {
-    use strata_core::JsonValue;
-    use strata_engine::JsonStore;
+    use strata_engine::{JsonStore, JsonValue};
 
     let (db, _temp, branch_id) = setup();
     let json = JsonStore::new(db.clone());
@@ -1394,8 +1391,8 @@ fn test_discover_used_spaces_excludes_system_space() {
 #[test]
 fn test_discover_used_spaces_filters_tombstones() {
     use std::sync::Arc as StdArc;
-    use strata_core::types::{Key, Namespace, TypeTag};
     use strata_engine::SpaceIndex;
+    use strata_storage::{Key, Namespace, TypeTag};
 
     let (db, _temp, branch_id) = setup();
 

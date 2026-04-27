@@ -13,9 +13,9 @@
 use std::collections::HashMap;
 
 use strata_concurrency::TransactionContext;
-use strata_core::types::{BranchId, Key};
 use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult};
+use strata_core::{BranchId, StrataError, StrataResult};
+use strata_storage::Key;
 
 use crate::keys;
 use crate::packed;

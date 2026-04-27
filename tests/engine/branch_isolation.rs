@@ -4,7 +4,7 @@
 
 use crate::common::*;
 use std::collections::HashMap;
-use strata_core::primitives::json::JsonPath;
+use strata_engine::JsonPath;
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {

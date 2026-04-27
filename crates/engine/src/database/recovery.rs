@@ -1,44 +1,33 @@
-//! Unified recovery orchestration for primary and follower opens
-//! (Epic D3).
+//! Unified recovery orchestration for primary and follower opens.
 //!
-//! `Database::run_recovery` is the single recovery entry point used
-//! by both `open_finish` (primary) and `acquire_follower_db`. Before
-//! D3 each mode had its own inline ladder across ~260 lines of
-//! `open.rs`, producing recovery errors as
-//! `StrataError::{internal,corruption,storage}(format!(...))` at seven
-//! sites. That duplication and its string-factory error construction
-//! is what D3 deletes.
+//! `Database::run_recovery` is the single recovery entry point used by both
+//! `open_finish` (primary) and `acquire_follower_db`. It centralizes recovery
+//! orchestration, typed error classification, and the shared rules around
+//! storage repair, snapshot install, and WAL replay.
 //!
 //! # Scope
 //!
-//! D3 owns orchestration + typed taxonomy only. The strict-vs-lossy
-//! policy branch on `RecoveryHealth::Degraded` is D4 — it hangs inside
-//! the storage step here (between `recover_segments()?` and
-//! `apply_storage_recovery(&outcome)`). The WAL-replay lossy fallback
-//! (populates `LossyRecoveryReport`, wipes the in-memory
-//! `SegmentedStore`) is preserved behaviour; it moves from `open.rs`
-//! into this module's `handle_wal_recovery_outcome` helper without
-//! semantic change.
+//! This module owns orchestration and typed taxonomy. Recovery policy still
+//! branches on `RecoveryHealth::Degraded` inside the storage step, and the
+//! WAL-replay lossy fallback preserves the existing runtime behavior.
 //!
-//! # First-open ordering (safety-critical)
+//! # First-open ordering
 //!
-//! Configured-codec validation runs **before** any recovery-managed
-//! directory is created or MANIFEST is written. Without that ordering, a fresh
-//! database with an invalid codec id would get a MANIFEST recording
-//! the invalid id on disk before the codec-init failure returned,
-//! leaving a poisoned directory that the next open could not repair.
-//! Preserves the pre-D3 behaviour at `open.rs:1010-1017`.
+//! Configured-codec validation runs **before** any recovery-managed directory
+//! is created or MANIFEST is written. Without that ordering, a fresh database
+//! with an invalid codec id would persist a poisoned directory that the next
+//! open could not repair.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::StrataError;
 use strata_concurrency::{
     apply_wal_record_to_memory_storage, CoordinatorRecoveryError, RecoveryCoordinator,
     RecoveryResult, RecoveryStats, TransactionManager,
 };
 use strata_core::id::CommitVersion;
-use strata_core::StrataError;
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::ManifestManager;
@@ -118,7 +107,7 @@ pub(crate) struct RecoveryOutcome {
 }
 
 impl Database {
-    /// Unified recovery entry point (Epic D3).
+    /// Unified recovery entry point.
     ///
     /// Orchestrates:
     /// 1. Configured-codec validation (before any recovery-managed
@@ -129,14 +118,12 @@ impl Database {
     /// 4. `SegmentedStore` construction at the segments directory.
     /// 5. `RecoveryCoordinator::recover` — snapshot install + WAL
     ///    replay via caller-supplied closures.
-    /// 6. WAL-replay lossy fallback (preserved pre-D3 behaviour).
+    /// 6. WAL-replay lossy fallback.
     /// 7. Snapshot-version fold.
     /// 8. `TransactionCoordinator::from_recovery_with_limits` +
     ///    `apply_storage_config`.
-    /// 9. `SegmentedStore::recover_segments` → SE2's classified
-    ///    outcome → `coordinator.apply_storage_recovery`. **D4
-    ///    inserts the strict-vs-lossy policy match between those two
-    ///    calls.**
+    /// 9. `SegmentedStore::recover_segments` → classified outcome →
+    ///    `coordinator.apply_storage_recovery`.
     /// 10. Follower-state restore (follower mode only).
     /// 11. Watermark construction.
     #[allow(clippy::too_many_lines)] // orchestrator: splitting further would scatter sequential state.

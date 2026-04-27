@@ -6,9 +6,8 @@
 
 use crate::common::*;
 use std::collections::HashMap;
-use strata_core::primitives::json::JsonPath;
 use strata_engine::database::OpenSpec;
-use strata_engine::KVStoreExt;
+use strata_engine::{JsonPath, KVStoreExt};
 
 /// Helper to create an event payload object
 fn event_payload(data: Value) -> Value {

@@ -40,8 +40,7 @@
 use crate::transaction::{CASOperation, TransactionContext};
 use std::collections::HashMap;
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::Key;
+use strata_storage::{Key, Storage};
 
 /// Types of conflicts that can occur during transaction validation
 ///

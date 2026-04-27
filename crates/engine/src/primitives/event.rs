@@ -36,6 +36,7 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::EventLogExt;
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -43,13 +44,12 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::StrataResult;
+use strata_storage::{Key, Namespace};
 
-// Re-export Event from core
-pub use strata_core::primitives::Event;
+// Re-export event semantic types from the engine-owned surface.
+pub use crate::semantics::event::{ChainVerification, Event};
 
 /// Hash version constants
 pub(crate) const HASH_VERSION_SHA256: u8 = 1; // SHA-256
@@ -247,22 +247,22 @@ fn from_stored_value<T: for<'de> Deserialize<'de>>(
 /// ```text
 /// use strata_primitives::EventLog;
 /// use strata_engine::Database;
-/// use strata_core::types::BranchId;
-/// use strata_core::value::Value;
+/// use strata_core::{BranchId, Value};
 ///
 /// let db = Database::open("/path/to/data")?;
 /// let log = EventLog::new(db);
 /// let branch_id = BranchId::new();
 ///
 /// // Append events
-/// let (seq, hash) = log.append(&branch_id, "tool_call", Value::String("search".into()))?;
+/// let first = log.append(&branch_id, "default", "tool_call", Value::String("search".into()))?;
+/// let second = log.append(&branch_id, "default", "tool_result", Value::String("done".into()))?;
 ///
 /// // Read events
-/// let event = log.get(&branch_id, seq)?;
+/// let first_event = log.get(&branch_id, "default", first.as_u64())?.unwrap();
+/// let second_event = log.get(&branch_id, "default", second.as_u64())?.unwrap();
 ///
-/// // Verify chain
-/// let verification = log.verify_chain(&branch_id)?;
-/// assert!(verification.is_valid);
+/// // Check hash linkage between adjacent events
+/// assert_eq!(second_event.value.prev_hash, first_event.value.hash);
 /// ```
 #[derive(Clone)]
 pub struct EventLog {
@@ -526,7 +526,7 @@ impl EventLog {
             match txn.get(&event_key)? {
                 Some(v) => {
                     let event: Event = from_stored_value(&v)
-                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
                     Ok(Some(Versioned::with_timestamp(
                         event.clone(),
                         Version::Sequence(sequence),
@@ -552,6 +552,77 @@ impl EventLog {
             };
 
             Ok(meta.next_sequence)
+        })
+    }
+
+    /// Verify that the stored event stream forms a dense, hash-linked chain.
+    pub fn verify_chain(
+        &self,
+        branch_id: &BranchId,
+        space: &str,
+    ) -> StrataResult<ChainVerification> {
+        self.db.transaction(*branch_id, |txn| {
+            let ns = self.namespace_for(branch_id, space);
+            let meta_key = Key::new_event_meta(ns.clone());
+
+            let meta: EventLogMeta = match txn.get(&meta_key)? {
+                Some(v) => from_stored_value(&v).map_err(|e| {
+                    StrataError::serialization(format!("corrupt EventLog metadata: {}", e))
+                })?,
+                None => return Ok(ChainVerification::valid(0)),
+            };
+
+            let mut expected_prev_hash = [0u8; 32];
+
+            for sequence in 0..meta.next_sequence {
+                let event_key = Key::new_event(ns.clone(), sequence);
+                let Some(value) = txn.get(&event_key)? else {
+                    return Ok(ChainVerification::invalid(
+                        meta.next_sequence,
+                        sequence,
+                        format!("missing event at sequence {sequence}"),
+                    ));
+                };
+
+                let event: Event = from_stored_value(&value)
+                    .map_err(|e| StrataError::serialization(e.to_string()))?;
+
+                if event.sequence != sequence {
+                    return Ok(ChainVerification::invalid(
+                        meta.next_sequence,
+                        sequence,
+                        format!("sequence mismatch at {sequence}: stored {}", event.sequence),
+                    ));
+                }
+
+                if event.prev_hash != expected_prev_hash {
+                    return Ok(ChainVerification::invalid(
+                        meta.next_sequence,
+                        sequence,
+                        format!("prev hash mismatch at sequence {sequence}"),
+                    ));
+                }
+
+                let computed_hash = compute_event_hash(
+                    event.sequence,
+                    &event.event_type,
+                    &event.payload,
+                    event.timestamp.as_micros(),
+                    &event.prev_hash,
+                )?;
+
+                if event.hash != computed_hash {
+                    return Ok(ChainVerification::invalid(
+                        meta.next_sequence,
+                        sequence,
+                        format!("hash mismatch at sequence {sequence}"),
+                    ));
+                }
+
+                expected_prev_hash = event.hash;
+            }
+
+            Ok(ChainVerification::valid(meta.next_sequence))
         })
     }
 
@@ -665,9 +736,8 @@ impl EventLog {
 
                         let event_key = Key::new_event(ns.clone(), seq);
                         if let Some(v) = txn.get(&event_key)? {
-                            let event: Event = from_stored_value(&v).map_err(|e| {
-                                strata_core::StrataError::serialization(e.to_string())
-                            })?;
+                            let event: Event = from_stored_value(&v)
+                                .map_err(|e| StrataError::serialization(e.to_string()))?;
                             results.push(Versioned::with_timestamp(
                                 event.clone(),
                                 Version::Sequence(seq),
@@ -703,7 +773,7 @@ impl EventLog {
                 let event_key = Key::new_event(ns.clone(), seq);
                 if let Some(v) = txn.get(&event_key)? {
                     let event: Event = from_stored_value(&v)
-                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
                     if event.event_type == event_type {
                         migrated_seqs.push(seq);
                         filtered.push(Versioned::with_timestamp(
@@ -745,7 +815,6 @@ impl EventLog {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
-        use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
         let meta: EventLogMeta = match self
@@ -774,7 +843,7 @@ impl EventLog {
             // Use get_at_timestamp to get the event as it existed at that time
             if let Some(vv) = self.db.get_at_timestamp(&event_key, as_of_ts)? {
                 let event: Event = from_stored_value(&vv.value)
-                    .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                    .map_err(|e| StrataError::serialization(e.to_string()))?;
                 // Filter by event's own timestamp (when the event was appended)
                 if event.timestamp.as_micros() <= as_of_ts {
                     if let Some(et) = event_type {
@@ -1063,10 +1132,7 @@ impl EventLog {
 // ========== Searchable Trait Implementation ==========
 
 impl crate::search::Searchable for EventLog {
-    fn search(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
 

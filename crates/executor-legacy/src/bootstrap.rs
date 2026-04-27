@@ -14,20 +14,20 @@ enum Backend {
     Ipc { _data_dir: PathBuf },
 }
 
-/// Transitional bootstrap handle kept only for the legacy open policy.
+/// Bootstrap handle for the legacy open policy.
 pub struct Strata {
     backend: Backend,
     access_mode: AccessMode,
 }
 
 impl Strata {
-    /// Open a database using the transitional legacy bootstrap policy.
+    /// Open a database using the legacy open policy.
     pub fn open<P: AsRef<Path>>(path: P) -> Result<Self> {
         Self::open_with(path, OpenOptions::default())
     }
 
-    /// Open a database using the transitional legacy bootstrap policy and the
-    /// provided open options.
+    /// Open a database using the legacy open policy and the provided open
+    /// options.
     pub fn open_with<P: AsRef<Path>>(path: P, opts: OpenOptions) -> Result<Self> {
         let data_dir = path.as_ref().to_path_buf();
 
@@ -75,8 +75,7 @@ impl Strata {
         }
     }
 
-    /// Open an ephemeral cache database using the transitional legacy bootstrap
-    /// policy.
+    /// Open an ephemeral cache database using the legacy open policy.
     pub fn cache() -> Result<Self> {
         let db = Database::open_runtime(default_product_cache_spec()).map_err(|error| {
             Error::Internal {

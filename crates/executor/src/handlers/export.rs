@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_core::primitives::json::JsonPath;
+use strata_engine::JsonPath;
 
 use crate::bridge::{json_to_value, to_core_branch_id, Primitives};
 use crate::convert::convert_result;

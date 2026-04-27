@@ -283,7 +283,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "test"
         }
-        fn recover(&self, _db: &std::sync::Arc<crate::Database>) -> strata_core::StrataResult<()> {
+        fn recover(&self, _db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
             Ok(())
         }
     }

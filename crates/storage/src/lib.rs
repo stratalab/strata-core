@@ -17,6 +17,7 @@ pub mod compaction;
 pub mod error;
 pub mod index;
 pub mod key_encoding;
+pub mod layout;
 pub mod manifest;
 pub mod memory_stats;
 pub mod memtable;
@@ -30,12 +31,14 @@ pub mod segment_builder;
 pub mod segmented;
 pub mod stored_value;
 mod test_hooks;
+pub mod traits;
 pub mod ttl;
 
 pub use bloom::BloomFilter;
 pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
 pub use error::{BranchOp, StorageError, StorageResult};
 pub use index::{BranchIndex, TypeIndex};
+pub use layout::{validate_space_name, Key, Namespace, TypeTag};
 pub use memory_stats::{BranchMemoryStats, StorageMemoryStats};
 pub use pressure::{MemoryPressure, PressureLevel};
 pub use quarantine::{
@@ -51,4 +54,5 @@ pub use segmented::{
     RecoveryFault, RecoveryHealth, SegmentedStore, StorageBranchRetention,
     StorageInheritedLayerInfo, StorageIterator, VersionedEntry,
 };
+pub use traits::{Storage, WriteMode};
 pub use ttl::TTLIndex;

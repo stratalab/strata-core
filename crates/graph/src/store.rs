@@ -21,7 +21,8 @@ use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use strata_core::id::TxnId;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
+use strata_storage::{Key, TypeTag};
 
 use crate::types::NodeData;
 
@@ -256,9 +257,7 @@ impl AbortObserver for GraphAbortObserver {
     }
 }
 
-fn parse_graph_node_key(key: &strata_core::types::Key) -> Result<Option<(String, String)>, String> {
-    use strata_core::types::TypeTag;
-
+fn parse_graph_node_key(key: &Key) -> Result<Option<(String, String)>, String> {
     if key.type_tag != TypeTag::Graph {
         return Ok(None);
     }
@@ -297,14 +296,14 @@ struct GraphRefreshHook {
 
 enum GraphRefreshOp {
     Index {
-        branch_id: strata_core::types::BranchId,
+        branch_id: BranchId,
         space: String,
         graph: String,
         node_id: String,
         data: crate::types::NodeData,
     },
     Remove {
-        branch_id: strata_core::types::BranchId,
+        branch_id: BranchId,
         space: String,
         graph: String,
         node_id: String,
@@ -349,13 +348,7 @@ impl RefreshHook for GraphRefreshHook {
         "graph"
     }
 
-    fn pre_delete_read(
-        &self,
-        _db: &Database,
-        deletes: &[strata_core::types::Key],
-    ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
-        use strata_core::types::TypeTag;
-
+    fn pre_delete_read(&self, _db: &Database, deletes: &[Key]) -> Vec<(Key, Vec<u8>)> {
         deletes
             .iter()
             .filter(|key| key.type_tag == TypeTag::Graph)
@@ -366,8 +359,8 @@ impl RefreshHook for GraphRefreshHook {
 
     fn apply_refresh(
         &self,
-        puts: &[(strata_core::types::Key, strata_core::value::Value)],
-        pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+        puts: &[(Key, strata_core::value::Value)],
+        pre_read_deletes: &[(Key, Vec<u8>)],
     ) -> Result<Box<dyn strata_engine::PreparedRefresh>, RefreshHookError> {
         let Some(db) = self.db.upgrade() else {
             return Ok(Box::new(strata_engine::NoopPreparedRefresh));
@@ -423,7 +416,7 @@ mod tests {
     use crate::types::NodeData;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_engine::database::OpenSpec;
     use strata_engine::search::EntityRef;
     use strata_engine::search::Searchable;
@@ -453,18 +446,14 @@ mod tests {
             "graph-test-fail-once"
         }
 
-        fn pre_delete_read(
-            &self,
-            _db: &Database,
-            _deletes: &[strata_core::types::Key],
-        ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
+        fn pre_delete_read(&self, _db: &Database, _deletes: &[Key]) -> Vec<(Key, Vec<u8>)> {
             Vec::new()
         }
 
         fn apply_refresh(
             &self,
-            puts: &[(strata_core::types::Key, strata_core::value::Value)],
-            _pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+            puts: &[(Key, strata_core::value::Value)],
+            _pre_read_deletes: &[(Key, Vec<u8>)],
         ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
             if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
                 return Err(RefreshHookError::new(

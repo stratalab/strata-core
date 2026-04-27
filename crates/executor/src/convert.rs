@@ -1,9 +1,10 @@
 //! Conversion from internal errors to executor-facing errors.
 
 use crate::Error;
-use strata_core::{EntityRef, StrataError};
+use strata_core::EntityRef;
+use strata_engine::{StrataError, StrataResult};
 
-pub(crate) fn convert_result<T>(result: strata_core::StrataResult<T>) -> crate::Result<T> {
+pub(crate) fn convert_result<T>(result: StrataResult<T>) -> crate::Result<T> {
     result.map_err(Error::from)
 }
 
@@ -186,7 +187,7 @@ fn version_type_name(v: &strata_core::Version) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::StrataError;
+    use strata_engine::StrataError;
 
     #[test]
     fn branch_name_lookup_maps_to_branch_not_found() {

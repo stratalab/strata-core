@@ -25,8 +25,10 @@
 //! break lexicographic byte ordering.
 
 use std::sync::Arc;
+
+use crate::{Key, Namespace, TypeTag};
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::BranchId;
 
 /// Size in bytes of the trailing `!commit_id` suffix in an `InternalKey`.
 pub const COMMIT_ID_SUFFIX_LEN: usize = 8;
@@ -242,7 +244,7 @@ impl InternalKey {
 
         // Branch ID: 16 bytes
         let branch_bytes: [u8; 16] = typed[..16].try_into().ok()?;
-        let branch_id = strata_core::types::BranchId::from_bytes(branch_bytes);
+        let branch_id = BranchId::from_bytes(branch_bytes);
         pos += 16;
 
         // Space: null-terminated
@@ -332,7 +334,7 @@ impl std::fmt::Debug for InternalKey {
 mod tests {
     use super::*;
     use strata_core::id::CommitVersion;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     fn make_key(space: &str, type_tag: TypeTag, user_key: &str) -> Key {
         let ns = Arc::new(Namespace::new(BranchId::new(), space.to_string()));

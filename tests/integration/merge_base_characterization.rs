@@ -1,10 +1,7 @@
 //! Characterization test locking the current externally-observable
-//! merge-base contract, per epic B1 of the branching execution plan
-//! (`docs/design/branching/branching-execution-plan.md`).
+//! merge-base contract.
 //!
-//! ## Finding from B1 exploration
-//!
-//! The branching execution plan describes two parallel merge-base paths:
+//! The engine currently contains two merge-base implementation paths:
 //! the canonical executor path (`db.branches().merge`) and a bare-engine
 //! path (`branch_ops::merge_branches`). In the current code, the bare-engine
 //! path is **not externally reachable** — `branch_ops` is a private module
@@ -13,24 +10,22 @@
 //! `compute_merge_base` themselves are reachable only from within the
 //! engine crate.
 //!
-//! That means at the *external* API surface, B2's "one canonical path" is
-//! already true. The duplication that B2 will collapse is the
+//! That means the *external* API surface already has one canonical path. The
+//! remaining duplication is the
 //! `merge_base_override` parameter that flows from
 //! `BranchService::merge_with_options(MergeOptions { merge_base: Some(_) })`
 //! down into `branch_ops::merge_branches_with_metadata`. This test locks
-//! today's behavior on every externally observable axis, and locks the
-//! override-takes-priority semantics through the public surface so B3 can
-//! prove its removal preserves equivalent behavior on every public path.
+//! today's behavior on every externally observable axis, including the
+//! override-takes-priority semantics through the public surface.
 //!
 //! Internal `branch_ops::merge_branches` characterization already exists
 //! as inline `#[cfg(test)]` cases in `crates/engine/src/branch_ops/mod.rs`
 //! (search for `merge_branches(&db, ...)`).
 //!
-//! B3.3 update: the store-backed merge-base authority replaced the old
-//! DAG-derived plus caller-override pair. Scenarios A1/A2/B/D/F are
-//! preserved verbatim as the B1 characterization floor; Scenario E is
-//! rewritten to assert the override no longer exists; Scenario G is
-//! added to lock the store-authoritative path.
+//! The store-backed merge-base authority replaced the older DAG-derived plus
+//! caller-override pair. Scenarios A1/A2/B/D/F are preserved verbatim as the
+//! characterization floor; Scenario E asserts the override no longer exists;
+//! Scenario G locks the store-authoritative path.
 //!
 //! ## Scenarios covered
 //!

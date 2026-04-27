@@ -13,10 +13,8 @@
 //! - Reads return `Versioned<T>` (value + version + timestamp)
 //! - Writes return `Version` (the version that was created)
 //!
-//! ## Migration from VersionedValue
-//!
-//! The old `VersionedValue` type is replaced by `Versioned<Value>`.
-//! This generic version allows any type to be versioned.
+//! `Versioned<T>` is generic so the same wrapper can describe versioned values
+//! across different result types.
 
 use super::{Timestamp, Version};
 use serde::{Deserialize, Serialize};
@@ -151,7 +149,7 @@ impl<T> AsMut<T> for Versioned<T> {
 }
 
 // ============================================================================
-// VersionedValue type alias for backwards compatibility
+// VersionedValue convenience alias
 // ============================================================================
 
 use crate::value::Value;
@@ -159,8 +157,7 @@ use std::collections::HashMap;
 
 /// Versioned value for the Value enum
 ///
-/// This is the most common use case - versioned arbitrary values.
-/// Equivalent to the old `VersionedValue` struct.
+/// This is the most common use case for the generic wrapper.
 pub type VersionedValue = Versioned<Value>;
 
 // ============================================================================
@@ -333,7 +330,7 @@ mod tests {
 
     #[test]
     fn test_versioned_is_older_than() {
-        // Create with old timestamp
+        // Create with an earlier timestamp
         let old_ts = Timestamp::from_micros(0);
         let v = Versioned::with_timestamp(1, Version::txn(1), old_ts);
 

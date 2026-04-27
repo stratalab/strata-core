@@ -9,10 +9,11 @@
 //! Per specification: Hot path must have zero allocations after warmup.
 
 use std::sync::Arc;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem, TransactionPool, MAX_POOL_SIZE};
+use strata_storage::{Key, Namespace, TypeTag};
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {

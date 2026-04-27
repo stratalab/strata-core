@@ -1,11 +1,10 @@
-//! B4.2 — mutation-path coverage matrix for the lifecycle write gate.
+//! Mutation-path coverage matrix for the lifecycle write gate.
 //!
 //! Exercises every `BranchService` mutation (plus the bundle-import path)
-//! against every lifecycle state a target / source can be in. The B4.1
-//! gate is meant to be uniform: one helper (`require_writable_by_name`
-//! or `require_visible_by_name`) runs at the top of every mutation, and
-//! no production path should smuggle a gate-bypassing side effect past
-//! it. B4.2 locks that uniformity.
+//! against every lifecycle state a target / source can be in. The gate is
+//! meant to be uniform: one helper (`require_writable_by_name` or
+//! `require_visible_by_name`) runs at the top of every mutation, and no
+//! production path should smuggle a gate-bypassing side effect past it.
 //!
 //! ## What each cell asserts
 //!
@@ -49,11 +48,12 @@ use crate::common::branching::{
 };
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
-use strata_core::{BranchRef, StrataError};
-use strata_engine::{bundle, CherryPickFilter, Database, MergeOptions};
+use strata_core::StrataError;
+use strata_engine::{
+    bundle, BranchLifecycleStatus, BranchRef, CherryPickFilter, Database, MergeOptions,
+};
 
 // =============================================================================
 // Enum of lifecycle target states and helpers to synthesize them

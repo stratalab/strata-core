@@ -495,11 +495,15 @@ fn db_export_graph_respects_selected_graph() {
 #[test]
 fn arrow_import_requires_arrow_feature() {
     let executor = create_executor();
+    let temp = tempdir().unwrap();
+    let import_path = temp.path().join("kv.jsonl");
+    std::fs::write(&import_path, "{\"key\":\"k\",\"value\":\"v\"}\n").unwrap();
+
     let error = executor
         .execute(Command::ArrowImport {
             branch: None,
             space: None,
-            file_path: "missing.jsonl".into(),
+            file_path: import_path.to_string_lossy().into_owned(),
             target: "kv".into(),
             key_column: None,
             value_column: None,
@@ -509,7 +513,7 @@ fn arrow_import_requires_arrow_feature() {
         .expect_err("ArrowImport should fail without the arrow feature");
 
     match error {
-        Error::Internal { reason, .. } => assert!(reason.contains("arrow")),
+        Error::InvalidInput { reason, .. } => assert!(reason.contains("arrow")),
         other => panic!("unexpected error: {other:?}"),
     }
 }

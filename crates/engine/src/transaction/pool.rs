@@ -172,16 +172,15 @@ impl TransactionPool {
 mod tests {
     use super::*;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::traits::{Storage, WriteMode};
-    use strata_core::types::{Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_storage::{Namespace, Storage, TypeTag, WriteMode};
 
     fn create_test_namespace() -> Arc<Namespace> {
         Arc::new(Namespace::new(BranchId::new(), "default".to_string()))
     }
 
-    fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> strata_core::types::Key {
-        strata_core::types::Key::new(ns.clone(), TypeTag::KV, user_key.to_vec())
+    fn create_test_key(ns: &Arc<Namespace>, user_key: &[u8]) -> strata_storage::Key {
+        strata_storage::Key::new(ns.clone(), TypeTag::KV, user_key.to_vec())
     }
 
     #[test]

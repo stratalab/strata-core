@@ -54,17 +54,18 @@ static FOLLOWER_SYNTHESIS_WARNED: Once = Once::new();
 
 use serde::{Deserialize, Serialize};
 use strata_concurrency::TransactionContext;
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
-use strata_core::{
-    BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, StrataError, StrataResult,
-};
+use strata_core::types::BranchId;
+use strata_storage::{Key, Namespace, TypeTag};
 use tracing::{info, warn};
 
+use crate::branch_domain::{
+    is_system_branch, BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef,
+    ForkAnchor,
+};
 use crate::database::dag_hook::{DagEvent, DagEventKind};
 use crate::database::{Database, DatabaseMode};
+use crate::{StrataError, StrataResult};
 
 // =============================================================================
 // Key prefixes
@@ -336,10 +337,7 @@ fn collect_legacy_branch_metadata(db: &Arc<Database>) -> StrataResult<Vec<String
         let Ok(name) = String::from_utf8(key.user_key.to_vec()) else {
             continue;
         };
-        if name.contains("__idx_")
-            || name == "__default_branch__"
-            || strata_core::branch_dag::is_system_branch(&name)
-        {
+        if name.contains("__idx_") || name == "__default_branch__" || is_system_branch(&name) {
             continue;
         }
         out.push(name);
@@ -961,7 +959,7 @@ impl BranchControlStore {
                 };
                 if name.contains("__idx_")
                     || name == "__default_branch__"
-                    || strata_core::branch_dag::is_system_branch(&name)
+                    || is_system_branch(&name)
                 {
                     continue;
                 }
@@ -2043,7 +2041,7 @@ mod tests {
                     branch: child,
                     name: "child".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent,
                         point: CommitVersion(8),
                     }),
@@ -2077,7 +2075,7 @@ mod tests {
                     branch: sib_a,
                     name: "a".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(5),
                     }),
@@ -2089,7 +2087,7 @@ mod tests {
                     branch: sib_b,
                     name: "b".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(10),
                     }),
@@ -2124,7 +2122,7 @@ mod tests {
                     branch: feature,
                     name: "feature".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(3),
                     }),
@@ -2192,7 +2190,7 @@ mod tests {
                     branch: feature,
                     name: "feature".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(5),
                     }),
@@ -2254,7 +2252,7 @@ mod tests {
                     branch: feature,
                     name: "feature".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(5),
                     }),
@@ -2340,7 +2338,7 @@ mod tests {
                     branch: feat_gen0,
                     name: "feat".to_string(),
                     lifecycle: BranchLifecycleStatus::Deleted,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(2),
                     }),
@@ -2352,7 +2350,7 @@ mod tests {
                     branch: feat_gen1,
                     name: "feat".to_string(),
                     lifecycle: BranchLifecycleStatus::Active,
-                    fork: Some(strata_core::ForkAnchor {
+                    fork: Some(ForkAnchor {
                         parent: main,
                         point: CommitVersion(15),
                     }),

@@ -28,18 +28,17 @@ pub mod types;
 
 pub use branch_dag::GraphSubsystem;
 pub use store::{GraphBackendState, StagedGraphOp};
-pub use strata_core::branch_dag::{
+pub use strata_engine::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
     BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId, Key};
-use strata_core::{StrataError, StrataResult, Value};
-
 use adjacency::AdjacencyIndex;
+use strata_core::{BranchId, StrataError, StrataResult, Value};
 use strata_engine::Database;
+use strata_storage::Key;
 use types::*;
 
 /// Graph store providing CRUD operations on nodes and edges.
@@ -51,10 +50,7 @@ pub struct GraphStore {
     db: Arc<Database>,
 }
 
-/// Canonical primitive-facing name for the graph store.
-///
-/// `GraphStore` remains as a compatibility name while the workspace is
-/// normalized around a single primitive vocabulary.
+/// Primitive-facing name for the graph store.
 pub type PrimitiveGraphStore = GraphStore;
 
 impl GraphStore {

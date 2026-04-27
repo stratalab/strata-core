@@ -12,9 +12,9 @@
 use std::sync::Arc;
 
 use strata_concurrency::TransactionContext;
-use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{EntityRef, Version};
+use strata_core::{BranchId, EntityRef, Version};
+use strata_storage::{Key, Namespace};
 
 use crate::error::{VectorError, VectorResult};
 use crate::store::VectorBackendState;

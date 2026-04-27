@@ -342,7 +342,7 @@ impl GraphStore {
         branch_id: BranchId,
         graph: &str,
         edges: &[(String, String, String, EdgeData)],
-        ns: &std::sync::Arc<strata_core::types::Namespace>,
+        ns: &std::sync::Arc<strata_storage::Namespace>,
     ) -> StrataResult<usize> {
         // Collect unique node IDs for existence checks
         let mut unique_nodes: std::collections::HashSet<&str> = std::collections::HashSet::new();

@@ -21,11 +21,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key};
+use strata_core::BranchId;
 
 use crate::key_encoding::{encode_typed_key_prefix, InternalKey};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::segment::{LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
+use crate::Key;
 
 // ---------------------------------------------------------------------------
 // SeekableIterator trait

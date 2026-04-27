@@ -27,7 +27,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use thiserror::Error;
 
 /// Self-contained outcome of [`SegmentedStore::recover_segments`].

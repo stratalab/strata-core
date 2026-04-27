@@ -36,9 +36,10 @@ use std::cell::Cell;
 use std::io;
 
 use strata_core::id::CommitVersion;
-use strata_core::StrataResult;
+use strata_core::{BranchId, StrataResult};
 use strata_engine::database::observers::{AbortInfo, AbortObserver};
 use strata_engine::Database;
+use strata_storage::{Key, Storage, TypeTag};
 use tracing::info;
 
 #[cfg(test)]
@@ -87,7 +88,7 @@ fn recover_vector_state(db: &std::sync::Arc<Database>) -> StrataResult<()> {
 /// `_system_` space is also safe.
 pub(crate) fn mmap_path(
     data_dir: &std::path::Path,
-    branch_id: strata_core::types::BranchId,
+    branch_id: BranchId,
     space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {
@@ -101,7 +102,7 @@ pub(crate) fn mmap_path(
 /// Layout: `{data_dir}/vectors/{branch_hex}/`.
 pub(crate) fn branch_cache_dir(
     data_dir: &std::path::Path,
-    branch_id: strata_core::types::BranchId,
+    branch_id: BranchId,
 ) -> std::path::PathBuf {
     let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
     data_dir.join("vectors").join(branch_hex)
@@ -147,10 +148,7 @@ pub(crate) fn purge_collection_disk_cache(data_dir: &std::path::Path, cid: &supe
 ///
 /// This is stronger than per-collection purge and is used during branch delete
 /// to remove orphan sidecar files that no longer have a loaded backend.
-pub(crate) fn purge_branch_disk_cache(
-    data_dir: &std::path::Path,
-    branch_id: strata_core::types::BranchId,
-) {
+pub(crate) fn purge_branch_disk_cache(data_dir: &std::path::Path, branch_id: BranchId) {
     if data_dir.as_os_str().is_empty() {
         return;
     }
@@ -173,9 +171,8 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
     use crate::heap::VectorHeap;
     use std::sync::Arc;
-    use strata_core::traits::Storage;
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_storage::{Key, Namespace, Storage};
 
     // Skip recovery for cache databases
     if db.is_cache() {
@@ -631,7 +628,7 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
     fn cleanup_deleted_branch(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-        branch_id: &strata_core::types::BranchId,
+        branch_id: &BranchId,
         _branch_name: &str,
     ) -> strata_core::StrataResult<()> {
         let store = crate::VectorStore::new(db.clone());
@@ -781,7 +778,7 @@ enum PendingVectorOp {
     },
     UpsertVector {
         collection_id: crate::CollectionId,
-        vector_id: strata_core::primitives::vector::VectorId,
+        vector_id: crate::VectorId,
         vector_key: String,
         embedding: Vec<f32>,
         created_at: u64,
@@ -789,7 +786,7 @@ enum PendingVectorOp {
     },
     DeleteVector {
         collection_id: crate::CollectionId,
-        vector_id: strata_core::primitives::vector::VectorId,
+        vector_id: crate::VectorId,
         deleted_at: u64,
     },
     DropCollection {
@@ -875,13 +872,11 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
     fn pre_delete_read(
         &self,
         db: &strata_engine::Database,
-        deletes: &[strata_core::types::Key],
-    ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
-        use strata_core::traits::Storage;
-
+        deletes: &[Key],
+    ) -> Vec<(Key, Vec<u8>)> {
         deletes
             .iter()
-            .filter(|key| key.type_tag == strata_core::types::TypeTag::Vector)
+            .filter(|key| key.type_tag == TypeTag::Vector)
             .map(|key| {
                 let bytes = db
                     .storage()
@@ -900,11 +895,10 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
 
     fn apply_refresh(
         &self,
-        puts: &[(strata_core::types::Key, strata_core::value::Value)],
-        pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+        puts: &[(Key, strata_core::value::Value)],
+        pre_read_deletes: &[(Key, Vec<u8>)],
     ) -> Result<Box<dyn strata_engine::PreparedRefresh>, strata_engine::RefreshHookError> {
-        use strata_core::primitives::vector::{CollectionId, VectorId};
-        use strata_core::types::TypeTag;
+        use crate::{CollectionId, VectorId};
 
         let Some(db) = self.db.upgrade() else {
             return Ok(Box::new(strata_engine::NoopPreparedRefresh));
@@ -1237,18 +1231,14 @@ mod tests {
             "vector-test-fail-once"
         }
 
-        fn pre_delete_read(
-            &self,
-            _db: &Database,
-            _deletes: &[strata_core::types::Key],
-        ) -> Vec<(strata_core::types::Key, Vec<u8>)> {
+        fn pre_delete_read(&self, _db: &Database, _deletes: &[Key]) -> Vec<(Key, Vec<u8>)> {
             Vec::new()
         }
 
         fn apply_refresh(
             &self,
-            puts: &[(strata_core::types::Key, strata_core::value::Value)],
-            _pre_read_deletes: &[(strata_core::types::Key, Vec<u8>)],
+            puts: &[(Key, strata_core::value::Value)],
+            _pre_read_deletes: &[(Key, Vec<u8>)],
         ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
             if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
                 return Err(RefreshHookError::new(

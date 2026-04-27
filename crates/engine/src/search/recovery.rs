@@ -22,14 +22,13 @@
 
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
-use crate::search::InvertedIndex;
+use crate::search::{extract_search_text, InvertedIndex};
+use crate::StrataResult;
+use crate::SYSTEM_BRANCH;
 use std::collections::HashSet;
-use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{Key, TypeTag};
 use strata_core::value::Value;
-use strata_core::StrataResult;
+use strata_storage::{Key, TypeTag};
 use tracing::info;
 
 /// Extract indexable text from a Value.
@@ -37,11 +36,7 @@ use tracing::info;
 /// Returns `Some(text)` for String and JSON-serializable values.
 /// Returns `None` for Null, Bool, Bytes (not searchable).
 pub fn extract_indexable_text(value: &Value) -> Option<String> {
-    match value {
-        Value::String(s) => Some(s.clone()),
-        Value::Null | Value::Bool(_) | Value::Bytes(_) => None,
-        other => serde_json::to_string(other).ok(),
-    }
+    extract_search_text(value)
 }
 
 /// True if `space` is a JSON-internal space (secondary index storage).
@@ -526,17 +521,11 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         "search"
     }
 
-    fn recover(
-        &self,
-        db: &std::sync::Arc<crate::database::Database>,
-    ) -> strata_core::StrataResult<()> {
+    fn recover(&self, db: &std::sync::Arc<crate::database::Database>) -> StrataResult<()> {
         recover_search_state(db)
     }
 
-    fn initialize(
-        &self,
-        db: &std::sync::Arc<crate::database::Database>,
-    ) -> strata_core::StrataResult<()> {
+    fn initialize(&self, db: &std::sync::Arc<crate::database::Database>) -> StrataResult<()> {
         use std::sync::Arc;
 
         if let Ok(index) = db.extension::<InvertedIndex>() {
@@ -557,7 +546,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         Ok(())
     }
 
-    fn freeze(&self, db: &crate::database::Database) -> strata_core::StrataResult<()> {
+    fn freeze(&self, db: &crate::database::Database) -> StrataResult<()> {
         db.freeze_search_index()
     }
 
@@ -572,7 +561,8 @@ impl crate::recovery::Subsystem for SearchSubsystem {
     ///      Without this, a restart would resurrect the stale documents.
     ///
     /// Search uses a single global manifest (not per-branch directories),
-    /// so the cleanup is surgical rather than directory-wipe (contrast with
+    /// so cleanup rewrites shared manifest state rather than removing a
+    /// branch-owned directory (contrast with
     /// `VectorSubsystem::cleanup_deleted_branch`). Sealed `.sidx` segment
     /// files retain tombstones for the removed docs and self-clean on the
     /// next seal/compaction cycle — DG-017 only requires the deletion to
@@ -595,7 +585,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
         db: &std::sync::Arc<crate::database::Database>,
         branch_id: &strata_core::types::BranchId,
         branch_name: &str,
-    ) -> strata_core::StrataResult<()> {
+    ) -> StrataResult<()> {
         let Ok(index) = db.extension::<InvertedIndex>() else {
             return Ok(());
         };

@@ -37,4 +37,10 @@ all-MiniLM-L6-v2/
 stratadb.org/
 
 .env
-/docs
+/docs/*
+!/docs/core/
+!/docs/core/*.md
+!/docs/engine/
+!/docs/engine/*.md
+!/docs/storage/
+!/docs/storage/*.md

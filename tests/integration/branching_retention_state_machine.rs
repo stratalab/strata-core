@@ -1,8 +1,8 @@
-//! B5 — generated-history retention / rebuild lane.
+//! Generated-history retention / rebuild lane.
 //!
-//! This suite is the heavy property/state-machine lane called for by
-//! `docs/design/branching/branching-gc/branching-b5-verification-spec.md`.
-//! It intentionally stays narrower than a full branching model:
+//! This suite is the heavy property/state-machine lane for retention and
+//! rebuild behavior. It intentionally stays narrower than a full branching
+//! model:
 //!
 //! - same-name recreate must not alias retention by branch name alone
 //! - materialization may rewrite ownership, but not visible results
@@ -230,6 +230,121 @@ fn assert_history_invariants(
     }
 
     Ok(())
+}
+
+#[test]
+fn regression_retention_report_stays_available_after_reopen_materialize_rewrite_gc_history() {
+    let mut test_db = TestDb::new();
+    test_db.db.branches().create("main").unwrap();
+    seed(&test_db.db, "main", "root", 1);
+    flush_branch(&test_db.db, "main");
+
+    let mut model = ModelState::new(1);
+    assert_history_invariants(&mut test_db, &model, 0, HistoryOp::RewriteMain).unwrap();
+
+    let ops = [
+        HistoryOp::Reopen,
+        HistoryOp::RewriteMain,
+        HistoryOp::ForkFeature,
+        HistoryOp::Reopen,
+        HistoryOp::Reopen,
+        HistoryOp::ForkFeature,
+        HistoryOp::Reopen,
+        HistoryOp::ForkFeature,
+        HistoryOp::MaterializeFeature,
+        HistoryOp::ForkFeature,
+        HistoryOp::RewriteMain,
+        HistoryOp::RewriteMain,
+        HistoryOp::Gc,
+    ];
+
+    for (step, op) in ops.into_iter().enumerate() {
+        match op {
+            HistoryOp::RewriteMain => {
+                if model.main_live {
+                    let value = model.alloc_value();
+                    seed(&test_db.db, "main", "root", value);
+                    flush_branch(&test_db.db, "main");
+                    model.main_value = value;
+                }
+            }
+            HistoryOp::ForkFeature => {
+                if model.main_live && !model.feature_exists {
+                    test_db.db.branches().fork("main", "feature").unwrap();
+                    model.feature_exists = true;
+                    model.feature_snapshot = Some(model.main_value);
+                    model.feature_parent_generation = Some(model.main_generation);
+                    model.feature_materialized = false;
+                }
+            }
+            HistoryOp::DeleteMain => {
+                if model.main_live {
+                    test_db.db.branches().delete("main").unwrap();
+                    model.main_live = false;
+                }
+            }
+            HistoryOp::RecreateMain => {
+                if !model.main_live {
+                    test_db.db.branches().create("main").unwrap();
+                    model.main_generation += 1;
+                    let value = model.alloc_value();
+                    seed(&test_db.db, "main", "root", value);
+                    flush_branch(&test_db.db, "main");
+                    model.main_live = true;
+                    model.main_value = value;
+                }
+            }
+            HistoryOp::MaterializeFeature => {
+                if model.feature_exists
+                    && test_db
+                        .db
+                        .storage()
+                        .inherited_layer_count(&resolve("feature"))
+                        > 0
+                {
+                    test_db
+                        .db
+                        .storage()
+                        .materialize_layer(&resolve("feature"), 0)
+                        .expect("materialize layer 0 succeeds");
+                }
+                if model.feature_exists {
+                    model.feature_materialized = test_db
+                        .db
+                        .storage()
+                        .inherited_layer_count(&resolve("feature"))
+                        == 0;
+                }
+            }
+            HistoryOp::Reopen => test_db.reopen(),
+            HistoryOp::Gc => {
+                if model.feature_exists || !model.main_live {
+                    test_db
+                        .db
+                        .storage()
+                        .gc_orphan_segments()
+                        .expect("healthy histories permit GC");
+                }
+            }
+        }
+
+        assert_history_invariants(&mut test_db, &model, step + 1, op).unwrap();
+    }
+
+    let report = test_db
+        .db
+        .retention_report()
+        .expect("retention report should remain available after gc");
+    let feature_entry = branch_entry(&report, "feature").expect("feature entry present");
+    assert_eq!(
+        feature_entry.inherited_layer_bytes, 0,
+        "materialized feature must stay detached from inherited-layer attribution"
+    );
+
+    test_db
+        .db
+        .retention_report()
+        .expect("repeated retention report reads should stay available");
 }
 
 proptest! {

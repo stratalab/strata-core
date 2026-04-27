@@ -1,7 +1,6 @@
 //! Per-database branch DAG hook.
 //!
 //! The `BranchDagHook` trait provides a hook for branch DAG operations.
-//! After the B3 cutover (`docs/design/branching/b3-phasing-plan.md`),
 //! `BranchControlStore` is the **authoritative** source for fork + merge
 //! lineage and `find_merge_base`; the DAG is a derived read-side
 //! projection used only for `log` and `ancestors` history traversals.
@@ -12,8 +11,8 @@
 //! merge, revert, and cherry-pick as a node and edge so that
 //! `BranchService::log` and `BranchService::ancestors` can answer
 //! ordered-history queries without walking the control store on every
-//! call. It is **not** consulted for `merge_base`: that authority lives
-//! in `BranchControlStore::find_merge_base` (B3.3).
+//! call. It is **not** consulted for `merge_base`: that authority lives in
+//! `BranchControlStore::find_merge_base`.
 //!
 //! The graph crate implements the actual DAG storage, but the engine cannot
 //! depend on the graph crate (cycle: graph depends on engine). This trait
@@ -58,9 +57,9 @@ use parking_lot::RwLock;
 use std::fmt;
 use std::sync::Arc;
 
+use crate::BranchRef;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_core::BranchRef;
 
 use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
 

@@ -2,8 +2,8 @@
 
 pub(in crate::segmented) use super::compaction::*;
 pub(crate) use super::*;
+pub(crate) use crate::{Namespace, TypeTag};
 pub(crate) use strata_core::id::CommitVersion;
-pub(crate) use strata_core::types::{Namespace, TypeTag};
 
 pub fn branch() -> BranchId {
     BranchId::from_bytes([1; 16])

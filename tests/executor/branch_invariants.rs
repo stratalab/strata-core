@@ -316,7 +316,7 @@ fn default_branch_always_works() {
 
 #[test]
 fn dag_records_via_executor_api() {
-    use strata_core::branch_dag::SYSTEM_BRANCH;
+    use strata_engine::SYSTEM_BRANCH;
     use strata_executor::{MergeStrategy, Session, Strata};
     use strata_graph::types::{Direction, NodeData};
     use strata_graph::GraphStore;

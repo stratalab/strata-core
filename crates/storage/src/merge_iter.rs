@@ -17,7 +17,7 @@ use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 use std::iter::Peekable;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 /// Source count threshold: use linear scan at or below this, heap above.
 const HEAP_THRESHOLD: usize = 4;
@@ -260,10 +260,11 @@ impl<I: Iterator<Item = (InternalKey, MemtableEntry)>> Iterator for RewritingIte
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Key, Namespace, TypeTag};
     use std::sync::Arc;
     use strata_core::id::CommitVersion;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_core::BranchId;
     use strata_core::Timestamp;
 
     fn branch() -> BranchId {

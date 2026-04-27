@@ -28,9 +28,8 @@ use crate::segment_builder::{
     FilterIndexEntry, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
     HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
-use strata_core::error::StrataError;
+use crate::{Key, StorageError, StorageResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::Key;
 use strata_core::value::Value;
 
 use std::cell::RefCell;
@@ -531,7 +530,7 @@ impl KVSegment {
         &self,
         key: &Key,
         snapshot_commit: CommitVersion,
-    ) -> Result<Option<SegmentEntry>, StrataError> {
+    ) -> StorageResult<Option<SegmentEntry>> {
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::encode(key, CommitVersion::MAX);
         self.point_lookup_preencoded(&typed_key, seek_ik.as_bytes(), snapshot_commit)
@@ -544,7 +543,7 @@ impl KVSegment {
         typed_key: &[u8],
         seek_bytes: &[u8],
         snapshot_commit: CommitVersion,
-    ) -> Result<Option<SegmentEntry>, StrataError> {
+    ) -> StorageResult<Option<SegmentEntry>> {
         let profiling = Self::segment_profile_enabled();
 
         // 1. Bloom check
@@ -708,7 +707,7 @@ impl KVSegment {
         typed_key: &[u8],
         seek_bytes: &[u8],
         snapshot_commit: CommitVersion,
-    ) -> Result<Option<SegmentEntry>, StrataError> {
+    ) -> crate::StorageResult<Option<SegmentEntry>> {
         let profiling = Self::segment_profile_enabled();
         let ts = if profiling {
             Some(std::time::Instant::now())
@@ -925,7 +924,7 @@ impl KVSegment {
     ///
     /// On cache hit, returns the cached decompressed block (zero decompression cost).
     /// On cache miss, reads from file via pread, decompresses if needed, caches, and returns.
-    fn read_data_block(&self, ie: &IndexEntry) -> Result<Arc<Vec<u8>>, StrataError> {
+    fn read_data_block(&self, ie: &IndexEntry) -> crate::StorageResult<Arc<Vec<u8>>> {
         let cache = crate::block_cache::global_cache();
         let block_offset = ie.block_offset;
         let profiling = Self::segment_profile_enabled();
@@ -951,7 +950,7 @@ impl KVSegment {
         };
         let framed_len = FRAME_OVERHEAD + ie.block_data_len as usize;
         let raw = pread_exact(&self.file, block_offset, framed_len).map_err(|e| {
-            StrataError::corruption(format!(
+            StorageError::corruption(format!(
                 "pread failed reading data block at offset {} in {:?}: {}",
                 block_offset, self.file_path, e
             ))
@@ -959,7 +958,7 @@ impl KVSegment {
 
         let (_block_type, codec_byte, reserved, data, stored_crc) = parse_framed_block_raw(&raw)
             .ok_or_else(|| {
-                StrataError::corruption(format!(
+                StorageError::corruption(format!(
                     "data block truncation at offset {} in {:?}",
                     block_offset, self.file_path
                 ))
@@ -971,7 +970,7 @@ impl KVSegment {
         if !pre_compression_crc {
             let computed_crc = crc32fast::hash(data);
             if stored_crc != computed_crc {
-                return Err(StrataError::corruption(format!(
+                return Err(StorageError::corruption(format!(
                     "data block CRC mismatch at offset {} in {:?}",
                     block_offset, self.file_path
                 )));
@@ -981,13 +980,13 @@ impl KVSegment {
         let decompressed = match codec_byte {
             0 => data.to_vec(), // Uncompressed
             1 => zstd::decode_all(data).map_err(|e| {
-                StrataError::corruption(format!(
+                StorageError::corruption(format!(
                     "zstd decompression failed at offset {} in {:?}: {}",
                     block_offset, self.file_path, e
                 ))
             })?,
             other => {
-                return Err(StrataError::corruption(format!(
+                return Err(StorageError::corruption(format!(
                     "unknown compression codec {} at offset {} in {:?}",
                     other, block_offset, self.file_path
                 )));
@@ -1000,7 +999,7 @@ impl KVSegment {
         if pre_compression_crc {
             let computed_crc = crc32fast::hash(&decompressed);
             if stored_crc != computed_crc {
-                return Err(StrataError::corruption(format!(
+                return Err(StorageError::corruption(format!(
                     "data block CRC mismatch (pre-compression) at offset {} in {:?}",
                     block_offset, self.file_path
                 )));
@@ -1035,7 +1034,7 @@ impl KVSegment {
         ie: &IndexEntry,
         typed_key: &[u8],
         snapshot_commit: CommitVersion,
-    ) -> Result<Option<SegmentEntry>, StrataError> {
+    ) -> crate::StorageResult<Option<SegmentEntry>> {
         let profiling = Self::segment_profile_enabled();
 
         let t0 = if profiling {
@@ -1988,8 +1987,9 @@ mod tests {
     use super::*;
     use crate::memtable::Memtable;
     use crate::segment_builder::SegmentBuilder;
+    use crate::{Namespace, TypeTag};
     use std::sync::Arc;
-    use strata_core::types::{BranchId, Namespace, TypeTag};
+    use strata_core::BranchId;
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])

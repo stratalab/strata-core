@@ -7,11 +7,10 @@
 use crate::primitives::branch::resolve_branch_name;
 use crate::search::recipe::{builtin_defaults, get_builtin_recipe, Recipe, BUILTIN_RECIPE_NAMES};
 use crate::system_space::system_kv_key;
-use crate::Database;
-use strata_core::branch_dag::SYSTEM_BRANCH;
+use crate::SYSTEM_BRANCH;
+use crate::{Database, StrataError, StrataResult};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::StrataResult;
 
 /// The branch ID for `_system_` where built-in recipes are stored.
 fn system_branch_id() -> BranchId {
@@ -54,7 +53,7 @@ pub fn set_recipe(
 ) -> StrataResult<()> {
     // Protect built-ins on _system_ branch
     if branch_id == system_branch_id() && BUILTIN_RECIPE_NAMES.contains(&name) {
-        return Err(strata_core::StrataError::InvalidInput {
+        return Err(StrataError::InvalidInput {
             message: format!("Cannot overwrite built-in recipe '{name}' on _system_ branch"),
         });
     }
@@ -72,7 +71,7 @@ pub fn set_recipe(
 /// returns an error. Deleting a user shadow restores the built-in fallback.
 pub fn delete_recipe(db: &Database, branch_id: BranchId, name: &str) -> StrataResult<()> {
     if branch_id == system_branch_id() && BUILTIN_RECIPE_NAMES.contains(&name) {
-        return Err(strata_core::StrataError::InvalidInput {
+        return Err(StrataError::InvalidInput {
             message: format!("Cannot delete built-in recipe '{name}' from _system_ branch"),
         });
     }
@@ -117,7 +116,6 @@ pub fn get_default_recipe(db: &Database, branch_id: BranchId) -> StrataResult<Re
 pub fn list_recipes(db: &Database, branch_id: BranchId) -> StrataResult<Vec<String>> {
     use std::collections::BTreeSet;
     use strata_core::id::CommitVersion;
-    use strata_core::traits::Storage;
 
     let mut names = BTreeSet::new();
 

@@ -16,7 +16,8 @@ default = []
 engine-internal = []
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
+strata-storage = { path = "../storage" }
 parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

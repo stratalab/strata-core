@@ -1,5 +1,6 @@
 //! Transaction API and write backpressure.
 
+use crate::{StrataError, StrataResult};
 use parking_lot::Mutex as ParkingMutex;
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_core::{Storage, StrataError, StrataResult};
 use strata_durability::wal::DurabilityMode;
 use strata_durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::SegmentedStore;
@@ -795,8 +795,10 @@ impl Database {
         TransactionPool::release(ctx);
     }
 
-    /// Legacy compatibility shim: dropping the owned transaction already
-    /// returns it to the pool, so this is just an explicit drop.
+    /// End a transaction explicitly.
+    ///
+    /// Dropping the owned transaction already returns it to the pool, so this
+    /// method is just an explicit drop.
     pub fn end_transaction(&self, txn: Transaction) {
         drop(txn);
     }
@@ -929,7 +931,7 @@ impl Database {
         }
     }
 
-    /// Legacy compatibility shim for callers still routing through Database.
+    /// Commit a transaction through the database handle.
     pub fn commit_transaction(&self, txn: &mut Transaction) -> StrataResult<u64> {
         txn.commit()
     }

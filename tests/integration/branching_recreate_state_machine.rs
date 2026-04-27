@@ -27,10 +27,10 @@
 use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
-use strata_core::{BranchId, BranchRef};
-use strata_engine::primitives::extensions::KVStoreExt;
+use strata_core::BranchId;
+use strata_engine::BranchRef;
+use strata_engine::{primitives::extensions::KVStoreExt, BranchLifecycleStatus};
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

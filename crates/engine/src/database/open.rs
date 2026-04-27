@@ -3,6 +3,7 @@
 use super::config::StorageConfig;
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
+use crate::{StrataError, StrataResult};
 use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,6 @@ pub(crate) fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig
 }
 
 use strata_core::id::CommitVersion;
-use strata_core::{StrataError, StrataResult};
 
 /// Restrict a directory to owner-only access (rwx------).
 /// Best-effort: logs a warning on failure but does not block database open.
@@ -427,12 +427,7 @@ impl Database {
         let layout = DatabaseLayout::from_root(&canonical_path);
         let wal_dir = layout.wal_dir().to_path_buf();
 
-        // Epic D3: unified recovery orchestration. `run_recovery` owns
-        // the follower-specific MANIFEST-or-config codec resolution,
-        // WAL-only-on-missing-MANIFEST branch, coordinator recovery
-        // with lossy fallback, segment recovery, and persisted
-        // follower-state restore. Pre-D3 this was ~260 inline lines
-        // with string-factory error wraps at four sites.
+        // Recovery orchestration is centralized in `run_recovery`.
         let outcome = Database::run_recovery(
             &canonical_path,
             &layout,
@@ -704,14 +699,7 @@ impl Database {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
 
-        // Epic D3: unified recovery orchestration. `run_recovery` owns
-        // codec validation (before any recovery-managed artifact
-        // creation), MANIFEST
-        // load-or-create, WAL replay with its lossy-fallback branch,
-        // coordinator construction, and SE2's segment recovery
-        // plus `coordinator.apply_storage_recovery`. Pre-D3 each of
-        // those steps lived inline here with string-factory error
-        // wraps scattered across 250 lines.
+        // Recovery orchestration is centralized in `run_recovery`.
         let outcome = Database::run_recovery(
             &canonical_path,
             &layout,
@@ -1177,11 +1165,10 @@ impl Database {
                     if let Some(branch_name) = &effective_default_branch {
                         Self::ensure_default_branch(db, branch_name)?;
                     }
-                    // B3.1: migrate any legacy BranchMetadata into
-                    // BranchControlStore. Runs once per database; second
-                    // open is a no-op. Lifecycle hooks above install the
-                    // DAG hook first, so migration's uncapped DAG log
-                    // fallback for fork-anchor derivation can run.
+                    // Rebuild branch-control state from any existing branch
+                    // metadata. Runs once per database; repeated opens become
+                    // a no-op. Lifecycle hooks above install the DAG hook
+                    // first so fork-anchor derivation can consult DAG history.
                     crate::branch_ops::branch_control_store::BranchControlStore::ensure_migrated(
                         db,
                     )?;

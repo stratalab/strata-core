@@ -22,7 +22,7 @@ openai = ["embed", "strata-inference/openai"]
 google = ["embed", "strata-inference/google"]
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-engine = { path = "../engine" }
 strata-search = { path = "../search" }
 strata-vector = { path = "../vector" }

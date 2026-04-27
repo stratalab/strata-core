@@ -1,17 +1,14 @@
-//! B5.2 — Crash / failpoint quarantine reopen suite.
+//! Crash / failpoint quarantine reopen suite.
 //!
-//! Covers the mandatory crash boundaries from
-//! `docs/design/branching/branching-gc/branching-b5-verification-spec.md`
-//! §"Required crash boundaries" that are reachable by injecting faults
-//! at the protocol seams. The suite does not enumerate every boundary
-//! via unique test hooks — several boundaries reduce to the same
-//! filesystem observable (e.g. "file at quarantine but inventory
-//! absent"). Each test states the required post-crash outcome per the
-//! §"Required outcome rule".
+//! Exercises the crash boundaries reachable through the current test hooks.
+//! Several distinct failures reduce to the same filesystem observable
+//! (for example, "file in quarantine but inventory absent"), so the suite
+//! focuses on required post-crash outcomes rather than one hook per branch of
+//! the implementation.
 //!
-//! Verification target (from the spec): no recovery-trusted
-//! manifest-reachable segment may be permanently deleted under any
-//! crash boundary; quarantine is reversible until final purge.
+//! Verification target: no recovery-trusted manifest-reachable segment may be
+//! permanently deleted across these crash boundaries, and quarantine remains
+//! reversible until final purge.
 
 #![cfg(not(miri))]
 

@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use strata_core::types::Namespace;
 use strata_engine::transaction::context::Transaction as ScopedTransaction;
 use strata_engine::transaction_ops::TransactionOps as _;
 use strata_engine::TransactionContext;
+use strata_storage::{Key, Namespace};
 
 use crate::bridge::{
     extract_version, require_branch_exists, to_core_branch_id, validate_value, Primitives,
@@ -138,8 +138,7 @@ pub(crate) fn execute_in_txn(
             after_sequence,
             ..
         } => {
-            let prefix =
-                strata_core::types::Key::new_event_type_idx_prefix(namespace.clone(), &event_type);
+            let prefix = Key::new_event_type_idx_prefix(namespace.clone(), &event_type);
             let index_entries = ctx.scan_prefix(&prefix).map_err(crate::Error::from)?;
             let mut events = Vec::new();
             for (index_key, _) in index_entries {
@@ -154,11 +153,11 @@ pub(crate) fn execute_in_txn(
                 if after_sequence.is_some_and(|after| sequence <= after) {
                     continue;
                 }
-                let event_key = strata_core::types::Key::new_event(namespace.clone(), sequence);
+                let event_key = Key::new_event(namespace.clone(), sequence);
                 if let Some(strata_core::Value::String(json)) =
                     ctx.get(&event_key).map_err(crate::Error::from)?
                 {
-                    let event: strata_core::Event =
+                    let event: strata_engine::Event =
                         serde_json::from_str(&json).map_err(|error| {
                             crate::Error::Serialization {
                                 reason: format!(

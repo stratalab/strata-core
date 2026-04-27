@@ -30,11 +30,13 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+use crate::BranchRef;
 use strata_core::contract::PrimitiveType;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::{BranchId, Key};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::{BranchRef, PrimitiveDegradedReason};
+use strata_core::PrimitiveDegradedReason;
+use strata_storage::Key;
 
 // =============================================================================
 // Error Types
@@ -288,7 +290,7 @@ pub struct BranchOpEvent {
     /// Same lifecycle instance as `branch_id`, plus the [`BranchGeneration`]
     /// that distinguishes a recreated branch from its earlier instance.
     ///
-    /// [`BranchGeneration`]: strata_core::BranchGeneration
+    /// [`BranchGeneration`]: crate::BranchGeneration
     pub branch_ref: BranchRef,
     /// The branch name (if known).
     pub branch_name: Option<String>,

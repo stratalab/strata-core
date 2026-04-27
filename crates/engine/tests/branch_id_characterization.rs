@@ -1,14 +1,9 @@
-//! Characterization test locking the byte-stable output of branch-name → `BranchId`
-//! resolution, per epic B1 of the branching execution plan
-//! (`docs/design/branching/branching-execution-plan.md`).
+//! Characterization test locking the byte-stable output of branch-name →
+//! `BranchId` resolution.
 //!
-//! B2 will collapse the currently-duplicated derivation
-//! (`crates/engine/src/primitives/branch/index.rs:36` and
-//! `crates/executor/src/bridge.rs:75`) into a single canonical
-//! `BranchId::from_user_name` in `strata_core`. Before that collapse happens,
-//! this test freezes the 16-byte output of the engine-side path so the
-//! collapse is provably byte-equivalent — no existing databases silently
-//! re-namespace their data.
+//! Branch ids must remain byte-stable so existing databases do not silently
+//! re-namespace their data. This test freezes the 16-byte output of the
+//! current engine-side path.
 //!
 //! If this test fails after a refactor, the refactor is NOT byte-stable.
 //! Either fix the code or update the baseline with explicit reviewer approval
@@ -20,21 +15,17 @@
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::primitives::{resolve_branch_name, BranchMetadata};
 use strata_engine::{Database, SearchSubsystem};
+use strata_storage::{Key, Namespace};
 use uuid::Uuid;
 
 /// The RFC 4122 namespace UUID used to derive branch IDs from names.
 ///
-/// Duplicated today at:
-/// - `crates/engine/src/primitives/branch/index.rs:36`
-/// - `crates/executor/src/bridge.rs:75`
-///
-/// B2 will collapse both into one canonical constant inside `strata_core`.
-/// This array is the locked baseline — changing it is a breaking compat
+/// This array is the locked baseline — changing it is a breaking compatibility
 /// change and invalidates every existing disk-backed database.
 const BRANCH_NAMESPACE_BYTES: [u8; 16] = [
     0x6b, 0xa7, 0xb8, 0x10, 0x9d, 0xad, 0x11, 0xd1, 0x80, 0xb4, 0x00, 0xc0, 0x4f, 0xd4, 0x30, 0xc8,

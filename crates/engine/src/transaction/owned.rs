@@ -3,9 +3,9 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use crate::{StrataError, StrataResult};
 use strata_concurrency::TransactionContext;
 use strata_core::types::BranchId;
-use strata_core::{StrataError, StrataResult};
 
 use crate::Database;
 

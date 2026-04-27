@@ -1,17 +1,14 @@
 use std::sync::Arc;
 
-use strata_core::limits::Limits;
-use strata_core::primitives::json::{JsonPath, JsonValue};
-use strata_core::{
-    validate_space_name, StrataError, StrataResult, Value, VersionedValue as CoreVersionedValue,
-};
+use strata_core::{Value, VersionedValue as CoreVersionedValue};
 use strata_engine::{
-    BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog,
-    JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
-    SpaceIndex as PrimitiveSpaceIndex,
+    BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog, JsonPath,
+    JsonStore as PrimitiveJsonStore, JsonValue, KVStore as PrimitiveKVStore, Limits,
+    SpaceIndex as PrimitiveSpaceIndex, StrataError, StrataResult,
 };
 use strata_graph::PrimitiveGraphStore;
 use strata_security::AccessMode;
+use strata_storage::validate_space_name;
 use strata_vector::VectorStore as PrimitiveVectorStore;
 
 use crate::{
@@ -50,7 +47,7 @@ impl Primitives {
 }
 
 pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types::BranchId> {
-    if strata_core::branch::aliases_default_branch_sentinel(branch.as_str()) {
+    if strata_engine::branch_domain::aliases_default_branch_sentinel(branch.as_str()) {
         return Err(StrataError::invalid_input(
             "branch name aliases reserved default-branch sentinel",
         )
@@ -197,13 +194,26 @@ pub(crate) fn validate_key_with_limits(key: &str, limits: &Limits) -> StrataResu
 pub(crate) fn validate_value(value: &Value, limits: &Limits) -> StrataResult<()> {
     limits
         .validate_value(value)
-        .map_err(|e| StrataError::capacity_exceeded(e.reason_code(), e.max(), e.actual()))
+        .map_err(limit_error_to_strata_error)
 }
 
 pub(crate) fn validate_vector(vector: &[f32], limits: &Limits) -> StrataResult<()> {
     limits
         .validate_vector(vector)
         .map_err(|e| StrataError::capacity_exceeded(e.reason_code(), e.max(), e.actual()))
+}
+
+fn limit_error_to_strata_error(error: strata_engine::LimitError) -> StrataError {
+    match error {
+        strata_engine::LimitError::ValueTooLarge { reason, .. }
+            if reason == "value_not_serializable" =>
+        {
+            StrataError::serialization(
+                "Value contains data that cannot be represented faithfully in JSON",
+            )
+        }
+        other => StrataError::capacity_exceeded(other.reason_code(), other.max(), other.actual()),
+    }
 }
 
 pub(crate) fn is_internal_collection(name: &str) -> bool {
@@ -493,5 +503,28 @@ pub(crate) fn database_info(db: &Arc<Database>, default_branch: &BranchId) -> Da
         branch_count,
         total_keys: db.approximate_total_keys(),
         default_branch: default_branch.as_str().to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn executor_value_validation_preserves_structural_limits_policy() {
+        let limits = Limits::default();
+
+        assert!(validate_value(&Value::Float(f64::NAN), &limits).is_ok());
+        assert!(validate_value(&Value::Float(f64::INFINITY), &limits).is_ok());
+
+        let tiny = Limits {
+            max_string_bytes: 10,
+            ..Limits::default()
+        };
+        let too_large = Value::String("this is a long string".to_string());
+        assert!(matches!(
+            validate_value(&too_large, &tiny),
+            Err(StrataError::CapacityExceeded { .. })
+        ));
     }
 }

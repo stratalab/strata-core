@@ -13,13 +13,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
-use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::StrataResult;
-use strata_core::{Version, Versioned, VersionedValue};
-use strata_storage::SegmentedStore;
+use strata_core::{BranchId, StrataError, StrataResult, Version, Versioned, VersionedValue};
+use strata_storage::{Key, SegmentedStore, Storage, TypeTag, WriteMode};
 
 const JSON_DOC_FORMAT_VERSION: u8 = 0x02;
 
@@ -198,7 +194,7 @@ pub enum CommitError {
     ///
     /// The target branch has been marked for deletion. Commits are rejected
     /// to prevent data resurrection on a deleted branch.
-    BranchDeleting(strata_core::types::BranchId),
+    BranchDeleting(BranchId),
 }
 
 impl std::fmt::Display for CommitError {
@@ -445,7 +441,8 @@ impl JsonPatchEntry {
 ///
 /// ```no_run
 /// # use strata_concurrency::{TransactionContext, JsonStoreExt};
-/// # use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+/// # use strata_core::BranchId;
+/// # use strata_storage::{Key, Namespace, TypeTag};
 /// # use strata_core::value::Value;
 /// # use strata_core::primitives::json::JsonPath;
 /// # use std::sync::Arc;
@@ -818,7 +815,8 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
     /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
@@ -957,7 +955,8 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
     /// let namespace = Arc::new(Namespace::for_branch(BranchId::default()));
@@ -1143,7 +1142,8 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::{Key, Namespace};
     /// # use strata_core::value::Value;
     /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
@@ -1232,7 +1232,8 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
     /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
     /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
@@ -1284,7 +1285,8 @@ impl TransactionContext {
     ///
     /// ```no_run
     /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::{BranchId, Key, Namespace};
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::{Key, Namespace};
     /// # use strata_core::id::CommitVersion;
     /// # use strata_core::value::Value;
     /// # use std::sync::Arc;
@@ -2344,8 +2346,9 @@ impl JsonStoreExt for TransactionContext {
 mod tests {
     use super::*;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::types::{BranchId, Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_core::BranchId;
+    use strata_storage::{Namespace, TypeTag};
 
     fn test_namespace_for(branch_id: BranchId) -> Arc<Namespace> {
         Arc::new(Namespace::new(branch_id, "default".to_string()))
@@ -2822,7 +2825,7 @@ mod tests {
 
     #[test]
     fn test_apply_writes_with_keep_last_mode() {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);

@@ -94,11 +94,11 @@
 
 use std::sync::Arc;
 
-use strata_core::branch::BranchLifecycleStatus;
+use crate::branch_domain::{BranchControlRecord, BranchLifecycleStatus, BranchRef};
+use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::EntityRef;
-use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult};
 
 use crate::branch_ops::branch_control_store::{
     BranchControlStore, LineageEdgeKind, LineageEdgeRecord, MergeBasePoint,
@@ -1653,8 +1653,8 @@ mod tests {
     use crate::database::dag_hook::{BranchDagError, MergeBaseResult as DagMergeBaseResult};
     use crate::database::OpenSpec;
     use crate::primitives::kv::KVStore;
-    use strata_core::types::{Key, TypeTag};
     use strata_core::value::Value;
+    use strata_storage::{Key, TypeTag};
     use tempfile::TempDir;
 
     struct ToggleFailDagHook {
@@ -1740,9 +1740,9 @@ mod tests {
         db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
             txn.put(
                 Key::new(
-                    Arc::new(strata_core::types::Namespace::for_branch(
-                        BranchId::from_bytes([0u8; 16]),
-                    )),
+                    Arc::new(strata_storage::Namespace::for_branch(BranchId::from_bytes(
+                        [0u8; 16],
+                    ))),
                     TypeTag::Branch,
                     name.as_bytes().to_vec(),
                 ),

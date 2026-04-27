@@ -12,9 +12,20 @@
 use super::index::InvertedIndex;
 use super::tokenizer::tokenize;
 use super::types::{EntityRef, SearchHit, SearchRequest, SearchResponse, SearchStats};
+use crate::semantics::value::extractable_text;
+use crate::StrataResult;
 use std::collections::HashMap;
 use strata_core::PrimitiveType;
-use strata_core::StrataResult;
+use strata_core::Value;
+
+/// Extract indexable text from a value for keyword search.
+///
+/// String values index directly. Numeric and structured values are serialized
+/// through JSON. Nulls, booleans, and raw bytes do not contribute searchable
+/// text.
+pub fn extract_search_text(value: &Value) -> Option<String> {
+    extractable_text(value)
+}
 
 /// Trait for primitives that support search
 ///
