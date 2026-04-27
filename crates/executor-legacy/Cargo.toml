@@ -1,0 +1,35 @@
+[package]
+name = "strata-executor-legacy"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+publish = false
+description = "Legacy Strata executor implementation retained during executor rewrite"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+embed = []
+expand = []
+rerank = []
+anthropic = ["embed"]
+openai = ["embed"]
+google = ["embed"]
+arrow = []
+
+[dependencies]
+strata-core = { path = "../core" }
+strata-engine = { path = "../engine" }
+strata-graph = { path = "../graph" }
+strata-vector = { path = "../vector" }
+strata-security = { path = "../security" }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

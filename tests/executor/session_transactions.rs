@@ -8,7 +8,7 @@
 
 use crate::common::*;
 use strata_core::Value;
-use strata_executor::{BranchId, Command, DistanceMetric, Output, Session, TxnStatus};
+use strata_executor::{BranchId, Command, DistanceMetric, Executor, Output, Session, TxnStatus};
 
 // ============================================================================
 // Transaction Lifecycle
@@ -43,6 +43,53 @@ fn begin_starts_transaction() {
 }
 
 #[test]
+fn explicit_transaction_branch_controls_omitted_commands() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+
+    let mut session = Session::new(db.clone());
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("feature")),
+            options: None,
+        })
+        .unwrap();
+
+    assert_eq!(session.current_branch(), "feature");
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "txn_branch_key".into(),
+            value: Value::Int(7),
+        })
+        .unwrap();
+    session.execute(Command::TxnCommit).unwrap();
+
+    let mut verifier = Session::new(db);
+    let default_output = verifier
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("default")),
+            space: None,
+            key: "txn_branch_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(is_none_value(&default_output));
+
+    let feature_output = verifier
+        .execute(Command::KvGet {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "txn_branch_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(extract_maybe_value(feature_output), Some(Value::Int(7)));
+}
+
+#[test]
 fn commit_ends_transaction() {
     let mut session = create_session();
 
@@ -66,6 +113,83 @@ fn commit_ends_transaction() {
 }
 
 #[test]
+fn commit_conflict_clears_transaction_state() {
+    let db = create_db();
+    let mut left = Session::new(db.clone());
+    let mut right = Session::new(db);
+
+    left.execute(Command::KvPut {
+        branch: None,
+        space: None,
+        key: "conflict_key".into(),
+        value: Value::Int(0),
+    })
+    .unwrap();
+
+    left.execute(Command::TxnBegin {
+        branch: None,
+        options: None,
+    })
+    .unwrap();
+    right
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let _ = left
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "conflict_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+    let _ = right
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "conflict_key".into(),
+            as_of: None,
+        })
+        .unwrap();
+
+    left.execute(Command::KvPut {
+        branch: None,
+        space: None,
+        key: "conflict_key".into(),
+        value: Value::Int(1),
+    })
+    .unwrap();
+    right
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "conflict_key".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    left.execute(Command::TxnCommit).unwrap();
+
+    let error = right.execute(Command::TxnCommit).unwrap_err();
+    assert!(matches!(
+        error,
+        strata_executor::Error::TransactionConflict { .. }
+    ));
+    assert!(!right.in_transaction());
+    assert!(matches!(
+        right.execute(Command::TxnIsActive).unwrap(),
+        Output::Bool(false)
+    ));
+    assert!(matches!(
+        right.execute(Command::TxnInfo).unwrap(),
+        Output::TxnInfo(None)
+    ));
+}
+
+#[test]
 fn rollback_ends_transaction() {
     let mut session = create_session();
 
@@ -82,6 +206,37 @@ fn rollback_ends_transaction() {
 
     assert!(matches!(output, Output::TxnAborted));
     assert!(!session.in_transaction());
+}
+
+#[test]
+fn transaction_rejects_explicit_branch_mismatch() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+    db.branches().create("other").unwrap();
+
+    let mut session = Session::new(db);
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("feature")),
+            options: None,
+        })
+        .unwrap();
+
+    let error = session
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("other")),
+            space: None,
+            key: "wrong_branch".into(),
+            value: Value::Int(1),
+        })
+        .expect_err("mismatched branch should be rejected while the transaction is active");
+
+    match error {
+        strata_executor::Error::InvalidInput { reason, .. } => {
+            assert!(reason.contains("active transaction is bound"));
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
 }
 
 #[test]
@@ -109,6 +264,146 @@ fn txn_info_returns_info_when_active() {
         }
         _ => panic!("Expected TxnInfo(Some) when transaction active"),
     }
+}
+
+#[test]
+fn transactional_event_append_rejects_scalar_payload_like_normal_path() {
+    let mut session = create_session();
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let error = session
+        .execute(Command::EventAppend {
+            branch: None,
+            space: None,
+            event_type: "bad.scalar".into(),
+            payload: Value::String("not an object".into()),
+        })
+        .expect_err("transactional event append should reject scalar payloads");
+
+    match error {
+        strata_executor::Error::InvalidInput { reason, .. } => {
+            assert!(reason.contains("object"), "unexpected reason: {reason}");
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn transactional_event_batch_append_rejects_non_finite_payloads_like_normal_path() {
+    let mut session = create_session();
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::EventBatchAppend {
+            branch: None,
+            space: None,
+            entries: vec![
+                strata_executor::BatchEventEntry {
+                    event_type: "bad.nan".into(),
+                    payload: event_payload("value", Value::Float(f64::NAN)),
+                },
+                strata_executor::BatchEventEntry {
+                    event_type: "bad.scalar".into(),
+                    payload: Value::String("not an object".into()),
+                },
+            ],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert!(
+                results[0]
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("non-finite")),
+                "unexpected first error: {:?}",
+                results[0].error
+            );
+            assert!(
+                results[1]
+                    .error
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("object")),
+                "unexpected second error: {:?}",
+                results[1].error
+            );
+        }
+        other => panic!("unexpected output: {other:?}"),
+    }
+}
+
+#[test]
+fn transactional_commit_succeeds_without_search_subsystem_and_persists_data() {
+    let db =
+        strata_engine::Database::open_runtime(strata_engine::database::OpenSpec::cache()).unwrap();
+    let executor = Executor::new(db.clone());
+    let mut session = Session::new(db);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "no_search_txn".into(),
+            value: Value::String("committed".into()),
+        })
+        .unwrap();
+
+    let output = session.execute(Command::TxnCommit).unwrap();
+    assert!(matches!(output, Output::TxnCommitted { .. }));
+
+    let value = executor
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "no_search_txn".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(
+        extract_maybe_value(value),
+        Some(Value::String("committed".into()))
+    );
+}
+
+#[test]
+fn set_branch_rejects_missing_branch() {
+    let mut session = create_session();
+    let error = session
+        .set_branch("missing")
+        .expect_err("set_branch should validate existence");
+
+    match error {
+        strata_executor::Error::BranchNotFound { branch, .. } => assert_eq!(branch, "missing"),
+        other => panic!("unexpected error: {other:?}"),
+    }
+}
+
+#[test]
+fn set_space_rejects_invalid_name() {
+    let mut session = create_session();
+    let error = session
+        .set_space("not allowed")
+        .expect_err("set_space should validate the name");
+
+    assert!(matches!(error, strata_executor::Error::InvalidInput { .. }));
 }
 
 // ============================================================================
@@ -432,6 +727,154 @@ fn db_commands_work_in_transaction() {
     session.execute(Command::Info).unwrap();
 
     session.execute(Command::TxnCommit).unwrap();
+}
+
+#[test]
+fn describe_uses_committed_view_inside_transaction() {
+    let db = create_db();
+    let mut session = Session::new(db);
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "pending".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::Describe { branch: None })
+        .expect("describe should bypass transaction-local state");
+
+    match output {
+        Output::Described(description) => assert_eq!(description.primitives.kv.count, 0),
+        other => panic!("Expected DescribeResult, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn describe_can_target_other_branch_inside_transaction() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+
+    let mut session = Session::new(db.clone());
+    session
+        .execute(Command::KvPut {
+            branch: Some(BranchId::from("feature")),
+            space: None,
+            key: "committed".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("default")),
+            options: None,
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "pending".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::Describe {
+            branch: Some(BranchId::from("feature")),
+        })
+        .expect("describe should bypass transaction branch binding");
+
+    match output {
+        Output::Described(description) => assert_eq!(description.primitives.kv.count, 1),
+        other => panic!("Expected DescribeResult, got {:?}", other),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn space_create_can_target_other_branch_inside_transaction() {
+    let db = create_db();
+    db.branches().create("feature").unwrap();
+
+    let mut session = Session::new(db.clone());
+    session
+        .execute(Command::TxnBegin {
+            branch: Some(BranchId::from("default")),
+            options: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::SpaceCreate {
+            branch: Some(BranchId::from("feature")),
+            space: "analytics".into(),
+        })
+        .expect("space create should bypass transaction branch binding");
+    assert!(matches!(output, Output::Unit));
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    let mut verifier = Session::new(db);
+    let output = verifier
+        .execute(Command::SpaceExists {
+            branch: Some(BranchId::from("feature")),
+            space: "analytics".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(true)));
+}
+
+#[test]
+fn space_delete_persists_even_if_transaction_rolls_back() {
+    let db = create_db();
+    let mut session = Session::new(db.clone());
+
+    session
+        .execute(Command::SpaceCreate {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::SpaceDelete {
+            branch: None,
+            space: "analytics".into(),
+            force: true,
+        })
+        .expect("space delete should bypass transaction context");
+    assert!(matches!(output, Output::Unit));
+
+    session.execute(Command::TxnRollback).unwrap();
+
+    let mut verifier = Session::new(db);
+    let output = verifier
+        .execute(Command::SpaceExists {
+            branch: None,
+            space: "analytics".into(),
+        })
+        .unwrap();
+    assert!(matches!(output, Output::Bool(false)));
 }
 
 // ============================================================================
@@ -1686,7 +2129,7 @@ fn event_get_by_type_sees_uncommitted() {
             branch: None,
             space: None,
             event_type: "audit".into(),
-            payload: Value::String("test action".into()),
+            payload: event_payload("action", Value::String("test action".into())),
         })
         .unwrap();
 
@@ -2313,6 +2756,464 @@ fn batch_get_sees_uncommitted() {
     session.execute(Command::TxnCommit).unwrap();
 }
 
+#[test]
+fn json_delete_nested_path_in_transaction_round_trip() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([
+                (
+                    "profile".to_string(),
+                    Value::object(std::collections::HashMap::from([
+                        ("name".to_string(), Value::String("Alice".into())),
+                        ("age".to_string(), Value::Int(30)),
+                    ])),
+                ),
+                ("active".to_string(), Value::Bool(true)),
+            ])),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonDelete {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.age".into(),
+        })
+        .unwrap();
+    assert!(matches!(
+        output,
+        Output::DeleteResult {
+            key,
+            deleted: true
+        } if key == "doc"
+    ));
+
+    let deleted_path = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.age".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(is_none_value(&deleted_path));
+
+    let profile_name = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.name".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(
+        extract_maybe_value(profile_name),
+        Some(Value::String("Alice".into()))
+    );
+
+    let active = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "active".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(extract_maybe_value(active), Some(Value::Bool(true)));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_batch_commands_record_per_entry_errors_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "profile".to_string(),
+                Value::object(std::collections::HashMap::from([
+                    ("name".to_string(), Value::String("Alice".into())),
+                    ("age".to_string(), Value::Int(30)),
+                ])),
+            )])),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonBatchGet {
+            branch: None,
+            space: None,
+            entries: vec![
+                strata_executor::BatchJsonGetEntry {
+                    key: "doc".into(),
+                    path: "profile.name".into(),
+                },
+                strata_executor::BatchJsonGetEntry {
+                    key: "doc".into(),
+                    path: "profile[".into(),
+                },
+            ],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchGetResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].value, Some(Value::String("Alice".into())));
+            assert!(results[0].error.is_none());
+            assert!(results[1].value.is_none());
+            assert!(results[1].error.is_some());
+        }
+        other => panic!("Expected BatchGetResults, got {:?}", other),
+    }
+
+    let output = session
+        .execute(Command::JsonBatchDelete {
+            branch: None,
+            space: None,
+            entries: vec![
+                strata_executor::BatchJsonDeleteEntry {
+                    key: "doc".into(),
+                    path: "profile.age".into(),
+                },
+                strata_executor::BatchJsonDeleteEntry {
+                    key: "_strata/bad".into(),
+                    path: "profile.age".into(),
+                },
+            ],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert!(results[0].error.is_none());
+            assert!(results[1].error.is_some());
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+
+    let deleted_path = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.age".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(is_none_value(&deleted_path));
+
+    let retained_path = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.name".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert_eq!(
+        extract_maybe_value(retained_path),
+        Some(Value::String("Alice".into()))
+    );
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn kv_batch_validation_contract_is_preserved_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::KvBatchPut {
+            branch: None,
+            space: None,
+            entries: vec![
+                strata_executor::BatchKvEntry {
+                    key: "good".into(),
+                    value: Value::Int(1),
+                },
+                strata_executor::BatchKvEntry {
+                    key: "_strata/bad".into(),
+                    value: Value::Int(2),
+                },
+            ],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert!(results[0].error.is_none());
+            assert!(results[1].error.is_some());
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+
+    let output = session
+        .execute(Command::KvBatchGet {
+            branch: None,
+            space: None,
+            keys: vec!["good".into(), "_strata/bad".into()],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchGetResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert_eq!(results[0].value, Some(Value::Int(1)));
+            assert!(results[0].error.is_none());
+            assert!(results[1].value.is_none());
+            assert!(results[1].error.is_some());
+        }
+        other => panic!("Expected BatchGetResults, got {:?}", other),
+    }
+
+    let output = session
+        .execute(Command::KvBatchDelete {
+            branch: None,
+            space: None,
+            keys: vec!["good".into(), "_strata/bad".into()],
+        })
+        .unwrap();
+
+    match output {
+        Output::BatchResults(results) => {
+            assert_eq!(results.len(), 2);
+            assert!(results[0].error.is_none());
+            assert!(results[1].error.is_some());
+        }
+        other => panic!("Expected BatchResults, got {:?}", other),
+    }
+
+    let error = session
+        .execute(Command::KvBatchExists {
+            branch: None,
+            space: None,
+            keys: vec!["good".into(), "_strata/bad".into()],
+        })
+        .expect_err("invalid batch exists key should still fail the command");
+    assert!(matches!(error, strata_executor::Error::InvalidInput { .. }));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn kv_read_contract_is_preserved_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "alpha".into(),
+            value: Value::Int(1),
+        })
+        .unwrap();
+    session
+        .execute(Command::KvPut {
+            branch: None,
+            space: None,
+            key: "beta".into(),
+            value: Value::Int(2),
+        })
+        .unwrap();
+
+    let invalid_get = session
+        .execute(Command::KvGet {
+            branch: None,
+            space: None,
+            key: "_strata/bad".into(),
+            as_of: None,
+        })
+        .expect_err("transactional KvGet should preserve key validation");
+    assert!(matches!(
+        invalid_get,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    let invalid_list = session
+        .execute(Command::KvList {
+            branch: None,
+            space: None,
+            prefix: Some("_strata/bad".into()),
+            cursor: None,
+            limit: None,
+            as_of: None,
+        })
+        .expect_err("transactional KvList should preserve prefix validation");
+    assert!(matches!(
+        invalid_list,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    let paged = session
+        .execute(Command::KvList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: Some(1),
+            as_of: None,
+        })
+        .unwrap();
+    match paged {
+        Output::KeysPage {
+            keys,
+            has_more,
+            cursor,
+        } => {
+            assert_eq!(keys.len(), 1);
+            assert!(has_more);
+            assert!(cursor.is_some());
+        }
+        other => panic!("Expected KeysPage, got {:?}", other),
+    }
+
+    let invalid_scan = session
+        .execute(Command::KvScan {
+            branch: None,
+            space: None,
+            start: Some("_strata/bad".into()),
+            limit: None,
+        })
+        .expect_err("transactional KvScan should preserve start-key validation");
+    assert!(matches!(
+        invalid_scan,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_read_contract_is_preserved_in_transaction() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "$".into(),
+            value: Value::object(std::collections::HashMap::from([(
+                "profile".to_string(),
+                Value::object(std::collections::HashMap::from([(
+                    "name".to_string(),
+                    Value::String("Alice".into()),
+                )])),
+            )])),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc".into(),
+            path: "profile.name".into(),
+            as_of: None,
+        })
+        .unwrap();
+    match output {
+        Output::MaybeVersioned(Some(vv)) => {
+            assert_eq!(vv.value, Value::String("Alice".into()));
+            assert!(vv.version > 0);
+            assert!(vv.timestamp > 0);
+        }
+        other => panic!("Expected MaybeVersioned(Some(_)), got {:?}", other),
+    }
+
+    let output = session
+        .execute(Command::JsonBatchGet {
+            branch: None,
+            space: None,
+            entries: vec![strata_executor::BatchJsonGetEntry {
+                key: "doc".into(),
+                path: "profile.name".into(),
+            }],
+        })
+        .unwrap();
+    match output {
+        Output::BatchGetResults(results) => {
+            assert_eq!(results.len(), 1);
+            assert_eq!(results[0].value, Some(Value::String("Alice".into())));
+            assert!(results[0].version.is_some());
+            assert!(results[0].timestamp.is_some());
+            assert!(results[0].error.is_none());
+        }
+        other => panic!("Expected BatchGetResults, got {:?}", other),
+    }
+
+    let invalid_list = session
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: Some("_strata/bad".into()),
+            cursor: None,
+            limit: 10,
+            as_of: None,
+        })
+        .expect_err("transactional JsonList should preserve prefix validation");
+    assert!(matches!(
+        invalid_list,
+        strata_executor::Error::InvalidInput { .. }
+    ));
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
 // ============================================================================
 // Cross-Primitive Atomicity Tests
 // ============================================================================
@@ -2376,7 +3277,7 @@ fn all_primitives_atomic_commit() {
             branch: None,
             space: None,
             event_type: "audit".into(),
-            payload: Value::String("test".into()),
+            payload: event_payload("action", Value::String("test".into())),
         })
         .unwrap();
     session
@@ -2419,11 +3320,19 @@ fn all_primitives_atomic_commit() {
         "KV should be visible after commit"
     );
 
-    // Note: JSON read-back verification skipped — the JsonSet inside txn
-    // uses Transaction::json_set which stores a proper JsonDoc, but the
-    // executor's JsonGet path has a deserialization mismatch for docs
-    // written via the Transaction layer. This is a pre-existing issue
-    // with how JsonGet resolves docs from different write paths.
+    let json = s2
+        .execute(Command::JsonGet {
+            branch: None,
+            space: None,
+            key: "doc1".into(),
+            path: "$".into(),
+            as_of: None,
+        })
+        .unwrap();
+    assert!(
+        !matches!(json, Output::Maybe(None) | Output::MaybeVersioned(None)),
+        "JSON document should be visible after commit"
+    );
 
     let node = s2
         .execute(Command::GraphGetNode {
@@ -2512,7 +3421,7 @@ fn all_primitives_atomic_rollback() {
             branch: None,
             space: None,
             event_type: "audit".into(),
-            payload: Value::String("test".into()),
+            payload: event_payload("action", Value::String("test".into())),
         })
         .unwrap();
     session

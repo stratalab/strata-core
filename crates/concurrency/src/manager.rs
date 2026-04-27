@@ -2637,6 +2637,14 @@ mod tests {
     #[test]
     fn test_issue_1739_json_writes_persisted_to_storage() {
         use strata_core::primitives::json::JsonPath;
+        #[derive(serde::Deserialize)]
+        struct StoredDoc {
+            id: String,
+            value: serde_json::Value,
+            version: u64,
+            created_at: u64,
+            updated_at: u64,
+        }
 
         let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(CommitVersion::ZERO);
@@ -2683,9 +2691,13 @@ mod tests {
             Value::Bytes(b) => b,
             other => panic!("Expected Value::Bytes, got {:?}", other),
         };
-        let stored_doc: serde_json::Value = rmp_serde::from_slice(stored_bytes).unwrap();
+        assert_eq!(stored_bytes.first().copied(), Some(0x02));
+        let stored_doc: StoredDoc = rmp_serde::from_slice(&stored_bytes[1..]).unwrap();
+        assert_eq!(stored_doc.id, "doc1");
+        assert!(stored_doc.version >= 1);
+        assert!(stored_doc.created_at <= stored_doc.updated_at);
         assert_eq!(
-            stored_doc,
+            stored_doc.value,
             serde_json::json!({"name": "alice", "age": 31}),
             "JSON document must reflect the json_set patch"
         );
@@ -2694,6 +2706,14 @@ mod tests {
     #[test]
     fn test_issue_1739_json_writes_included_in_wal_payload() {
         use strata_core::primitives::json::JsonPath;
+        #[derive(serde::Deserialize)]
+        struct StoredDoc {
+            id: String,
+            value: serde_json::Value,
+            version: u64,
+            created_at: u64,
+            updated_at: u64,
+        }
 
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
@@ -2755,9 +2775,13 @@ mod tests {
             Value::Bytes(b) => b,
             other => panic!("Expected Value::Bytes in WAL payload, got {:?}", other),
         };
-        let wal_doc: serde_json::Value = rmp_serde::from_slice(wal_bytes).unwrap();
+        assert_eq!(wal_bytes.first().copied(), Some(0x02));
+        let wal_doc: StoredDoc = rmp_serde::from_slice(&wal_bytes[1..]).unwrap();
+        assert_eq!(wal_doc.id, "doc1");
+        assert!(wal_doc.version >= 1);
+        assert!(wal_doc.created_at <= wal_doc.updated_at);
         assert_eq!(
-            wal_doc,
+            wal_doc.value,
             serde_json::json!({"x": 99}),
             "WAL payload must contain the correctly patched document"
         );

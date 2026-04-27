@@ -207,6 +207,9 @@ pub struct BundleVerifyInfo {
     /// Run ID from the bundle
     pub branch_id: String,
 
+    /// User-visible branch name from the bundle metadata
+    pub branch_name: String,
+
     /// Format version of the bundle
     pub format_version: u32,
 

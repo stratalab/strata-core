@@ -5,6 +5,8 @@
 //! model management — are exposed through the executor and CLI, not through
 //! `strata-inference`'s own CLI binaries.
 
+pub mod shadow;
+
 #[cfg(feature = "embed")]
 pub mod embed;
 #[cfg(feature = "embed")]

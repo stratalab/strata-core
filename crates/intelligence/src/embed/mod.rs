@@ -8,6 +8,7 @@
 
 pub mod download;
 pub mod extract;
+pub mod runtime;
 
 use std::sync::{Arc, Mutex};
 

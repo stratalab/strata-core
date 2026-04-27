@@ -413,7 +413,7 @@ mod tests {
     fn new_for_test_close_shuts_down_cache_handle() {
         let db = Strata::cache().expect("cache open should succeed");
         let default_branch = db.current_branch().to_string();
-        let session = db.session();
+        let session = db.session().expect("session should open");
         let context = Context::new(
             default_branch.clone(),
             default_branch,

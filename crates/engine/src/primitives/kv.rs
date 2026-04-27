@@ -184,6 +184,15 @@ impl KVStore {
                 };
                 index.index_document(&entity_ref, &text, None);
             }
+        } else if let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() {
+            if index.is_enabled() {
+                let entity_ref = crate::search::EntityRef::Kv {
+                    branch_id,
+                    space: space.to_string(),
+                    key: key.to_string(),
+                };
+                index.remove_document(&entity_ref);
+            }
         }
 
         Ok(Version::Txn(commit_version))
@@ -452,13 +461,15 @@ impl KVStore {
         let index_enabled = index.is_enabled();
         for (i, (key, _)) in entries.iter().enumerate() {
             if index_enabled {
+                let entity_ref = crate::search::EntityRef::Kv {
+                    branch_id: *branch_id,
+                    space: space.to_string(),
+                    key: key.clone(),
+                };
                 if let Some(ref text) = texts[i] {
-                    let entity_ref = crate::search::EntityRef::Kv {
-                        branch_id: *branch_id,
-                        space: space.to_string(),
-                        key: key.clone(),
-                    };
                     index.index_document(&entity_ref, text, None);
+                } else {
+                    index.remove_document(&entity_ref);
                 }
             }
         }

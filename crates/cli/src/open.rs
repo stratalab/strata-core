@@ -81,6 +81,7 @@ pub(crate) fn open_cli(request: OpenRequest) -> Result<OpenedCli, String> {
         Session::new_with_mode(db.database(), AccessMode::ReadOnly)
     } else {
         db.session()
+            .map_err(|error| format!("Failed to create session: {error}"))?
     };
     if !request.follower {
         ensure_branch_exists(&mut session, &branch)?;

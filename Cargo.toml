@@ -24,6 +24,7 @@ members = [
     "crates/cli",
     "crates/security",
     "crates/executor",
+    "crates/executor-legacy",
     "crates/search",
     "crates/vector",
 ]

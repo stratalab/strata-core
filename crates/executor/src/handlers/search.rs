@@ -20,7 +20,7 @@ use crate::{Error, Output, Result};
 ///
 /// The recipe is the single source of truth for search behavior.
 /// Resolved by name (string) or used directly (inline JSON object).
-pub fn search(
+pub(crate) fn search(
     p: &Arc<Primitives>,
     branch: BranchId,
     space: String,
@@ -232,7 +232,7 @@ pub fn search(
         None
     };
 
-    let embed_status = crate::handlers::embed_hook::embed_status(p);
+    let embed_status = crate::handlers::embed_runtime::embed_status(p);
     let (embedding_pending, embedding_total) =
         if embed_status.auto_embed && embed_status.pending > 0 {
             (

@@ -140,6 +140,16 @@ impl JsonDoc {
             .unwrap()
             .as_micros() as u64;
     }
+
+    fn from_legacy_value(id: impl Into<String>, value: JsonValue) -> Self {
+        JsonDoc {
+            id: id.into(),
+            value,
+            version: 1,
+            created_at: 0,
+            updated_at: 0,
+        }
+    }
 }
 
 /// JSON document storage primitive
@@ -228,19 +238,49 @@ impl JsonStore {
     /// Falls back to v1 (raw MessagePack) if no recognized version tag is found,
     /// ensuring backward compatibility with documents written before versioning.
     pub(crate) fn deserialize_doc(value: &Value) -> StrataResult<JsonDoc> {
+        Self::deserialize_doc_with_fallback_id(value, "")
+    }
+
+    pub(crate) fn deserialize_doc_with_fallback_id(
+        value: &Value,
+        fallback_id: &str,
+    ) -> StrataResult<JsonDoc> {
         match value {
             Value::Bytes(bytes) if bytes.is_empty() => {
                 Err(StrataError::serialization("empty JsonDoc bytes"))
             }
             Value::Bytes(bytes) => {
+                let decode_doc = |payload: &[u8]| {
+                    rmp_serde::from_slice(payload)
+                        .map_err(|e| StrataError::serialization(e.to_string()))
+                };
+                let decode_legacy_doc = |payload: &[u8]| {
+                    let doc: JsonDoc = decode_doc(payload)?;
+                    if fallback_id.is_empty() || doc.id == fallback_id {
+                        Ok(doc)
+                    } else {
+                        Err(StrataError::serialization(
+                            "legacy JsonDoc id mismatch".to_string(),
+                        ))
+                    }
+                };
+                let decode_value = |payload: &[u8]| {
+                    // Strict-decode the legacy raw payload: require the
+                    // MessagePack stream to consume the entire byte slice.
+                    // Without this, garbage byte sequences like
+                    // `[0, 1, 2, 3, 4, 5]` decode as a single positive
+                    // fixint (the leading `0`) and silently mask real
+                    // corruption as a "legacy" scalar document.
+                    let value = decode_full_msgpack::<JsonValue>(payload)?;
+                    Ok(JsonDoc::from_legacy_value(fallback_id, value))
+                };
+
                 if bytes[0] == Self::FORMAT_VERSION {
-                    // v2: skip version byte, deserialize payload
-                    rmp_serde::from_slice(&bytes[1..])
-                        .map_err(|e| StrataError::serialization(e.to_string()))
+                    decode_doc(&bytes[1..])
+                        .or_else(|_| decode_doc(bytes))
+                        .or_else(|_| decode_value(bytes))
                 } else {
-                    // v1 fallback: no version header, raw MessagePack
-                    rmp_serde::from_slice(bytes)
-                        .map_err(|e| StrataError::serialization(e.to_string()))
+                    decode_legacy_doc(bytes).or_else(|_| decode_value(bytes))
                 }
             }
             _ => Err(StrataError::invalid_input("expected bytes for JsonDoc")),
@@ -250,7 +290,27 @@ impl JsonStore {
     // ========================================================================
     // Document Operations
     // ========================================================================
+}
 
+/// Strict MessagePack decode that requires the input to be fully consumed.
+///
+/// `rmp_serde::from_slice` returns the first valid value and silently ignores
+/// any trailing bytes. For the legacy raw `JsonValue` fallback we want the
+/// opposite: short garbage byte sequences must surface as errors instead of
+/// being interpreted as the leading scalar.
+fn decode_full_msgpack<T: serde::de::DeserializeOwned>(payload: &[u8]) -> StrataResult<T> {
+    let mut cursor = std::io::Cursor::new(payload);
+    let value = rmp_serde::decode::from_read(&mut cursor)
+        .map_err(|e| StrataError::serialization(e.to_string()))?;
+    if (cursor.position() as usize) != payload.len() {
+        return Err(StrataError::serialization(
+            "trailing bytes after legacy JSON payload".to_string(),
+        ));
+    }
+    Ok(value)
+}
+
+impl JsonStore {
     /// Create a new JSON document
     ///
     /// Creates a new document with version 1. Fails if a document with
@@ -358,7 +418,7 @@ impl JsonStore {
 
         self.db.transaction(*branch_id, |txn| match txn.get(&key)? {
             Some(value) => {
-                let doc = Self::deserialize_doc(&value)?;
+                let doc = Self::deserialize_doc_with_fallback_id(&value, doc_id)?;
                 Ok(get_at_path(&doc.value, path).cloned())
             }
             None => Ok(None),
@@ -383,7 +443,7 @@ impl JsonStore {
         use strata_core::Storage;
         match self.db.storage().get_versioned(&key, CommitVersion::MAX)? {
             Some(vv) => {
-                let doc = Self::deserialize_doc(&vv.value)?;
+                let doc = Self::deserialize_doc_with_fallback_id(&vv.value, doc_id)?;
                 match get_at_path(&doc.value, path).cloned() {
                     Some(json_val) => Ok(Some(Versioned::with_timestamp(
                         json_val,
@@ -415,24 +475,26 @@ impl JsonStore {
         let mut corrupt_count: u32 = 0;
         let versions: Vec<Versioned<JsonValue>> = history
             .iter()
-            .filter_map(|vv| match Self::deserialize_doc(&vv.value) {
-                Ok(doc) => Some(Versioned::with_timestamp(
-                    doc.value,
-                    Version::counter(doc.version),
-                    vv.timestamp,
-                )),
-                Err(e) => {
-                    corrupt_count += 1;
-                    tracing::warn!(
-                        target: "strata::json",
-                        doc_id = doc_id,
-                        error = %e,
-                        corrupt_count = corrupt_count,
-                        "Skipping corrupt document entry in version history"
-                    );
-                    None
-                }
-            })
+            .filter_map(
+                |vv| match Self::deserialize_doc_with_fallback_id(&vv.value, doc_id) {
+                    Ok(doc) => Some(Versioned::with_timestamp(
+                        doc.value,
+                        Version::counter(doc.version),
+                        vv.timestamp,
+                    )),
+                    Err(e) => {
+                        corrupt_count += 1;
+                        tracing::warn!(
+                            target: "strata::json",
+                            doc_id = doc_id,
+                            error = %e,
+                            corrupt_count = corrupt_count,
+                            "Skipping corrupt document entry in version history"
+                        );
+                        None
+                    }
+                },
+            )
             .collect();
         if corrupt_count > 0 {
             tracing::error!(
@@ -514,7 +576,7 @@ impl JsonStore {
     ) -> StrataResult<(Version, JsonValue)> {
         match txn.get(key)? {
             Some(stored) => {
-                let mut doc = Self::deserialize_doc(&stored)?;
+                let mut doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                 let old_value = if !indexes.is_empty() {
                     Some(doc.value.clone())
                 } else {
@@ -698,7 +760,7 @@ impl JsonStore {
                 let key = self.key_for(branch_id, space, doc_id);
                 match txn.get(&key)? {
                     Some(stored) => {
-                        let doc = Self::deserialize_doc(&stored)?;
+                        let doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                         match get_at_path(&doc.value, path).cloned() {
                             Some(json_val) => {
                                 results.push(Some(Versioned::with_timestamp(
@@ -815,7 +877,7 @@ impl JsonStore {
             let stored = txn.get(&key)?.ok_or_else(|| {
                 StrataError::invalid_input(format!("JSON document {} not found", doc_id))
             })?;
-            let mut doc = Self::deserialize_doc(&stored)?;
+            let mut doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
             let old_value = if !indexes.is_empty() {
                 Some(doc.value.clone())
             } else {
@@ -883,7 +945,7 @@ impl JsonStore {
 
             // Remove index entries before deleting the document
             if !indexes.is_empty() {
-                let doc = Self::deserialize_doc(&stored)?;
+                let doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                 Self::update_index_entries(
                     txn,
                     branch_id,
@@ -923,7 +985,7 @@ impl JsonStore {
                 match txn.get(&key)? {
                     Some(stored) => {
                         if !indexes.is_empty() {
-                            let doc = Self::deserialize_doc(&stored)?;
+                            let doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                             Self::update_index_entries(
                                 txn,
                                 branch_id,
@@ -974,7 +1036,7 @@ impl JsonStore {
                     let stored = txn.get(&key)?.ok_or_else(|| {
                         StrataError::invalid_input(format!("JSON document {} not found", doc_id))
                     })?;
-                    let mut doc = Self::deserialize_doc(&stored)?;
+                    let mut doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                     let old_value = if !indexes.is_empty() {
                         Some(doc.value.clone())
                     } else {
@@ -1139,7 +1201,7 @@ impl JsonStore {
                 .into_iter()
                 .filter_map(|(key, value)| {
                     let doc_id = key.user_key_string()?;
-                    let doc = Self::deserialize_doc(&value).ok()?;
+                    let doc = Self::deserialize_doc_with_fallback_id(&value, &doc_id).ok()?;
                     Some((doc_id, doc.value))
                 })
                 .collect();
@@ -1186,7 +1248,7 @@ impl JsonStore {
         let result = self.db.get_at_timestamp(&key, as_of_ts)?;
         match result {
             Some(vv) => {
-                let doc = Self::deserialize_doc(&vv.value)?;
+                let doc = Self::deserialize_doc_with_fallback_id(&vv.value, doc_id)?;
                 Ok(get_at_path(&doc.value, path).cloned())
             }
             None => Ok(None),
@@ -1636,7 +1698,7 @@ impl crate::search::Searchable for JsonStore {
             for doc_id in ordered_doc_ids.iter().take(req.k) {
                 let key = self.key_for(&req.branch_id, &req.space, doc_id);
                 if let Some(stored) = txn.get(&key)? {
-                    let doc = Self::deserialize_doc(&stored)?;
+                    let doc = Self::deserialize_doc_with_fallback_id(&stored, doc_id)?;
                     let snippet = crate::search::truncate_text(
                         &serde_json::to_string(&doc.value).unwrap_or_default(),
                         200,
@@ -1699,7 +1761,7 @@ impl JsonStoreExt for TransactionContext {
 
         match self.get(&key)? {
             Some(value) => {
-                let doc = JsonStore::deserialize_doc(&value)?;
+                let doc = JsonStore::deserialize_doc_with_fallback_id(&value, doc_id)?;
                 Ok(get_at_path(&doc.value, path).cloned())
             }
             None => Ok(None),
@@ -1724,7 +1786,7 @@ impl JsonStoreExt for TransactionContext {
         let stored = self.get(&key)?.ok_or_else(|| {
             StrataError::invalid_input(format!("JSON document {} not found", doc_id))
         })?;
-        let mut doc = JsonStore::deserialize_doc(&stored)?;
+        let mut doc = JsonStore::deserialize_doc_with_fallback_id(&stored, doc_id)?;
 
         set_at_path(&mut doc.value, path, value)
             .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
@@ -3549,6 +3611,76 @@ mod tests {
         if let Value::Bytes(bytes) = &v2_value {
             assert_eq!(bytes[0], JsonStore::FORMAT_VERSION);
         }
+    }
+
+    #[test]
+    fn test_raw_json_value_backward_compat_after_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_id = BranchId::new();
+
+        {
+            let db = Database::open(temp.path()).unwrap();
+            let key = Key::new_json(
+                Arc::new(Namespace::for_branch_space(branch_id, "default")),
+                "legacy-doc",
+            );
+            let raw_value = Value::Bytes(rmp_serde::to_vec(&JsonValue::from(2)).unwrap());
+            db.transaction(branch_id, |txn| txn.put(key.clone(), raw_value))
+                .unwrap();
+            db.flush().unwrap();
+            db.shutdown().unwrap();
+        }
+
+        let reopened = Database::open(temp.path()).unwrap();
+        let store = JsonStore::new(reopened.clone());
+        let value = store
+            .get(&branch_id, "default", "legacy-doc", &JsonPath::root())
+            .expect("legacy raw JsonValue should decode after restart");
+        assert_eq!(value, Some(JsonValue::from(2)));
+    }
+
+    #[test]
+    fn test_raw_json_object_with_doc_like_keys_stays_user_data_after_restart() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let branch_id = BranchId::new();
+
+        {
+            let db = Database::open(temp.path()).unwrap();
+            let key = Key::new_json(
+                Arc::new(Namespace::for_branch_space(branch_id, "default")),
+                "legacy-doc",
+            );
+            let raw_value = Value::Bytes(
+                rmp_serde::to_vec(&JsonValue::from_value(serde_json::json!({
+                    "id": "embedded-id",
+                    "value": { "payload": "user-data" },
+                    "version": 7,
+                    "created_at": 100u64,
+                    "updated_at": 200u64
+                })))
+                .unwrap(),
+            );
+            db.transaction(branch_id, |txn| txn.put(key.clone(), raw_value))
+                .unwrap();
+            db.flush().unwrap();
+            db.shutdown().unwrap();
+        }
+
+        let reopened = Database::open(temp.path()).unwrap();
+        let store = JsonStore::new(reopened.clone());
+        let value = store
+            .get(&branch_id, "default", "legacy-doc", &JsonPath::root())
+            .expect("legacy raw JsonValue object should decode after restart");
+        assert_eq!(
+            value,
+            Some(JsonValue::from_value(serde_json::json!({
+                "id": "embedded-id",
+                "value": { "payload": "user-data" },
+                "version": 7,
+                "created_at": 100u64,
+                "updated_at": 200u64
+            })))
+        );
     }
 
     // ========== JsonStore::search() BM25 integration tests ==========

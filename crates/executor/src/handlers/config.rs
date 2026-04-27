@@ -10,12 +10,12 @@ use crate::{Error, Output, Result};
 use strata_security::SensitiveString;
 
 /// Handle ConfigGet command: return the current database configuration.
-pub fn config_get(p: &Arc<Primitives>) -> Result<Output> {
+pub(crate) fn config_get(p: &Arc<Primitives>) -> Result<Output> {
     Ok(Output::Config(p.db.config()))
 }
 
 /// Handle ConfigSetAutoEmbed command: enable or disable auto-embedding.
-pub fn config_set_auto_embed(p: &Arc<Primitives>, enabled: bool) -> Result<Output> {
+pub(crate) fn config_set_auto_embed(p: &Arc<Primitives>, enabled: bool) -> Result<Output> {
     p.db.update_config(|cfg| {
         cfg.auto_embed = enabled;
     })
@@ -24,12 +24,12 @@ pub fn config_set_auto_embed(p: &Arc<Primitives>, enabled: bool) -> Result<Outpu
 }
 
 /// Handle AutoEmbedStatus command: check if auto-embedding is enabled.
-pub fn auto_embed_status(p: &Arc<Primitives>) -> Result<Output> {
+pub(crate) fn auto_embed_status(p: &Arc<Primitives>) -> Result<Output> {
     Ok(Output::Bool(p.db.auto_embed_enabled()))
 }
 
 /// Handle DurabilityCounters command: return WAL counters (default if None).
-pub fn durability_counters(p: &Arc<Primitives>) -> Result<Output> {
+pub(crate) fn durability_counters(p: &Arc<Primitives>) -> Result<Output> {
     let counters = p.db.durability_counters().unwrap_or_default();
     Ok(Output::DurabilityCounters(counters))
 }
@@ -98,7 +98,7 @@ const STORAGE_U64_KEYS: &[&str] = &[
 ];
 
 /// Handle ConfigureSet command: set a named configuration key.
-pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<Output> {
+pub(crate) fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<Output> {
     let key_lower = key.trim().to_ascii_lowercase();
 
     if !KNOWN_KEYS.contains(&key_lower.as_str()) {
@@ -452,7 +452,7 @@ pub fn configure_set(p: &Arc<Primitives>, key: String, value: String) -> Result<
 }
 
 /// Handle ConfigureGetKey command: get the value of a named configuration key.
-pub fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
+pub(crate) fn configure_get_key(p: &Arc<Primitives>, key: String) -> Result<Output> {
     let key_lower = key.trim().to_ascii_lowercase();
 
     if !KNOWN_KEYS.contains(&key_lower.as_str()) {

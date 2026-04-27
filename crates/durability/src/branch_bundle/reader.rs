@@ -76,6 +76,7 @@ impl BranchBundleReader {
 
         Ok(BundleVerifyInfo {
             branch_id: branch_info.branch_id,
+            branch_name: branch_info.name,
             format_version: manifest.format_version,
             wal_entry_count: manifest.contents.wal_entry_count,
             checksums_valid,
@@ -431,6 +432,7 @@ mod tests {
         let verify_info = BranchBundleReader::validate(&path).unwrap();
 
         assert_eq!(verify_info.branch_id, branch_info.branch_id);
+        assert_eq!(verify_info.branch_name, branch_info.name);
         assert_eq!(verify_info.format_version, BRANCHBUNDLE_FORMAT_VERSION);
         assert_eq!(verify_info.wal_entry_count, 2);
         assert!(verify_info.checksums_valid);

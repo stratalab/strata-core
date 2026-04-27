@@ -568,6 +568,21 @@ mod tests {
         (p, default_branch())
     }
 
+    /// Setup variant that gives the populate closure a transport-neutral
+    /// executor so commands without a thin typed wrapper (vector, graph)
+    /// can drive setup directly through the public `Command` surface.
+    fn setup_with_executor<F>(populate: F) -> (Arc<Primitives>, BranchId)
+    where
+        F: FnOnce(&crate::Executor),
+    {
+        let strata = crate::Strata::cache().expect("open cache db");
+        let executor = crate::Executor::new(strata.database());
+        populate(&executor);
+        let p = Arc::new(Primitives::new(strata.database()));
+        std::mem::forget(strata);
+        (p, default_branch())
+    }
+
     #[test]
     fn test_kv_export_schema() {
         let (p, branch_id) = setup_with(|db| {
@@ -815,26 +830,44 @@ mod tests {
     #[test]
     fn test_vector_export() {
         use crate::types::DistanceMetric;
+        use crate::Command;
         use arrow::array::{FixedSizeListArray, Float32Array};
 
-        let (p, branch_id) = setup_with(|db| {
-            db.vector_create_collection("docs", 3, DistanceMetric::Cosine)
-                .unwrap();
-            db.vector_upsert(
-                "docs",
-                "v1",
-                vec![1.0, 2.0, 3.0],
-                Some(Value::String(r#"{"tag":"a"}"#.into())),
-            )
+        let (p, branch_id) = setup_with_executor(|exec| {
+            exec.execute(Command::VectorCreateCollection {
+                branch: None,
+                space: None,
+                collection: "docs".into(),
+                dimension: 3,
+                metric: DistanceMetric::Cosine,
+            })
             .unwrap();
-            db.vector_upsert("docs", "v2", vec![4.0, 5.0, 6.0], None)
-                .unwrap();
-            db.vector_upsert(
-                "docs",
-                "v3",
-                vec![7.0, 8.0, 9.0],
-                Some(Value::String(r#"{"tag":"c"}"#.into())),
-            )
+            exec.execute(Command::VectorUpsert {
+                branch: None,
+                space: None,
+                collection: "docs".into(),
+                key: "v1".into(),
+                vector: vec![1.0, 2.0, 3.0],
+                metadata: Some(Value::String(r#"{"tag":"a"}"#.into())),
+            })
+            .unwrap();
+            exec.execute(Command::VectorUpsert {
+                branch: None,
+                space: None,
+                collection: "docs".into(),
+                key: "v2".into(),
+                vector: vec![4.0, 5.0, 6.0],
+                metadata: None,
+            })
+            .unwrap();
+            exec.execute(Command::VectorUpsert {
+                branch: None,
+                space: None,
+                collection: "docs".into(),
+                key: "v3".into(),
+                vector: vec![7.0, 8.0, 9.0],
+                metadata: Some(Value::String(r#"{"tag":"c"}"#.into())),
+            })
             .unwrap();
         });
 
@@ -893,25 +926,46 @@ mod tests {
 
     #[test]
     fn test_graph_nodes_export() {
-        let (p, branch_id) = setup_with(|db| {
-            db.graph_create("social").unwrap();
-            db.graph_add_node_typed(
-                "social",
-                "alice",
-                None,
-                Some(Value::String(r#"{"age":30}"#.into())),
-                Some("Person"),
-            )
+        use crate::Command;
+
+        let (p, branch_id) = setup_with_executor(|exec| {
+            exec.execute(Command::GraphCreate {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                cascade_policy: None,
+            })
             .unwrap();
-            db.graph_add_node_typed(
-                "social",
-                "bob",
-                None,
-                Some(Value::String(r#"{"age":25}"#.into())),
-                Some("Person"),
-            )
+            exec.execute(Command::GraphAddNode {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                node_id: "alice".into(),
+                entity_ref: None,
+                properties: Some(Value::String(r#"{"age":30}"#.into())),
+                object_type: Some("Person".into()),
+            })
             .unwrap();
-            db.graph_add_node("social", "acme", None, None).unwrap();
+            exec.execute(Command::GraphAddNode {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                node_id: "bob".into(),
+                entity_ref: None,
+                properties: Some(Value::String(r#"{"age":25}"#.into())),
+                object_type: Some("Person".into()),
+            })
+            .unwrap();
+            exec.execute(Command::GraphAddNode {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                node_id: "acme".into(),
+                entity_ref: None,
+                properties: None,
+                object_type: None,
+            })
+            .unwrap();
         });
 
         let (schema, batches) = export_to_batches(
@@ -966,17 +1020,51 @@ mod tests {
 
     #[test]
     fn test_graph_edges_export() {
+        use crate::Command;
         use arrow::array::Float64Array;
 
-        let (p, branch_id) = setup_with(|db| {
-            db.graph_create("social").unwrap();
-            db.graph_add_node("social", "alice", None, None).unwrap();
-            db.graph_add_node("social", "bob", None, None).unwrap();
-            db.graph_add_node("social", "carol", None, None).unwrap();
-            db.graph_add_edge("social", "alice", "bob", "knows", Some(0.9), None)
+        let (p, branch_id) = setup_with_executor(|exec| {
+            exec.execute(Command::GraphCreate {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                cascade_policy: None,
+            })
+            .unwrap();
+            for node in ["alice", "bob", "carol"] {
+                exec.execute(Command::GraphAddNode {
+                    branch: None,
+                    space: None,
+                    graph: "social".into(),
+                    node_id: node.into(),
+                    entity_ref: None,
+                    properties: None,
+                    object_type: None,
+                })
                 .unwrap();
-            db.graph_add_edge("social", "bob", "carol", "knows", Some(0.5), None)
-                .unwrap();
+            }
+            exec.execute(Command::GraphAddEdge {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                src: "alice".into(),
+                dst: "bob".into(),
+                edge_type: "knows".into(),
+                weight: Some(0.9),
+                properties: None,
+            })
+            .unwrap();
+            exec.execute(Command::GraphAddEdge {
+                branch: None,
+                space: None,
+                graph: "social".into(),
+                src: "bob".into(),
+                dst: "carol".into(),
+                edge_type: "knows".into(),
+                weight: Some(0.5),
+                properties: None,
+            })
+            .unwrap();
         });
 
         let (schema, batches) = export_to_batches(

@@ -8,7 +8,7 @@ use crate::{Error, Output, Result};
 /// Handle `Command::Generate { model, prompt, ... }`.
 #[cfg(feature = "embed")]
 #[allow(clippy::too_many_arguments)]
-pub fn generate(
+pub(crate) fn generate(
     p: &Arc<Primitives>,
     model: String,
     prompt: String,
@@ -147,7 +147,7 @@ pub fn generate(
 
 /// Handle `Command::Tokenize { model, text, add_special_tokens }`.
 #[cfg(feature = "embed")]
-pub fn tokenize(
+pub(crate) fn tokenize(
     p: &Arc<Primitives>,
     model: String,
     text: String,
@@ -184,7 +184,7 @@ pub fn tokenize(
 
 /// Handle `Command::Detokenize { model, ids }`.
 #[cfg(feature = "embed")]
-pub fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<Output> {
+pub(crate) fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<Output> {
     use strata_intelligence::generate::GenerateModelState;
 
     let state =
@@ -210,7 +210,7 @@ pub fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> Result<O
 
 /// Handle `Command::GenerateUnload { model }`.
 #[cfg(feature = "embed")]
-pub fn generate_unload(p: &Arc<Primitives>, model: String) -> Result<Output> {
+pub(crate) fn generate_unload(p: &Arc<Primitives>, model: String) -> Result<Output> {
     use strata_intelligence::generate::GenerateModelState;
 
     let state =
@@ -230,7 +230,7 @@ pub fn generate_unload(p: &Arc<Primitives>, model: String) -> Result<Output> {
 
 #[cfg(not(feature = "embed"))]
 #[allow(clippy::too_many_arguments)]
-pub fn generate(
+pub(crate) fn generate(
     _p: &Arc<Primitives>,
     _model: String,
     _prompt: String,
@@ -249,7 +249,7 @@ pub fn generate(
 }
 
 #[cfg(not(feature = "embed"))]
-pub fn tokenize(
+pub(crate) fn tokenize(
     _p: &Arc<Primitives>,
     _model: String,
     _text: String,
@@ -262,7 +262,7 @@ pub fn tokenize(
 }
 
 #[cfg(not(feature = "embed"))]
-pub fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Result<Output> {
+pub(crate) fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
@@ -270,7 +270,7 @@ pub fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Resul
 }
 
 #[cfg(not(feature = "embed"))]
-pub fn generate_unload(_p: &Arc<Primitives>, _model: String) -> Result<Output> {
+pub(crate) fn generate_unload(_p: &Arc<Primitives>, _model: String) -> Result<Output> {
     Err(Error::Internal {
         reason: "Generation not available: compile with --features embed".to_string(),
         hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),

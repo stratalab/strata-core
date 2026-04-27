@@ -11,7 +11,7 @@ use crate::bridge::Primitives;
 use crate::{Output, Result};
 
 /// Handle ConfigureModel command: store model endpoint configuration.
-pub fn configure_model(
+pub(crate) fn configure_model(
     p: &Arc<Primitives>,
     endpoint: String,
     model: String,

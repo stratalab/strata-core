@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_core::Value;
-use strata_executor::{Command, Executor, Output, Session};
+use strata_executor::{Command, Executor, Output, Session, Strata};
 
 // ============================================================================
 // Concurrent Session Isolation
@@ -1042,8 +1042,7 @@ fn executor_branch_isolation() {
 /// Strata API should be safe to use from multiple threads
 #[test]
 fn strata_api_thread_safe() {
-    // Use Strata::cache() directly for ephemeral test database
-    let strata = Arc::new(strata_executor::Strata::cache().unwrap());
+    let strata = Arc::new(Strata::cache().unwrap());
 
     let num_threads = 8;
     let ops_per_thread = 100;
