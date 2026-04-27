@@ -70,10 +70,10 @@ impl LocalSession {
                 Ok(Output::TxnCommitted { version })
             }
             Err(error) => match &error {
-                strata_core::StrataError::TransactionAborted { .. }
-                | strata_core::StrataError::Conflict { .. }
-                | strata_core::StrataError::VersionConflict { .. }
-                | strata_core::StrataError::WriteConflict { .. } => {
+                strata_engine::StrataError::TransactionAborted { .. }
+                | strata_engine::StrataError::Conflict { .. }
+                | strata_engine::StrataError::VersionConflict { .. }
+                | strata_engine::StrataError::WriteConflict { .. } => {
                     Err(Error::TransactionConflict {
                         reason: error.to_string(),
                         hint: Some(
@@ -82,8 +82,8 @@ impl LocalSession {
                         ),
                     })
                 }
-                strata_core::StrataError::Storage { .. }
-                | strata_core::StrataError::Corruption { .. } => Err(Error::Io {
+                strata_engine::StrataError::Storage { .. }
+                | strata_engine::StrataError::Corruption { .. } => Err(Error::Io {
                     reason: error.to_string(),
                     hint: None,
                 }),
@@ -639,7 +639,7 @@ fn apply_kv_post_commit(
     match convert_result(primitives.kv.get(&branch_id, space, key))? {
         Some(value) => {
             if index.is_enabled() {
-                if let Some(text) = value.extractable_text() {
+                if let Some(text) = strata_engine::search::extract_search_text(&value) {
                     index.index_document(&entity_ref, &text, None);
                 } else {
                     index.remove_document(&entity_ref);

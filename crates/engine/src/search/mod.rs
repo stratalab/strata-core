@@ -26,8 +26,8 @@ pub use recipe::Recipe;
 pub use recovery::{extract_indexable_text, SearchSubsystem};
 pub use searchable::{
     build_search_response, build_search_response_with_index, build_search_response_with_scorer,
-    truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate, SearchDoc, Searchable,
-    SimpleScorer,
+    extract_search_text, truncate_text, BM25LiteScorer, Scorer, ScorerContext, SearchCandidate,
+    SearchDoc, Searchable, SimpleScorer,
 };
 pub use tokenizer::{
     parse_query, tokenize, tokenize_unique, tokenize_with_positions, ParsedQuery, Token,

@@ -9,6 +9,7 @@
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
 
+use crate::{StrataError, StrataResult};
 use parking_lot::Mutex as ParkingMutex;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -18,8 +19,6 @@ use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager}
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::traits::Storage;
 use strata_core::types::BranchId;
-use strata_core::StrataError;
-use strata_core::StrataResult;
 use strata_durability::wal::WalWriter;
 use strata_storage::{RecoveredState, SegmentedStore};
 use tracing::{debug, info, warn};

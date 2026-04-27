@@ -1,9 +1,9 @@
 //! Flush, checkpoint, and compaction.
 
+use crate::{StrataError, StrataResult};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::{Key, TypeTag};
-use strata_core::{StrataError, StrataResult};
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::{
     BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,

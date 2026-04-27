@@ -59,10 +59,11 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
+use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{BranchControlRecord, BranchRef, StrataError, StrataResult, VersionedValue};
+use strata_core::{BranchControlRecord, BranchRef, VersionedValue};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};

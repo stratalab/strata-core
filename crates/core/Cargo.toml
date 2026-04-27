@@ -13,15 +13,9 @@ workspace = true
 
 [features]
 default = []
-perf-trace = []  # Enable per-operation timing instrumentation
 
 [dependencies]
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-bincode = { workspace = true }
-tracing = { workspace = true }
-
-[dev-dependencies]

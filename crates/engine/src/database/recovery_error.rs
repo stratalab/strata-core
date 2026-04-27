@@ -14,9 +14,9 @@
 use std::io;
 use std::path::PathBuf;
 
+use crate::StrataError;
 use strata_concurrency::CoordinatorRecoveryError;
 use strata_core::id::TxnId;
-use strata_core::StrataError;
 use strata_durability::wal::WalReaderError;
 use strata_durability::{ManifestError, SnapshotReadError};
 use strata_storage::{RecoveryHealth, StorageError};

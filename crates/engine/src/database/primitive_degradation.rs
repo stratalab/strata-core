@@ -31,10 +31,11 @@
 
 use std::time::SystemTime;
 
+use crate::StrataError;
 use dashmap::DashMap;
 use strata_core::contract::PrimitiveType;
 use strata_core::types::BranchId;
-use strata_core::{BranchRef, PrimitiveDegradedReason, StrataError};
+use strata_core::{BranchRef, PrimitiveDegradedReason};
 
 use crate::database::observers::{PrimitiveDegradedEvent, PrimitiveDegradedObserverRegistry};
 

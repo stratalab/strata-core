@@ -20,6 +20,7 @@
 use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use crate::branch_ops::{self, branch_control_store::is_control_store_key};
 use crate::database::Database;
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
@@ -28,8 +29,6 @@ use strata_core::id::CommitVersion;
 use strata_core::traits::Storage;
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::StrataResult;
 use strata_storage::StorageError;
 use tracing::{info, warn};
 
@@ -798,10 +797,7 @@ impl DeleteBranchCompletion {
 // This implementation returns empty results.
 
 impl crate::search::Searchable for BranchIndex {
-    fn search(
-        &self,
-        _req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, _req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         // Search moved to intelligence layer - return empty results
         Ok(crate::SearchResponse::empty())
     }

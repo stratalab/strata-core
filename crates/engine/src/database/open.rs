@@ -3,6 +3,7 @@
 use super::config::StorageConfig;
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
+use crate::{StrataError, StrataResult};
 use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::path::{Path, PathBuf};
@@ -36,7 +37,6 @@ pub(crate) fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig
 }
 
 use strata_core::id::CommitVersion;
-use strata_core::{StrataError, StrataResult};
 
 /// Restrict a directory to owner-only access (rwx------).
 /// Best-effort: logs a warning on failure but does not block database open.

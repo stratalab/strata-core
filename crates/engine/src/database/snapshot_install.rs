@@ -23,9 +23,10 @@
 
 use std::collections::HashMap;
 
+use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
-use strata_core::{BranchId, StrataError, StrataResult, TypeTag};
+use strata_core::{BranchId, TypeTag};
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::format::primitive_tags;
 use strata_durability::{LoadedSnapshot, SnapshotSerializer};

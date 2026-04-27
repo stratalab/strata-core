@@ -15,6 +15,7 @@
 //! 3. Register the hook with `db.register_refresh_hook()`
 //! 4. `Database::refresh()` will call your hook automatically
 
+use crate::StrataResult;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -23,7 +24,6 @@ use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::Key;
 use strata_core::value::Value;
-use strata_core::StrataResult;
 
 // =============================================================================
 // Error Types

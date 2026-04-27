@@ -6,12 +6,13 @@
 //!
 //! Index metadata is stored in `_idx_meta_{space}` as JSON documents.
 
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
 use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::types::{BranchId, Key, Namespace, TypeTag};
-use strata_core::{PrimitiveDegradedReason, StrataError, StrataResult};
+use strata_core::PrimitiveDegradedReason;
 
 use crate::database::Database;
 

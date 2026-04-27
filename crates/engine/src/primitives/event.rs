@@ -36,6 +36,7 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::EventLogExt;
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -45,8 +46,6 @@ use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::StrataResult;
 
 // Re-export Event from core
 pub use strata_core::primitives::Event;
@@ -526,7 +525,7 @@ impl EventLog {
             match txn.get(&event_key)? {
                 Some(v) => {
                     let event: Event = from_stored_value(&v)
-                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
                     Ok(Some(Versioned::with_timestamp(
                         event.clone(),
                         Version::Sequence(sequence),
@@ -665,9 +664,8 @@ impl EventLog {
 
                         let event_key = Key::new_event(ns.clone(), seq);
                         if let Some(v) = txn.get(&event_key)? {
-                            let event: Event = from_stored_value(&v).map_err(|e| {
-                                strata_core::StrataError::serialization(e.to_string())
-                            })?;
+                            let event: Event = from_stored_value(&v)
+                                .map_err(|e| StrataError::serialization(e.to_string()))?;
                             results.push(Versioned::with_timestamp(
                                 event.clone(),
                                 Version::Sequence(seq),
@@ -703,7 +701,7 @@ impl EventLog {
                 let event_key = Key::new_event(ns.clone(), seq);
                 if let Some(v) = txn.get(&event_key)? {
                     let event: Event = from_stored_value(&v)
-                        .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                        .map_err(|e| StrataError::serialization(e.to_string()))?;
                     if event.event_type == event_type {
                         migrated_seqs.push(seq);
                         filtered.push(Versioned::with_timestamp(
@@ -774,7 +772,7 @@ impl EventLog {
             // Use get_at_timestamp to get the event as it existed at that time
             if let Some(vv) = self.db.get_at_timestamp(&event_key, as_of_ts)? {
                 let event: Event = from_stored_value(&vv.value)
-                    .map_err(|e| strata_core::StrataError::serialization(e.to_string()))?;
+                    .map_err(|e| StrataError::serialization(e.to_string()))?;
                 // Filter by event's own timestamp (when the event was appended)
                 if event.timestamp.as_micros() <= as_of_ts {
                     if let Some(et) = event_type {
@@ -1063,10 +1061,7 @@ impl EventLog {
 // ========== Searchable Trait Implementation ==========
 
 impl crate::search::Searchable for EventLog {
-    fn search(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
 

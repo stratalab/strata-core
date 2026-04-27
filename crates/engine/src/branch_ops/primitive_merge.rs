@@ -44,11 +44,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::StrataResult;
 use parking_lot::Mutex;
 use strata_core::primitives::json::JsonValue;
 use strata_core::types::{BranchId, TypeTag};
 use strata_core::value::Value;
-use strata_core::{PrimitiveType, StrataResult};
+use strata_core::PrimitiveType;
 
 use super::json_merge::merge_json_values;
 use super::{

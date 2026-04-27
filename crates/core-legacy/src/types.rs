@@ -9,63 +9,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
-use uuid::Uuid;
-
-/// Unique identifier for a branch storage namespace.
-///
-/// `BranchId` is an opaque UUID wrapper used throughout the system for storage
-/// isolation, locking, and branch-scoped queries.
-///
-/// For user-facing branch names, the canonical mapping is
-/// [`BranchId::from_user_name`], which derives deterministic ids for normal
-/// names and preserves a few load-bearing sentinel cases. [`BranchId::new`] is
-/// still valid for synthetic or test-only ids, but it is not the canonical path
-/// for user-facing branch creation after B2.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct BranchId(Uuid);
-
-impl BranchId {
-    /// Create a new random `BranchId` using UUID v4.
-    ///
-    /// Use this for synthetic/internal ids and tests. User-facing branch names
-    /// should normally go through [`BranchId::from_user_name`] so the branch
-    /// namespace remains deterministic across engine and executor.
-    pub fn new() -> Self {
-        Self(Uuid::new_v4())
-    }
-
-    /// Create a BranchId from raw bytes
-    pub fn from_bytes(bytes: [u8; 16]) -> Self {
-        Self(Uuid::from_bytes(bytes))
-    }
-
-    /// Parse a BranchId from a string representation
-    ///
-    /// Accepts standard UUID format (with or without hyphens).
-    ///
-    /// # Errors
-    /// Returns None if the string is not a valid UUID.
-    pub fn from_string(s: &str) -> Option<Self> {
-        Uuid::parse_str(s).ok().map(Self)
-    }
-
-    /// Get the raw bytes of this BranchId
-    pub fn as_bytes(&self) -> &[u8; 16] {
-        self.0.as_bytes()
-    }
-}
-
-impl Default for BranchId {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl fmt::Display for BranchId {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
+pub use strata_core_foundation::BranchId;
 
 /// Namespace: branch + space isolation
 ///
@@ -124,8 +68,8 @@ impl fmt::Display for Namespace {
 impl Ord for Namespace {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         self.branch_id
-            .0
-            .cmp(&other.branch_id.0)
+            .as_bytes()
+            .cmp(other.branch_id.as_bytes())
             .then(self.space.cmp(&other.space))
     }
 }

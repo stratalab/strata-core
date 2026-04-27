@@ -36,7 +36,7 @@
 //! ```
 
 use super::PrimitiveType;
-use crate::types::BranchId;
+use crate::BranchId;
 use serde::{Deserialize, Serialize};
 
 /// Universal reference to any entity in the database

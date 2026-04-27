@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }

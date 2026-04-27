@@ -10,6 +10,7 @@
 // everything lived in a single `tests.rs` keep compiling unchanged.
 pub use super::*;
 pub use crate::recovery::Subsystem;
+pub use crate::StrataError;
 pub use serial_test::serial;
 pub use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 pub use std::sync::Arc;
@@ -19,7 +20,7 @@ pub use strata_concurrency::__internal as concurrency_test_hooks;
 pub use strata_core::id::{CommitVersion, TxnId};
 pub use strata_core::types::{Key, Namespace, TypeTag};
 pub use strata_core::value::Value;
-pub use strata_core::{Storage, StrataError, Timestamp, WriteMode};
+pub use strata_core::{Storage, Timestamp, WriteMode};
 pub use strata_durability::__internal::WalWriterEngineExt;
 pub use strata_durability::codec::IdentityCodec;
 pub use strata_durability::format::WalRecord;

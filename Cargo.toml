@@ -14,6 +14,7 @@ default-members = ["crates/executor", "crates/cli", "crates/engine"]
 exclude = ["benchmarks"]
 members = [
     "crates/core",
+    "crates/core-legacy",
     "crates/storage",
     "crates/concurrency",
     "crates/durability",
@@ -189,7 +190,8 @@ rustc-hash = { workspace = true }
 parking_lot = { workspace = true }
 proptest = { workspace = true }
 # Internal crates for testing only
-strata-core = { path = "crates/core" }
+strata-core = { package = "strata-core-legacy", path = "crates/core-legacy" }
+strata-core-foundation = { package = "strata-core", path = "crates/core" }
 strata-storage = { path = "crates/storage" }
 strata-concurrency = { path = "crates/concurrency" }
 strata-durability = { path = "crates/durability" }

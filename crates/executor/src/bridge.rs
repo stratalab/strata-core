@@ -2,13 +2,11 @@ use std::sync::Arc;
 
 use strata_core::limits::Limits;
 use strata_core::primitives::json::{JsonPath, JsonValue};
-use strata_core::{
-    validate_space_name, StrataError, StrataResult, Value, VersionedValue as CoreVersionedValue,
-};
+use strata_core::{validate_space_name, Value, VersionedValue as CoreVersionedValue};
 use strata_engine::{
     BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog,
     JsonStore as PrimitiveJsonStore, KVStore as PrimitiveKVStore,
-    SpaceIndex as PrimitiveSpaceIndex,
+    SpaceIndex as PrimitiveSpaceIndex, StrataError, StrataResult,
 };
 use strata_graph::PrimitiveGraphStore;
 use strata_security::AccessMode;

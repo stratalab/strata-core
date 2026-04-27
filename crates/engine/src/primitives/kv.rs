@@ -24,6 +24,7 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::KVStoreExt;
+use crate::{StrataError, StrataResult};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
@@ -31,7 +32,6 @@ use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult};
 use strata_core::{Version, VersionedHistory};
 use strata_storage::StorageIterator;
 
@@ -164,7 +164,7 @@ impl KVStore {
         value: Value,
     ) -> StrataResult<Version> {
         // Extract text for indexing before the value is consumed
-        let text_for_index = value.extractable_text();
+        let text_for_index = crate::search::extract_search_text(&value);
 
         let storage_key = self.key_for(branch_id, space, key);
         let branch_id = *branch_id;
@@ -442,7 +442,7 @@ impl KVStore {
         // Extract text for indexing BEFORE the values are consumed by the transaction
         let texts: Vec<Option<String>> = entries
             .iter()
-            .map(|(_, value)| value.extractable_text())
+            .map(|(_, value)| crate::search::extract_search_text(value))
             .collect();
 
         let ((), commit_version) = self.db.transaction_with_version(*branch_id, |txn| {
@@ -616,10 +616,7 @@ impl KVStore {
 // This implementation returns empty results - use InvertedIndex for full-text search.
 
 impl crate::search::Searchable for KVStore {
-    fn search(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
 

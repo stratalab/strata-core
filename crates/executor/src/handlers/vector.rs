@@ -17,7 +17,7 @@ use crate::{
 };
 
 fn convert_vector_result<T>(
-    result: std::result::Result<T, impl Into<strata_core::StrataError>>,
+    result: std::result::Result<T, impl Into<strata_engine::StrataError>>,
     _branch_id: strata_core::types::BranchId,
 ) -> Result<T> {
     result.map_err(|error| Error::from(error.into()))

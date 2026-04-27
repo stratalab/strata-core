@@ -30,6 +30,7 @@
 pub mod background;
 mod coordinator;
 pub mod database;
+pub mod error;
 pub mod instrumentation;
 pub mod recovery;
 pub mod transaction;
@@ -51,6 +52,7 @@ pub use database::{
     StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus,
     SystemMetrics, WalWriterHealth,
 };
+pub use error::{StrataError, StrataResult};
 pub use instrumentation::PerfTrace;
 pub use recovery::Subsystem;
 pub use strata_concurrency::TransactionContext;

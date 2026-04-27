@@ -34,6 +34,7 @@ pub mod index;
 
 use crate::database::Database;
 use crate::primitives::extensions::JsonStoreExt;
+use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -45,8 +46,7 @@ use strata_core::primitives::json::{
 };
 use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::StrataError;
-use strata_core::{StrataResult, VersionedHistory};
+use strata_core::VersionedHistory;
 
 // =============================================================================
 // Limit Validation Helpers
@@ -1534,10 +1534,7 @@ impl JsonStore {
 
 impl JsonStore {
     /// BM25 search via InvertedIndex — same pattern as KV.
-    fn search_bm25(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search_bm25(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{truncate_text, EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
 
@@ -1627,10 +1624,7 @@ impl JsonStore {
 }
 
 impl crate::search::Searchable for JsonStore {
-    fn search(
-        &self,
-        req: &crate::SearchRequest,
-    ) -> strata_core::StrataResult<crate::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
         use crate::search::{EntityRef, SearchHit, SearchStats, SortDirection};
         use std::collections::HashSet;
         use std::time::Instant;

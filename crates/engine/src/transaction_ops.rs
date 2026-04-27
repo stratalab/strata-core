@@ -26,7 +26,8 @@
 //! })?;
 //! ```
 
-use strata_core::{Event, JsonPath, JsonValue, StrataError, Value, Version, Versioned};
+use crate::StrataError;
+use strata_core::{Event, JsonPath, JsonValue, Value, Version, Versioned};
 
 /// Operations available within a transaction
 ///

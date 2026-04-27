@@ -192,9 +192,23 @@ pub enum StorageError {
         /// Human-readable description of the disagreement observed.
         reason: String,
     },
+
+    /// Corruption detected while decoding or scanning storage-owned data.
+    #[error("{message}")]
+    Corruption {
+        /// Human-readable corruption detail.
+        message: String,
+    },
 }
 
 impl StorageError {
+    /// Build a corruption error owned by the storage layer.
+    pub fn corruption(message: impl Into<String>) -> Self {
+        Self::Corruption {
+            message: message.into(),
+        }
+    }
+
     /// Returns the underlying `io::ErrorKind` for callers and tests that only
     /// need the coarse I/O classification.
     ///
@@ -213,7 +227,8 @@ impl StorageError {
             | StorageError::RecoveryHealthResetRequiresReopen { .. }
             | StorageError::BranchDeletedDuringOp { .. }
             | StorageError::ReclaimRefusedManifestProof { .. }
-            | StorageError::QuarantineReconciliationFailed { .. } => io::ErrorKind::Other,
+            | StorageError::QuarantineReconciliationFailed { .. }
+            | StorageError::Corruption { .. } => io::ErrorKind::Other,
         }
     }
 }
@@ -275,6 +290,7 @@ impl From<StorageError> for StrataError {
             StorageError::QuarantineReconciliationFailed { branch_id, reason } => StrataError::storage(
                 format!("quarantine reconciliation failed for branch {branch_id}: {reason}"),
             ),
+            StorageError::Corruption { message } => StrataError::corruption(message),
         }
     }
 }
@@ -282,5 +298,39 @@ impl From<StorageError> for StrataError {
 impl From<StorageError> for io::Error {
     fn from(value: StorageError) -> Self {
         io::Error::other(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{StorageError, StorageResult};
+    use strata_core::StrataError;
+
+    #[test]
+    fn corruption_constructor_preserves_message() {
+        let err = StorageError::corruption("segment footer CRC mismatch");
+
+        assert!(matches!(
+            err,
+            StorageError::Corruption { ref message }
+            if message == "segment footer CRC mismatch"
+        ));
+    }
+
+    #[test]
+    fn corruption_converts_to_parent_error_without_losing_detail() {
+        fn lift(err: StorageError) -> StorageResult<()> {
+            Err(err)
+        }
+
+        let parent: StrataError = lift(StorageError::corruption("segment block truncated"))
+            .unwrap_err()
+            .into();
+
+        assert!(matches!(
+            parent,
+            StrataError::Corruption { ref message }
+            if message == "segment block truncated"
+        ));
     }
 }

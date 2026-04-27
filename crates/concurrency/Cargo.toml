@@ -17,7 +17,7 @@ perf-trace = ["strata-core/perf-trace"]  # Enable per-operation timing in commit
 fault-injection = []
 
 [dependencies]
-strata-core = { path = "../core" }
+strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-storage = { path = "../storage" }
 strata-durability = { path = "../durability", features = ["engine-internal"] }
 chrono = { workspace = true }

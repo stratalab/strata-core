@@ -33,12 +33,12 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::StrataError;
 use strata_concurrency::{
     apply_wal_record_to_memory_storage, CoordinatorRecoveryError, RecoveryCoordinator,
     RecoveryResult, RecoveryStats, TransactionManager,
 };
 use strata_core::id::CommitVersion;
-use strata_core::StrataError;
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::layout::DatabaseLayout;
 use strata_durability::ManifestManager;

@@ -78,6 +78,7 @@ pub use registry::OPEN_DATABASES;
 
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
+use crate::{StrataError, StrataResult};
 use dashmap::DashMap;
 use parking_lot::Mutex as ParkingMutex;
 use std::any::{Any, TypeId};
@@ -88,7 +89,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use strata_core::id::CommitVersion;
 use strata_core::types::{BranchId, Key};
-use strata_core::{StrataError, StrataResult, VersionedValue};
+use strata_core::VersionedValue;
 use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_durability::wal::{DurabilityMode, WalWriter};
 use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator, StorageResult};
@@ -1231,7 +1232,7 @@ impl Database {
     /// so a vector freeze error doesn't also lose search data.
     pub(crate) fn run_freeze_hooks(&self) -> StrataResult<()> {
         let subsystems = self.subsystems.read();
-        let mut first_error: Option<strata_core::StrataError> = None;
+        let mut first_error: Option<StrataError> = None;
         for subsystem in subsystems.iter().rev() {
             if let Err(e) = subsystem.freeze(self) {
                 tracing::warn!(
@@ -1255,11 +1256,8 @@ impl Database {
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
     /// KVStore::get() hot path where version metadata is not needed.
-    pub fn get_value_direct(
-        &self,
-        key: &Key,
-    ) -> strata_core::StrataResult<Option<strata_core::value::Value>> {
-        self.storage.get_value_direct(key)
+    pub fn get_value_direct(&self, key: &Key) -> StrataResult<Option<strata_core::value::Value>> {
+        self.storage.get_value_direct(key).map_err(Into::into)
     }
 
     /// Direct single-key read returning full VersionedValue metadata.
@@ -1270,8 +1268,8 @@ impl Database {
     pub fn get_versioned_direct(
         &self,
         key: &Key,
-    ) -> strata_core::StrataResult<Option<strata_core::VersionedValue>> {
-        self.storage.get_versioned_direct(key)
+    ) -> StrataResult<Option<strata_core::VersionedValue>> {
+        self.storage.get_versioned_direct(key).map_err(Into::into)
     }
 
     /// Get version history for a key directly from storage.
@@ -1302,7 +1300,9 @@ impl Database {
         key: &Key,
         max_timestamp: u64,
     ) -> StrataResult<Option<VersionedValue>> {
-        self.storage.get_at_timestamp(key, max_timestamp)
+        self.storage
+            .get_at_timestamp(key, max_timestamp)
+            .map_err(Into::into)
     }
 
     /// Count entries matching a prefix directly from storage.
@@ -1315,7 +1315,9 @@ impl Database {
         prefix: &Key,
         max_version: CommitVersion,
     ) -> StrataResult<u64> {
-        self.storage.count_prefix(prefix, max_version)
+        self.storage
+            .count_prefix(prefix, max_version)
+            .map_err(Into::into)
     }
 
     /// Scan entries in a range directly from storage.
@@ -1357,7 +1359,9 @@ impl Database {
         prefix: &Key,
         max_timestamp: u64,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
-        self.storage.scan_prefix_at_timestamp(prefix, max_timestamp)
+        self.storage
+            .scan_prefix_at_timestamp(prefix, max_timestamp)
+            .map_err(Into::into)
     }
 
     /// Get the available time range for a branch.
@@ -1365,7 +1369,7 @@ impl Database {
     /// Returns (oldest_ts, latest_ts) in microseconds since epoch.
     /// Returns None if the branch has no data.
     pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
-        self.storage.time_range(branch_id)
+        self.storage.time_range(branch_id).map_err(Into::into)
     }
 
     /// Check if this is a cache (no-disk) database

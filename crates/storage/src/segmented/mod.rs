@@ -85,7 +85,7 @@ use strata_core::id::CommitVersion;
 use strata_core::traits::{Storage, WriteMode};
 use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult, Timestamp, VersionedValue};
+use strata_core::{StrataResult, Timestamp, VersionedValue};
 
 // ---------------------------------------------------------------------------
 // Level configuration constants
@@ -479,7 +479,7 @@ impl StorageIterator {
     /// On subsequent calls, re-seeks existing children in place —
     /// segment iterators are repositioned via in-memory index (O(log B)),
     /// memtable entries are re-collected from the seek position.
-    pub fn seek(&mut self, target: &Key) -> StrataResult<()> {
+    pub fn seek(&mut self, target: &Key) -> StorageResult<()> {
         let target_ik = InternalKey::encode(target, CommitVersion::MAX);
 
         if let Some(ref mut pipeline) = self.pipeline {
@@ -685,10 +685,10 @@ impl StorageIterator {
     }
 
     /// Check if any segment reported corruption during iteration.
-    pub fn check_corruption(&self) -> StrataResult<()> {
+    pub fn check_corruption(&self) -> StorageResult<()> {
         if let Some(ref pipeline) = self.pipeline {
             if pipeline.corruption_detected() {
-                return Err(StrataError::corruption(
+                return Err(StorageError::corruption(
                     "Segment data block corruption detected during iteration",
                 ));
             }
@@ -2643,7 +2643,7 @@ impl SegmentedStore {
     }
 
     /// Direct single-key read returning only the Value (no VersionedValue).
-    pub fn get_value_direct(&self, key: &Key) -> StrataResult<Option<Value>> {
+    pub fn get_value_direct(&self, key: &Key) -> StorageResult<Option<Value>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
@@ -2668,7 +2668,7 @@ impl SegmentedStore {
     /// This provides per-key read consistency without the overhead of
     /// transaction allocation, coordinator mutex, or read-set tracking.
     /// For multi-key snapshot isolation, use `Database::transaction()`.
-    pub fn get_versioned_direct(&self, key: &Key) -> StrataResult<Option<VersionedValue>> {
+    pub fn get_versioned_direct(&self, key: &Key) -> StorageResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
@@ -2934,7 +2934,7 @@ impl SegmentedStore {
         &self,
         key: &Key,
         max_timestamp: u64,
-    ) -> StrataResult<Option<VersionedValue>> {
+    ) -> StorageResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
@@ -2966,7 +2966,7 @@ impl SegmentedStore {
         &self,
         prefix: &Key,
         max_timestamp: u64,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let snapshot = match self.snapshot_branch(&prefix.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(Vec::new()),
@@ -3020,7 +3020,7 @@ impl SegmentedStore {
     ///
     /// The O(1) fast path includes timestamps from all writes (puts,
     /// deletes, tombstones). The fallback path only scans live entries.
-    pub fn time_range(&self, branch_id: BranchId) -> StrataResult<Option<(u64, u64)>> {
+    pub fn time_range(&self, branch_id: BranchId) -> StorageResult<Option<(u64, u64)>> {
         // O(1) fast path: read atomic timestamps (populated by write path).
         if let Some(branch) = self.branches.get(&branch_id) {
             let min_ts = branch.min_timestamp.load(Ordering::Relaxed);
@@ -3083,7 +3083,7 @@ impl SegmentedStore {
         version: CommitVersion,
         timestamp_micros: u64,
         ttl_ms: u64,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         let branch_id = key.namespace.branch_id;
 
         let mut branch = self
@@ -3116,7 +3116,7 @@ impl SegmentedStore {
         key: &Key,
         version: CommitVersion,
         timestamp_micros: u64,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         let branch_id = key.namespace.branch_id;
 
         let mut branch = self
@@ -3153,7 +3153,7 @@ impl SegmentedStore {
         version: CommitVersion,
         timestamp_micros: u64,
         put_ttls: &[u64],
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
         }
@@ -3257,7 +3257,7 @@ impl SegmentedStore {
         branch_id: BranchId,
         type_tag: TypeTag,
         entries: &[DecodedSnapshotEntry],
-    ) -> StrataResult<usize> {
+    ) -> StorageResult<usize> {
         if entries.is_empty() {
             return Ok(0);
         }
@@ -4401,9 +4401,10 @@ impl SegmentedStore {
                     all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
                 }
                 if iter.corruption_detected() {
-                    return Err(StrataError::corruption(
+                    return Err(StorageError::corruption(
                         "segment scan stopped due to data block corruption",
-                    ));
+                    )
+                    .into());
                 }
             }
         }
@@ -4427,9 +4428,10 @@ impl SegmentedStore {
                         }
                     }
                     if iter.corruption_detected() {
-                        return Err(StrataError::corruption(
+                        return Err(StorageError::corruption(
                             "segment scan stopped due to data block corruption",
-                        ));
+                        )
+                        .into());
                     }
                 }
             }
@@ -4452,7 +4454,7 @@ impl SegmentedStore {
         snapshot: &BranchSnapshot,
         key: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Option<(CommitVersion, MemtableEntry)>> {
+    ) -> StorageResult<Option<(CommitVersion, MemtableEntry)>> {
         let profiling = read_profile_enabled();
         let t_total = if profiling {
             Some(Instant::now())
@@ -4738,7 +4740,7 @@ impl SegmentedStore {
     fn get_all_versions_from_snapshot(
         snapshot: &BranchSnapshot,
         key: &Key,
-    ) -> StrataResult<Vec<(CommitVersion, MemtableEntry)>> {
+    ) -> StorageResult<Vec<(CommitVersion, MemtableEntry)>> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -4761,7 +4763,7 @@ impl SegmentedStore {
                     all_versions.push((se.commit_id, segment_entry_to_memtable_entry(se)));
                 }
                 if iter.corruption_detected() {
-                    return Err(StrataError::corruption(
+                    return Err(StorageError::corruption(
                         "segment scan stopped due to data block corruption",
                     ));
                 }
@@ -4787,7 +4789,7 @@ impl SegmentedStore {
                         }
                     }
                     if iter.corruption_detected() {
-                        return Err(StrataError::corruption(
+                        return Err(StorageError::corruption(
                             "segment scan stopped due to data block corruption",
                         ));
                     }
@@ -4924,7 +4926,7 @@ impl SegmentedStore {
         snapshot: &BranchSnapshot,
         prefix: &Key,
         start_key: &Key,
-    ) -> StrataResult<(
+    ) -> StorageResult<(
         MergeIterator<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)>>>,
         Vec<Arc<AtomicBool>>,
     )> {
@@ -5066,7 +5068,7 @@ impl SegmentedStore {
         snapshot: &BranchSnapshot,
         prefix: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<u64> {
+    ) -> StorageResult<u64> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let count = mvcc
@@ -5159,7 +5161,7 @@ impl SegmentedStore {
     /// Uses the same merge/MVCC pipeline as `scan_prefix` but only counts
     /// the live (non-tombstone, non-expired) entries, avoiding the O(N)
     /// `Vec<(Key, VersionedValue)>` allocation.
-    pub fn count_prefix(&self, prefix: &Key, max_version: CommitVersion) -> StrataResult<u64> {
+    pub fn count_prefix(&self, prefix: &Key, max_version: CommitVersion) -> StorageResult<u64> {
         let branch_id = prefix.namespace.branch_id;
 
         // O(1) fast path: unprefixed count at latest version uses
@@ -5607,7 +5609,7 @@ fn point_lookup_level(
     l1_segments: &[Arc<KVSegment>],
     key: &Key,
     max_version: CommitVersion,
-) -> StrataResult<Option<SegmentEntry>> {
+) -> StorageResult<Option<SegmentEntry>> {
     let typed_key = encode_typed_key(key);
     let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
     point_lookup_level_preencoded(l1_segments, &typed_key, seek_ik.as_bytes(), max_version)
@@ -5618,7 +5620,7 @@ fn point_lookup_level_preencoded(
     typed_key: &[u8],
     seek_bytes: &[u8],
     max_version: CommitVersion,
-) -> StrataResult<Option<SegmentEntry>> {
+) -> StorageResult<Option<SegmentEntry>> {
     if l1_segments.is_empty() {
         return Ok(None);
     }
@@ -5683,10 +5685,10 @@ pub(crate) fn segment_entry_to_memtable_entry(se: SegmentEntry) -> MemtableEntry
 ///
 /// Called after consuming a `MergeIterator` whose segment sources carry
 /// `Arc<AtomicBool>` corruption flags via `OwnedSegmentIter::with_corruption_flag`.
-fn check_corruption(flags: &[Arc<AtomicBool>]) -> StrataResult<()> {
+fn check_corruption(flags: &[Arc<AtomicBool>]) -> StorageResult<()> {
     for flag in flags {
         if flag.load(Ordering::Relaxed) {
-            return Err(StrataError::corruption(
+            return Err(StorageError::corruption(
                 "segment scan stopped due to data block corruption",
             ));
         }
