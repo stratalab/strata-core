@@ -97,20 +97,31 @@ pub(crate) fn arrow_import(
 }
 
 /// Handle ArrowImport when the arrow feature is not enabled.
+///
+/// Still validate user-facing inputs (e.g. missing file) before refusing
+/// on the feature gate, so callers get the same user-error classification
+/// regardless of how the binary was compiled.
 #[cfg(not(feature = "arrow"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn arrow_import(
     _p: &Arc<Primitives>,
     _branch: BranchId,
     _space: String,
-    _file_path: String,
+    file_path: String,
     _target: String,
     _key_column: Option<String>,
     _value_column: Option<String>,
     _collection: Option<String>,
     _format: Option<String>,
 ) -> Result<Output> {
-    Err(Error::Internal {
+    let path = std::path::Path::new(&file_path);
+    if !path.exists() {
+        return Err(Error::InvalidInput {
+            reason: format!("file not found: '{}'", path.display()),
+            hint: None,
+        });
+    }
+    Err(Error::InvalidInput {
         reason: "Import requires the 'arrow' feature".into(),
         hint: Some("Rebuild with: cargo build --features arrow".into()),
     })

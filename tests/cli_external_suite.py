@@ -2098,7 +2098,14 @@ class ExternalCliSuite:
                 "import kv should write the imported value when arrow is enabled",
             )
         else:
-            reason = internal_reason(imported, "import kv")
+            # When the binary is built without the `arrow` feature, the
+            # executor surfaces this as a user-facing InvalidInput rather
+            # than an engine Internal — feature-not-compiled is a build
+            # configuration error, not an invariant violation.
+            invalid = require_key(imported_body, "InvalidInput", "import kv")
+            ensure(isinstance(invalid, dict), "import kv: InvalidInput payload should be an object")
+            reason = require_key(invalid, "reason", "import kv")
+            ensure(isinstance(reason, str), "import kv: InvalidInput.reason should be a string")
             ensure("arrow" in reason.lower(), "import failure should mention the arrow feature")
 
     def test_shell_open_modes(self) -> None:
