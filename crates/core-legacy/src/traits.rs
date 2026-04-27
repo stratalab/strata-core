@@ -787,7 +787,7 @@ mod tests {
     fn segmented_store_history_and_scan_match_across_surfaces() {
         let store = SegmentedStore::new();
         let key = test_key(&test_ns(), "history-forwarded");
-        let prefix = Key::new_kv(key.namespace.clone(), b"history-".to_vec());
+        let prefix = Key::new_kv(key.namespace.clone(), b"history-");
         let storage_view: &dyn StorageSurface = &store;
 
         storage_view

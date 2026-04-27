@@ -4406,8 +4406,7 @@ impl SegmentedStore {
                 if iter.corruption_detected() {
                     return Err(StorageError::corruption(
                         "segment scan stopped due to data block corruption",
-                    )
-                    .into());
+                    ));
                 }
             }
         }
@@ -4433,8 +4432,7 @@ impl SegmentedStore {
                     if iter.corruption_detected() {
                         return Err(StorageError::corruption(
                             "segment scan stopped due to data block corruption",
-                        )
-                        .into());
+                        ));
                     }
                 }
             }

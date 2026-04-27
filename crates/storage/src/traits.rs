@@ -273,7 +273,7 @@ mod tests {
     fn segmented_store_history_and_scan_follow_storage_surface() {
         let store = SegmentedStore::new();
         let key = key("history-forwarded");
-        let prefix = Key::new_kv(key.namespace.clone(), b"history-".to_vec());
+        let prefix = Key::new_kv(key.namespace.clone(), b"history-");
         let storage_view: &dyn Storage = &store;
 
         storage_view
@@ -313,9 +313,9 @@ mod tests {
         let ns = Arc::new(Namespace::for_branch(BranchId::from_user_name(
             "atomic-forwarded",
         )));
-        let keep = Key::new_kv(ns.clone(), b"atomic-keep".to_vec());
-        let drop_key = Key::new_kv(ns.clone(), b"atomic-drop".to_vec());
-        let prefix = Key::new_kv(ns, b"atomic-".to_vec());
+        let keep = Key::new_kv(ns.clone(), b"atomic-keep");
+        let drop_key = Key::new_kv(ns.clone(), b"atomic-drop");
+        let prefix = Key::new_kv(ns, b"atomic-");
         let storage_view: &dyn Storage = &store;
 
         storage_view

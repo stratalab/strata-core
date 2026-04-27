@@ -58,14 +58,17 @@ The intended stack is:
 1. `core`
 2. `storage`
 3. `engine`
-4. `executor`
-5. `cli`
+4. `intelligence`
+5. `executor`
+6. `cli`
 
 In that stack:
 
 - `core` owns stable shared language
 - `storage` owns the persistence substrate and runtime coordination
 - `engine` owns database semantics and primitives
+- `intelligence` owns embedding, inference, and higher-level AI/runtime
+  workflows layered on top of engine semantics
 - `executor` owns the public command boundary
 - `cli` owns presentation
 

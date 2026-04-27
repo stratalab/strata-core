@@ -15,8 +15,7 @@ mod tests {
             super::StrataError::InvalidInput { ref message } if message == "bad branch name"
         ));
 
-        let result: super::StrataResult<()> = Err(super::StrataError::corruption("bad bytes"));
-        let err = result.unwrap_err();
+        let err = super::StrataError::corruption("bad bytes");
         assert!(matches!(
             err,
             super::StrataError::Corruption { ref message } if message == "bad bytes"

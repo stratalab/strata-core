@@ -651,7 +651,7 @@ impl KVSegment {
             });
         }
 
-        Ok(result?)
+        result
     }
 
     // ── Segment read-path profiling (STRATA_PROFILE_SEGMENT=1) ──────────
