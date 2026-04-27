@@ -1,0 +1,729 @@
+{
+  "commands": {
+    "begin": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "state-machine-violation",
+          "owner": "illegal-sequences",
+          "tier": "adversarial"
+        },
+        {
+          "coverage": "crash-recovery",
+          "owner": "crash-recovery",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "branch cherry-pick": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch create": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "negative-usage",
+          "owner": "hostile-input",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "branch del": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "state-machine-violation",
+          "owner": "illegal-sequences",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "branch diff": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch diff3": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch exists": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "branch export": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch fork": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch import": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "crash-recovery",
+          "owner": "crash-recovery",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "branch info": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "branch list": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "branch merge": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch merge-base": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch revert": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard"
+    },
+    "branch validate": {
+      "coverage": "success",
+      "owner": "shell-branch-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "crash-recovery",
+          "owner": "crash-recovery",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "commit": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "compact": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "config get": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "config list": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "config set": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "configure-model": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "describe": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "detokenize": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "down": {
+      "coverage": "success",
+      "owner": "shell-local-admin",
+      "tier": "full",
+      "additional_coverage": [
+        {
+          "coverage": "concurrency-conflict",
+          "owner": "concurrency-conflict",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "durability-counters": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "embed": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "event append": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event get": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event len": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event list": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event range": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event range-time": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "event types": {
+      "coverage": "success",
+      "owner": "shell-event",
+      "tier": "smoke"
+    },
+    "export": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "flush": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "generate": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "graph add-edge": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph add-node": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph analytics cdlp": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph analytics lcc": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph analytics pagerank": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "scale-stress",
+          "owner": "scale-stress",
+          "tier": "full"
+        }
+      ]
+    },
+    "graph analytics sssp": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph analytics wcc": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph bfs": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "scale-stress",
+          "owner": "scale-stress",
+          "tier": "full"
+        }
+      ]
+    },
+    "graph bulk-insert": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph create": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph delete": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph get-node": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph info": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph list": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph list-nodes": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph neighbors": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph ontology define": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "state-machine-violation",
+          "owner": "illegal-sequences",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "graph ontology delete": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph ontology freeze": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph ontology get": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph ontology list": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph ontology status": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "state-machine-violation",
+          "owner": "illegal-sequences",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "graph ontology summary": {
+      "coverage": "success",
+      "owner": "shell-graph-power",
+      "tier": "standard"
+    },
+    "graph remove-edge": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "graph remove-node": {
+      "coverage": "success",
+      "owner": "shell-graph",
+      "tier": "smoke"
+    },
+    "health": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "import": {
+      "coverage": "typed-refusal",
+      "owner": "shell-mixed",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "negative-usage",
+          "owner": "hostile-input",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "info": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "init": {
+      "coverage": "success",
+      "owner": "shell-init",
+      "tier": "standard"
+    },
+    "json count": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json del": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json get": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json getv": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json history": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json list": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke"
+    },
+    "json set": {
+      "coverage": "success",
+      "owner": "shell-json",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "negative-usage",
+          "owner": "hostile-input",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "kv count": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke"
+    },
+    "kv del": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke"
+    },
+    "kv get": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "concurrency-conflict",
+          "owner": "concurrency-conflict",
+          "tier": "adversarial"
+        },
+        {
+          "coverage": "crash-recovery",
+          "owner": "crash-recovery",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "kv getv": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke"
+    },
+    "kv history": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke"
+    },
+    "kv list": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "scale-stress",
+          "owner": "scale-stress",
+          "tier": "full"
+        }
+      ]
+    },
+    "kv put": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "concurrency-conflict",
+          "owner": "concurrency-conflict",
+          "tier": "adversarial"
+        },
+        {
+          "coverage": "crash-recovery",
+          "owner": "crash-recovery",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "kv scan": {
+      "coverage": "success",
+      "owner": "shell-kv",
+      "tier": "smoke"
+    },
+    "metrics": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke"
+    },
+    "models list": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "models local": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "models pull": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "ping": {
+      "coverage": "success",
+      "owner": "shell-admin",
+      "tier": "smoke",
+      "additional_coverage": [
+        {
+          "coverage": "concurrency-conflict",
+          "owner": "concurrency-conflict",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "recipe delete": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "recipe get": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "recipe list": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "recipe seed": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "recipe set": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "recipe show": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "rollback": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "search": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "space create": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "space del": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "space exists": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "space list": {
+      "coverage": "success",
+      "owner": "shell-branch-space",
+      "tier": "smoke"
+    },
+    "tokenize": {
+      "coverage": "typed-refusal",
+      "owner": "shell-feature-gates",
+      "tier": "standard"
+    },
+    "txn active": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "txn info": {
+      "coverage": "success",
+      "owner": "shell-mixed",
+      "tier": "standard"
+    },
+    "uninstall": {
+      "coverage": "negative-usage",
+      "owner": "shell-local-admin",
+      "tier": "full"
+    },
+    "up": {
+      "coverage": "success",
+      "owner": "shell-local-admin",
+      "tier": "full",
+      "additional_coverage": [
+        {
+          "coverage": "concurrency-conflict",
+          "owner": "concurrency-conflict",
+          "tier": "adversarial"
+        }
+      ]
+    },
+    "vector batch-upsert": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "scale-stress",
+          "owner": "scale-stress",
+          "tier": "full"
+        }
+      ]
+    },
+    "vector collections": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector create": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector del": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector drop": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector get": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector getv": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector history": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector search": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "scale-stress",
+          "owner": "scale-stress",
+          "tier": "full"
+        }
+      ]
+    },
+    "vector stats": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard"
+    },
+    "vector upsert": {
+      "coverage": "success",
+      "owner": "shell-vector",
+      "tier": "standard",
+      "additional_coverage": [
+        {
+          "coverage": "negative-usage",
+          "owner": "hostile-input",
+          "tier": "adversarial"
+        }
+      ]
+    }
+  }
+}
