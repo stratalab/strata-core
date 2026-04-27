@@ -10,11 +10,9 @@ use std::sync::Arc;
 use strata_concurrency::transaction::{CASOperation, TransactionContext};
 use strata_concurrency::validation::{validate_cas_set, validate_transaction, ConflictType};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::SegmentedStore;
+use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));

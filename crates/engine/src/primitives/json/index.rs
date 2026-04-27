@@ -11,8 +11,9 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
 use strata_core::primitives::json::{JsonPath, JsonValue};
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::PrimitiveDegradedReason;
+use strata_storage::{Key, Namespace, TypeTag};
 
 use crate::database::Database;
 

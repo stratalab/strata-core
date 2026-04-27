@@ -20,7 +20,7 @@ use crate::pressure::{MemoryPressure, PressureLevel};
 use crate::seekable::{self, SeekableIterator as _};
 use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
-use crate::{BranchOp, StorageError, StorageResult};
+use crate::{BranchOp, Key, Storage, StorageError, StorageResult, TypeTag, WriteMode};
 
 use arc_swap::ArcSwap;
 use dashmap::DashMap;
@@ -82,10 +82,8 @@ thread_local! {
 }
 
 use strata_core::id::CommitVersion;
-use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{BranchId, Key, TypeTag};
 use strata_core::value::Value;
-use strata_core::{StrataResult, Timestamp, VersionedValue};
+use strata_core::{BranchId, Timestamp, VersionedValue};
 
 // ---------------------------------------------------------------------------
 // Level configuration constants
@@ -3271,7 +3269,7 @@ impl SegmentedStore {
             .or_insert_with(BranchState::new);
 
         for snapshot_entry in entries {
-            let namespace = Arc::new(strata_core::Namespace::for_branch_space(
+            let namespace = Arc::new(crate::Namespace::for_branch_space(
                 branch_id,
                 &snapshot_entry.space,
             ));
@@ -4285,7 +4283,7 @@ impl SegmentedStore {
         branch: &BranchState,
         key: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Option<(CommitVersion, MemtableEntry)>> {
+    ) -> StorageResult<Option<(CommitVersion, MemtableEntry)>> {
         // Encode once, reuse everywhere.
         let typed_key = encode_typed_key(key);
         let seek_ik = InternalKey::from_typed_key_bytes(&typed_key, CommitVersion::MAX);
@@ -4377,7 +4375,7 @@ impl SegmentedStore {
     fn get_all_versions_from_branch(
         branch: &BranchState,
         key: &Key,
-    ) -> StrataResult<Vec<(CommitVersion, MemtableEntry)>> {
+    ) -> StorageResult<Vec<(CommitVersion, MemtableEntry)>> {
         let mut all_versions = Vec::new();
 
         // Active memtable
@@ -4818,7 +4816,7 @@ impl SegmentedStore {
         branch: &'b BranchState,
         prefix: &Key,
         start_key: &Key,
-    ) -> StrataResult<(
+    ) -> StorageResult<(
         MergeIterator<Box<dyn Iterator<Item = (InternalKey, MemtableEntry)> + 'b>>,
         Vec<Arc<AtomicBool>>,
     )> {
@@ -4999,7 +4997,7 @@ impl SegmentedStore {
         branch: &BranchState,
         prefix: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let results: Vec<_> = mvcc
@@ -5020,7 +5018,7 @@ impl SegmentedStore {
         snapshot: &BranchSnapshot,
         prefix: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let results: Vec<_> = mvcc
@@ -5043,7 +5041,7 @@ impl SegmentedStore {
         start_key: &Key,
         max_version: CommitVersion,
         limit: Option<usize>,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_snapshot_merge_iter(snapshot, prefix, start_key)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let filtered = mvcc
@@ -5120,7 +5118,7 @@ impl SegmentedStore {
         start_key: &Key,
         max_version: CommitVersion,
         limit: Option<usize>,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let snapshot = match self.snapshot_branch(&prefix.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(Vec::new()),
@@ -5136,7 +5134,7 @@ impl SegmentedStore {
         start_key: &Key,
         max_version: CommitVersion,
         limit: Option<usize>,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, start_key)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let filtered = mvcc
@@ -5187,7 +5185,7 @@ impl SegmentedStore {
         branch: &BranchState,
         prefix: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<u64> {
+    ) -> StorageResult<u64> {
         let (merge, flags) = Self::build_branch_merge_iter(branch, prefix, prefix)?;
         let mvcc = MvccIterator::new(merge, max_version);
         let count = mvcc
@@ -5207,6 +5205,86 @@ impl SegmentedStore {
         };
         let ver = branch.version.load();
         self.write_branch_manifest_from_state(branch_id, &ver, &branch.inherited_layers)
+    }
+
+    /// Returns the latest visible value for `key` at or before `max_version`.
+    pub fn get_versioned(
+        &self,
+        key: &Key,
+        max_version: CommitVersion,
+    ) -> StorageResult<Option<VersionedValue>> {
+        Storage::get_versioned(self, key, max_version)
+    }
+
+    /// Returns historical values for `key`, newest first.
+    pub fn get_history(
+        &self,
+        key: &Key,
+        limit: Option<usize>,
+        before_version: Option<CommitVersion>,
+    ) -> StorageResult<Vec<VersionedValue>> {
+        Storage::get_history(self, key, limit, before_version)
+    }
+
+    /// Scans keys that share `prefix` at or before `max_version`.
+    pub fn scan_prefix(
+        &self,
+        prefix: &Key,
+        max_version: CommitVersion,
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
+        Storage::scan_prefix(self, prefix, max_version)
+    }
+
+    /// Returns the highest committed version visible in this store.
+    pub fn current_version(&self) -> CommitVersion {
+        Storage::current_version(self)
+    }
+
+    /// Writes a value at `version` using the provided retention mode.
+    pub fn put_with_version_mode(
+        &self,
+        key: Key,
+        value: Value,
+        version: CommitVersion,
+        ttl: Option<Duration>,
+        mode: WriteMode,
+    ) -> StorageResult<()> {
+        Storage::put_with_version_mode(self, key, value, version, ttl, mode)
+    }
+
+    /// Writes a tombstone for `key` at `version`.
+    pub fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StorageResult<()> {
+        Storage::delete_with_version(self, key, version)
+    }
+
+    /// Applies a batch of writes that share the same commit version.
+    pub fn apply_batch(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        version: CommitVersion,
+    ) -> StorageResult<()> {
+        Storage::apply_batch(self, writes, version)
+    }
+
+    /// Applies a batch of tombstones that share the same commit version.
+    pub fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StorageResult<()> {
+        Storage::delete_batch(self, deletes, version)
+    }
+
+    /// Applies puts and deletes atomically before the version becomes visible.
+    pub fn apply_writes_atomic(
+        &self,
+        writes: Vec<(Key, Value, WriteMode)>,
+        deletes: Vec<Key>,
+        version: CommitVersion,
+        put_ttls: &[u64],
+    ) -> StorageResult<()> {
+        Storage::apply_writes_atomic(self, writes, deletes, version, put_ttls)
+    }
+
+    /// Returns only the latest visible version for `key`.
+    pub fn get_version_only(&self, key: &Key) -> StorageResult<Option<CommitVersion>> {
+        Storage::get_version_only(self, key)
     }
 }
 
@@ -5234,7 +5312,7 @@ impl Storage for SegmentedStore {
         &self,
         key: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Option<VersionedValue>> {
+    ) -> StorageResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),
@@ -5257,7 +5335,7 @@ impl Storage for SegmentedStore {
         key: &Key,
         limit: Option<usize>,
         before_version: Option<CommitVersion>,
-    ) -> StrataResult<Vec<VersionedValue>> {
+    ) -> StorageResult<Vec<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(Vec::new()),
@@ -5288,7 +5366,7 @@ impl Storage for SegmentedStore {
         &self,
         prefix: &Key,
         max_version: CommitVersion,
-    ) -> StrataResult<Vec<(Key, VersionedValue)>> {
+    ) -> StorageResult<Vec<(Key, VersionedValue)>> {
         let snapshot = match self.snapshot_branch(&prefix.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(Vec::new()),
@@ -5308,7 +5386,7 @@ impl Storage for SegmentedStore {
         version: CommitVersion,
         ttl: Option<Duration>,
         _mode: WriteMode,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         let branch_id = key.namespace.branch_id;
 
         // Get-or-create branch
@@ -5344,7 +5422,7 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StrataResult<()> {
+    fn delete_with_version(&self, key: &Key, version: CommitVersion) -> StorageResult<()> {
         let branch_id = key.namespace.branch_id;
 
         let mut branch = self
@@ -5381,7 +5459,7 @@ impl Storage for SegmentedStore {
         &self,
         writes: Vec<(Key, Value, WriteMode)>,
         version: CommitVersion,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         if writes.is_empty() {
             return Ok(());
         }
@@ -5425,7 +5503,7 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StrataResult<()> {
+    fn delete_batch(&self, deletes: Vec<Key>, version: CommitVersion) -> StorageResult<()> {
         if deletes.is_empty() {
             return Ok(());
         }
@@ -5472,7 +5550,7 @@ impl Storage for SegmentedStore {
         deletes: Vec<Key>,
         version: CommitVersion,
         put_ttls: &[u64],
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         if writes.is_empty() && deletes.is_empty() {
             return Ok(());
         }
@@ -5551,7 +5629,7 @@ impl Storage for SegmentedStore {
         Ok(())
     }
 
-    fn get_version_only(&self, key: &Key) -> StrataResult<Option<CommitVersion>> {
+    fn get_version_only(&self, key: &Key) -> StorageResult<Option<CommitVersion>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
             None => return Ok(None),

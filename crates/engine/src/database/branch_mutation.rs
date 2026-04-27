@@ -61,9 +61,10 @@ use std::sync::Arc;
 
 use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::{BranchControlRecord, BranchRef, VersionedValue};
+use strata_storage::{Key, Namespace};
 use tracing::{error, info, warn};
 
 use super::dag_hook::{BranchDagError, BranchDagHook, DagEvent};

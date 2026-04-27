@@ -18,15 +18,15 @@ pub use std::time::Duration;
 pub use strata_concurrency::TransactionPayload;
 pub use strata_concurrency::__internal as concurrency_test_hooks;
 pub use strata_core::id::{CommitVersion, TxnId};
-pub use strata_core::types::{Key, Namespace, TypeTag};
 pub use strata_core::value::Value;
-pub use strata_core::{Storage, Timestamp, WriteMode};
+pub use strata_core::Timestamp;
 pub use strata_durability::__internal::WalWriterEngineExt;
 pub use strata_durability::codec::IdentityCodec;
 pub use strata_durability::format::WalRecord;
 pub use strata_durability::now_micros;
 pub use strata_durability::wal::WalConfig;
 pub use strata_durability::KvSnapshotEntry;
+pub use strata_storage::{Key, Namespace, Storage, TypeTag, WriteMode};
 pub use tempfile::TempDir;
 
 // `super::test_hooks` is a private sibling module of `database::tests`;

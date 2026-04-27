@@ -36,11 +36,10 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult};
+use strata_core::{BranchId, StrataError, StrataResult};
 use strata_engine::Database;
+use strata_storage::{Key, Namespace, Storage};
 
 use crate::{CollectionRecord, VectorStore};
 

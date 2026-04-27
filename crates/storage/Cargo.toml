@@ -12,7 +12,7 @@ publish = false
 workspace = true
 
 [dependencies]
-strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
+strata-core = { package = "strata-core", path = "../core" }
 dashmap = { workspace = true }
 rustc-hash = { workspace = true }
 thiserror = { workspace = true }
@@ -24,6 +24,7 @@ parking_lot = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

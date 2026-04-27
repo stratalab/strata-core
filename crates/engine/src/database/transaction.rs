@@ -8,7 +8,6 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_core::Storage;
 use strata_durability::wal::DurabilityMode;
 use strata_durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::SegmentedStore;

@@ -2,8 +2,7 @@ use std::fmt;
 use std::io;
 use std::path::PathBuf;
 
-use strata_core::types::BranchId;
-use strata_core::StrataError;
+use strata_core::BranchId;
 use thiserror::Error;
 
 use crate::segmented::{DegradationClass, RecoveryFault};
@@ -245,56 +244,6 @@ fn recovery_fault_kind(fault: &RecoveryFault) -> io::ErrorKind {
     }
 }
 
-impl From<StorageError> for StrataError {
-    fn from(value: StorageError) -> Self {
-        match value {
-            StorageError::Io(inner) => StrataError::storage_with_source("storage I/O error", inner),
-            StorageError::RecoveryAlreadyApplied => {
-                StrataError::storage("segment recovery already applied on this store instance")
-            }
-            StorageError::RecoveryHealthResetRequiresSuccessfulRecovery => StrataError::storage(
-                "reset_recovery_health() requires a successfully applied recovery on this store instance",
-            ),
-            StorageError::ManifestPublish { branch_id, inner } => StrataError::storage_with_source(
-                format!("failed to publish segment manifest for branch {branch_id}"),
-                inner,
-            ),
-            StorageError::DirFsync { dir, inner } => StrataError::storage_with_source(
-                format!(
-                    "segment manifest rename may not be durable for directory {}",
-                    dir.display()
-                ),
-                inner,
-            ),
-            StorageError::RecoveryFault(fault) => {
-                StrataError::storage_with_source("recovery fault", fault)
-            }
-            StorageError::GcRefusedDegradedRecovery { class } => StrataError::storage(format!(
-                "gc refused under degraded recovery ({class:?})"
-            )),
-            StorageError::RecoveryHealthResetRequiresReopen { class } => {
-                StrataError::storage(format!(
-                    "reset_recovery_health() requires a fresh reopen after degraded recovery ({class:?})"
-                ))
-            }
-            StorageError::BranchDeletedDuringOp { branch_id, op } => StrataError::storage(
-                format!("branch {branch_id} was deleted during {op}; operation refused to resurrect"),
-            ),
-            StorageError::ReclaimRefusedManifestProof { segment_id } => StrataError::storage(
-                format!("reclaim refused: segment {segment_id} still referenced by a recovery-trusted manifest"),
-            ),
-            StorageError::QuarantinePublishFailed { dir, inner } => StrataError::storage_with_source(
-                format!("quarantine publish failed for directory {}", dir.display()),
-                inner,
-            ),
-            StorageError::QuarantineReconciliationFailed { branch_id, reason } => StrataError::storage(
-                format!("quarantine reconciliation failed for branch {branch_id}: {reason}"),
-            ),
-            StorageError::Corruption { message } => StrataError::corruption(message),
-        }
-    }
-}
-
 impl From<StorageError> for io::Error {
     fn from(value: StorageError) -> Self {
         io::Error::other(value)
@@ -303,8 +252,7 @@ impl From<StorageError> for io::Error {
 
 #[cfg(test)]
 mod tests {
-    use super::{StorageError, StorageResult};
-    use strata_core::StrataError;
+    use super::StorageError;
 
     #[test]
     fn corruption_constructor_preserves_message() {
@@ -314,23 +262,6 @@ mod tests {
             err,
             StorageError::Corruption { ref message }
             if message == "segment footer CRC mismatch"
-        ));
-    }
-
-    #[test]
-    fn corruption_converts_to_parent_error_without_losing_detail() {
-        fn lift(err: StorageError) -> StorageResult<()> {
-            Err(err)
-        }
-
-        let parent: StrataError = lift(StorageError::corruption("segment block truncated"))
-            .unwrap_err()
-            .into();
-
-        assert!(matches!(
-            parent,
-            StrataError::Corruption { ref message }
-            if message == "segment block truncated"
         ));
     }
 }

@@ -35,11 +35,10 @@ pub use strata_core::branch_dag::{
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId, Key};
-use strata_core::{StrataError, StrataResult, Value};
-
 use adjacency::AdjacencyIndex;
+use strata_core::{BranchId, StrataError, StrataResult, Value};
 use strata_engine::Database;
+use strata_storage::Key;
 use types::*;
 
 /// Graph store providing CRUD operations on nodes and edges.

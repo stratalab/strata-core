@@ -30,10 +30,10 @@ use once_cell::sync::Lazy;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::{Version, VersionedHistory};
-use strata_storage::StorageIterator;
+use strata_storage::{Key, Namespace, StorageIterator};
 
 /// Global cache of `Arc<Namespace>` per (branch, space) pair. One heap allocation
 /// per unique combination, ever — subsequent calls return `Arc::clone()`.
@@ -763,7 +763,7 @@ impl KVStoreExt for TransactionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::TypeTag;
+    use strata_storage::TypeTag;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>, KVStore) {
@@ -1120,7 +1120,7 @@ mod tests {
         // is consistent even if a concurrent write happens
         let mut txn = db.begin_transaction(branch_id).unwrap();
         let ns = Arc::new(Namespace::for_branch(branch_id));
-        let storage_key = strata_core::types::Key::new_kv(ns.clone(), "iso_key");
+        let storage_key = Key::new_kv(ns.clone(), "iso_key");
         let vv = txn.get_versioned(&storage_key).unwrap().unwrap();
         assert_eq!(vv.value, Value::Int(1));
 

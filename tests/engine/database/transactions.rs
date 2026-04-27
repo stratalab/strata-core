@@ -217,7 +217,7 @@ fn commit_transaction_returns_version() {
 
     // Add a write to the transaction
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
+    use strata_storage::{Key, Namespace};
     let key = Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), "manual_tx_key");
     ctx.write_set.insert(key, Value::Int(42));
 

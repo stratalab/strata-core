@@ -22,8 +22,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::Key;
 use strata_core::value::Value;
+use strata_storage::Key;
 
 // =============================================================================
 // Error Types

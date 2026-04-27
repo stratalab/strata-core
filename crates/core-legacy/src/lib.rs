@@ -6,12 +6,10 @@
 //!
 //! It currently exposes:
 //! - BranchId: Unique identifier for agent branches
-//! - Namespace: Branch and space isolation (branch_id/space)
-//! - Key: Composite key with type tagging
-//! - TypeTag: Discriminates between primitive types
+//! - Compatibility storage layout types (`Namespace`, `Key`, `TypeTag`)
+//! - Compatibility storage traits (`Storage`, `WriteMode`)
 //! - Value: Unified value enum for all data types
 //! - Error: Error type hierarchy
-//! - Traits: Core trait definitions (Storage)
 //! - Primitive types: Event, JSON, Vector types (in `primitives` module)
 //! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
 

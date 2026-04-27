@@ -33,7 +33,7 @@ pub(crate) use install_pause::{arm, maybe_pause, release, wait_until_entered};
 mod install_pause {
     use std::collections::HashMap;
     use std::sync::{Arc, Condvar, Mutex, OnceLock};
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     // Keyed by (op_tag, branch_id) so parallel tests on distinct branches
     // don't collide on a shared global slot. Production callers pass their

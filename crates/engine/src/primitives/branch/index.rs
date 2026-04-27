@@ -26,10 +26,10 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_storage::StorageError;
+use strata_storage::{Key, Namespace, TypeTag};
 use tracing::{info, warn};
 
 /// Internal metadata key storing the effective default branch name for

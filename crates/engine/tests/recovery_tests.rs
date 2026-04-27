@@ -1282,7 +1282,7 @@ fn bypass_kv_put(
     value: Value,
 ) {
     use std::sync::Arc as StdArc;
-    use strata_core::types::{Key, Namespace, TypeTag};
+    use strata_storage::{Key, Namespace, TypeTag};
 
     let ns = StdArc::new(Namespace::for_branch_space(branch_id, space));
     let key = Key::new(ns, TypeTag::KV, user_key.to_vec());
@@ -1296,7 +1296,7 @@ fn bypass_kv_put(
 /// actually fired — the union path would otherwise mask a missing
 /// registration via the data scan.
 fn space_metadata_exists(db: &Arc<Database>, branch_id: BranchId, space: &str) -> bool {
-    use strata_core::types::Key;
+    use strata_storage::Key;
 
     db.transaction(branch_id, |txn| {
         let key = Key::new_space(branch_id, space);
@@ -1394,8 +1394,8 @@ fn test_discover_used_spaces_excludes_system_space() {
 #[test]
 fn test_discover_used_spaces_filters_tombstones() {
     use std::sync::Arc as StdArc;
-    use strata_core::types::{Key, Namespace, TypeTag};
     use strata_engine::SpaceIndex;
+    use strata_storage::{Key, Namespace, TypeTag};
 
     let (db, _temp, branch_id) = setup();
 

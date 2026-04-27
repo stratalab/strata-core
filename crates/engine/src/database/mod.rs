@@ -88,10 +88,11 @@ use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key};
+use strata_core::types::BranchId;
 use strata_core::VersionedValue;
 use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_durability::wal::{DurabilityMode, WalWriter};
+use strata_storage::Key;
 use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator, StorageResult};
 
 // ============================================================================
@@ -1072,7 +1073,6 @@ impl Database {
     pub fn active_branch_ref(&self, branch_id: BranchId) -> Option<strata_core::BranchRef> {
         use crate::branch_ops::branch_control_store::active_ptr_key;
         use strata_core::id::CommitVersion;
-        use strata_core::traits::Storage;
         use strata_core::value::Value;
 
         let ap_key = active_ptr_key(branch_id);
@@ -1286,9 +1286,9 @@ impl Database {
         before_version: Option<u64>,
     ) -> StrataResult<Vec<VersionedValue>> {
         use strata_core::id::CommitVersion;
-        use strata_core::Storage;
-        self.storage
-            .get_history(key, limit, before_version.map(CommitVersion))
+        Ok(self
+            .storage
+            .get_history(key, limit, before_version.map(CommitVersion))?)
     }
 
     /// Get value at or before the given timestamp directly from storage.
@@ -1332,8 +1332,9 @@ impl Database {
         max_version: CommitVersion,
         limit: Option<usize>,
     ) -> StrataResult<Vec<(Key, VersionedValue)>> {
-        self.storage
-            .scan_range(prefix, start_key, max_version, limit)
+        Ok(self
+            .storage
+            .scan_range(prefix, start_key, max_version, limit)?)
     }
 
     /// Create a persistent [`StorageIterator`] for cursor-based pagination.

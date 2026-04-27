@@ -12,8 +12,8 @@
 //! efficient ordered iteration.
 
 use crate::key_encoding::{encode_typed_key, encode_typed_key_prefix, InternalKey};
+use crate::Key;
 use strata_core::id::CommitVersion;
-use strata_core::types::Key;
 use strata_core::value::Value;
 use strata_core::{Timestamp, Version, VersionedValue};
 
@@ -444,7 +444,9 @@ impl ApproximateSize for Value {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use strata_core::types::{BranchId, Namespace, TypeTag};
+    use strata_core::BranchId;
+
+    use crate::{Namespace, TypeTag};
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])

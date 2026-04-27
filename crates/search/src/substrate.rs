@@ -26,7 +26,7 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::StrataResult;
 use strata_engine::search::recipe::FusionConfig;
 use strata_engine::search::{
@@ -34,6 +34,7 @@ use strata_engine::search::{
 };
 use strata_engine::system_space::SYSTEM_SPACE;
 use strata_engine::Database;
+use strata_storage::{Key, Namespace};
 
 // Primitive facades
 use strata_engine::primitives::{EventLog, JsonStore, KVStore};

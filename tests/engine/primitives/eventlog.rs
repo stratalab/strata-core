@@ -781,8 +781,8 @@ fn metadata_corruption_returns_error() {
         .unwrap();
 
     // Directly corrupt metadata by writing invalid data to the meta key
-    let ns = strata_core::types::Namespace::for_branch_space(test_db.branch_id, "default");
-    let meta_key = strata_core::types::Key::new_event_meta(std::sync::Arc::new(ns));
+    let ns = strata_storage::Namespace::for_branch_space(test_db.branch_id, "default");
+    let meta_key = strata_storage::Key::new_event_meta(std::sync::Arc::new(ns));
     test_db
         .db
         .transaction(test_db.branch_id, |txn| {

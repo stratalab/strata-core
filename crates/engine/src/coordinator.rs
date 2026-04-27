@@ -17,10 +17,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::traits::Storage;
 use strata_core::types::BranchId;
 use strata_durability::wal::WalWriter;
-use strata_storage::{RecoveredState, SegmentedStore};
+use strata_storage::{RecoveredState, SegmentedStore, Storage};
 use tracing::{debug, info, warn};
 
 /// Transaction coordinator for the database
@@ -699,10 +698,9 @@ mod tests {
     #[test]
     fn test_issue_1726_version_counter_from_segments() {
         use strata_concurrency::RecoveryCoordinator;
-        use strata_core::traits::WriteMode;
-        use strata_core::types::{Key, Namespace, TypeTag};
         use strata_core::value::Value;
         use strata_durability::layout::DatabaseLayout;
+        use strata_storage::{Key, Namespace, TypeTag, WriteMode};
 
         fn branch() -> BranchId {
             BranchId::from_bytes([1; 16])

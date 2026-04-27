@@ -13,10 +13,9 @@
 //! - Multiple write/close/reopen cycles
 
 use strata_core::contract::Version;
-use strata_core::types::{Key, Namespace, BranchId};
 use strata_core::value::Value;
 use strata_core::Timestamp;
-use strata_core::Storage;
+use strata_storage::{BranchId, Key, Namespace, Storage};
 use strata_durability::wal::{DurabilityMode, WALEntry};
 use strata_engine::Database;
 use tempfile::TempDir;

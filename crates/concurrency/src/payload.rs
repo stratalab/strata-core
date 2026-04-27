@@ -12,8 +12,8 @@
 
 use serde::{Deserialize, Serialize};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::Key;
 use strata_core::value::Value;
+use strata_storage::Key;
 
 use crate::TransactionContext;
 
@@ -159,8 +159,9 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::types::{BranchId, Key, Namespace};
     use strata_core::value::Value;
+    use strata_core::BranchId;
+    use strata_storage::{Key, Namespace};
 
     fn test_ns() -> Arc<Namespace> {
         let branch_id = BranchId::new();

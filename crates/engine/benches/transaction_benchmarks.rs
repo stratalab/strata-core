@@ -9,10 +9,11 @@
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use std::sync::Arc;
 use std::thread;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem};
+use strata_storage::{Key, Namespace};
 use tempfile::TempDir;
 
 fn create_ns(branch_id: BranchId) -> Arc<Namespace> {

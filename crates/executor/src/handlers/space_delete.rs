@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use strata_core::types::{Key, Namespace, TypeTag};
+use strata_storage::{Key, Namespace, TypeTag};
 
 use crate::bridge::{require_branch_exists, to_core_branch_id, Primitives};
 use crate::convert::convert_result;

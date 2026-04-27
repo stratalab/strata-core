@@ -27,9 +27,8 @@ use crate::StrataResult;
 use std::collections::HashSet;
 use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{Key, TypeTag};
 use strata_core::value::Value;
+use strata_storage::{Key, TypeTag};
 use tracing::info;
 
 /// Extract indexable text from a Value.

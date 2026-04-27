@@ -21,7 +21,7 @@ use std::io;
 use std::path::Path;
 
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 use crate::{StorageError, StorageResult};
 

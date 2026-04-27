@@ -40,12 +40,13 @@ use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::{
     BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, PrimitiveType, Version,
     VersionedValue,
 };
+use strata_storage::{Key, Namespace, TypeTag};
 use tracing::info;
 
 use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore, MergeBasePoint};
@@ -1167,7 +1168,6 @@ fn cow_diff_branches(
     options: &DiffOptions,
     snapshot_version: CommitVersion,
 ) -> StrataResult<BranchDiffResult> {
-    use strata_core::Storage;
     let space_index = SpaceIndex::new(db.clone());
     let storage = db.storage();
 
@@ -3622,7 +3622,7 @@ pub(crate) fn cherry_pick_from_diff_expected(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::Namespace;
+    use strata_storage::Namespace;
     use tempfile::TempDir;
 
     fn setup() -> (TempDir, Arc<Database>) {

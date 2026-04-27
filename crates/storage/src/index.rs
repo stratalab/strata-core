@@ -6,7 +6,9 @@
 //! - TypeIndex: Maps TypeTag → Set<Key> for primitive-specific queries
 
 use std::collections::{HashMap, HashSet};
-use strata_core::{BranchId, Key, TypeTag};
+use strata_core::BranchId;
+
+use crate::{Key, TypeTag};
 
 /// Secondary index: BranchId → Keys
 ///
@@ -136,8 +138,8 @@ impl TypeIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Namespace;
     use std::sync::Arc;
-    use strata_core::Namespace;
 
     /// Helper to create a test namespace
     fn test_namespace(branch_id: BranchId) -> Arc<Namespace> {

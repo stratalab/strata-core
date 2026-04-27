@@ -44,8 +44,9 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_storage::{Key, Namespace};
 
 // Re-export Event from core
 pub use strata_core::primitives::Event;
@@ -743,7 +744,6 @@ impl EventLog {
         if limit == Some(0) {
             return Ok(Vec::new());
         }
-        use strata_core::Storage;
         let ns = self.namespace_for(branch_id, space);
         let meta_key = Key::new_event_meta(ns.clone());
         let meta: EventLogMeta = match self

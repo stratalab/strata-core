@@ -26,8 +26,8 @@ use crate::branch_bundle::error::{BranchBundleError, BranchBundleResult};
 use crate::branch_bundle::types::{xxh3_hex, WAL_BRANCHLOG_MAGIC, WAL_BRANCHLOG_VERSION};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
-use strata_core::types::Key;
 use strata_core::value::Value;
+use strata_storage::Key;
 
 /// Header size in bytes: magic (10) + version (2) + count (4)
 const HEADER_SIZE: usize = 16;
@@ -429,8 +429,9 @@ fn validate_single_entry<R: Read>(reader: &mut R, index: usize) -> BranchBundleR
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_core::BranchId;
+    use strata_storage::{Key, Namespace, TypeTag};
 
     fn make_test_branch_id() -> (BranchId, String) {
         let branch_id = BranchId::new();

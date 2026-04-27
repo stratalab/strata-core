@@ -37,7 +37,8 @@ use tempfile::TempDir;
 /// EXPECTED: With enough iterations, this should show lost updates.
 #[test]
 fn test_issue_594_toctou_race_condition() {
-    use strata_core::types::{Key, Namespace, BranchId};
+    use strata_core::types::BranchId;
+    use strata_storage::{Key, Namespace};
     use strata_core::value::Value;
     use strata_engine::Database;
 

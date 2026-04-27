@@ -11,7 +11,8 @@
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
+use strata_storage::{Key, Namespace};
 
 /// The reserved space name for internal system data.
 pub const SYSTEM_SPACE: &str = "_system_";

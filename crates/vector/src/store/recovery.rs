@@ -47,7 +47,7 @@ impl VectorStore {
         branch_id: BranchId,
         source_branch_id: Option<BranchId>,
     ) -> VectorResult<()> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let version = CommitVersion(self.db.storage().version());
 
@@ -151,7 +151,7 @@ impl VectorStore {
         space: &str,
         collection_name: &str,
     ) -> VectorResult<usize> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let state = self.state()?;
         let version = CommitVersion(self.db.storage().version());

@@ -44,9 +44,10 @@ use strata_core::id::CommitVersion;
 use strata_core::primitives::json::{
     delete_at_path, get_at_path, set_at_path, JsonLimitError, JsonPath, JsonValue,
 };
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::VersionedHistory;
+use strata_storage::{Key, Namespace};
 
 // =============================================================================
 // Limit Validation Helpers
@@ -440,7 +441,6 @@ impl JsonStore {
         use strata_core::contract::Versioned;
 
         let key = self.key_for(branch_id, space, doc_id);
-        use strata_core::Storage;
         match self.db.storage().get_versioned(&key, CommitVersion::MAX)? {
             Some(vv) => {
                 let doc = Self::deserialize_doc_with_fallback_id(&vv.value, doc_id)?;

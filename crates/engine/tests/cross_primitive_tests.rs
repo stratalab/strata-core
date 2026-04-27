@@ -15,11 +15,10 @@
 // using the public primitive APIs.
 
 /*
-use strata_core::Storage;
 use strata_core::StrataError;
-use strata_core::types::{Key, Namespace, BranchId};
 use strata_core::value::Value;
 use strata_engine::Database;
+use strata_storage::{BranchId, Key, Namespace, Storage};
 use tempfile::TempDir;
 
 // ... tests that use db.storage() ...

@@ -7,10 +7,10 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use strata_core::{BranchId, StrataError, StrataResult};
 #[cfg(test)]
-use strata_core::types::TypeTag;
-use strata_core::types::{BranchId, Key, Namespace};
-use strata_core::{StrataError, StrataResult};
+use strata_storage::TypeTag;
+use strata_storage::{Key, Namespace};
 
 /// Global cache of `Arc<Namespace>` per `(branch, space)` pair. One heap
 /// allocation per pair, ever — all subsequent calls return `Arc::clone()`

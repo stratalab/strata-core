@@ -3,13 +3,13 @@
 use crate::{StrataError, StrataResult};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::{Key, TypeTag};
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::{
     BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,
     EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, ManifestError, ManifestManager,
     VectorCollectionSnapshotEntry, VectorSnapshotEntry, WalOnlyCompactor,
 };
+use strata_storage::{Key, TypeTag};
 use tracing::info;
 
 use super::{scan_dir_size, Database, DatabaseDiskUsage, PersistenceMode};

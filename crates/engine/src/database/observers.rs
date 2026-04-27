@@ -32,9 +32,10 @@ use std::time::SystemTime;
 
 use strata_core::contract::PrimitiveType;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::{BranchId, Key};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::{BranchRef, PrimitiveDegradedReason};
+use strata_storage::Key;
 
 // =============================================================================
 // Error Types

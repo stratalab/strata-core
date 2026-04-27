@@ -20,6 +20,7 @@ perf-trace = []  # Enable per-operation timing instrumentation
 
 [dependencies]
 strata-core-foundation = { package = "strata-core", path = "../core" }
+strata-storage = { path = "../storage" }
 uuid = { workspace = true }
 serde = { workspace = true }
 serde_bytes = { workspace = true }

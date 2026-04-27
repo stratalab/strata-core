@@ -234,8 +234,8 @@ fn empty_transaction_is_read_only() {
 #[test]
 fn transaction_with_write_is_not_read_only() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -249,7 +249,7 @@ fn transaction_with_write_is_not_read_only() {
 #[test]
 fn transaction_with_delete_is_not_read_only() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -264,8 +264,8 @@ fn transaction_with_delete_is_not_read_only() {
 fn transaction_with_cas_is_not_read_only() {
     use std::sync::Arc;
     use strata_concurrency::transaction::CASOperation;
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -283,7 +283,7 @@ fn transaction_with_cas_is_not_read_only() {
 #[test]
 fn transaction_with_only_reads_is_read_only() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -301,8 +301,8 @@ fn transaction_with_only_reads_is_read_only() {
 #[test]
 fn pending_operations_count() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -325,7 +325,7 @@ fn pending_operations_count() {
 #[test]
 fn read_count_tracks_reads() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
@@ -345,8 +345,8 @@ fn read_count_tracks_reads() {
 #[test]
 fn write_count_tracks_only_writes() {
     use std::sync::Arc;
-    use strata_core::types::{Key, Namespace};
     use strata_core::value::Value;
+    use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
     let mut txn = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));

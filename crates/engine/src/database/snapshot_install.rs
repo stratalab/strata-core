@@ -26,11 +26,11 @@ use std::collections::HashMap;
 use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
-use strata_core::{BranchId, TypeTag};
+use strata_core::BranchId;
 use strata_durability::codec::{clone_codec, StorageCodec};
 use strata_durability::format::primitive_tags;
 use strata_durability::{LoadedSnapshot, SnapshotSerializer};
-use strata_storage::{DecodedSnapshotEntry, DecodedSnapshotValue, SegmentedStore};
+use strata_storage::{DecodedSnapshotEntry, DecodedSnapshotValue, SegmentedStore, TypeTag};
 use tracing::warn;
 
 /// Counts of entries installed per primitive during a snapshot install.
@@ -390,9 +390,8 @@ mod tests {
     use std::sync::Arc;
     use strata_core::contract::Version;
     use strata_core::id::CommitVersion;
-    use strata_core::traits::Storage;
     use strata_core::value::Value;
-    use strata_core::{BranchId, Key, Namespace};
+    use strata_core::BranchId;
     use strata_durability::codec::IdentityCodec;
     use strata_durability::format::{
         EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, VectorCollectionSnapshotEntry,
@@ -402,6 +401,8 @@ mod tests {
         disk_snapshot::{SnapshotSection, SnapshotWriter},
         SnapshotReader,
     };
+    use strata_storage::Storage;
+    use strata_storage::{Key, Namespace};
 
     fn writer_for(dir: &std::path::Path) -> SnapshotWriter {
         SnapshotWriter::new(dir.to_path_buf(), Box::new(IdentityCodec), [9u8; 16]).unwrap()

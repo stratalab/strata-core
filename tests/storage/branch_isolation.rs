@@ -5,11 +5,9 @@
 use std::sync::Arc;
 use std::thread;
 use strata_core::id::CommitVersion;
-use strata_core::traits::{Storage, WriteMode};
-use strata_core::types::{Key, Namespace};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::SegmentedStore;
+use strata_storage::{Key, Namespace, SegmentedStore, WriteMode};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));

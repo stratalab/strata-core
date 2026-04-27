@@ -55,7 +55,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 use crate::quarantine::{
     read_quarantine_manifest, write_quarantine_manifest, QuarantineEntry, QUARANTINE_DIR,

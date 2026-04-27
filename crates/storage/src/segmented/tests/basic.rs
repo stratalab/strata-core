@@ -643,12 +643,31 @@ fn list_branch_nonexistent_branch() {
         .is_empty());
 }
 
+fn corrupt_first_segment_crc(dir: &std::path::Path, branch_id: BranchId) {
+    use crate::segment_builder::HEADER_SIZE;
+
+    let branch_dir = dir.join(hex_encode_branch(&branch_id));
+    let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
+        .collect();
+    assert_eq!(sst_files.len(), 1, "expected exactly one segment file");
+    let sst_path = sst_files[0].path();
+
+    let data = std::fs::read(&sst_path).unwrap();
+    let data_len =
+        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
+    let crc_offset = HEADER_SIZE + 8 + data_len;
+    let mut corrupt = data.clone();
+    corrupt[crc_offset] ^= 0xFF;
+    std::fs::write(&sst_path, &corrupt).unwrap();
+}
+
 /// Issue #1749: scan_prefix must return an error (not silently truncated results)
 /// when a segment data block is corrupt.
 #[test]
 fn test_issue_1749_scan_prefix_returns_error_on_corruption() {
-    use crate::segment_builder::HEADER_SIZE;
-
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
@@ -659,26 +678,7 @@ fn test_issue_1749_scan_prefix_returns_error_on_corruption() {
     seed(&store, kv_key("item_c"), Value::Int(3), 3);
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
-
-    // Find the .sst file on disk.
-    let branch_dir = dir.path().join(hex_encode_branch(&b));
-    let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
-        .collect();
-    assert_eq!(sst_files.len(), 1, "expected exactly one segment file");
-    let sst_path = sst_files[0].path();
-
-    // Read the segment file and corrupt the first data block's CRC.
-    // Frame layout: type(1) + codec(1) + reserved(2) + data_len(4) + data(N) + crc(4)
-    let data = std::fs::read(&sst_path).unwrap();
-    let data_len =
-        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
-    let crc_offset = HEADER_SIZE + 8 + data_len;
-    let mut corrupt = data.clone();
-    corrupt[crc_offset] ^= 0xFF; // flip a CRC byte
-    std::fs::write(&sst_path, &corrupt).unwrap();
+    corrupt_first_segment_crc(dir.path(), b);
 
     // Re-open the store so it loads the corrupt segment file.
     drop(store);
@@ -688,18 +688,15 @@ fn test_issue_1749_scan_prefix_returns_error_on_corruption() {
     // scan_prefix MUST return Err, not a silently truncated Vec.
     let prefix = Key::new(ns(), TypeTag::KV, "item_".as_bytes().to_vec());
     let result = store2.scan_prefix(&prefix, CommitVersion::MAX);
-    assert!(
-        result.is_err(),
-        "scan_prefix must return Err on corrupt segment, got {} entries",
-        result.unwrap().len(),
-    );
+    assert!(matches!(
+        result,
+        Err(crate::StorageError::Corruption { .. })
+    ));
 }
 
 /// Issue #1749: get_history must return an error on segment corruption.
 #[test]
 fn test_issue_1749_get_history_returns_error_on_corruption() {
-    use crate::segment_builder::HEADER_SIZE;
-
     let dir = tempfile::tempdir().unwrap();
     let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
     let b = branch();
@@ -708,23 +705,7 @@ fn test_issue_1749_get_history_returns_error_on_corruption() {
     seed(&store, kv_key("mykey"), Value::Int(20), 2);
     store.rotate_memtable(&b);
     store.flush_oldest_frozen(&b).unwrap();
-
-    let branch_dir = dir.path().join(hex_encode_branch(&b));
-    let sst_files: Vec<_> = std::fs::read_dir(&branch_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().is_some_and(|ext| ext == "sst"))
-        .collect();
-    assert_eq!(sst_files.len(), 1);
-    let sst_path = sst_files[0].path();
-
-    let data = std::fs::read(&sst_path).unwrap();
-    let data_len =
-        u32::from_le_bytes(data[HEADER_SIZE + 4..HEADER_SIZE + 8].try_into().unwrap()) as usize;
-    let crc_offset = HEADER_SIZE + 8 + data_len;
-    let mut corrupt = data.clone();
-    corrupt[crc_offset] ^= 0xFF;
-    std::fs::write(&sst_path, &corrupt).unwrap();
+    corrupt_first_segment_crc(dir.path(), b);
 
     drop(store);
     let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
@@ -732,11 +713,84 @@ fn test_issue_1749_get_history_returns_error_on_corruption() {
 
     // get_history MUST return Err, not silently truncated results.
     let result = store2.get_history(&kv_key("mykey"), None, None);
-    assert!(
-        result.is_err(),
-        "get_history must return Err on corrupt segment, got {} entries",
-        result.unwrap().len(),
-    );
+    assert!(matches!(
+        result,
+        Err(crate::StorageError::Corruption { .. })
+    ));
+}
+
+#[test]
+fn scan_prefix_at_timestamp_returns_error_on_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    seed(&store, kv_key("item_a"), Value::Int(1), 1);
+    seed(&store, kv_key("item_b"), Value::Int(2), 2);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+    corrupt_first_segment_crc(dir.path(), b);
+
+    drop(store);
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    store2.recover_segments().unwrap();
+
+    let prefix = Key::new(ns(), TypeTag::KV, "item_".as_bytes().to_vec());
+    let result = store2.scan_prefix_at_timestamp(&prefix, u64::MAX);
+    assert!(matches!(
+        result,
+        Err(crate::StorageError::Corruption { .. })
+    ));
+}
+
+#[test]
+fn scan_range_returns_error_on_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    seed(&store, kv_key("item_a"), Value::Int(1), 1);
+    seed(&store, kv_key("item_b"), Value::Int(2), 2);
+    seed(&store, kv_key("item_c"), Value::Int(3), 3);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+    corrupt_first_segment_crc(dir.path(), b);
+
+    drop(store);
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    store2.recover_segments().unwrap();
+
+    let prefix = Key::new(ns(), TypeTag::KV, "item_".as_bytes().to_vec());
+    let start_key = kv_key("item_a");
+    let result = store2.scan_range(&prefix, &start_key, CommitVersion::MAX, Some(10));
+    assert!(matches!(
+        result,
+        Err(crate::StorageError::Corruption { .. })
+    ));
+}
+
+#[test]
+fn count_prefix_returns_error_on_corruption() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let b = branch();
+
+    seed(&store, kv_key("item_a"), Value::Int(1), 1);
+    seed(&store, kv_key("item_b"), Value::Int(2), 2);
+    store.rotate_memtable(&b);
+    store.flush_oldest_frozen(&b).unwrap();
+    corrupt_first_segment_crc(dir.path(), b);
+
+    drop(store);
+    let store2 = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    store2.recover_segments().unwrap();
+
+    let prefix = Key::new(ns(), TypeTag::KV, "item_".as_bytes().to_vec());
+    let result = store2.count_prefix(&prefix, CommitVersion::MAX);
+    assert!(matches!(
+        result,
+        Err(crate::StorageError::Corruption { .. })
+    ));
 }
 
 // ===== count_prefix tests =====

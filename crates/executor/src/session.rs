@@ -1,9 +1,9 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_core::types::Namespace;
 use strata_engine::{Database, Transaction, TransactionContext};
 use strata_security::AccessMode;
+use strata_storage::Namespace;
 
 use crate::bridge::{
     access_denied, bypasses_active_transaction, is_read_only, json_to_value,
@@ -814,9 +814,9 @@ enum TxnCommand {
 mod tests {
     use std::sync::Arc;
 
-    use strata_core::types::Key;
     use strata_core::Value;
     use strata_security::AccessMode;
+    use strata_storage::{Key, Namespace};
 
     use super::SessionBackend;
     use crate::{Command, Error, Output, Session, Strata};
@@ -1021,9 +1021,7 @@ mod tests {
             crate::bridge::to_core_branch_id(&branch).expect("default branch should parse");
 
         let corrupt_json_key = Key::new_json(
-            Arc::new(strata_core::types::Namespace::for_branch_space(
-                branch_id, "default",
-            )),
+            Arc::new(Namespace::for_branch_space(branch_id, "default")),
             "corrupt-json",
         );
         db.transaction(branch_id, |txn| {

@@ -21,10 +21,9 @@
 //! - Multiple incomplete transactions (all discarded)
 //! - Mix of committed and incomplete (only committed recovered)
 
-use strata_core::types::{Key, Namespace, BranchId};
 use strata_core::value::Value;
 use strata_core::Timestamp;
-use strata_core::Storage;
+use strata_storage::{BranchId, Key, Namespace, Storage};
 use strata_durability::wal::{DurabilityMode, WALEntry};
 use strata_engine::Database;
 use tempfile::TempDir;

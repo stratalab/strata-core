@@ -16,8 +16,8 @@
 //! Per spec Section 4: These tests validate legacy compatibility and transaction semantics.
 
 use strata_core::StrataError;
-use strata_core::traits::Storage;
-use strata_core::types::{Key, Namespace, BranchId};
+use strata_core::BranchId;
+use strata_storage::{Key, Namespace, Storage};
 use strata_core::value::Value;
 use strata_engine::{Database, RetryConfig};
 use std::sync::Arc;

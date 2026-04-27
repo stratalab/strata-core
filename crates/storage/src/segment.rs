@@ -28,9 +28,8 @@ use crate::segment_builder::{
     FilterIndexEntry, IndexEntry, KVHeader, PropertiesBlock, FOOTER_SZ, FRAME_OVERHEAD,
     HEADER_SIZE, IDX_TYPE_PARTITIONED,
 };
-use crate::{StorageError, StorageResult};
+use crate::{Key, StorageError, StorageResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::Key;
 use strata_core::value::Value;
 
 use std::cell::RefCell;
@@ -1988,8 +1987,9 @@ mod tests {
     use super::*;
     use crate::memtable::Memtable;
     use crate::segment_builder::SegmentBuilder;
+    use crate::{Namespace, TypeTag};
     use std::sync::Arc;
-    use strata_core::types::{BranchId, Namespace, TypeTag};
+    use strata_core::BranchId;
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])

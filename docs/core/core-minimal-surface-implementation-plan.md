@@ -23,6 +23,7 @@ This plan should be read together with:
 - [core-charter.md](./core-charter.md)
 - [core-crate-map.md](./core-crate-map.md)
 - [core-error-review.md](./core-error-review.md)
+- [co4-storage-boundary-eviction-plan.md](./co4-storage-boundary-eviction-plan.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
 
 ## Rewrite Rules
@@ -299,6 +300,10 @@ error.
 ### Goal
 
 Move storage-facing abstractions and policies out of `core`.
+
+Detailed execution sequence:
+
+- [co4-storage-boundary-eviction-plan.md](./co4-storage-boundary-eviction-plan.md)
 
 ### Scope
 

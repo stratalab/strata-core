@@ -11,8 +11,8 @@
 
 use crate::key_encoding::InternalKey;
 use crate::memtable::MemtableEntry;
+use crate::TypeTag;
 use strata_core::id::CommitVersion;
-use strata_core::types::TypeTag;
 
 /// Pruning iterator for segment compaction.
 ///
@@ -276,10 +276,11 @@ impl CompactionScheduler {
 mod tests {
     use super::*;
     use crate::merge_iter::MergeIterator;
+    use crate::{Key, Namespace, TypeTag};
     use std::sync::Arc;
     use strata_core::id::CommitVersion;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
     use strata_core::value::Value;
+    use strata_core::BranchId;
     use strata_core::Timestamp;
 
     fn branch() -> BranchId {

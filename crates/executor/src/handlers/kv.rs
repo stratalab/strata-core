@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use strata_core::types::{Key, Namespace, TypeTag};
 use strata_engine::transaction::context::Transaction as ScopedTransaction;
 use strata_engine::transaction_ops::TransactionOps as _;
 use strata_engine::TransactionContext;
+use strata_storage::{Key, Namespace, TypeTag};
 
 use crate::bridge::{
     extract_version, require_branch_exists, to_core_branch_id, to_versioned_value, validate_key,

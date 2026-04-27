@@ -456,11 +456,8 @@ fn bench_100_branch_fanout() {
         let child = BranchId::from_bytes([c + 50; 16]);
         for i in 0..2000 {
             let key = Key::new(
-                std::sync::Arc::new(strata_core::types::Namespace::new(
-                    child,
-                    "default".to_string(),
-                )),
-                strata_core::types::TypeTag::KV,
+                std::sync::Arc::new(Namespace::new(child, "default".to_string())),
+                TypeTag::KV,
                 format!("k{:06}", i).into_bytes(),
             );
             let val = store.get_versioned(&key, CommitVersion::MAX).unwrap();
@@ -487,16 +484,13 @@ fn bench_fork_chain_depth() {
         .collect();
 
     // Populate first branch
-    let ns_a = std::sync::Arc::new(strata_core::types::Namespace::new(
-        branches[0],
-        "default".to_string(),
-    ));
+    let ns_a = std::sync::Arc::new(Namespace::new(branches[0], "default".to_string()));
     for i in 0..1000 {
         seed(
             &store,
             Key::new(
                 std::sync::Arc::clone(&ns_a),
-                strata_core::types::TypeTag::KV,
+                TypeTag::KV,
                 format!("k{:04}", i).into_bytes(),
             ),
             Value::Int(i as i64),
@@ -523,14 +517,11 @@ fn bench_fork_chain_depth() {
     drop(last);
 
     // Verify E can read all data
-    let ns_e = std::sync::Arc::new(strata_core::types::Namespace::new(
-        branches[4],
-        "default".to_string(),
-    ));
+    let ns_e = std::sync::Arc::new(Namespace::new(branches[4], "default".to_string()));
     for i in 0..1000 {
         let key = Key::new(
             std::sync::Arc::clone(&ns_e),
-            strata_core::types::TypeTag::KV,
+            TypeTag::KV,
             format!("k{:04}", i).into_bytes(),
         );
         let val = store.get_versioned(&key, CommitVersion::MAX).unwrap();
@@ -1217,7 +1208,10 @@ fn test_issue_1677_corruption_does_not_resurrect_stale_data() {
     match result {
         Err(e) => {
             assert!(
-                e.is_storage_error(),
+                matches!(
+                    e,
+                    crate::StorageError::Corruption { .. } | crate::StorageError::Io(_)
+                ),
                 "expected a storage/corruption error, got: {e}"
             );
         }

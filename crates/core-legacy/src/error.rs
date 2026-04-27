@@ -70,6 +70,7 @@ use crate::contract::{EntityRef, PrimitiveType, Version};
 use crate::types::BranchId;
 use std::collections::HashMap;
 use std::io;
+use strata_storage::StorageError;
 use thiserror::Error;
 
 // =============================================================================
@@ -2473,6 +2474,92 @@ impl From<serde_json::Error> for StrataError {
     }
 }
 
+impl From<StorageError> for StrataError {
+    fn from(value: StorageError) -> Self {
+        match value {
+            StorageError::Io(inner) => StrataError::storage_with_source("storage I/O error", inner),
+            StorageError::RecoveryAlreadyApplied => {
+                StrataError::storage("segment recovery already applied on this store instance")
+            }
+            StorageError::RecoveryHealthResetRequiresSuccessfulRecovery => StrataError::storage(
+                "reset_recovery_health() requires a successfully applied recovery on this store instance",
+            ),
+            StorageError::ManifestPublish { branch_id, inner } => StrataError::storage_with_source(
+                format!("failed to publish segment manifest for branch {branch_id}"),
+                inner,
+            ),
+            StorageError::DirFsync { dir, inner } => StrataError::storage_with_source(
+                format!(
+                    "segment manifest rename may not be durable for directory {}",
+                    dir.display()
+                ),
+                inner,
+            ),
+            StorageError::RecoveryFault(fault) => {
+                StrataError::storage_with_source("recovery fault", fault)
+            }
+            StorageError::GcRefusedDegradedRecovery { class } => StrataError::storage(format!(
+                "gc refused under degraded recovery ({class:?})"
+            )),
+            StorageError::RecoveryHealthResetRequiresReopen { class } => {
+                StrataError::storage(format!(
+                    "reset_recovery_health() requires a fresh reopen after degraded recovery ({class:?})"
+                ))
+            }
+            StorageError::BranchDeletedDuringOp { branch_id, op } => StrataError::storage(
+                format!("branch {branch_id} was deleted during {op}; operation refused to resurrect"),
+            ),
+            StorageError::ReclaimRefusedManifestProof { segment_id } => StrataError::storage(
+                format!("reclaim refused: segment {segment_id} still referenced by a recovery-trusted manifest"),
+            ),
+            StorageError::QuarantinePublishFailed { dir, inner } => StrataError::storage_with_source(
+                format!("quarantine publish failed for directory {}", dir.display()),
+                inner,
+            ),
+            StorageError::QuarantineReconciliationFailed { branch_id, reason } => StrataError::storage(
+                format!("quarantine reconciliation failed for branch {branch_id}: {reason}"),
+            ),
+            StorageError::Corruption { message } => StrataError::corruption(message),
+            other => StrataError::storage(other.to_string()),
+        }
+    }
+}
+
+impl From<StrataError> for StorageError {
+    fn from(value: StrataError) -> Self {
+        match value {
+            StrataError::Storage { message, source } => match source {
+                Some(source) => match source.downcast::<io::Error>() {
+                    Ok(inner) => StorageError::Io(*inner),
+                    Err(source) => {
+                        StorageError::Io(io::Error::other(format!("{message}: {source}")))
+                    }
+                },
+                None => StorageError::Io(io::Error::other(message)),
+            },
+            StrataError::Corruption { message } => StorageError::corruption(message),
+            StrataError::InvalidInput { message } => StorageError::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("invalid input: {message}"),
+            )),
+            StrataError::Serialization { message } => StorageError::Io(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("serialization error: {message}"),
+            )),
+            StrataError::CodecDecode { message, .. } => {
+                StorageError::corruption(format!("codec decode failure: {message}"))
+            }
+            StrataError::LegacyFormat {
+                found_version,
+                hint,
+            } => StorageError::corruption(format!(
+                "legacy on-disk format: found version {found_version}. {hint}"
+            )),
+            other => StorageError::Io(io::Error::other(other.to_string())),
+        }
+    }
+}
+
 // =============================================================================
 // StrataError Tests
 // =============================================================================
@@ -3576,5 +3663,99 @@ mod adversarial_error_tests {
         assert!(e.is_not_found());
         // but wire code is InvalidPath
         assert_eq!(e.code(), ErrorCode::InvalidPath);
+    }
+}
+
+#[cfg(test)]
+mod storage_error_bridge_tests {
+    use super::*;
+    use std::fmt;
+    use std::io::ErrorKind;
+
+    #[test]
+    fn storage_corruption_converts_to_parent_without_losing_detail() {
+        let parent: StrataError = StorageError::corruption("segment block truncated").into();
+
+        assert!(matches!(
+            parent,
+            StrataError::Corruption { ref message }
+            if message == "segment block truncated"
+        ));
+    }
+
+    #[test]
+    fn parent_corruption_roundtrips_back_to_storage_corruption() {
+        let err = StorageError::from(StrataError::corruption("segment block truncated"));
+
+        assert!(matches!(
+            err,
+            StorageError::Corruption { ref message }
+            if message == "segment block truncated"
+        ));
+    }
+
+    #[test]
+    fn parent_storage_without_source_roundtrips_back_to_storage_io() {
+        let err = StorageError::from(StrataError::storage("disk write failed"));
+
+        match err {
+            StorageError::Io(inner) => {
+                assert_eq!(inner.kind(), ErrorKind::Other);
+                assert!(inner.to_string().contains("disk write failed"));
+            }
+            other => panic!("expected storage io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_invalid_input_roundtrips_back_to_storage_invalid_input_io() {
+        let err = StorageError::from(StrataError::invalid_input("key cannot be empty"));
+
+        match err {
+            StorageError::Io(inner) => {
+                assert_eq!(inner.kind(), ErrorKind::InvalidInput);
+                assert!(inner.to_string().contains("key cannot be empty"));
+            }
+            other => panic!("expected invalid-input io error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_codec_decode_roundtrips_back_to_storage_corruption() {
+        let err = StorageError::from(StrataError::codec_decode("AES-GCM tag mismatch"));
+
+        assert!(matches!(
+            err,
+            StorageError::Corruption { ref message }
+            if message.contains("AES-GCM tag mismatch")
+        ));
+    }
+
+    #[test]
+    fn parent_storage_with_non_io_source_roundtrips_back_to_storage_io() {
+        #[derive(Debug)]
+        struct SyntheticSource;
+
+        impl fmt::Display for SyntheticSource {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("synthetic source")
+            }
+        }
+
+        impl std::error::Error for SyntheticSource {}
+
+        let err = StorageError::from(StrataError::storage_with_source(
+            "disk write failed",
+            SyntheticSource,
+        ));
+
+        match err {
+            StorageError::Io(inner) => {
+                assert_eq!(inner.kind(), ErrorKind::Other);
+                assert!(inner.to_string().contains("disk write failed"));
+                assert!(inner.to_string().contains("synthetic source"));
+            }
+            other => panic!("expected storage io error, got {other:?}"),
+        }
     }
 }

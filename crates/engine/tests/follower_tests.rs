@@ -7,7 +7,7 @@
 use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::JsonValue;
 use strata_engine::database::OpenSpec;
@@ -16,6 +16,7 @@ use strata_engine::{
     Database, JsonStore, NoopPreparedRefresh, PreparedRefresh, RefreshHook, RefreshHookError,
     RefreshHooks, SearchRequest, SearchSubsystem, Subsystem,
 };
+use strata_storage::{Key, Namespace};
 use tempfile::tempdir;
 
 fn ns(branch: BranchId) -> Arc<Namespace> {

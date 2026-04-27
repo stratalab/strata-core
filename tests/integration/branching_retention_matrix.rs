@@ -25,8 +25,9 @@ use crate::common::*;
 use std::sync::Arc;
 use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
-use strata_core::{BranchId, Key, Namespace};
+use strata_core::BranchId;
 use strata_engine::{ReclaimStatus, RetentionBlocker};
+use strata_storage::{Key, Namespace};
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

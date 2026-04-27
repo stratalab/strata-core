@@ -56,11 +56,11 @@ use serde::{Deserialize, Serialize};
 use strata_concurrency::TransactionContext;
 use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
-use strata_core::traits::Storage;
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::{
     BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, StrataError, StrataResult,
 };
+use strata_storage::{Key, Namespace, TypeTag};
 use tracing::{info, warn};
 
 use crate::database::dag_hook::{DagEvent, DagEventKind};

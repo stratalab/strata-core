@@ -19,10 +19,11 @@ use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
 use crate::transaction_ops::TransactionOps;
 use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
-use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+use strata_core::types::BranchId;
 use strata_core::{
     EntityRef, Event, JsonPath, JsonValue, StrataError, Timestamp, Value, Version, Versioned,
 };
+use strata_storage::{Key, Namespace, TypeTag};
 
 /// Transaction wrapper that implements TransactionOps
 ///
@@ -463,7 +464,7 @@ impl<'a> TransactionOps for Transaction<'a> {
 mod tests {
     use super::*;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_storage::SegmentedStore;
+    use strata_storage::{SegmentedStore, WriteMode};
 
     fn create_test_namespace() -> Arc<Namespace> {
         let branch_id = BranchId::new();
@@ -707,9 +708,6 @@ mod tests {
 
     #[test]
     fn test_event_with_base_sequence() {
-        use strata_core::traits::Storage;
-        use strata_core::WriteMode;
-
         let ns = create_test_namespace();
         let store = Arc::new(SegmentedStore::new());
 
@@ -797,9 +795,6 @@ mod tests {
 
     #[test]
     fn test_event_len_with_committed_events_no_appends() {
-        use strata_core::traits::Storage;
-        use strata_core::WriteMode;
-
         let ns = create_test_namespace();
         let store = Arc::new(SegmentedStore::new());
 
@@ -832,9 +827,6 @@ mod tests {
 
     #[test]
     fn test_event_len_with_committed_events_after_append() {
-        use strata_core::traits::Storage;
-        use strata_core::WriteMode;
-
         let ns = create_test_namespace();
         let store = Arc::new(SegmentedStore::new());
 
@@ -1000,8 +992,6 @@ mod tests {
     /// Helper: pre-commit data into the store so a new TransactionContext can
     /// read it from the snapshot.
     fn commit_kv(store: &Arc<SegmentedStore>, ns: &Namespace, key: &str, value: Value) {
-        use strata_core::traits::Storage;
-        use strata_core::WriteMode;
         let k = Key::new_kv(Arc::new(ns.clone()), key);
         let version = CommitVersion(store.next_version());
         store

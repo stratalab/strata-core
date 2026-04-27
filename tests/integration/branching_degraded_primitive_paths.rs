@@ -25,14 +25,15 @@ use crate::common::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
-use strata_core::types::{Namespace, TypeTag};
 use strata_core::value::Value;
-use strata_core::{BranchId, Key, PrimitiveDegradedReason, StrataError};
+use strata_core::BranchId;
+use strata_core::{PrimitiveDegradedReason, StrataError};
 use strata_engine::database::observers::ObserverError;
 use strata_engine::{
     Database, PrimitiveDegradationRegistry, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
 };
 use strata_engine::{SearchRequest, Searchable};
+use strata_storage::{Key, Namespace, TypeTag};
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

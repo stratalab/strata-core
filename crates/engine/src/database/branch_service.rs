@@ -1654,8 +1654,8 @@ mod tests {
     use crate::database::dag_hook::{BranchDagError, MergeBaseResult as DagMergeBaseResult};
     use crate::database::OpenSpec;
     use crate::primitives::kv::KVStore;
-    use strata_core::types::{Key, TypeTag};
     use strata_core::value::Value;
+    use strata_storage::{Key, TypeTag};
     use tempfile::TempDir;
 
     struct ToggleFailDagHook {
@@ -1741,9 +1741,9 @@ mod tests {
         db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
             txn.put(
                 Key::new(
-                    Arc::new(strata_core::types::Namespace::for_branch(
-                        BranchId::from_bytes([0u8; 16]),
-                    )),
+                    Arc::new(strata_storage::Namespace::for_branch(BranchId::from_bytes(
+                        [0u8; 16],
+                    ))),
                     TypeTag::Branch,
                     name.as_bytes().to_vec(),
                 ),

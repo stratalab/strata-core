@@ -1,10 +1,10 @@
 use std::sync::Arc;
 
-use strata_core::types::Namespace;
 use strata_engine::primitives::json::index::IndexType;
 use strata_engine::transaction::context::Transaction as ScopedTransaction;
 use strata_engine::transaction_ops::TransactionOps as _;
 use strata_engine::TransactionContext;
+use strata_storage::{Key, Namespace, TypeTag};
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, require_branch_exists, to_core_branch_id,
@@ -509,12 +509,8 @@ pub(crate) fn execute_in_txn(
                 }
             }
             let prefix_key = match prefix {
-                Some(ref prefix) => strata_core::types::Key::new_json(namespace.clone(), prefix),
-                None => strata_core::types::Key::new(
-                    namespace.clone(),
-                    strata_core::types::TypeTag::Json,
-                    vec![],
-                ),
+                Some(ref prefix) => Key::new_json(namespace.clone(), prefix),
+                None => Key::new(namespace.clone(), TypeTag::Json, vec![]),
             };
             let entries = ctx.scan_prefix(&prefix_key).map_err(crate::Error::from)?;
             let mut keys: Vec<String> = entries

@@ -1,9 +1,9 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use strata_core::validate_space_name;
 use strata_engine::{Database, HealthReport, SystemMetrics};
 use strata_security::{AccessMode, OpenOptions};
+use strata_storage::validate_space_name;
 
 use crate::ipc::IpcClient;
 use crate::{BranchId, Command, DatabaseInfo, Error, Executor, Output, Result, Session, Value};

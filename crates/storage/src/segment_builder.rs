@@ -1592,9 +1592,10 @@ mod tests {
     use super::*;
     use crate::memtable::Memtable;
     use crate::segment::KVSegment;
+    use crate::{Key, Namespace, TypeTag};
     use std::sync::Arc;
     use strata_core::id::CommitVersion;
-    use strata_core::types::{BranchId, Key, Namespace, TypeTag};
+    use strata_core::BranchId;
 
     fn branch() -> BranchId {
         BranchId::from_bytes([1; 16])

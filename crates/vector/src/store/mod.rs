@@ -37,11 +37,12 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::{BranchId, Key, Namespace};
 use strata_core::value::Value;
+use strata_core::BranchId;
 use strata_core::EntityRef;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem};
+use strata_storage::{Key, Namespace};
 use tracing::{debug, info, warn};
 
 /// Statistics from vector recovery
@@ -303,7 +304,7 @@ impl VectorStore {
         space: &str,
         backend_type: crate::IndexBackendType,
     ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let mut backend = self.create_backend_with_type(id, config, backend_type)?;
 
@@ -476,7 +477,7 @@ impl VectorStore {
 
     /// Get a vector record by KV key
     fn get_vector_record_by_key(&self, key: &Key) -> VectorResult<Option<VectorRecord>> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let version = CommitVersion(self.db.storage().version());
         let Some(versioned) = self
@@ -509,7 +510,7 @@ impl VectorStore {
         collection: &str,
         target_id: VectorId,
     ) -> VectorResult<(String, Option<JsonValue>)> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
@@ -569,7 +570,7 @@ impl VectorStore {
         }
 
         // Backend not loaded - count from KV
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
@@ -588,7 +589,7 @@ impl VectorStore {
     /// All deletes are performed in a single transaction to guarantee
     /// atomicity — either all vectors are deleted or none are.
     fn delete_all_vectors(&self, branch_id: BranchId, space: &str, name: &str) -> VectorResult<()> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
@@ -636,7 +637,7 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<Option<(VectorConfig, CollectionRecord)>> {
-        use strata_core::traits::Storage;
+        use strata_storage::Storage;
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = CommitVersion(self.db.storage().version());

@@ -20,11 +20,12 @@
 
 use std::sync::Arc;
 
-use strata_core::types::{BranchId, Key, Namespace};
+use strata_core::types::BranchId;
 use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::primitives::{resolve_branch_name, BranchMetadata};
 use strata_engine::{Database, SearchSubsystem};
+use strata_storage::{Key, Namespace};
 use uuid::Uuid;
 
 /// The RFC 4122 namespace UUID used to derive branch IDs from names.

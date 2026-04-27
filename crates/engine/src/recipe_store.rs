@@ -116,7 +116,6 @@ pub fn get_default_recipe(db: &Database, branch_id: BranchId) -> StrataResult<Re
 pub fn list_recipes(db: &Database, branch_id: BranchId) -> StrataResult<Vec<String>> {
     use std::collections::BTreeSet;
     use strata_core::id::CommitVersion;
-    use strata_core::traits::Storage;
 
     let mut names = BTreeSet::new();
 

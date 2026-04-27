@@ -1,6 +1,6 @@
 //! Memory usage statistics for the storage layer.
 
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 /// Memory usage statistics for the entire storage layer.
 #[derive(Debug, Clone)]

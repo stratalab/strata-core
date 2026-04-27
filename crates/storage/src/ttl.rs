@@ -7,7 +7,9 @@
 //! - O(expired count) instead of O(total data)
 
 use std::collections::{BTreeMap, HashSet};
-use strata_core::{Key, Timestamp};
+use strata_core::Timestamp;
+
+use crate::Key;
 
 /// TTL index: expiry_timestamp → Keys
 ///
@@ -99,8 +101,9 @@ impl TTLIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Namespace;
     use std::sync::Arc;
-    use strata_core::{BranchId, Namespace};
+    use strata_core::BranchId;
 
     /// Helper to create a test key
     fn test_key(suffix: &str) -> Key {
