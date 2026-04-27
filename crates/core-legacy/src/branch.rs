@@ -1,12 +1,11 @@
-//! Canonical branch-truth types.
+//! Branch lineage and lifecycle types.
 //!
 //! This module defines branch lineage identity and lifecycle status, while the
 //! foundational branch-id derivation surface lives in `strata-core`.
 //!
 //! ## Authority map
 //!
-//! - Branch control truth = engine-owned control records (`BranchControlRecord`
-//!   minimum shape is defined here; the store itself lands in B3/B5).
+//! - Branch control truth = engine-owned control records.
 //! - `_branch_dag` = derived lineage projection, not a competing authority.
 //! - Storage fork info (inherited layers, fork manifests, refcounts) =
 //!   execution truth for `CoW` storage, not branch-control or lineage truth.
@@ -15,12 +14,11 @@
 //!
 //! - `BranchGeneration` — monotonic per-name lifecycle counter (type alias).
 //! - `BranchRef` — `(id, generation)` identity carried by lineage-bearing
-//!   surfaces (events, hooks, DAG, control records). Wiring into those
-//!   surfaces is B3 work; B2 only lands the type.
-//! - `BranchLifecycleStatus` — canonical three-state lifecycle
-//!   (`Active`, `Archived`, `Deleted`). Write-gate enforcement is B4.
-//! - `ForkAnchor` / `BranchControlRecord` — the minimum control-record
-//!   shape the later engine-owned `BranchControlStore` will use.
+//!   surfaces (events, hooks, DAG, control records).
+//! - `BranchLifecycleStatus` — three-state lifecycle
+//!   (`Active`, `Archived`, `Deleted`).
+//! - `ForkAnchor` / `BranchControlRecord` — the control-record shape used by
+//!   the engine.
 
 use crate::id::CommitVersion;
 use crate::types::BranchId;
@@ -38,19 +36,17 @@ pub use strata_core_foundation::branch::aliases_default_branch_sentinel;
 /// them: delete-and-recreate increments the generation so lineage surfaces
 /// can tell the old instance from the new one.
 ///
-/// B3 wires this into `BranchOpEvent`, `BranchDagHook`, and the branch DAG
-/// keys; B2 only lands the type.
 pub type BranchGeneration = u64;
 
 /// Generation-aware branch identifier.
 ///
-/// `BranchId` alone is the canonical storage/locking identity — same name =
+/// `BranchId` alone is the storage/locking identity — same name =
 /// same physical KV namespace, regardless of lifecycle instance. `BranchRef`
 /// adds the per-name `generation` counter so ancestry, hooks, events, and
 /// the branch control overlay can distinguish between lifecycle instances
 /// of the same name.
 ///
-/// Used by every surface that carries branch lineage post-B3: events,
+/// Used by every surface that carries branch lineage: events,
 /// hooks, merge-base queries, DAG keys, control records. `BranchId` alone
 /// remains valid for storage isolation and for API inputs that address
 /// "whatever generation is currently live for this name."
@@ -76,23 +72,19 @@ impl BranchRef {
 
 /// Canonical branch lifecycle status.
 ///
-/// This becomes the canonical replacement for the parallel `BranchStatus`
-/// enums that exist today in engine, executor, and core-branch-types. B2
-/// lands the shared type; later epics migrate runtime users and enforce the
-/// write gate.
+/// This describes branch writability and visibility at the lifecycle level.
 ///
-/// The four-variant event-stream enum at
-/// `crates/core/src/branch_types.rs::BranchStatus` is distinct — it describes
-/// event-stream durability lifecycles and is renamed to
-/// `EventStreamLifecycleStatus` in a later epic.
+/// The event-stream enum at `crates/core/src/branch_types.rs::BranchStatus`
+/// is distinct; it models event-stream durability lifecycle rather than
+/// branch lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BranchLifecycleStatus {
     /// Writable. Reads and writes both proceed.
     Active,
-    /// Intended read-only state. B4 wires this into the branch write gate.
+    /// Intended read-only state.
     Archived,
-    /// Intended tombstoned state. B4 hides it from live branch surfaces.
+    /// Intended tombstoned state.
     Deleted,
 }
 
@@ -117,8 +109,7 @@ impl BranchLifecycleStatus {
 
 /// Fork anchor: the parent branch and commit version a child was forked from.
 ///
-/// Part of the `BranchControlRecord` minimum shape. The actual engine-owned
-/// control store lands in B3/B5; B2 freezes the record shape.
+/// Part of the `BranchControlRecord` shape.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ForkAnchor {
     /// The parent branch this one was forked from.
@@ -129,15 +120,13 @@ pub struct ForkAnchor {
 
 /// Minimum engine-owned branch control record shape.
 ///
-/// This is the record the future `BranchControlStore` (B3/B5) holds as the
-/// authoritative per-branch control truth. B2 freezes the shape so later
-/// epics are execution work, not fresh schema design.
+/// This is the record `BranchControlStore` uses as per-branch control truth.
 ///
 /// Fields:
 /// - `branch`: generation-aware identity of this lifecycle instance.
 /// - `name`: user-facing handle. Distinct from `branch.id`, which is the
 ///   deterministic UUID derivation of the name.
-/// - `lifecycle`: canonical lifecycle status (B4 enforces it at the write gate).
+/// - `lifecycle`: lifecycle status used by write gating and visibility checks.
 /// - `fork`: `None` for a root branch (e.g. `"default"`), `Some(_)` for a
 ///   child forked from a parent at a specific commit version.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -161,9 +150,8 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    /// Hardcoded byte anchors for a subset of branch names. These MUST match
-    /// the engine and executor B1 anchor tables exactly — drift between any
-    /// of the three tables is a parity break.
+    /// Hardcoded byte anchors for a subset of branch names. These must match
+    /// the engine and executor anchor tables exactly.
     const HARDCODED_ANCHORS: &[(&str, [u8; 16])] = &[
         ("default", [0u8; 16]),
         (
@@ -228,7 +216,7 @@ mod tests {
             let actual = *BranchId::from_user_name(name).as_bytes();
             assert_eq!(
                 actual, expected,
-                "BranchId::from_user_name({name:?}) drifted from its B1 hardcoded \
+                "BranchId::from_user_name({name:?}) drifted from its hardcoded \
                  anchor.\nexpected {expected:02x?}\nactual   {actual:02x?}"
             );
         }

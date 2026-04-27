@@ -1,4 +1,4 @@
-//! Shared helpers for the B4.x branching coverage suites.
+//! Shared helpers for branching lifecycle coverage.
 //!
 //! Synthesize lifecycle states no production path produces (most notably
 //! `Archived`), capture branch-op observer output, and snapshot the
@@ -13,11 +13,10 @@
 
 use std::sync::{Arc, Mutex};
 
-use strata_core::branch::BranchLifecycleStatus;
-use strata_core::{BranchId, BranchRef};
+use strata_core::BranchId;
 use strata_engine::database::{BranchOpEvent, BranchOpObserver, ObserverError};
 use strata_engine::primitives::branch::resolve_branch_name;
-use strata_engine::Database;
+use strata_engine::{BranchLifecycleStatus, BranchRef, Database};
 use strata_graph::branch_dag::dag_branch_node_id_for_ref;
 use strata_graph::keys::{validate_node_id, GRAPH_SPACE};
 use strata_graph::types::NodeData;

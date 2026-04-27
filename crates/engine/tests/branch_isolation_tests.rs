@@ -101,8 +101,6 @@ fn test_event_log_isolation() {
     assert_eq!(event_log.len(&branch1, "default").unwrap(), 1);
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 1);
 
-    // Note: verify_chain() removed in MVP simplification
-
     // Appending more to branch1 doesn't affect branch2
     event_log
         .append(&branch1, "default", "event2", string_payload("branch1-2"))
@@ -280,8 +278,7 @@ fn test_event_log_chain_isolation() {
     let event1_1 = event_log.get(&branch1, "default", 1).unwrap().unwrap();
     assert_eq!(event1_1.value.prev_hash, event1_0.value.hash);
 
-    // Note: verify_chain() removed in MVP simplification
-    // Verify chain lengths independently
+    // Each branch maintains its own independent chain length.
     assert_eq!(event_log.len(&branch1, "default").unwrap(), 3);
     assert_eq!(event_log.len(&branch2, "default").unwrap(), 2);
 }

@@ -39,7 +39,7 @@ use strata_core::id::CommitVersion;
 use strata_core::{BranchId, StrataResult};
 use strata_engine::database::observers::{AbortInfo, AbortObserver};
 use strata_engine::Database;
-use strata_storage::{Key, Namespace, Storage, TypeTag};
+use strata_storage::{Key, Storage, TypeTag};
 use tracing::info;
 
 #[cfg(test)]
@@ -778,7 +778,7 @@ enum PendingVectorOp {
     },
     UpsertVector {
         collection_id: crate::CollectionId,
-        vector_id: strata_core::primitives::vector::VectorId,
+        vector_id: crate::VectorId,
         vector_key: String,
         embedding: Vec<f32>,
         created_at: u64,
@@ -786,7 +786,7 @@ enum PendingVectorOp {
     },
     DeleteVector {
         collection_id: crate::CollectionId,
-        vector_id: strata_core::primitives::vector::VectorId,
+        vector_id: crate::VectorId,
         deleted_at: u64,
     },
     DropCollection {
@@ -898,7 +898,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
         puts: &[(Key, strata_core::value::Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
     ) -> Result<Box<dyn strata_engine::PreparedRefresh>, strata_engine::RefreshHookError> {
-        use strata_core::primitives::vector::{CollectionId, VectorId};
+        use crate::{CollectionId, VectorId};
 
         let Some(db) = self.db.upgrade() else {
             return Ok(Box::new(strata_engine::NoopPreparedRefresh));

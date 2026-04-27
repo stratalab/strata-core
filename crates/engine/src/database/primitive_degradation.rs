@@ -1,12 +1,9 @@
-//! B5.4 — per-Database primitive degradation registry.
+//! Per-database primitive degradation registry.
 //!
-//! Per the B5 convergence contract at
-//! `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
-//! §"Degraded-state closure targets", named primitive failure paths
-//! (vector config mismatch, JSON `_idx` load failure) must fail closed
-//! with typed errors rather than silently serving stale or wrong
-//! branch-visible data. This module is the engine-owned record of
-//! those fail-closed events.
+//! Named primitive failure paths (for example vector config mismatch or JSON
+//! secondary-index load failure) must fail closed with typed errors rather
+//! than silently serving stale or wrong branch-visible data. This module is
+//! the engine-owned record of those fail-closed events.
 //!
 //! The registry is stored as a per-`Database` extension via
 //! `db.extension::<PrimitiveDegradationRegistry>()`. It is the single
@@ -31,11 +28,11 @@
 
 use std::time::SystemTime;
 
-use crate::StrataError;
+use crate::{BranchRef, StrataError};
 use dashmap::DashMap;
 use strata_core::contract::PrimitiveType;
 use strata_core::types::BranchId;
-use strata_core::{BranchRef, PrimitiveDegradedReason};
+use strata_core::PrimitiveDegradedReason;
 
 use crate::database::observers::{PrimitiveDegradedEvent, PrimitiveDegradedObserverRegistry};
 

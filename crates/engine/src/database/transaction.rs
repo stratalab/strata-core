@@ -795,8 +795,10 @@ impl Database {
         TransactionPool::release(ctx);
     }
 
-    /// Legacy compatibility shim: dropping the owned transaction already
-    /// returns it to the pool, so this is just an explicit drop.
+    /// End a transaction explicitly.
+    ///
+    /// Dropping the owned transaction already returns it to the pool, so this
+    /// method is just an explicit drop.
     pub fn end_transaction(&self, txn: Transaction) {
         drop(txn);
     }
@@ -929,7 +931,7 @@ impl Database {
         }
     }
 
-    /// Legacy compatibility shim for callers still routing through Database.
+    /// Commit a transaction through the database handle.
     pub fn commit_transaction(&self, txn: &mut Transaction) -> StrataResult<u64> {
         txn.commit()
     }

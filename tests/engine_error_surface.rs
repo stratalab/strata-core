@@ -1,23 +1,31 @@
 //! Downstream surface checks for the engine-owned parent error boundary.
 
+use std::sync::Arc;
+
 use strata_core::{BranchId, StrataError as LegacyStrataError};
 use strata_engine::{database::OpenSpec, Database, StrataError, StrataResult};
 use strata_storage::StorageError;
 
 #[test]
-fn engine_reexports_parent_error_for_downstream_consumers() {
-    fn fail() -> StrataResult<()> {
-        Err(StrataError::invalid_input("surface check"))
-    }
-
-    fn propagate() -> StrataResult<()> {
-        fail()?;
+fn invalid_branch_name_surfaces_engine_owned_error_from_real_api() {
+    fn create_invalid_branch(db: &Arc<Database>) -> StrataResult<()> {
+        db.branches().create("").map(|_| ())?;
         Ok(())
     }
 
-    let err = propagate().unwrap_err();
-    assert!(matches!(err, StrataError::InvalidInput { .. }));
-    assert!(matches!(err, LegacyStrataError::InvalidInput { .. }));
+    let db = Database::open_runtime(OpenSpec::cache()).unwrap();
+    let err = create_invalid_branch(&db).unwrap_err();
+
+    assert!(matches!(
+        err,
+        StrataError::InvalidInput { ref message }
+        if message.contains("branch name cannot be empty")
+    ));
+    assert!(matches!(
+        err,
+        LegacyStrataError::InvalidInput { ref message }
+        if message.contains("branch name cannot be empty")
+    ));
 }
 
 #[test]

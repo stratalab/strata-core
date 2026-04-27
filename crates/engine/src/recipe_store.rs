@@ -7,8 +7,8 @@
 use crate::primitives::branch::resolve_branch_name;
 use crate::search::recipe::{builtin_defaults, get_builtin_recipe, Recipe, BUILTIN_RECIPE_NAMES};
 use crate::system_space::system_kv_key;
+use crate::SYSTEM_BRANCH;
 use crate::{Database, StrataError, StrataResult};
-use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 

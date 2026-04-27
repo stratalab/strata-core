@@ -50,7 +50,10 @@
 //! base queries go through `BranchControlStore` instead** — readers
 //! must never use this DAG to compute a merge base.
 
-pub use strata_core::branch_dag::*;
+pub use strata_engine::{
+    is_system_branch, CherryPickRecord, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord,
+    MergeRecord, RevertRecord, BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
+};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -58,12 +61,12 @@ use std::sync::Arc;
 use strata_core::contract::Timestamp;
 use strata_core::types::BranchId;
 use strata_core::{StrataError, StrataResult};
+use strata_engine::BranchRef;
 use tracing::warn;
 
 use crate::keys::{validate_node_id, GRAPH_SPACE};
 use crate::types::{Direction, EdgeData, NodeData};
 use crate::GraphStore;
-use strata_core::BranchRef;
 use strata_engine::primitives::branch::resolve_branch_name;
 use strata_engine::{CherryPickInfo, Database, MergeInfo, MergeStrategy, RevertInfo};
 
@@ -1926,7 +1929,7 @@ impl BranchDagHook for GraphBranchDagHook {
     }
 
     fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
-        use strata_core::branch_dag::is_system_branch;
+        use strata_engine::is_system_branch;
 
         let db = self.upgrade_db()?;
 

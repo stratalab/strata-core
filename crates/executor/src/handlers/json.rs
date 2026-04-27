@@ -468,7 +468,7 @@ pub(crate) fn execute_in_txn(
             } else {
                 let mut txn = ScopedTransaction::new(ctx, namespace);
                 let Some(mut doc) = txn
-                    .json_get_path(&key, &strata_core::JsonPath::root())
+                    .json_get_path(&key, &strata_engine::JsonPath::root())
                     .map_err(crate::Error::from)?
                 else {
                     return Ok(Output::DeleteResult {
@@ -477,9 +477,9 @@ pub(crate) fn execute_in_txn(
                     });
                 };
 
-                let deleted = match strata_core::delete_at_path(&mut doc, &path) {
+                let deleted = match strata_engine::delete_at_path(&mut doc, &path) {
                     Ok(Some(_)) => true,
-                    Ok(None) | Err(strata_core::JsonPathError::NotFound) => false,
+                    Ok(None) | Err(strata_engine::JsonPathError::NotFound) => false,
                     Err(error) => {
                         return Err(crate::Error::InvalidInput {
                             reason: error.to_string(),
@@ -489,7 +489,7 @@ pub(crate) fn execute_in_txn(
                 };
 
                 if deleted {
-                    txn.json_set(&key, &strata_core::JsonPath::root(), doc)
+                    txn.json_set(&key, &strata_engine::JsonPath::root(), doc)
                         .map_err(crate::Error::from)?;
                     effects.record_json(space, &key);
                 }
@@ -723,7 +723,7 @@ fn embed_doc_value(
     branch_id: strata_core::types::BranchId,
     space: &str,
     key: &str,
-    json_value: strata_core::primitives::json::JsonValue,
+    json_value: strata_engine::JsonValue,
 ) {
     if let Ok(value) = json_to_value(json_value) {
         if let Some(text) = embed_runtime::extract_text(&value) {
@@ -762,7 +762,7 @@ fn embed_full_doc(
     space: &str,
     key: &str,
 ) {
-    use strata_core::primitives::json::JsonPath;
+    use strata_engine::JsonPath;
 
     match primitives
         .json

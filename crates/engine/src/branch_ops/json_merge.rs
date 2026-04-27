@@ -32,7 +32,8 @@
 //! conflicting subtree without re-running the diff.
 
 use serde_json::{Map, Value as JsonInner};
-use strata_core::primitives::json::JsonValue;
+
+use crate::semantics::json::JsonValue;
 
 use super::MergeStrategy;
 

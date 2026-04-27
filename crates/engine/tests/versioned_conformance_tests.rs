@@ -16,13 +16,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use strata_core::contract::{EntityRef, PrimitiveType, Version};
-use strata_core::primitives::json::JsonPath;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::extensions::*;
-use strata_engine::Database;
 use strata_engine::*;
+use strata_engine::{Database, JsonPath};
 // VectorStore is in strata-vector; see root integration tests
 
 /// Helper to create an empty object payload for EventLog

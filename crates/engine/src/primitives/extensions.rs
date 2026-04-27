@@ -33,9 +33,9 @@
 //! - Consistent behavior between standalone and transaction APIs
 //! - Easier maintenance and testing
 
+use crate::semantics::json::{JsonPath, JsonValue};
 use crate::StrataResult;
 use strata_core::contract::Version;
-use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::Value;
 
 // Forward declarations - traits are defined here, implementations

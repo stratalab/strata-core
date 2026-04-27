@@ -1680,6 +1680,11 @@ impl SegmentedStore {
                     match self.quarantine_segment_if_unreferenced(&sst_path, file_id) {
                         Ok(true) => newly_quarantined.push(sst_path),
                         Ok(false) => {} // still referenced by runtime accelerator
+                        Err(StorageError::ReclaimRefusedManifestProof { .. }) => {
+                            // The runtime live-set scan is only a candidate screen.
+                            // If the authoritative manifest walk still sees the
+                            // segment as live, skip it and continue.
+                        }
                         Err(e) => {
                             // Degraded gate fired mid-scan, or publish failed —
                             // propagate so callers see retention debt.

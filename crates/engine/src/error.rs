@@ -7,17 +7,19 @@ pub use strata_core::{StrataError, StrataResult};
 
 #[cfg(test)]
 mod tests {
-    use std::any::TypeId;
-
     #[test]
-    fn engine_error_surface_matches_canonical_definition() {
-        assert_eq!(
-            TypeId::of::<super::StrataError>(),
-            TypeId::of::<strata_core::StrataError>()
-        );
-        assert_eq!(
-            TypeId::of::<super::StrataResult<()>>(),
-            TypeId::of::<strata_core::StrataResult<()>>()
-        );
+    fn engine_error_constructors_remain_usable_from_engine_surface() {
+        let err = super::StrataError::invalid_input("bad branch name");
+        assert!(matches!(
+            err,
+            super::StrataError::InvalidInput { ref message } if message == "bad branch name"
+        ));
+
+        let result: super::StrataResult<()> = Err(super::StrataError::corruption("bad bytes"));
+        let err = result.unwrap_err();
+        assert!(matches!(
+            err,
+            super::StrataError::Corruption { ref message } if message == "bad bytes"
+        ));
     }
 }

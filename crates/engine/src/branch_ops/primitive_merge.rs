@@ -44,9 +44,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use crate::semantics::json::JsonValue;
 use crate::StrataResult;
 use parking_lot::Mutex;
-use strata_core::primitives::json::JsonValue;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::PrimitiveType;

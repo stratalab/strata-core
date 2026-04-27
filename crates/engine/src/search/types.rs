@@ -13,8 +13,9 @@
 
 use std::collections::HashMap;
 use strata_core::id::CommitVersion;
-use strata_core::primitives::json::JsonValue;
 use strata_core::types::BranchId;
+
+use crate::JsonValue;
 
 // Re-export contract types
 pub use strata_core::contract::EntityRef;

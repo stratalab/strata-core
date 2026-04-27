@@ -1070,7 +1070,7 @@ impl Database {
     ///
     /// Returns `None` when the active pointer is absent (legacy /
     /// gen-0-only branches; follower pre-migration state).
-    pub fn active_branch_ref(&self, branch_id: BranchId) -> Option<strata_core::BranchRef> {
+    pub fn active_branch_ref(&self, branch_id: BranchId) -> Option<crate::BranchRef> {
         use crate::branch_ops::branch_control_store::active_ptr_key;
         use strata_core::id::CommitVersion;
         use strata_core::value::Value;
@@ -1085,7 +1085,7 @@ impl Database {
             Value::Int(n) if n >= 0 => n as u64,
             _ => return None,
         };
-        Some(strata_core::BranchRef::new(branch_id, generation))
+        Some(crate::BranchRef::new(branch_id, generation))
     }
 
     // =========================================================================

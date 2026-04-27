@@ -447,11 +447,11 @@ fn restrict_config_permissions(_path: &std::path::Path) -> StrataResult<()> {
 impl StrataConfig {
     /// Parse the default_vector_dtype string into a StorageDtype.
     /// Returns F32 for unrecognized values.
-    pub fn vector_storage_dtype(&self) -> strata_core::primitives::StorageDtype {
+    pub fn vector_storage_dtype(&self) -> crate::StorageDtype {
         match self.default_vector_dtype.to_lowercase().as_str() {
-            "int8" | "sq8" => strata_core::primitives::StorageDtype::Int8,
-            "binary" | "rabitq" => strata_core::primitives::StorageDtype::Binary,
-            _ => strata_core::primitives::StorageDtype::F32,
+            "int8" | "sq8" => crate::StorageDtype::Int8,
+            "binary" | "rabitq" => crate::StorageDtype::Binary,
+            _ => crate::StorageDtype::F32,
         }
     }
 

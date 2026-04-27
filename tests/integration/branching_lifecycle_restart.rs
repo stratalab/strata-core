@@ -30,8 +30,8 @@ use crate::common::branching::archive_branch_for_test;
 use crate::common::*;
 use std::sync::Arc;
 use strata_core::value::Value;
-use strata_core::{BranchRef, StrataError};
-use strata_engine::bundle;
+use strata_core::StrataError;
+use strata_engine::{bundle, BranchLifecycleStatus, BranchRef};
 use tempfile::TempDir;
 
 fn resolve(name: &str) -> BranchId {
@@ -68,10 +68,7 @@ fn archived_lifecycle_persists_across_reopen() {
         .expect("archived record persists across reopen");
     assert_eq!(rec.branch, archived_ref, "reopen preserves BranchRef");
     assert!(
-        matches!(
-            rec.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Archived
-        ),
+        matches!(rec.lifecycle, BranchLifecycleStatus::Archived),
         "reopen preserves Archived lifecycle"
     );
 }
@@ -327,10 +324,7 @@ fn four_create_delete_cycles_leave_four_distinct_tombstones() {
                     )
                 });
             assert!(
-                matches!(
-                    rec.lifecycle,
-                    strata_core::branch::BranchLifecycleStatus::Deleted
-                ),
+                matches!(rec.lifecycle, BranchLifecycleStatus::Deleted),
                 "cycle {cycle}: prior cycle {prior_cycle} record must be `Deleted`, got {:?}",
                 rec.lifecycle,
             );
@@ -351,10 +345,7 @@ fn four_create_delete_cycles_leave_four_distinct_tombstones() {
             .unwrap()
             .expect("tombstone record must exist by ref post-delete");
         assert!(
-            matches!(
-                tombstoned.lifecycle,
-                strata_core::branch::BranchLifecycleStatus::Deleted
-            ),
+            matches!(tombstoned.lifecycle, BranchLifecycleStatus::Deleted),
             "cycle {cycle}: just-deleted record must be `Deleted`, got {:?}",
             tombstoned.lifecycle,
         );
@@ -376,10 +367,7 @@ fn four_create_delete_cycles_leave_four_distinct_tombstones() {
             .unwrap()
             .unwrap();
         assert_eq!(rec.branch, *prior_ref);
-        assert!(matches!(
-            rec.lifecycle,
-            strata_core::branch::BranchLifecycleStatus::Deleted
-        ));
+        assert!(matches!(rec.lifecycle, BranchLifecycleStatus::Deleted));
         // Sanity: the cycle-N tombstone must be at generation N.
         assert_eq!(rec.branch.generation, cycle as u64);
     }
@@ -420,10 +408,7 @@ fn in_session_cycles_survive_reopen_without_collapsing_tombstones() {
                 panic!("post-reopen: tombstone for cycle {cycle} at {prior_ref:?} must persist")
             });
         assert!(
-            matches!(
-                rec.lifecycle,
-                strata_core::branch::BranchLifecycleStatus::Deleted
-            ),
+            matches!(rec.lifecycle, BranchLifecycleStatus::Deleted),
             "post-reopen: cycle {cycle} record must be `Deleted`",
         );
     }

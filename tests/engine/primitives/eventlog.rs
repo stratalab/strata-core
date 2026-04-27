@@ -213,25 +213,59 @@ fn read_range_empty_when_start_equals_end() {
 }
 
 // ============================================================================
-// Hash Chain Verification
+// Hash Chain Behavior
 // ============================================================================
 
 #[test]
-#[ignore = "requires: EventLog::verify_chain"]
-fn verify_chain_valid_for_empty_log() {
+fn empty_log_has_no_events_to_link() {
     let test_db = TestDb::new();
-    let _event = test_db.event();
-    // Chain integrity verification is an architectural principle
-    // but verify_chain() is not yet in the MVP API
+    let event = test_db.event();
+
+    assert_eq!(event.len(&test_db.branch_id, "default").unwrap(), 0);
+    assert!(event
+        .get(&test_db.branch_id, "default", 0)
+        .unwrap()
+        .is_none());
+    assert_eq!(
+        event.verify_chain(&test_db.branch_id, "default").unwrap(),
+        strata_engine::ChainVerification::valid(0)
+    );
 }
 
 #[test]
-#[ignore = "requires: EventLog::verify_chain"]
-fn verify_chain_valid_after_appends() {
+fn appended_events_form_a_contiguous_hash_chain() {
     let test_db = TestDb::new();
-    let _event = test_db.event();
-    // Chain integrity verification is an architectural principle
-    // but verify_chain() is not yet in the MVP API
+    let event = test_db.event();
+
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(1))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(2))
+        .unwrap();
+    event
+        .append(&test_db.branch_id, "default", "type", payload_int(3))
+        .unwrap();
+
+    let first = event
+        .get(&test_db.branch_id, "default", 0)
+        .unwrap()
+        .unwrap();
+    let second = event
+        .get(&test_db.branch_id, "default", 1)
+        .unwrap()
+        .unwrap();
+    let third = event
+        .get(&test_db.branch_id, "default", 2)
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(second.value.prev_hash, first.value.hash);
+    assert_eq!(third.value.prev_hash, second.value.hash);
+    assert_eq!(
+        event.verify_chain(&test_db.branch_id, "default").unwrap(),
+        strata_engine::ChainVerification::valid(3)
+    );
 }
 
 #[test]

@@ -445,11 +445,9 @@ impl std::fmt::Display for ConstraintReason {
 // StrataError - Unified Error Type
 // =============================================================================
 
-/// Unified legacy parent error type for Strata operations.
+/// Unified parent error type for Strata operations.
 ///
-/// New downstream layers should import the parent database/runtime error from
-/// `strata_engine`. This definition remains here as a compatibility surface for
-/// lower layers that have not yet completed their ownership move.
+/// Application-facing callers typically use the engine re-export of this type.
 ///
 /// ## Wire Encoding
 ///

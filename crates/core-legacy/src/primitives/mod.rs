@@ -1,15 +1,4 @@
-//! Primitive types for Strata
-//!
-//! This module defines the canonical data structures for all primitives.
-//! These types are shared between the `engine` and `primitives` crates.
-//!
-//! ## Design Principle
-//!
-//! - **strata-core** defines canonical semantic types (this module)
-//! - **strata-primitives** provides stateless facades and implementation logic
-//! - **strata-engine** orchestrates transactions and recovery
-//!
-//! All crates share the same type definitions from core.
+//! Primitive data types and helper exports for Strata.
 
 pub mod event;
 pub mod json;

@@ -42,3 +42,5 @@ stratadb.org/
 !/docs/core/*.md
 !/docs/engine/
 !/docs/engine/*.md
+!/docs/storage/
+!/docs/storage/*.md

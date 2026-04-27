@@ -1,13 +1,9 @@
-//! Event types for the EventLog primitive
-//!
-//! These types define the structure of events in the append-only event log.
+//! Event data types for the EventLog primitive.
 
 use crate::contract::Timestamp;
 use crate::value::Value;
 use serde::{Deserialize, Serialize};
 
-/// An event in the log
-///
 /// Events are immutable records in an append-only log. Each event includes:
 /// - A monotonically increasing sequence number
 /// - A user-defined event type for categorization
@@ -29,9 +25,7 @@ pub struct Event {
     pub hash: [u8; 32],
 }
 
-/// Chain verification result
-///
-/// Returned by `verify_chain()` to report the integrity status of an event chain.
+/// Result of checking an event hash chain.
 #[derive(Debug, Clone)]
 pub struct ChainVerification {
     /// Whether the chain is valid

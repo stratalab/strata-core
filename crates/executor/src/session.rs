@@ -753,10 +753,10 @@ fn read_committed_json_root(
     branch_id: strata_core::types::BranchId,
     space: &str,
     key: &str,
-) -> Result<Option<strata_core::JsonValue>> {
+) -> Result<Option<strata_engine::JsonValue>> {
     primitives
         .json
-        .get(&branch_id, space, key, &strata_core::JsonPath::root())
+        .get(&branch_id, space, key, &strata_engine::JsonPath::root())
         .map_err(Error::from)
 }
 

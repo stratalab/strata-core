@@ -157,7 +157,7 @@ pub(crate) fn execute_in_txn(
                 if let Some(strata_core::Value::String(json)) =
                     ctx.get(&event_key).map_err(crate::Error::from)?
                 {
-                    let event: strata_core::Event =
+                    let event: strata_engine::Event =
                         serde_json::from_str(&json).map_err(|error| {
                             crate::Error::Serialization {
                                 reason: format!(

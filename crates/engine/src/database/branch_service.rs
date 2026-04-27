@@ -94,12 +94,11 @@
 
 use std::sync::Arc;
 
+use crate::branch_domain::{BranchControlRecord, BranchLifecycleStatus, BranchRef};
 use crate::{StrataError, StrataResult};
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::EntityRef;
-use strata_core::{BranchControlRecord, BranchRef};
 
 use crate::branch_ops::branch_control_store::{
     BranchControlStore, LineageEdgeKind, LineageEdgeRecord, MergeBasePoint,

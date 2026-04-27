@@ -1,6 +1,5 @@
 //! Shared test utilities for all integration test suites.
 //!
-//! Consolidated from per-milestone test_utils.rs files.
 //! Import via `mod common;` from any test's main.rs.
 
 #![allow(dead_code)]
@@ -17,9 +16,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
-pub use strata_core::{BranchId, JsonPath, JsonValue, Value, Version};
+pub use strata_core::{BranchId, Value, Version};
 pub use strata_engine::database::OpenSpec;
-pub use strata_engine::{Database, EventLog, JsonStore, KVStore, SearchSubsystem, StrataConfig};
+pub use strata_engine::{
+    Database, EventLog, JsonPath, JsonStore, JsonValue, KVStore, SearchSubsystem, StrataConfig,
+};
 pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
@@ -162,11 +163,11 @@ impl TestDb {
 
     /// Reopen the database in a lossy-tolerant configuration.
     ///
-    /// Sets `allow_missing_manifest = true` so a `DegradationClass::PolicyDowngrade`
-    /// recovery (e.g. B5.2 `QuarantineInventoryMismatch`, legacy no-manifest
-    /// fallback) succeeds instead of refusing the open. Used by the B5.2
-    /// quarantine-reopen / retention-report suites that deliberately stage
-    /// degraded states and assert engine behavior after the open.
+    /// Sets `allow_missing_manifest = true` so a
+    /// `DegradationClass::PolicyDowngrade` recovery (for example
+    /// `QuarantineInventoryMismatch` or a missing manifest) succeeds instead
+    /// of refusing the open. Used by tests that deliberately stage degraded
+    /// states and assert engine behavior after the open.
     pub fn reopen_allowing_policy_downgrade(&mut self) {
         let path = self.dir.path().to_path_buf();
         drop(std::mem::replace(

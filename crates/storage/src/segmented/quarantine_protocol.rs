@@ -52,6 +52,7 @@
 use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use strata_core::id::CommitVersion;
@@ -76,6 +77,20 @@ fn manifest_entry_matches_segment(
             .strip_suffix(".sst")
             .and_then(|stem| stem.parse::<u64>().ok())
             == Some(file_id)
+}
+
+fn reserve_segment_id_from_filename(next_segment_id: &AtomicU64, filename: &str) {
+    let Some(stem) = filename.strip_suffix(".sst") else {
+        return;
+    };
+    let Ok(seg_id) = stem.parse::<u64>() else {
+        return;
+    };
+    next_segment_id.fetch_max(seg_id + 1, Ordering::Relaxed);
+}
+
+fn candidate_disappeared(seg_path: &Path, branch_dir: &Path, err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::NotFound && (!seg_path.exists() || !branch_dir.exists())
 }
 
 #[derive(Debug, Clone)]
@@ -319,12 +334,20 @@ impl SegmentedStore {
         // and rename leaves the file at its original path with the
         // inventory listing it, which reopen reconciliation handles by
         // dropping the stale entry (no health degrade).
-        let existing = read_quarantine_manifest(&branch_dir)
-            .map_err(|inner| StorageError::QuarantinePublishFailed {
-                dir: branch_dir.clone(),
-                inner,
-            })?
-            .unwrap_or_default();
+        if !branch_dir.exists() {
+            return Ok(false);
+        }
+        let existing = match read_quarantine_manifest(&branch_dir) {
+            Ok(existing) => existing,
+            Err(inner) if candidate_disappeared(seg_path, &branch_dir, &inner) => return Ok(false),
+            Err(inner) => {
+                return Err(StorageError::QuarantinePublishFailed {
+                    dir: branch_dir.clone(),
+                    inner,
+                });
+            }
+        }
+        .unwrap_or_default();
         let mut entries = existing.entries;
         if !entries.iter().any(|e| e.segment_id == file_id) {
             entries.push(QuarantineEntry {
@@ -332,23 +355,38 @@ impl SegmentedStore {
                 filename: filename.clone(),
             });
         }
-        write_quarantine_manifest(&branch_dir, &entries)?;
+        if let Err(err) = write_quarantine_manifest(&branch_dir, &entries) {
+            match &err {
+                StorageError::QuarantinePublishFailed { inner, .. }
+                    if candidate_disappeared(seg_path, &branch_dir, inner) =>
+                {
+                    return Ok(false);
+                }
+                _ => return Err(err),
+            }
+        }
 
         // Stage 3 rename — create __quarantine__/ if absent.
         let quarantine_dir = branch_dir.join(QUARANTINE_DIR);
         if !quarantine_dir.exists() {
-            std::fs::create_dir_all(&quarantine_dir).map_err(|inner| {
-                StorageError::QuarantinePublishFailed {
+            if let Err(inner) = std::fs::create_dir_all(&quarantine_dir) {
+                if candidate_disappeared(seg_path, &branch_dir, &inner) {
+                    return Ok(false);
+                }
+                return Err(StorageError::QuarantinePublishFailed {
                     dir: branch_dir.clone(),
                     inner,
-                }
-            })?;
+                });
+            }
         }
         let quarantine_path = quarantine_dir.join(&filename);
         if let Err(e) = std::fs::rename(seg_path, &quarantine_path) {
             // Rename failed: inventory still lists the entry but file is at
             // original path. Reopen reconciliation drops the stale entry
             // without degrading; subsequent GC will re-nominate.
+            if candidate_disappeared(seg_path, &branch_dir, &e) {
+                return Ok(false);
+            }
             return Err(StorageError::QuarantinePublishFailed {
                 dir: branch_dir,
                 inner: e,
@@ -653,7 +691,13 @@ impl SegmentedStore {
                 .get(&view.branch_id)
                 .cloned()
                 .unwrap_or_default();
-            reconcile_single_branch(&view.branch_dir, view.branch_id, &live, faults);
+            reconcile_single_branch(
+                &view.branch_dir,
+                view.branch_id,
+                &live,
+                &self.next_segment_id,
+                faults,
+            );
         }
     }
 }
@@ -716,6 +760,7 @@ fn reconcile_single_branch(
     branch_path: &Path,
     branch_id: BranchId,
     manifest_live_filenames: &HashSet<String>,
+    next_segment_id: &AtomicU64,
     faults: &mut Vec<RecoveryFault>,
 ) {
     let quarantine_dir = branch_path.join(QUARANTINE_DIR);
@@ -746,6 +791,13 @@ fn reconcile_single_branch(
         return;
     }
     let manifest = state.manifest.unwrap();
+
+    for name in state.files_on_disk.keys() {
+        reserve_segment_id_from_filename(next_segment_id, name);
+    }
+    for entry in &manifest.entries {
+        reserve_segment_id_from_filename(next_segment_id, &entry.filename);
+    }
 
     // Collect on-disk quarantine filenames.
     let on_disk: HashSet<String> = state.files_on_disk.keys().cloned().collect();

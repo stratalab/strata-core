@@ -317,6 +317,109 @@ fn clear_branch_retry_removes_empty_leftover_dir_after_gc() {
     );
 }
 
+/// Reopen must reserve segment ids from quarantine debt so a same-name
+/// recreate cannot reuse an `.sst` filename that is still listed in the
+/// quarantine inventory.
+#[test]
+fn recreate_after_reopen_does_not_reuse_quarantined_segment_filename() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    seed(&store, kv_key("before"), Value::Int(1), 1);
+    store.rotate_memtable(&branch());
+    store.flush_oldest_frozen(&branch()).unwrap();
+
+    let b_dir = branch_dir_for(dir.path(), branch());
+    store.clear_branch(&branch()).unwrap();
+    drop(store);
+
+    let reopened = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let first_recovery = reopened.recover_segments().unwrap();
+    assert!(
+        matches!(first_recovery.health, RecoveryHealth::Healthy),
+        "delete with consistent quarantine inventory must reopen cleanly"
+    );
+
+    seed(&reopened, kv_key("after"), Value::Int(2), 2);
+    reopened.rotate_memtable(&branch());
+    reopened.flush_oldest_frozen(&branch()).unwrap();
+
+    let top_level_ssts: HashSet<String> = std::fs::read_dir(&b_dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_file())
+        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("sst"))
+        .filter_map(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        })
+        .collect();
+    let inventory = read_quarantine_manifest(&b_dir)
+        .unwrap()
+        .expect("quarantine inventory remains until explicit GC");
+    for entry in &inventory.entries {
+        assert!(
+            !top_level_ssts.contains(&entry.filename),
+            "recreated branch must not reuse quarantined filename {}",
+            entry.filename
+        );
+    }
+    drop(reopened);
+
+    let reopened_again = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+    let second_recovery = reopened_again.recover_segments().unwrap();
+    assert!(
+        matches!(second_recovery.health, RecoveryHealth::Healthy),
+        "same-name recreate with retained quarantine debt must reopen cleanly"
+    );
+    assert_eq!(
+        reopened_again
+            .get_versioned(&kv_key("after"), CommitVersion::MAX)
+            .unwrap()
+            .map(|entry| entry.value),
+        Some(Value::Int(2)),
+    );
+}
+
+/// A parent that forks, materializes the child, and then continues rewriting
+/// must let GC skip manifest-protected or disappearing candidates rather than
+/// failing the whole reclaim pass.
+#[test]
+fn gc_after_materialized_child_and_parent_rewrites_stays_best_effort() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = SegmentedStore::with_dir(dir.path().to_path_buf(), 0);
+
+    seed(&store, parent_kv("root"), Value::Int(1), 1);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    seed(&store, parent_kv("root"), Value::Int(2), 2);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .branches
+        .entry(child_branch())
+        .or_insert_with(BranchState::new);
+    store
+        .fork_branch(&parent_branch(), &child_branch())
+        .unwrap();
+    store.materialize_layer(&child_branch(), 0).unwrap();
+
+    seed(&store, parent_kv("root"), Value::Int(3), 3);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    seed(&store, parent_kv("root"), Value::Int(4), 4);
+    store.rotate_memtable(&parent_branch());
+    store.flush_oldest_frozen(&parent_branch()).unwrap();
+
+    store
+        .gc_orphan_segments()
+        .expect("healthy histories should let GC skip unreclaimable candidates and continue");
+}
+
 /// Top-level `.sst` files that are no longer listed in the branch's own
 /// manifest and are not held by any descendant inherited layer are cleanup
 /// debt, not manifest-reachable retention. The storage snapshot must not count

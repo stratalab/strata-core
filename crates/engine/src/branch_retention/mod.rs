@@ -1,36 +1,8 @@
-//! B5.1 — Branch retention contract vocabulary.
+//! Vocabulary for branch-retention reporting and reasoning.
 //!
-//! This module is the engine-side citation surface for the normative
-//! retention contract at
-//! `docs/design/branching/branching-gc/branching-retention-contract.md`.
-//!
-//! Doc comments on retention code paths cite contract sections by
-//! type name in plain backticks (e.g. `` `BarrierKind::PhysicalRetention` ``,
-//! `` `ConvergenceClass::StagedPublish` ``) so the citation survives
-//! contract paragraph renumbering. The types themselves are
-//! `pub(crate)` — B5.1 is annotation-only and does not expand the
-//! public engine surface. Bracketed rustdoc links (`[...]`) are
-//! intentionally avoided: cross-crate links to `pub(crate)` items
-//! cannot resolve, and same-crate `pub` → `pub(crate)` links emit a
-//! privacy-escape rustdoc warning.
-//!
-//! When a future B5.2+ phase needs to *match* on these vocabulary
-//! values at runtime (e.g. to classify a `RetentionBlocker` for
-//! `Database::retention_report()`), additional variants and
-//! supporting types land here. The B5.1 set is the minimum needed to
-//! make annotation citations resolve to symbols.
-//!
-//! ## Contract sections referenced
-//!
-//! - §"Barrier model" — barrier categories.
-//! - §"Authoritative and non-authoritative state" — accelerator role.
-//! - §"Reclaim protocol" — quarantine-based reclaim.
-//! - §"Recovery rebuild protocol" — runtime accelerator rebuild on
-//!   reopen.
-//! - §"Engine-facing attribution contract" — branch-vocabulary
-//!   reporting.
-//! - Convergence/observability doc §"Convergence classes" —
-//!   per-surface convergence labels.
+//! These types make retention code paths explicit and readable without
+//! hard-coding prose into every call site. The types are `pub(crate)` because
+//! they support engine implementation detail rather than public API.
 
 #![allow(dead_code)]
 
@@ -76,8 +48,8 @@ pub(crate) enum BarrierKind {
 /// Maps onto the retention contract's reclaimability rule and the
 /// reclaim protocol's candidate-vs-proven-orphan distinction.
 ///
-/// B5.1 ships this enum so doc comments on storage-side reachability
-/// walks can cite the role they consider. Production code that
+/// Storage-side reachability walks use this role vocabulary in documentation
+/// and internal reasoning. Production code that
 /// matches on these variants lands in B5.2 with the
 /// `retention_report()` and reclaim implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

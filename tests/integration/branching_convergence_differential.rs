@@ -1,38 +1,37 @@
-//! B5.3 — Differential convergence proof corpus.
+//! Differential convergence proof corpus.
 //!
-//! Pins the convergence-closure contract from
-//! `docs/design/branching/branching-gc/b5-phasing-plan.md` §B5.3 and
-//! `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`.
+//! Pins the expected convergence behavior of the branch-visible derived
+//! surfaces.
 //!
 //! Each branch-visible derived surface is labeled with exactly one
 //! `ConvergenceClass` (see `crates/engine/src/branch_retention/mod.rs`),
 //! and this corpus proves the claimed class per surface × dimension:
 //!
-//! - `§1` — `BranchStatusCache` is `AdvisoryOnly` and has no
+//! - `BranchStatusCache` is `AdvisoryOnly` and has no
 //!   correctness role: empty cache, stale cache, delete, recreate, and
 //!   sibling reads all behave correctly against `BranchControlStore`
 //!   as the authoritative gate.
-//! - `§2` — KV / Event / Graph BM25: `StagedPublish` for ordinary
+//! - KV / Event / Graph BM25: `StagedPublish` for ordinary
 //!   writes (inline), explicit `ReopenHealed` fallback at merge-time
 //!   (merge apply writes via raw `txn.put` and bypasses inline
 //!   indexing; `SearchSubsystem::recover` + `reconcile_index` heal on
 //!   next open).
-//! - `§3` — JSON BM25 / Vector HNSW: `StagedPublish` with immediate
+//! - JSON BM25 / Vector HNSW: `StagedPublish` with immediate
 //!   post-merge refresh via `PrimitiveMergeHandler::post_commit`.
-//! - `§4` — Follower-refresh / publish-clamp branch-layer smoke check:
+//! - Follower-refresh / publish-clamp branch-layer smoke check:
 //!   this suite proves the canonical query guard is reachable from the
 //!   branch read path, while the actual blocked-refresh / reopen proofs
 //!   remain in the crate-local hook-failure suites in
 //!   `crates/engine/tests/follower_tests.rs`,
 //!   `crates/vector/src/recovery.rs`, and `crates/graph/src/store.rs`.
-//! - `§5` — Search / vector on-disk caches: `ReopenHealed` — valid
+//! - Search / vector on-disk caches: `ReopenHealed` — valid
 //!   caches fast-path reload and reconcile; invalid / missing caches
 //!   trigger rebuild from KV truth.
-//! - `§6` — Vector in-memory HNSW: rebuilds after reopen from KV
+//! - Vector in-memory HNSW: rebuilds after reopen from KV
 //!   truth.
-//! - `§7` — Delete / recreate convergence per surface: no old
+//! - Delete / recreate convergence per surface: no old
 //!   lifecycle derived state leaks to the new lifecycle instance.
-//! - `§8` — Same-name recreate lifecycle identity: `BranchRef`
+//! - Same-name recreate lifecycle identity: `BranchRef`
 //!   generation advances; derived surfaces consult authoritative
 //!   lifecycle sources, not the advisory cache.
 
@@ -40,11 +39,11 @@
 
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::branch::BranchLifecycleStatus;
-use strata_core::branch_dag::DagBranchStatus;
 use strata_core::value::Value;
 use strata_core::{BranchId, StrataError};
-use strata_engine::{SearchSubsystem, Searchable, Subsystem};
+use strata_engine::{
+    BranchLifecycleStatus, DagBranchStatus, SearchSubsystem, Searchable, Subsystem,
+};
 use strata_graph::branch_status_cache::BranchStatusCache;
 use strata_graph::types::NodeData;
 

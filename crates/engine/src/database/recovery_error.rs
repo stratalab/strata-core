@@ -1,15 +1,9 @@
-//! Typed recovery-error vocabulary for the engine (Epic D3).
+//! Typed recovery-error vocabulary for the engine.
 //!
 //! `RecoveryError` is the engine-level error emitted by
-//! `Database::run_recovery` (see [`super::recovery`]). It replaces the
-//! ad-hoc `StrataError::{internal,corruption,storage}(format!(...))`
-//! wraps that were previously scattered across `open.rs`.
-//!
-//! D3's load-bearing requirement is that snapshot and WAL recovery
-//! failures survive the coordinator seam in typed form. The engine still
-//! converts `RecoveryError` back into `StrataError` at the public open
-//! entry points, but `run_recovery()` itself now exposes the structured
-//! taxonomy that D4's policy work will build on.
+//! `Database::run_recovery` (see [`super::recovery`]). It keeps snapshot and
+//! WAL recovery failures in structured form inside the engine, while the
+//! public open entry points still convert back into `StrataError`.
 
 use std::io;
 use std::path::PathBuf;

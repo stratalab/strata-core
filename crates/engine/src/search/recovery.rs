@@ -24,8 +24,8 @@ use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
 use crate::search::{extract_search_text, InvertedIndex};
 use crate::StrataResult;
+use crate::SYSTEM_BRANCH;
 use std::collections::HashSet;
-use strata_core::branch_dag::SYSTEM_BRANCH;
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
 use strata_storage::{Key, TypeTag};
@@ -561,7 +561,8 @@ impl crate::recovery::Subsystem for SearchSubsystem {
     ///      Without this, a restart would resurrect the stale documents.
     ///
     /// Search uses a single global manifest (not per-branch directories),
-    /// so the cleanup is surgical rather than directory-wipe (contrast with
+    /// so cleanup rewrites shared manifest state rather than removing a
+    /// branch-owned directory (contrast with
     /// `VectorSubsystem::cleanup_deleted_branch`). Sealed `.sidx` segment
     /// files retain tombstones for the removed docs and self-clean on the
     /// next seal/compaction cycle — DG-017 only requires the deletion to

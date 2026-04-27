@@ -20,6 +20,7 @@ It should be read together with:
 - [engine-error-architecture.md](./engine-error-architecture.md)
 - [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
 - [../core/core-error-review.md](../core/core-error-review.md)
+- [../storage/storage-charter.md](../storage/storage-charter.md)
 
 ## Current State
 
@@ -129,6 +130,11 @@ Current state:
 
 - several engine-domain or primitive-domain items still live in `core-legacy`
   because `CO4` and `CO5` are not done yet
+- branch-domain and limits ownership have already moved in active code
+- JSON/vector active callers above the lower seam now import through
+  `strata-engine`
+- but the physical JSON/vector helper implementations still live in
+  `core-legacy`
 
 Examples already identified in the core plan:
 
@@ -143,6 +149,61 @@ Why it is still pending:
 
 - these moves belong to the later core cleanup phases and the engine rewrite,
   not to `CO1`–`CO3`
+- the remaining primitive-family move is now blocked by the current dependency
+  graph:
+  - `engine` depends on `core-legacy`
+  - `core-legacy` cannot depend back on `engine` without a cycle
+  - `concurrency` is a lower layer and still depends directly on the legacy
+    JSON helper surface
+
+What is specifically still pending here:
+
+- move the physical JSON helper implementation out of
+  `crates/core-legacy/src/primitives/json.rs`
+- move the physical vector helper/config/preset implementation out of
+  `crates/core-legacy/src/primitives/vector.rs`
+- remove the lower-layer `concurrency -> core-legacy` JSON helper seam
+- replace the current `engine::semantics::{json,vector}` forwarding layer
+  with truly engine-owned implementations
+
+### 5a. Finish the remaining branch/limits/event/value definition move
+
+Current state:
+
+- active code imports these families from `strata-engine`
+- `core-legacy` no longer presents them as the canonical home
+- but the physical definitions for several of those families still live in:
+  - `crates/core-legacy/src/branch.rs`
+  - `crates/core-legacy/src/branch_dag.rs`
+  - `crates/core-legacy/src/branch_types.rs`
+  - `crates/core-legacy/src/limits.rs`
+  - `crates/core-legacy/src/primitives/event.rs`
+  - `crates/core-legacy/src/value.rs`
+
+Why it is still pending:
+
+- `engine` still depends on `core-legacy`
+- `core-legacy` cannot depend back to `engine` without a package cycle
+- the current state is a presentation and import-ownership contraction, not a
+  full physical definition inversion
+
+What completion looks like:
+
+- the physical definitions move into `engine` or the final owning crate
+- `core-legacy` stops being the host of these engine-domain families
+- the remaining root exports become removable rather than just non-canonical
+
+One staging detail here is intentional:
+
+- `branch_domain`, `semantics::json`, and `semantics::vector` are still
+  engine-facing re-export seams
+- `limits` and `semantics::event` already exist as engine-side parallel
+  definitions with explicit conversions to and from the older surface
+
+That asymmetry is not accidental. The re-export seams are still waiting on the
+dependency rewrite that removes the lower-layer cycles. The parallel
+definitions were pulled forward because engine-local policy and behavior tests
+already needed a stable home before the final physical move.
 
 What completion looks like:
 

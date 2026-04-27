@@ -1,11 +1,6 @@
-//! B5.4 — Fail-closed degraded primitive paths.
+//! Fail-closed degraded primitive paths.
 //!
-//! Pins the degraded-primitive closure contract from
-//! `docs/design/branching/branching-gc/b5-phasing-plan.md` §B5.4 and
-//! `docs/design/branching/branching-gc/branching-b5-convergence-and-observability.md`
-//! §"Degraded-state closure targets".
-//!
-//! The surfaces named by B5.4 are:
+//! The surfaces under test are:
 //!
 //! - **vector in-memory / HNSW state** — config mismatch or rebuild
 //!   failure must fail closed, not silently fall back.

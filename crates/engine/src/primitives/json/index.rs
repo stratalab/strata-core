@@ -6,11 +6,11 @@
 //!
 //! Index metadata is stored in `_idx_meta_{space}` as JSON documents.
 
+use crate::semantics::json::{get_at_path, JsonPath, JsonValue};
 use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
-use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::types::BranchId;
 use strata_core::PrimitiveDegradedReason;
 use strata_storage::{Key, Namespace, TypeTag};
@@ -268,7 +268,7 @@ pub fn extract_field_value(doc_value: &JsonValue, field_path: &str) -> Option<Js
         return Some(doc_value.clone());
     }
     let path: JsonPath = path_str.parse().ok()?;
-    strata_core::primitives::json::get_at_path(doc_value, &path).cloned()
+    get_at_path(doc_value, &path).cloned()
 }
 
 // =============================================================================

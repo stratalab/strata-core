@@ -1,9 +1,7 @@
-//! B5.2 — Adversarial retention / reclaim proof matrix.
+//! Adversarial retention / reclaim proof matrix.
 //!
-//! Covers the deterministic schedule families from
-//! `docs/design/branching/branching-gc/b5-phasing-plan.md` §B5.2 +
-//! `docs/design/branching/branching-gc/branching-b5-verification-spec.md`
-//! §"Required schedule matrix". Each test proves one or more of:
+//! Covers the deterministic schedule families for retention and reclaim. Each
+//! test proves one or more of:
 //!
 //! - A1 Reachability beats accelerators (manifest proof wins)
 //! - A2 Quarantine is reversible until final purge
@@ -14,19 +12,17 @@
 //!
 //! The crash/failpoint boundary suite lives in
 //! `branching_gc_quarantine_recovery.rs`. The generated-history
-//! state-machine suite is not on the B5.2 merge-critical path (phasing
-//! plan §B5.2 "deterministic + failpoint proof suites are the minimum
-//! bar; state-machine suite lands with B5.3 or later").
+//! state-machine suite is separate because it explores a much larger search
+//! space than the deterministic proof cases here.
 
 #![cfg(not(miri))]
 
 use crate::common::branching::archive_branch_for_test;
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_engine::{ReclaimStatus, RetentionBlocker};
+use strata_engine::{BranchLifecycleStatus, ReclaimStatus, RetentionBlocker};
 use strata_storage::{Key, Namespace};
 
 fn resolve(name: &str) -> BranchId {

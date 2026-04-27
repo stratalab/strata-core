@@ -1,9 +1,6 @@
-//! B5.2 — `Database::retention_report()`.
+//! `Database::retention_report()`.
 //!
-//! Engine-owned, branch-vocabulary retention attribution surface per
-//! `docs/design/branching/branching-gc/branching-retention-contract.md`
-//! §"Engine-facing attribution contract" and the convergence doc's
-//! §"Retention report contract".
+//! Engine-owned retention attribution expressed in branch vocabulary.
 //!
 //! Two-layer assembly:
 //!
@@ -20,26 +17,20 @@
 //!    layer), the entry appears in [`RetentionReport::orphan_storage`]
 //!    rather than being fabricated into some live lifecycle.
 //!
-//! Per the convergence doc's §"Rule 2. Stale-visible and unavailable
-//! are not the same." plus the surface matrix's hard-fail-degraded
-//! classification, `retention_report()` returns
-//! [`StrataError::RetentionReportUnavailable`] when recovery health
-//! cannot sustain trustworthy manifest-derived attribution
-//! (`DataLoss` or any `QuarantineInventoryMismatch`-driven
-//! `PolicyDowngrade`). Reclaim blockage that is *attribution-safe* is
-//! surfaced as [`ReclaimStatus`] inside a successful report — blocked
-//! reclaim is a retention fact, not a fabrication.
+//! `retention_report()` returns [`StrataError::RetentionReportUnavailable`]
+//! when recovery health cannot sustain trustworthy manifest-derived
+//! attribution (`DataLoss` or any `QuarantineInventoryMismatch`-driven
+//! `PolicyDowngrade`). Reclaim blockage that is still attribution-safe is
+//! surfaced as [`ReclaimStatus`] inside a successful report.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::{BranchControlRecord, BranchLifecycleStatus, BranchRef};
 use strata_core::contract::PrimitiveType;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_core::{
-    BranchControlRecord, BranchLifecycleStatus, BranchRef, PrimitiveDegradedReason, StrataError,
-    StrataResult,
-};
+use strata_core::{PrimitiveDegradedReason, StrataError, StrataResult};
 use strata_storage::{
     DegradationClass, RecoveryHealth, StorageBranchRetention, StorageError,
     StorageInheritedLayerInfo,
@@ -301,13 +292,21 @@ impl Database {
         };
 
         // Storage layer — manifest-derived per-directory facts.
+        // Retention snapshot is a read-only view over branch directories that
+        // can churn under compaction / reclaim. Retry once before surfacing
+        // unavailability so a transient `NotFound` during the scan does not
+        // downgrade the whole report while a second immediate read would
+        // succeed.
         let storage_snapshot = match self.storage.retention_snapshot() {
             Ok(snapshot) => snapshot,
-            Err(e) => {
-                return Err(StrataError::retention_report_unavailable(
-                    retention_snapshot_unavailable_class(&e),
-                ))
-            }
+            Err(_) => match self.storage.retention_snapshot() {
+                Ok(snapshot) => snapshot,
+                Err(e) => {
+                    return Err(StrataError::retention_report_unavailable(
+                        retention_snapshot_unavailable_class(&e),
+                    ))
+                }
+            },
         };
         let snapshot_by_id: HashMap<BranchId, StorageBranchRetention> = storage_snapshot
             .into_iter()

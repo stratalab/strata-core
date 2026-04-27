@@ -319,8 +319,7 @@ impl RecoveryCoordinator {
     /// - `StrataError::IncompatibleReuse` if the MANIFEST codec does not match
     ///   `expected_codec_id`. Codec mismatch is a configuration error, not
     ///   data corruption — the engine open paths at `database/open.rs` surface
-    ///   the same variant so the coordinator-only codepath agrees (Epic D3
-    ///   recovery-parity requirement).
+    ///   the same variant so the coordinator-only codepath agrees.
     pub fn plan_recovery(&self, expected_codec_id: &str) -> StrataResult<RecoveryPlan> {
         let manifest_path = self.layout.manifest_path();
         if !ManifestManager::exists(manifest_path) {

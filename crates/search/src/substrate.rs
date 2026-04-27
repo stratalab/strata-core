@@ -1179,7 +1179,7 @@ mod tests {
         doc_id: &str,
         json_str: &str,
     ) -> u64 {
-        use strata_core::primitives::json::JsonValue;
+        use strata_engine::JsonValue;
         let json_store = JsonStore::new(db.clone());
         let value: JsonValue = json_str.parse().expect("parse json");
         json_store
@@ -1545,7 +1545,7 @@ mod tests {
     /// landed. It is the canonical regression guard for that filter.
     #[test]
     fn test_bm25_fan_out_no_cross_primitive_duplicates() {
-        use strata_core::primitives::json::JsonValue;
+        use strata_engine::JsonValue;
 
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
             .expect("create db");

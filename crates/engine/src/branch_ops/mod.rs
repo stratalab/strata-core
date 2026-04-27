@@ -26,6 +26,9 @@ pub(crate) use dag_hooks::{
     with_branch_dag_hooks_suppressed,
 };
 
+use crate::branch_domain::{
+    BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
+};
 use crate::database::Database;
 use crate::primitives::branch::resolve_branch_name;
 use crate::primitives::branch::BranchIndex;
@@ -38,14 +41,10 @@ use std::sync::Arc;
 
 use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_core::{
-    BranchControlRecord, BranchGeneration, BranchRef, ForkAnchor, PrimitiveType, Version,
-    VersionedValue,
-};
+use strata_core::{PrimitiveType, Version, VersionedValue};
 use strata_storage::{Key, Namespace, TypeTag};
 use tracing::info;
 
@@ -67,7 +66,7 @@ pub(crate) const DATA_TYPE_TAGS: [TypeTag; 5] = [
 ];
 
 /// The well-known branch name used for internal metadata (tags, notes).
-const SYSTEM_BRANCH: &str = "_system_";
+const SYSTEM_BRANCH: &str = crate::SYSTEM_BRANCH;
 
 fn tag_key(branch: &str, name: &str) -> String {
     format!("tag:{branch}:{name}")

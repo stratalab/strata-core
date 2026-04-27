@@ -1,9 +1,8 @@
-//! B3.4 — bundle-import generation policy (AD7) and observer events.
+//! Bundle-import generation policy and observer events.
 //!
-//! These tests cover the generation-handling rules from
-//! `docs/design/branching/b3-phasing-plan.md`:
+//! These tests cover the generation-handling rules for bundle import:
 //!
-//! - **Bundles without `generation` deserialise as gen 0.** A pre-B3.4
+//! - **Bundles without `generation` deserialise as gen 0.**
 //!   bundle (no `generation` field in `BRANCH.json`) imports onto a
 //!   fresh target as `BranchRef { generation: 0 }`. `#[serde(default)]`
 //!   on `BundleBranchInfo::generation` is the load-bearing piece.
@@ -35,13 +34,13 @@ use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
 use strata_core::value::Value;
-use strata_core::{BranchId, BranchRef};
+use strata_core::BranchId;
 use strata_durability::branch_bundle::BundleBranchInfo;
 use strata_engine::bundle;
 use strata_engine::database::observers::{
     BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError,
 };
-use strata_engine::primitives::extensions::KVStoreExt;
+use strata_engine::BranchRef;
 use tempfile::TempDir;
 
 fn resolve(name: &str) -> BranchId {

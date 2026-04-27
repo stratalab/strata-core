@@ -1,8 +1,4 @@
-//! Legacy compatibility traits for storage abstraction.
-//!
-//! `Storage` and `WriteMode` are now storage-owned concepts. This module
-//! exists only as a compatibility surface for older import paths; it is not
-//! the canonical owner.
+//! Shared storage abstraction traits and write semantics.
 
 use std::time::Duration;
 
@@ -14,13 +10,9 @@ use crate::value::Value;
 use strata_storage::Storage as StorageSurface;
 pub use strata_storage::WriteMode;
 
-/// Compatibility copy of the storage-owned trait surface.
-///
 /// This trait enables replacing the MVP BTreeMap+RwLock implementation
 /// with sharded, lock-free, or distributed storage without breaking
 /// upper layers (concurrency, primitives, engine).
-///
-/// New code should prefer `strata_storage::Storage`.
 ///
 /// ## Thread Safety
 ///
@@ -744,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn segmented_store_matches_legacy_forwarder_surface() {
+    fn segmented_store_matches_core_storage_surface() {
         let store = SegmentedStore::new();
         let key = test_key(&test_ns(), "forwarded");
         let version = CommitVersion(7);

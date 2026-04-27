@@ -17,12 +17,11 @@
 
 use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
 use crate::transaction_ops::TransactionOps;
+use crate::{Event, JsonPath, JsonValue};
 use std::sync::Arc;
 use strata_concurrency::{JsonStoreExt, TransactionContext};
 use strata_core::types::BranchId;
-use strata_core::{
-    EntityRef, Event, JsonPath, JsonValue, StrataError, Timestamp, Value, Version, Versioned,
-};
+use strata_core::{EntityRef, StrataError, Timestamp, Value, Version, Versioned};
 use strata_storage::{Key, Namespace, TypeTag};
 
 /// Transaction wrapper that implements TransactionOps

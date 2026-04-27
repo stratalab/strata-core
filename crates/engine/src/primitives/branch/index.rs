@@ -17,6 +17,10 @@
 //! - Primary key format: `<global_namespace>:<TypeTag::Branch>:<branch_id>`
 //! - BranchIndex uses a global namespace (not branch-scoped) since it manages branches themselves.
 
+use crate::branch_domain::{
+    aliases_default_branch_sentinel as branch_domain_aliases_default_branch_sentinel,
+    is_system_branch,
+};
 use crate::branch_ops::dag_hooks::{dispatch_create_hook, dispatch_delete_hook};
 use crate::branch_ops::{self, branch_control_store::is_control_store_key};
 use crate::database::Database;
@@ -54,7 +58,7 @@ pub fn resolve_branch_name(name: &str) -> BranchId {
 /// with the reserved nil-UUID branch sentinel used by the literal `"default"`
 /// branch and branch-control paths.
 pub(crate) fn aliases_default_branch_sentinel(name: &str) -> bool {
-    strata_core::branch::aliases_default_branch_sentinel(name)
+    branch_domain_aliases_default_branch_sentinel(name)
 }
 
 /// Reject persisted branch-control artifacts that still address the reserved
@@ -86,10 +90,7 @@ pub(crate) fn validate_reserved_branch_aliases(db: &Arc<Database>) -> StrataResu
         let Ok(name) = String::from_utf8(key.user_key.to_vec()) else {
             continue;
         };
-        if name.contains("__idx_")
-            || name == DEFAULT_BRANCH_MARKER_KEY
-            || strata_core::branch_dag::is_system_branch(&name)
-        {
+        if name.contains("__idx_") || name == DEFAULT_BRANCH_MARKER_KEY || is_system_branch(&name) {
             continue;
         }
         if aliases_default_branch_sentinel(&name) {
@@ -476,7 +477,7 @@ impl BranchIndex {
                     // Filter out index keys (legacy) and system branches
                     if key_str.contains("__idx_")
                         || key_str == DEFAULT_BRANCH_MARKER_KEY
-                        || strata_core::branch_dag::is_system_branch(&key_str)
+                        || is_system_branch(&key_str)
                     {
                         None
                     } else {

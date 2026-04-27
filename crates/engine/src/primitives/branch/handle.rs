@@ -29,11 +29,11 @@
 
 use crate::database::Database;
 use crate::primitives::extensions::{EventLogExt, JsonStoreExt, KVStoreExt};
+use crate::semantics::json::{JsonPath, JsonValue};
 use crate::StrataResult;
 use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
-use strata_core::primitives::json::{JsonPath, JsonValue};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 

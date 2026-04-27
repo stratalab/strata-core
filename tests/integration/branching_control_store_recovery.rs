@@ -1,4 +1,4 @@
-//! B3.4 — `BranchControlStore` recovery on reopen.
+//! `BranchControlStore` recovery on reopen.
 //!
 //! These tests reopen a primary database and assert that:
 //!
@@ -31,8 +31,8 @@
 use crate::common::*;
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
-use strata_core::{BranchId, BranchRef};
-use strata_engine::primitives::extensions::KVStoreExt;
+use strata_core::BranchId;
+use strata_engine::BranchRef;
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

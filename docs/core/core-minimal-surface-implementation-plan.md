@@ -24,6 +24,7 @@ This plan should be read together with:
 - [core-crate-map.md](./core-crate-map.md)
 - [core-error-review.md](./core-error-review.md)
 - [co4-storage-boundary-eviction-plan.md](./co4-storage-boundary-eviction-plan.md)
+- [../storage/storage-charter.md](../storage/storage-charter.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
 
 ## Rewrite Rules
@@ -350,6 +351,10 @@ These are not open audit items. They move to `storage`.
 
 Move engine-domain schema, limits policy, and primitive helper behavior out of
 `core`.
+
+Detailed execution sequence:
+
+- [co5-engine-domain-and-primitive-eviction-plan.md](./co5-engine-domain-and-primitive-eviction-plan.md)
 
 ### Scope
 

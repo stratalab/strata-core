@@ -1,4 +1,4 @@
-//! B4.4 — same-name serialization race harness.
+//! Same-name serialization race harness.
 //!
 //! Exercises the three-layer serialization model documented in
 //! `BranchService`'s module header (quiesce + drain + OCC on the
@@ -61,10 +61,9 @@ use crate::common::branching::CapturingBranchObserver;
 use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_core::branch::BranchLifecycleStatus;
 use strata_core::value::Value;
-use strata_core::{BranchRef, StrataError};
-use strata_engine::Database;
+use strata_core::StrataError;
+use strata_engine::{BranchLifecycleStatus, BranchRef, Database};
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

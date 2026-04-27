@@ -1,20 +1,11 @@
-//! Legacy core compatibility surface for Strata.
+//! Shared Strata surface for frequently used data types and traits.
 //!
-//! This crate preserves older import paths while lower-layer ownership is
-//! being moved to their long-term homes. New code should prefer the narrower
-//! owning crates instead of treating this crate as the canonical boundary.
-//!
-//! It currently exposes:
-//! - BranchId: Unique identifier for agent branches
-//! - Compatibility storage layout types (`Namespace`, `Key`, `TypeTag`)
-//! - Compatibility storage traits (`Storage`, `WriteMode`)
-//! - Value: Unified value enum for all data types
-//! - Error: Error type hierarchy
-//! - Primitive types: Event, JSON, Vector types (in `primitives` module)
-//! - Contract types: EntityRef, Versioned<T>, Version, Timestamp, PrimitiveType, BranchName
+//! This crate exposes a broad convenience import path for IDs, contracts,
+//! values, errors, storage layout types, and primitive data types used across
+//! the workspace.
 
 // Module declarations
-pub mod branch; // Canonical branch-truth types (B2)
+pub mod branch; // Branch lineage and lifecycle types
 pub mod branch_dag; // Branch DAG types and constants
 pub mod branch_types; // Branch lifecycle types
 pub mod contract; // contract types
@@ -22,12 +13,12 @@ pub mod error;
 pub mod id;
 pub mod instrumentation; // Performance tracing (feature-gated)
 pub mod limits; // Size limits for keys, values, and vectors
-pub mod primitives; // primitive types (Event, Vector, JSON types)
+pub mod primitives; // Primitive data types (Event, Vector, JSON)
 pub mod traits;
 pub mod types;
 pub mod value;
 
-// Re-export canonical branch-truth types at crate root.
+// Re-export branch lineage and lifecycle types at crate root.
 pub use branch::{
     BranchControlRecord, BranchGeneration, BranchLifecycleStatus, BranchRef, ForkAnchor,
 };
@@ -42,7 +33,7 @@ pub use id::{CommitVersion, TxnId};
 pub use limits::{LimitError, Limits};
 pub use traits::{Storage, WriteMode};
 pub use types::{validate_space_name, BranchId, Key, Namespace, TypeTag};
-pub use value::{extractable_text, LegacyValueExt, Value};
+pub use value::{extractable_text, LegacyValueExt, Value, ValueTextExt};
 
 // Re-export contract types at crate root for convenience
 pub use contract::{
@@ -50,7 +41,7 @@ pub use contract::{
     VersionedHistory, VersionedValue, MAX_BRANCH_NAME_LENGTH,
 };
 
-// Re-export primitive types at crate root for convenience
+// Re-export primitive data types at crate root for convenience.
 pub use primitives::{
     // JSON types
     apply_patches,
@@ -87,36 +78,29 @@ pub use primitives::{
 };
 
 #[cfg(test)]
-mod forwarding_tests {
-    use std::any::TypeId;
-
+mod surface_tests {
     #[test]
-    fn foundational_ids_and_contract_dtos_are_forwarded_from_new_core() {
-        assert_eq!(
-            TypeId::of::<crate::BranchId>(),
-            TypeId::of::<strata_core_foundation::BranchId>()
+    fn foundational_root_exports_behave_consistently() {
+        let branch_id = crate::BranchId::from_user_name("surface-check");
+        let entity = crate::EntityRef::json(branch_id, "profiles", "user-1");
+        let versioned = crate::Versioned::new(
+            crate::Value::array(vec![crate::Value::Int(1), crate::Value::String("a".into())]),
+            crate::Version::txn(7),
         );
+
+        assert_eq!(entity.branch_id(), branch_id);
+        assert_eq!(entity.space(), Some("profiles"));
+        assert_eq!(entity.json_doc_id(), Some("user-1"));
+        assert_eq!(versioned.version(), crate::Version::txn(7));
         assert_eq!(
-            TypeId::of::<crate::CommitVersion>(),
-            TypeId::of::<strata_core_foundation::CommitVersion>()
-        );
-        assert_eq!(
-            TypeId::of::<crate::TxnId>(),
-            TypeId::of::<strata_core_foundation::TxnId>()
-        );
-        assert_eq!(
-            TypeId::of::<crate::EntityRef>(),
-            TypeId::of::<strata_core_foundation::EntityRef>()
-        );
-        assert_eq!(
-            TypeId::of::<crate::Value>(),
-            TypeId::of::<strata_core_foundation::Value>()
+            versioned.value().as_array().unwrap(),
+            &[crate::Value::Int(1), crate::Value::String("a".into())]
         );
     }
 
     #[test]
-    fn legacy_value_surface_retains_extractable_text() {
-        use crate::LegacyValueExt;
+    fn value_surface_retains_extractable_text() {
+        use crate::ValueTextExt;
 
         let value = crate::Value::String("hello".to_string());
         assert_eq!(value.extractable_text(), Some("hello".to_string()));
