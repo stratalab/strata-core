@@ -44,3 +44,9 @@ stratadb.org/
 !/docs/engine/*.md
 !/docs/storage/
 !/docs/storage/*.md
+!/docs/architecture/
+!/docs/architecture/*.md
+!/docs/design-system/
+!/docs/design-system/*.md
+!/docs/design-system/*.jpeg
+!/docs/design-system/*.png
