@@ -622,15 +622,6 @@ pub struct TransactionContext {
     /// version, independent of the read_set.
     pub cas_set: Vec<CASOperation>,
 
-    // Event state tracking (lazy allocation, like JSON fields)
-    /// Tracks the cumulative event sequence count across Transaction instances.
-    /// This allows multiple Transaction::new() calls within the same session
-    /// transaction to continue from the correct sequence number.
-    event_sequence_count: Option<u64>,
-
-    /// Tracks the last event hash for hash chaining across Transaction instances.
-    event_last_hash: Option<[u8; 32]>,
-
     // JSON Operations (M5 - lazy allocation for zero overhead when not using JSON)
     /// JSON path reads for fine-grained conflict detection
     ///
@@ -725,8 +716,6 @@ impl TransactionContext {
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
             cas_set: Vec::new(),
-            event_sequence_count: None,
-            event_last_hash: None,
             json_reads: None,
             json_writes: None,
             json_snapshot_versions: None,
@@ -778,8 +767,6 @@ impl TransactionContext {
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
             cas_set: Vec::new(),
-            event_sequence_count: None,
-            event_last_hash: None,
             json_reads: None,
             json_writes: None,
             json_snapshot_versions: None,
@@ -1354,31 +1341,6 @@ impl TransactionContext {
             new_value,
         });
         Ok(())
-    }
-
-    // === Event State Tracking ===
-
-    /// Get the current event sequence count tracked across Transaction instances.
-    ///
-    /// Returns 0 if no events have been appended in this transaction context.
-    pub fn event_sequence_count(&self) -> u64 {
-        self.event_sequence_count.unwrap_or(0)
-    }
-
-    /// Get the last event hash tracked across Transaction instances.
-    ///
-    /// Returns the zero hash if no events have been appended in this transaction context.
-    pub fn event_last_hash(&self) -> [u8; 32] {
-        self.event_last_hash.unwrap_or([0u8; 32])
-    }
-
-    /// Update the event state after an event append.
-    ///
-    /// Called by Transaction::event_append() to persist event continuity
-    /// across multiple Transaction instances within the same session transaction.
-    pub fn set_event_state(&mut self, count: u64, last_hash: [u8; 32]) {
-        self.event_sequence_count = Some(count);
-        self.event_last_hash = Some(last_hash);
     }
 
     // === JSON Operations (M5 Epic 30) ===
@@ -2146,10 +2108,6 @@ impl TransactionContext {
         shrink_if_large!(self.delete_set);
         shrink_if_large!(self.key_write_modes);
         shrink_if_large!(self.ttl_map);
-
-        // Clear event state (deallocate, since event ops are rare)
-        self.event_sequence_count = None;
-        self.event_last_hash = None;
 
         // Clear JSON fields (deallocate, since JSON ops are rare)
         self.json_reads = None;
