@@ -108,6 +108,13 @@ pub trait EventLogExt {
 ///
 /// The `_in_space` methods accept an explicit space parameter. The convenience
 /// methods (`json_get`, `json_set`, `json_create`) delegate to them with `"default"`.
+///
+/// New JSON transaction logic should prefer the engine-owned scoped transaction
+/// path exposed by `crate::transaction::Transaction::scoped()` and the public
+/// branch transaction wrappers. The raw `TransactionContext` implementation of
+/// this trait is retained as a compatibility seam for older closure-style call
+/// sites and performs direct full-document read/modify/write operations instead
+/// of buffering JSON path semantics through `JsonTxnState`.
 pub trait JsonStoreExt {
     /// Get value at path in a document in the specified space
     fn json_get_in_space(

@@ -1734,8 +1734,14 @@ impl crate::search::Searchable for JsonStore {
 // JsonStoreExt Implementation
 // =============================================================================
 //
-// Extension trait implementation for cross-primitive transactions.
-// Allows JSON operations within a TransactionContext.
+// Compatibility-only extension trait implementation for raw
+// `Database::transaction(|txn| ...)` closures.
+//
+// This path intentionally remains a direct full-document read/modify/write
+// bridge on `TransactionContext`. New JSON transaction behavior should go
+// through engine-owned scoped transactions (`Transaction::scoped`,
+// `BranchHandle::transaction`, executor/session transaction wrappers), which
+// buffer JSON semantics in `JsonTxnState` before commit.
 
 impl JsonStoreExt for TransactionContext {
     fn json_get_in_space(
@@ -1770,24 +1776,24 @@ impl JsonStoreExt for TransactionContext {
         path.validate().map_err(limit_error_to_error)?;
         value.validate().map_err(limit_error_to_error)?;
 
+        let branch_id = self.branch_id;
         let key = Key::new_json(
-            Arc::new(Namespace::for_branch_space(self.branch_id, space)),
+            Arc::new(Namespace::for_branch_space(branch_id, space)),
             doc_id,
         );
-
-        let stored = self.get(&key)?.ok_or_else(|| {
-            StrataError::invalid_input(format!("JSON document {} not found", doc_id))
-        })?;
-        let mut doc = JsonStore::deserialize_doc_with_fallback_id(&stored, doc_id)?;
-
-        set_at_path(&mut doc.value, path, value)
-            .map_err(|e| StrataError::invalid_input(format!("Path error: {}", e)))?;
-        doc.touch();
-
-        let serialized = JsonStore::serialize_doc(&doc)?;
-        self.put(key, serialized)?;
-
-        Ok(Version::counter(doc.version))
+        crate::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
+        JsonStore::set_in_txn(
+            self,
+            &key,
+            doc_id,
+            path,
+            value,
+            true,
+            &branch_id,
+            space,
+            &[],
+        )
+        .map(|(version, _)| version)
     }
 
     fn json_create_in_space(
@@ -3423,6 +3429,34 @@ mod tests {
                 "Default space should not have custom space doc"
             );
 
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn test_json_store_ext_set_creates_missing_document() {
+        use crate::primitives::extensions::JsonStoreExt;
+
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+
+        db.transaction(branch_id, |txn| {
+            txn.json_set(
+                "doc1",
+                &"profile.name".parse().unwrap(),
+                JsonValue::from("Ada"),
+            )?;
+
+            let stored = txn
+                .json_get("doc1", &JsonPath::root())?
+                .expect("json_set should create a missing document");
+            assert_eq!(
+                stored,
+                JsonValue::from_value(serde_json::json!({
+                    "profile": { "name": "Ada" }
+                }))
+            );
             Ok(())
         })
         .unwrap();

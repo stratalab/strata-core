@@ -30,12 +30,14 @@
 use crate::database::Database;
 use crate::primitives::extensions::{EventLogExt, JsonStoreExt, KVStoreExt};
 use crate::semantics::json::{JsonPath, JsonValue};
+use crate::transaction_ops::TransactionOps;
 use crate::StrataResult;
+use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::types::BranchId;
 use strata_core::value::Value;
+use strata_storage::Namespace;
 
 // ============================================================================
 // BranchHandle
@@ -73,6 +75,71 @@ use strata_core::value::Value;
 pub struct BranchHandle {
     db: Arc<Database>,
     branch_id: BranchId,
+}
+
+/// Branch-scoped transaction wrapper for public branch transactions.
+///
+/// This wrapper preserves the generic lower transaction context for raw KV/event
+/// operations while routing JSON document semantics through the engine-owned
+/// scoped transaction surface.
+pub struct BranchTransaction<'a> {
+    txn: &'a mut crate::transaction::Transaction,
+}
+
+impl<'a> BranchTransaction<'a> {
+    fn new(txn: &'a mut crate::transaction::Transaction) -> Self {
+        Self { txn }
+    }
+}
+
+impl Deref for BranchTransaction<'_> {
+    type Target = crate::transaction::Transaction;
+
+    fn deref(&self) -> &Self::Target {
+        self.txn
+    }
+}
+
+impl DerefMut for BranchTransaction<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.txn
+    }
+}
+
+impl JsonStoreExt for BranchTransaction<'_> {
+    fn json_get_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        path: &JsonPath,
+    ) -> StrataResult<Option<JsonValue>> {
+        let namespace = Arc::new(Namespace::for_branch_space(self.txn.branch_id(), space));
+        let mut scoped = self.txn.scoped(namespace);
+        scoped.json_get_path(doc_id, path)
+    }
+
+    fn json_set_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        path: &JsonPath,
+        value: JsonValue,
+    ) -> StrataResult<Version> {
+        let namespace = Arc::new(Namespace::for_branch_space(self.txn.branch_id(), space));
+        let mut scoped = self.txn.scoped(namespace);
+        scoped.json_set(doc_id, path, value)
+    }
+
+    fn json_create_in_space(
+        &mut self,
+        space: &str,
+        doc_id: &str,
+        value: JsonValue,
+    ) -> StrataResult<Version> {
+        let namespace = Arc::new(Namespace::for_branch_space(self.txn.branch_id(), space));
+        let mut scoped = self.txn.scoped(namespace);
+        scoped.json_create(doc_id, value)
+    }
 }
 
 impl BranchHandle {
@@ -127,9 +194,15 @@ impl BranchHandle {
     /// ```
     pub fn transaction<F, T>(&self, f: F) -> StrataResult<T>
     where
-        F: FnOnce(&mut TransactionContext) -> StrataResult<T>,
+        F: FnOnce(&mut BranchTransaction<'_>) -> StrataResult<T>,
     {
-        self.db.transaction(self.branch_id, f)
+        let mut txn = self.db.begin_transaction(self.branch_id)?;
+        let value = {
+            let mut branch_txn = BranchTransaction::new(&mut txn);
+            f(&mut branch_txn)?
+        };
+        txn.commit()?;
+        Ok(value)
     }
 }
 
@@ -232,26 +305,36 @@ impl JsonHandle {
 
     /// Create a new JSON document
     pub fn create(&self, doc_id: &str, value: JsonValue) -> StrataResult<Version> {
-        self.db
-            .transaction(self.branch_id, |txn| txn.json_create(doc_id, value))
+        let mut txn = self.db.begin_transaction(self.branch_id)?;
+        let namespace = Arc::new(Namespace::for_branch_space(self.branch_id, "default"));
+        let version = txn.scoped(namespace).json_create(doc_id, value)?;
+        txn.commit()?;
+        Ok(version)
     }
 
     /// Get value at path in a document
     pub fn get(&self, doc_id: &str, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
-        self.db
-            .transaction(self.branch_id, |txn| txn.json_get(doc_id, path))
+        let mut txn = self.db.begin_transaction(self.branch_id)?;
+        let namespace = Arc::new(Namespace::for_branch_space(self.branch_id, "default"));
+        let value = txn.scoped(namespace).json_get_path(doc_id, path)?;
+        txn.commit()?;
+        Ok(value)
     }
 
     /// Set value at path in a document
     pub fn set(&self, doc_id: &str, path: &JsonPath, value: JsonValue) -> StrataResult<Version> {
-        self.db
-            .transaction(self.branch_id, |txn| txn.json_set(doc_id, path, value))
+        let mut txn = self.db.begin_transaction(self.branch_id)?;
+        let namespace = Arc::new(Namespace::for_branch_space(self.branch_id, "default"));
+        let version = txn.scoped(namespace).json_set(doc_id, path, value)?;
+        txn.commit()?;
+        Ok(version)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Database, TransactionOps};
 
     #[test]
     fn test_branch_handle_is_clone_send_sync() {
@@ -260,5 +343,60 @@ mod tests {
         assert_clone_send_sync::<KvHandle>();
         assert_clone_send_sync::<EventHandle>();
         assert_clone_send_sync::<JsonHandle>();
+    }
+
+    #[test]
+    fn test_json_handle_set_creates_missing_document() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+        let handle = BranchHandle::new(db.clone(), branch_id);
+
+        handle
+            .json()
+            .set(
+                "doc1",
+                &"profile.name".parse().unwrap(),
+                JsonValue::from("Ada"),
+            )
+            .unwrap();
+
+        let doc = handle
+            .json()
+            .get("doc1", &JsonPath::root())
+            .unwrap()
+            .expect("document should exist");
+        assert_eq!(
+            doc,
+            JsonValue::from_value(serde_json::json!({
+                "profile": { "name": "Ada" }
+            }))
+        );
+    }
+
+    #[test]
+    fn test_branch_transaction_json_uses_engine_scoped_state() {
+        let db = Database::cache().unwrap();
+        let branch_id = BranchId::new();
+        let branch = BranchHandle::new(db, branch_id);
+
+        branch
+            .transaction(|txn| {
+                txn.json_set(
+                    "doc1",
+                    &"profile.age".parse().unwrap(),
+                    JsonValue::from(30i64),
+                )?;
+                let doc = txn
+                    .json_get("doc1", &JsonPath::root())?
+                    .expect("document should be visible inside branch transaction");
+                assert_eq!(
+                    doc,
+                    JsonValue::from_value(serde_json::json!({
+                        "profile": { "age": 30 }
+                    }))
+                );
+                Ok(())
+            })
+            .unwrap();
     }
 }

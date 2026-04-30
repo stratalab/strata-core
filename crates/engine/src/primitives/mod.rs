@@ -48,7 +48,7 @@ pub mod space;
 
 // Re-exports - primitives are exported as they're implemented
 pub use branch::{resolve_branch_name, BranchMetadata, BranchStatus};
-pub use branch::{BranchHandle, EventHandle, JsonHandle, KvHandle};
+pub use branch::{BranchHandle, BranchTransaction, EventHandle, JsonHandle, KvHandle};
 pub use event::{Event, EventLog};
 pub use json::{JsonDoc, JsonStore};
 pub use kv::KVStore;

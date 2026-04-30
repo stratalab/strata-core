@@ -238,15 +238,18 @@ from falling back into `TransactionContext` under a different name.
 
 ## Execution Order
 
-`ST2` should run as three ordered sub-epics:
+`ST2` should run as one small event extraction followed by one coordinated JSON
+extraction:
 
 1. `ST2A` — event continuity extraction
-2. `ST2B` — JSON write materialization extraction
-3. `ST2C` — JSON path/patch conflict policy extraction
+2. `ST2 JSON` — one engine-owned JSON transaction-semantics move executed as
+   several small commits
 
-Do not start with JSON conflict policy. It is the most entangled seam and it
-depends on where engine-owned JSON transaction state lives after `ST2A` and
-`ST2B`.
+Do not try to land JSON write materialization in isolation if it requires new
+temporary lower-layer accessors or a synthetic manager hook. The JSON read
+state, write state, OCC policy, path-overlap policy, and commit-time
+materialization are one semantic bundle. They should move together
+architecturally, even if the implementation is verified in smaller commits.
 
 ## ST2A — Event Continuity Extraction
 
@@ -327,29 +330,41 @@ These must stay green or be replaced with stronger engine-owned coverage:
 - the adjacent concurrent append OCC regression in
   [crates/engine/src/database/tests/regressions.rs](../../crates/engine/src/database/tests/regressions.rs)
 
-## ST2B — JSON Write Materialization Extraction
+## ST2B/ST2C — JSON Transaction Semantics Extraction
 
 ### Goal
 
-Move JSON write materialization out of `concurrency` and into engine-owned JSON
+Move JSON transaction semantics out of `concurrency` and into engine-owned JSON
 transaction semantics.
 
 ### Current Problem
 
-Today the lower layer decides:
+Today the lower layer decides all of the following:
 
 - how buffered JSON patch intent becomes a full stored document
 - how patch sequences bump document version
 - how root delete/create/update map onto the stored `JsonDoc` shape
 - how the stored document bytes are serialized before generic commit
+- which document versions must be remembered for OCC
+- which path reads and path writes are part of the transaction view
+- which overlapping writes conflict on the same document
 
-That logic is currently split between:
+That logic is currently split between lower state, lower validation, and the
+manager commit hook:
 
 - `materialize_json_writes()` in
   [crates/concurrency/src/transaction.rs](../../crates/concurrency/src/transaction.rs)
 - the direct manager hook in
   [crates/concurrency/src/manager.rs](../../crates/concurrency/src/manager.rs)
 - the lower duplicate `StoredJsonDoc` encode/decode helpers
+- `JsonPathRead`
+- `JsonPatchEntry`
+- `json_reads`
+- `json_writes`
+- `json_snapshot_versions`
+- `validate_json_set()`
+- `validate_json_paths()`
+- `check_write_write_conflicts()`
 
 ### Exact Changes Needed
 
@@ -363,15 +378,28 @@ Remove lower-layer ownership of:
 - `materialize_json_writes()`
 - the direct `txn.materialize_json_writes()` call in
   [crates/concurrency/src/manager.rs](../../crates/concurrency/src/manager.rs)
+- `JsonPathRead`
+- `JsonPatchEntry`
+- `json_reads`
+- `json_writes`
+- `json_snapshot_versions`
+- `validate_json_set()`
+- `validate_json_paths()`
+- `check_write_write_conflicts()`
 
 After this step, the commit manager should see only generic writes, deletes,
-and CAS state.
+and CAS state, and the lower validator should be primitive-agnostic again.
 
 #### In `strata-engine`
 
-Introduce engine-owned JSON transaction materialization that:
+Introduce engine-owned JSON transaction state and let it own the full JSON
+semantic bundle:
 
 - buffers JSON mutation intent in engine-owned semantic state
+- tracks observed document versions in engine-owned semantic state
+- tracks JSON path reads and writes in engine-owned semantic state
+- preserves the missing-document version-zero rule for create-if-absent races
+- validates overlapping writes on the same document before generic commit
 - reconstructs the base document from snapshot state
 - applies pending patches in order
 - preserves the existing stored `JsonDoc` encoding
@@ -393,20 +421,26 @@ The main engine touch points are likely:
 - [crates/engine/src/primitives/json/mod.rs](../../crates/engine/src/primitives/json/mod.rs)
 - [crates/engine/src/database/transaction.rs](../../crates/engine/src/database/transaction.rs)
 
-The important commit-path change is that engine must finalize semantic JSON
-state into generic mutations before handing the lower context to the generic
-commit manager.
+The commit order after the JSON extraction should be:
+
+1. engine validates JSON semantic state
+2. engine materializes JSON deltas into generic writes/deletes
+3. lower runtime performs only generic validation and generic commit
 
 ### Acceptance
 
+- `concurrency` no longer stores JSON semantic delta/read state
 - `concurrency` no longer materializes JSON writes
+- `concurrency` no longer validates JSON-specific conflicts
 - the manager commit path no longer has primitive-specific JSON hooks
+- engine owns JSON document OCC, path-overlap rules, and document materialization
 - engine owns how JSON patch intent becomes stored document bytes
 - stored `JsonDoc` shape and legacy read compatibility remain unchanged
+- lower transaction validation is primitive-agnostic again
 
 ### Critical Tests
 
-These behaviors must stay covered:
+The materialization and compatibility regressions must survive intact:
 
 - `test_materialize_json_writes_emits_json_doc_shape` from
   [crates/concurrency/src/transaction.rs](../../crates/concurrency/src/transaction.rs)
@@ -415,82 +449,7 @@ These behaviors must stay covered:
 - commit-path tests that prove the generic commit still persists the canonical
   document shape
 
-## ST2C — JSON Path/Patch Conflict Policy Extraction
-
-### Goal
-
-Move JSON document OCC tracking and overlapping-path conflict policy out of
-`concurrency` and into engine-owned JSON transaction semantics.
-
-### Current Problem
-
-The lower transaction layer currently owns both:
-
-- JSON document snapshot-version tracking
-- overlapping write-path conflict rules
-
-The relevant state and validators are:
-
-- `JsonPathRead`
-- `JsonPatchEntry`
-- `json_reads`
-- `json_writes`
-- `json_snapshot_versions`
-- `validate_json_set()`
-- `validate_json_paths()`
-- `check_write_write_conflicts()`
-
-This is JSON-specific concurrency policy living below engine.
-
-### Exact Changes Needed
-
-#### In `strata-concurrency`
-
-Strip JSON-specific semantic state and validation out of:
-
-- [crates/concurrency/src/transaction.rs](../../crates/concurrency/src/transaction.rs)
-- [crates/concurrency/src/validation.rs](../../crates/concurrency/src/validation.rs)
-- [crates/concurrency/src/conflict.rs](../../crates/concurrency/src/conflict.rs)
-- [crates/concurrency/src/lib.rs](../../crates/concurrency/src/lib.rs)
-
-After this step:
-
-- `validate_transaction()` should be generic again
-- `ConflictType` should no longer need JSON-specific variants
-- the lower public surface should not export a JSON semantic trait
-
-#### In `strata-engine`
-
-Move JSON transactional validation into engine-owned semantic state:
-
-- track observed document versions in engine-owned state
-- track pending JSON path reads/writes in engine-owned state
-- preserve the missing-document version-zero rule for create-if-absent races
-- validate overlapping writes on the same document before generic commit
-
-The main engine touch points are likely:
-
-- [crates/engine/src/transaction/context.rs](../../crates/engine/src/transaction/context.rs)
-- [crates/engine/src/transaction/owned.rs](../../crates/engine/src/transaction/owned.rs)
-- [crates/engine/src/primitives/json/mod.rs](../../crates/engine/src/primitives/json/mod.rs)
-- [crates/engine/src/database/transaction.rs](../../crates/engine/src/database/transaction.rs)
-
-The commit order after `ST2C` should be:
-
-1. engine validates JSON semantic state
-2. engine materializes JSON deltas into generic writes/deletes
-3. lower runtime performs only generic validation and generic commit
-
-### Acceptance
-
-- `concurrency` no longer exports JSON transaction-semantic state
-- `concurrency` no longer validates JSON-specific conflicts
-- engine owns JSON document OCC and path-overlap rules
-- lower transaction validation is primitive-agnostic again
-
-### Critical Tests
-
-The issue-1915 regression family must survive intact:
+The issue-1915 regression family must also survive intact:
 
 - `test_issue_1915_json_missing_doc_read_invisible_to_occ`
 - `test_issue_1915_json_get_missing_doc_records_read`
@@ -502,15 +461,20 @@ must also survive, ideally as engine-owned JSON semantic tests.
 
 ## Recommended Commit Shape
 
-Execute `ST2` as three small commits, one semantic seam at a time:
+Execute `ST2` as one small event move followed by a coordinated JSON series:
 
-1. `ST2A` — add the engine semantic sidecar and move event continuity into it
-2. `ST2B` — move JSON materialization into engine and remove the manager hook
-3. `ST2C` — move JSON read/write conflict policy into engine and make the
-   lower validator generic again
+1. `ST2A` — move event continuity out of the lower transaction layer
+2. `ST2 JSON-1` — introduce engine-owned JSON transaction state
+3. `ST2 JSON-2` — repoint engine JSON transaction methods to that state
+4. `ST2 JSON-3` — move JSON validation and materialization into the engine
+   commit path
+5. `ST2 JSON-4` — delete the lower JSON semantic state, lower validators, and
+   the manager materialization hook
 
-Do not combine `ST2B` and `ST2C`. Materialization and conflict policy touch
-the same state, but they are separable and should be verified independently.
+Do not build temporary lower-layer accessors solely to let engine reach back
+into `json_writes` after validation. If a change requires that kind of seam,
+it is a sign that the JSON extraction should advance as one coordinated move
+rather than as isolated `ST2B` and `ST2C` patches.
 
 ## Compatibility Rules
 
@@ -551,14 +515,12 @@ Minimum required checks by sub-step:
    - event sequence/hash regressions
    - manual transaction wrapper tests if constructor signatures change
 
-2. `ST2B`
+2. `ST2 JSON`
    - JSON document shape/materialization regressions
    - legacy raw JSON compatibility tests
-   - commit-path tests proving generic writes still land in canonical form
-
-3. `ST2C`
    - issue-1915 missing-document OCC regressions
    - overlapping write-path regressions
+   - commit-path tests proving generic writes still land in canonical form
    - any higher-level JSON transaction tests that exercise create/update/delete
      within a transaction
 

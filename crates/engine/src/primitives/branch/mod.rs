@@ -7,7 +7,7 @@
 mod handle;
 mod index;
 
-pub use handle::{BranchHandle, EventHandle, JsonHandle, KvHandle};
+pub use handle::{BranchHandle, BranchTransaction, EventHandle, JsonHandle, KvHandle};
 pub(crate) use index::{
     aliases_default_branch_sentinel, default_branch_marker_key, read_default_branch_marker,
     validate_reserved_branch_aliases, write_default_branch_marker, BranchIndex,

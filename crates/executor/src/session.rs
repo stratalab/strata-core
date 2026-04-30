@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_engine::{Database, Transaction, TransactionContext};
+use strata_engine::{Database, Transaction};
 use strata_security::AccessMode;
 use strata_storage::Namespace;
 
@@ -158,13 +158,10 @@ impl LocalSession {
             .txn
             .as_mut()
             .expect("transaction should be active while dispatching in-transaction commands");
-        let ctx = txn
-            .context_mut()
-            .expect("transaction context should be available until commit or rollback");
 
         dispatch_in_txn(
             executor,
-            ctx,
+            txn,
             namespace,
             branch_id,
             &space,
@@ -510,7 +507,7 @@ fn command_space(command: &Command) -> String {
 
 fn dispatch_in_txn(
     executor: &Executor,
-    ctx: &mut TransactionContext,
+    txn: &mut Transaction,
     namespace: Arc<Namespace>,
     branch_id: strata_core::types::BranchId,
     space: &str,
@@ -539,6 +536,9 @@ fn dispatch_in_txn(
         | other @ Command::KvBatchGet { .. }
         | other @ Command::KvBatchDelete { .. }
         | other @ Command::KvBatchExists { .. } => {
+            let ctx = txn
+                .context_mut()
+                .expect("transaction context should be available until commit or rollback");
             kv::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
         }
         other @ Command::JsonGet { .. }
@@ -548,13 +548,16 @@ fn dispatch_in_txn(
         | other @ Command::JsonBatchSet { .. }
         | other @ Command::JsonBatchGet { .. }
         | other @ Command::JsonBatchDelete { .. } => {
-            json::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
+            json::execute_in_txn(executor.primitives(), txn, namespace, space, other, effects)
         }
         other @ Command::EventAppend { .. }
         | other @ Command::EventGet { .. }
         | other @ Command::EventGetByType { .. }
         | other @ Command::EventLen { .. }
         | other @ Command::EventBatchAppend { .. } => {
+            let ctx = txn
+                .context_mut()
+                .expect("transaction context should be available until commit or rollback");
             event::execute_in_txn(executor.primitives(), ctx, namespace, space, other, effects)
         }
         other @ Command::GraphCreate { .. }
@@ -567,11 +570,17 @@ fn dispatch_in_txn(
         | other @ Command::GraphAddEdge { .. }
         | other @ Command::GraphRemoveEdge { .. }
         | other @ Command::GraphNeighbors { .. } => {
+            let ctx = txn
+                .context_mut()
+                .expect("transaction context should be available until commit or rollback");
             graph::execute_in_txn(executor.primitives(), ctx, branch_id, space, other)
         }
         other @ Command::VectorUpsert { .. }
         | other @ Command::VectorDelete { .. }
         | other @ Command::VectorGet { .. } => {
+            let ctx = txn
+                .context_mut()
+                .expect("transaction context should be available until commit or rollback");
             vector::execute_in_txn(executor.primitives(), ctx, branch_id, space, other)
         }
 

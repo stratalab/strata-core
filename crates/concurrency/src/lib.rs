@@ -8,9 +8,7 @@
 //! - Conflict detection at commit time
 //! - Compare-and-swap (CAS) operations
 //! - WAL integration for durability
-//! - JSON region-based conflict detection
 
-pub(crate) mod conflict;
 pub mod lock_ordering;
 pub mod manager;
 pub mod payload;
@@ -38,4 +36,4 @@ pub use recovery::{
     apply_wal_record_to_memory_storage, manifest_error_to_strata_error, CoordinatorRecoveryError,
     RecoveryCoordinator, RecoveryPlan, RecoveryResult, RecoveryStats,
 };
-pub use transaction::{CommitError, JsonStoreExt, TransactionContext, TransactionStatus};
+pub use transaction::{CommitError, TransactionContext, TransactionStatus};

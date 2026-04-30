@@ -1,10 +1,9 @@
 use std::sync::Arc;
 
 use strata_engine::primitives::json::index::IndexType;
-use strata_engine::transaction::context::Transaction as ScopedTransaction;
 use strata_engine::transaction_ops::TransactionOps as _;
-use strata_engine::TransactionContext;
-use strata_storage::{Key, Namespace, TypeTag};
+use strata_engine::Transaction as EngineTransaction;
+use strata_storage::Namespace;
 
 use crate::bridge::{
     extract_version, json_to_value, parse_path, require_branch_exists, to_core_branch_id,
@@ -414,7 +413,7 @@ pub(crate) fn batch_delete(
 
 pub(crate) fn execute_in_txn(
     primitives: &Arc<Primitives>,
-    ctx: &mut TransactionContext,
+    ctx: &mut EngineTransaction,
     namespace: Arc<Namespace>,
     space: &str,
     command: crate::Command,
@@ -423,7 +422,7 @@ pub(crate) fn execute_in_txn(
     match command {
         crate::Command::JsonGet { key, path, .. } => {
             convert_result(validate_key(&key))?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let mut txn = ctx.scoped(namespace);
             let path = convert_result(parse_path(&path))?;
             let result = txn.json_get(&key).map_err(crate::Error::from)?;
             Ok(Output::MaybeVersioned(match result {
@@ -443,7 +442,7 @@ pub(crate) fn execute_in_txn(
         } => {
             convert_result(validate_key(&key))?;
             convert_result(validate_value(&value, &primitives.limits))?;
-            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let mut txn = ctx.scoped(namespace);
             let path = convert_result(parse_path(&path))?;
             let value = convert_result(value_to_json(value))?;
             let version = txn
@@ -459,14 +458,14 @@ pub(crate) fn execute_in_txn(
             convert_result(validate_key(&key))?;
             let path = convert_result(parse_path(&path))?;
             if path.is_root() {
-                let mut txn = ScopedTransaction::new(ctx, namespace);
+                let mut txn = ctx.scoped(namespace);
                 let deleted = txn.json_delete(&key).map_err(crate::Error::from)?;
                 if deleted {
                     effects.record_json(space, &key);
                 }
                 Ok(Output::DeleteResult { key, deleted })
             } else {
-                let mut txn = ScopedTransaction::new(ctx, namespace);
+                let mut txn = ctx.scoped(namespace);
                 let Some(mut doc) = txn
                     .json_get_path(&key, &strata_engine::JsonPath::root())
                     .map_err(crate::Error::from)?
@@ -508,15 +507,10 @@ pub(crate) fn execute_in_txn(
                     convert_result(validate_key(prefix))?;
                 }
             }
-            let prefix_key = match prefix {
-                Some(ref prefix) => Key::new_json(namespace.clone(), prefix),
-                None => Key::new(namespace.clone(), TypeTag::Json, vec![]),
-            };
-            let entries = ctx.scan_prefix(&prefix_key).map_err(crate::Error::from)?;
-            let mut keys: Vec<String> = entries
-                .into_iter()
-                .filter_map(|(key, _)| key.user_key_string())
-                .collect();
+            let mut txn = ctx.scoped(namespace);
+            let mut keys = txn
+                .json_list_keys(prefix.as_deref())
+                .map_err(crate::Error::from)?;
             if let Some(ref cursor) = cursor {
                 keys.retain(|key| key.as_str() > cursor.as_str());
             }
@@ -537,7 +531,7 @@ pub(crate) fn execute_in_txn(
                 };
                 entries.len()
             ];
-            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let mut txn = ctx.scoped(namespace);
             for (index, entry) in entries.into_iter().enumerate() {
                 if let Err(error) = validate_key(&entry.key) {
                     results[index].error = Some(error.to_string());

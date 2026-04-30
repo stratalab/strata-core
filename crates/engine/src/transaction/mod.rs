@@ -18,6 +18,7 @@
 //! TransactionOps trait for unified primitive access within transactions.
 
 pub mod context;
+pub mod json_state;
 pub mod owned;
 pub mod pool;
 
