@@ -1042,9 +1042,8 @@ fn test_issue_1914_sequence_from_persisted_meta() {
         let v = t
             .event_append("evt", Value::String("second".into()))
             .unwrap();
-        // Before fix: base_sequence comes from ctx.event_sequence_count()
-        // which defaults to 0 → duplicate sequence 0.
-        // After fix: reads persisted meta.next_sequence = 1.
+        // The second scoped wrapper must continue from persisted metadata
+        // rather than resetting back to sequence 0.
         assert_eq!(
             v,
             strata_core::Version::seq(1),

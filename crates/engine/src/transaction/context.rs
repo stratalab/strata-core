@@ -54,23 +54,30 @@ pub struct Transaction<'a> {
     base_sequence: u64,
     /// Last hash for chaining (starts as zero hash or last event's hash)
     last_hash: [u8; 32],
+    /// Whether the event chain state is already initialized for this wrapper.
+    ///
+    /// Wrappers created with `new()` defer initialization until the first
+    /// event operation so wrapper construction does not create extra reads.
+    /// Wrappers created with `with_base_sequence()` keep the caller-provided
+    /// state authoritative.
+    event_state_initialized: bool,
 }
 
 impl<'a> Transaction<'a> {
     /// Create a new Transaction wrapper
     ///
-    /// Reads event state (sequence count, last hash) from TransactionContext
-    /// to maintain continuity across multiple Transaction instances within
-    /// the same session transaction.
+    /// Event continuity is loaded lazily from the transaction context's
+    /// staged event metadata on first use. This keeps primitive semantics in
+    /// the engine while relying on the lower transaction buffer as the single
+    /// source of truth for intra-transaction continuity.
     pub fn new(ctx: &'a mut TransactionContext, namespace: Arc<Namespace>) -> Self {
-        let base_sequence = ctx.event_sequence_count();
-        let last_hash = ctx.event_last_hash();
         Self {
             ctx,
             namespace,
             pending_events: Vec::new(),
-            base_sequence,
-            last_hash,
+            base_sequence: 0,
+            last_hash: [0u8; 32],
+            event_state_initialized: false,
         }
     }
 
@@ -89,6 +96,7 @@ impl<'a> Transaction<'a> {
             pending_events: Vec::new(),
             base_sequence,
             last_hash,
+            event_state_initialized: true,
         }
     }
 
@@ -236,11 +244,12 @@ impl<'a> TransactionOps for Transaction<'a> {
             _ => EventLogMeta::default(),
         };
 
-        // On first append in this Transaction instance, initialize from
-        // persisted state instead of ephemeral defaults.
-        if self.pending_events.is_empty() {
+        // On first append in a lazily initialized wrapper, load continuity
+        // from the transaction view before assigning a new sequence.
+        if !self.event_state_initialized {
             self.base_sequence = persisted_meta.next_sequence;
             self.last_hash = persisted_meta.head_hash;
+            self.event_state_initialized = true;
         }
 
         let sequence = self.next_sequence();
@@ -305,12 +314,6 @@ impl<'a> TransactionOps for Transaction<'a> {
         })?;
         self.ctx.put(meta_key, Value::String(meta_json))?;
 
-        // Update TransactionContext event state for cross-Transaction continuity
-        self.ctx.set_event_state(
-            self.base_sequence + self.pending_events.len() as u64 + 1,
-            event.hash,
-        );
-
         // Buffer the event
         self.pending_events.push(event);
 
@@ -354,10 +357,10 @@ impl<'a> TransactionOps for Transaction<'a> {
     }
 
     fn event_len(&mut self) -> Result<u64, StrataError> {
-        // If no appends have occurred yet, base_sequence may still be the
-        // uninitialised default (0).  Read persisted meta to get the true
-        // committed count (#1973).
-        if self.pending_events.is_empty() {
+        // If this wrapper has not initialized event state yet, load the
+        // current count from the transaction view instead of trusting the
+        // default zero base.
+        if !self.event_state_initialized && self.pending_events.is_empty() {
             let meta_key = Key::new_event_meta(self.namespace.clone());
             if let Some(Value::String(s)) = self.ctx.get(&meta_key)? {
                 if let Ok(meta) = serde_json::from_str::<EventLogMeta>(&s) {
@@ -709,11 +712,55 @@ mod tests {
     fn test_event_with_base_sequence() {
         let ns = create_test_namespace();
         let store = Arc::new(SegmentedStore::new());
-
-        // Pre-populate event meta in the store to simulate 100 existing events
         let last_hash = [42u8; 32];
+        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
+        let mut txn = Transaction::with_base_sequence(&mut ctx, ns.clone(), 100, last_hash);
+
+        // The explicit base is authoritative even when the store has no event
+        // metadata to read from.
+        assert_eq!(txn.event_len().unwrap(), 100);
+
+        // New events should continue from the explicit base.
+        let v1 = txn.event_append("new_event", Value::Int(1)).unwrap();
+        assert_eq!(v1, Version::seq(100));
+        assert_eq!(txn.event_len().unwrap(), 101);
+
+        // The event should chain from the provided last_hash
+        let event = txn.event_get(100).unwrap().unwrap();
+        assert_eq!(event.value.prev_hash, last_hash);
+    }
+
+    #[test]
+    fn test_event_continuity_across_scoped_wrappers() {
+        let ns = create_test_namespace();
+        let mut ctx = create_test_context(&ns);
+
+        let first_hash = {
+            let mut txn = Transaction::new(&mut ctx, ns.clone());
+            let version = txn.event_append("first", Value::Int(1)).unwrap();
+            assert_eq!(version, Version::seq(0));
+
+            let first = txn.event_get(0).unwrap().unwrap();
+            first.value.hash
+        };
+
+        {
+            let mut txn = Transaction::new(&mut ctx, ns.clone());
+            let version = txn.event_append("second", Value::Int(2)).unwrap();
+            assert_eq!(version, Version::seq(1));
+
+            let second = txn.event_get(1).unwrap().unwrap();
+            assert_eq!(second.value.prev_hash, first_hash);
+        }
+    }
+
+    #[test]
+    fn test_event_continuity_comes_from_staged_meta() {
+        let ns = create_test_namespace();
+        let store = Arc::new(SegmentedStore::new());
+        let last_hash = [9u8; 32];
         let meta = EventLogMeta {
-            next_sequence: 100,
+            next_sequence: 7,
             head_hash: last_hash,
             hash_version: HASH_VERSION_SHA256,
             streams: Default::default(),
@@ -731,17 +778,25 @@ mod tests {
             )
             .unwrap();
 
-        let mut ctx = TransactionContext::with_store(TxnId(2), ns.branch_id, store);
-        let mut txn = Transaction::with_base_sequence(&mut ctx, ns.clone(), 100, last_hash);
+        let mut ctx = TransactionContext::with_store(TxnId(3), ns.branch_id, store);
 
-        // New events should continue from base
-        let v1 = txn.event_append("new_event", Value::Int(1)).unwrap();
-        assert_eq!(v1, Version::seq(100));
-        assert_eq!(txn.event_len().unwrap(), 101);
+        {
+            let mut txn = Transaction::new(&mut ctx, ns.clone());
+            assert_eq!(txn.event_len().unwrap(), 7);
+            let version = txn.event_append("next", Value::Int(1)).unwrap();
+            assert_eq!(version, Version::seq(7));
+            let event = txn.event_get(7).unwrap().unwrap();
+            assert_eq!(event.value.prev_hash, last_hash);
+        }
 
-        // The event should chain from the provided last_hash
-        let event = txn.event_get(100).unwrap().unwrap();
-        assert_eq!(event.value.prev_hash, last_hash);
+        {
+            let mut txn = Transaction::new(&mut ctx, ns.clone());
+            assert_eq!(txn.event_len().unwrap(), 8);
+            let version = txn.event_append("again", Value::Int(2)).unwrap();
+            assert_eq!(version, Version::seq(8));
+            let event = txn.event_get(8).unwrap().unwrap();
+            assert_ne!(event.value.prev_hash, [0u8; 32]);
+        }
     }
 
     #[test]
