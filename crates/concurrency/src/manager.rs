@@ -413,7 +413,7 @@ impl TransactionManager {
         external_version: Option<CommitVersion>,
     ) -> std::result::Result<CommitVersion, CommitError> {
         // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
-        if txn.is_read_only() && txn.json_writes().is_empty() {
+        if txn.is_read_only() {
             if !txn.is_active() {
                 return Err(CommitError::InvalidState(format!(
                     "Cannot commit transaction {} from {:?} state - must be Active",
@@ -456,12 +456,9 @@ impl TransactionManager {
             return Err(CommitError::BranchDeleting(txn.branch_id));
         }
 
-        // Skip OCC validation for blind writes (no reads, no CAS, no JSON snapshots)
+        // Skip OCC validation for blind writes (no reads, no CAS)
         let t0 = Instant::now();
-        let can_skip_validation = txn.read_set.is_empty()
-            && txn.cas_set.is_empty()
-            && txn.json_snapshot_versions().map_or(true, |v| v.is_empty())
-            && txn.json_writes().is_empty();
+        let can_skip_validation = txn.read_set.is_empty() && txn.cas_set.is_empty();
 
         if can_skip_validation {
             if !txn.is_active() {
@@ -495,15 +492,6 @@ impl TransactionManager {
             }
         };
         let version_alloc_ns = t0.elapsed().as_nanos() as u64;
-
-        // Materialize JSON patches into write_set (#1739 OCC-H1)
-        if let Err(e) = txn.materialize_json_writes() {
-            self.mark_version_applied(commit_version);
-            return Err(CommitError::WALError(format!(
-                "JSON materialization failed: {}",
-                e
-            )));
-        }
 
         // WAL write (durability)
         //
@@ -917,8 +905,7 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::TransactionPayload;
-    use crate::{JsonStoreExt, TransactionContext};
+    use crate::TransactionContext;
     use parking_lot::Mutex as ParkingMutex;
     use std::path::Path;
     use std::sync::Arc;
@@ -1359,33 +1346,6 @@ mod tests {
     }
 
     #[test]
-    fn test_read_only_with_json_writes_takes_normal_path() {
-        let temp_dir = TempDir::new().unwrap();
-        let wal_dir = temp_dir.path().join("wal");
-        let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-
-        let v_before = manager.current_version();
-
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
-        // No KV writes, but has json_writes → not fast-pathed
-        use strata_core::primitives::json::{JsonPatch, JsonPath};
-        txn.record_json_write(
-            create_test_key(&create_test_namespace(branch_id), "doc"),
-            JsonPatch::set_at(JsonPath::root(), serde_json::json!({"a": 1}).into()),
-            CommitVersion(0),
-        );
-
-        let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
-        assert!(result.is_ok());
-
-        // Version SHOULD have been incremented (not fast-pathed)
-        assert!(manager.current_version() > v_before);
-    }
-
-    #[test]
     fn test_read_only_rejects_non_active() {
         let store = Arc::new(SegmentedStore::new());
         let manager = TransactionManager::new(CommitVersion::ZERO);
@@ -1491,29 +1451,6 @@ mod tests {
 
         let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
         assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_write_with_json_snapshot_still_validates() {
-        let temp_dir = TempDir::new().unwrap();
-        let wal_dir = temp_dir.path().join("wal");
-        let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let key = create_test_key(&ns, "json_doc");
-
-        // Has json_snapshot_versions → should go through full validation path
-        // Use version 0 (key doesn't exist) so validation passes
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
-        txn.put(key.clone(), Value::Int(1)).unwrap();
-        txn.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
-
-        let result = manager.commit(&mut txn, store.as_ref(), Some(&mut wal));
-        assert!(result.is_ok());
-        // Verify it went through the normal path (version incremented)
-        assert!(manager.current_version() > CommitVersion::ZERO);
     }
 
     // ========================================================================
@@ -1736,42 +1673,6 @@ mod tests {
         let recovery = test_recovery(temp_dir.path());
         let result = recovery.recover_into_memory_storage().unwrap();
         assert_eq!(result.stats.txns_replayed, 0);
-    }
-
-    #[test]
-    fn test_commit_with_wal_arc_with_json_writes_takes_normal_path() {
-        // A txn with no KV writes but json_writes should still go through
-        // the full path (version alloc + WAL write), not the read-only fast path.
-        let temp_dir = TempDir::new().unwrap();
-        let wal_dir = temp_dir.path().join("wal");
-        let wal = Arc::new(ParkingMutex::new(create_test_wal(&wal_dir)));
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-
-        let v_before = manager.current_version();
-
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
-        // No KV writes, but has json_writes → not fast-pathed
-        use strata_core::primitives::json::{JsonPatch, JsonPath};
-        txn.record_json_write(
-            create_test_key(&ns, "doc"),
-            JsonPatch::set_at(JsonPath::root(), serde_json::json!({"a": 1}).into()),
-            CommitVersion(0),
-        );
-
-        let result = manager.commit_with_wal_arc(&mut txn, store.as_ref(), Some(&wal));
-        assert!(result.is_ok());
-
-        // Version SHOULD have been incremented (not fast-pathed)
-        assert!(manager.current_version() > v_before);
-
-        // WAL should have a record
-        drop(wal);
-        let recovery = test_recovery(temp_dir.path());
-        let rec_result = recovery.recover_into_memory_storage().unwrap();
-        assert_eq!(rec_result.stats.txns_replayed, 1);
     }
 
     #[test]
@@ -2627,164 +2528,6 @@ mod tests {
     }
 
     // ========================================================================
-    // Issue #1739: OCC-H1 — JSON mutation path validates but never persists.
-    // json_writes are ignored by apply_writes() and TransactionPayload.
-    // ========================================================================
-
-    #[test]
-    fn test_issue_1739_json_writes_persisted_to_storage() {
-        use strata_core::primitives::json::JsonPath;
-        #[derive(serde::Deserialize)]
-        struct StoredDoc {
-            id: String,
-            value: serde_json::Value,
-            version: u64,
-            created_at: u64,
-            updated_at: u64,
-        }
-
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let json_key = Key::new_json(ns.clone(), "doc1");
-
-        // Step 1: Store a base JSON document via a regular KV put.
-        let base_doc = serde_json::json!({"name": "alice", "age": 30});
-        let base_bytes = rmp_serde::to_vec(&base_doc).unwrap();
-        let mut txn0 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        txn0.put(json_key.clone(), Value::Bytes(base_bytes))
-            .unwrap();
-        manager.commit(&mut txn0, store.as_ref(), None).unwrap();
-
-        // Step 2: Start a JSON-only transaction that modifies the document.
-        let mut txn1 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        txn1.json_set(
-            &json_key,
-            &"age".parse::<JsonPath>().unwrap(),
-            serde_json::json!(31).into(),
-        )
-        .unwrap();
-
-        // Commit the JSON-only transaction.
-        let commit_v = manager.commit(&mut txn1, store.as_ref(), None).unwrap();
-
-        // Step 3: Read back from storage and verify the document was updated.
-        let result = store.get_versioned(&json_key, commit_v).unwrap();
-        assert!(
-            result.is_some(),
-            "JSON document must exist in storage after json_set commit"
-        );
-        let vv = result.unwrap();
-        let stored_bytes = match &vv.value {
-            Value::Bytes(b) => b,
-            other => panic!("Expected Value::Bytes, got {:?}", other),
-        };
-        assert_eq!(stored_bytes.first().copied(), Some(0x02));
-        let stored_doc: StoredDoc = rmp_serde::from_slice(&stored_bytes[1..]).unwrap();
-        assert_eq!(stored_doc.id, "doc1");
-        assert!(stored_doc.version >= 1);
-        assert!(stored_doc.created_at <= stored_doc.updated_at);
-        assert_eq!(
-            stored_doc.value,
-            serde_json::json!({"name": "alice", "age": 31}),
-            "JSON document must reflect the json_set patch"
-        );
-    }
-
-    #[test]
-    fn test_issue_1739_json_writes_included_in_wal_payload() {
-        use strata_core::primitives::json::JsonPath;
-        #[derive(serde::Deserialize)]
-        struct StoredDoc {
-            id: String,
-            value: serde_json::Value,
-            version: u64,
-            created_at: u64,
-            updated_at: u64,
-        }
-
-        let temp_dir = TempDir::new().unwrap();
-        let wal_dir = temp_dir.path().join("wal");
-        let mut wal = create_test_wal(&wal_dir);
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let json_key = Key::new_json(ns.clone(), "doc1");
-
-        // Store a base JSON document.
-        let base_doc = serde_json::json!({"x": 1});
-        let base_bytes = rmp_serde::to_vec(&base_doc).unwrap();
-        let mut txn0 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        txn0.put(json_key.clone(), Value::Bytes(base_bytes))
-            .unwrap();
-        manager
-            .commit(&mut txn0, store.as_ref(), Some(&mut wal))
-            .unwrap();
-
-        // JSON-only transaction.
-        let mut txn1 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        txn1.json_set(
-            &json_key,
-            &"x".parse::<JsonPath>().unwrap(),
-            serde_json::json!(99).into(),
-        )
-        .unwrap();
-        let commit_v = manager
-            .commit(&mut txn1, store.as_ref(), Some(&mut wal))
-            .unwrap();
-
-        // Read WAL and verify the payload contains the JSON put.
-        wal.flush().unwrap();
-        let reader = WalReader::new();
-        let records = reader.read_all_after_watermark(&wal_dir, 0).unwrap();
-        // Record[0] = base doc put, Record[1] = json_set commit
-        assert!(records.len() >= 2, "Expected at least 2 WAL records");
-        let payload = TransactionPayload::from_bytes(&records[1].writeset).unwrap();
-        assert_eq!(payload.version, commit_v.as_u64());
-        assert!(
-            !payload.puts.is_empty(),
-            "WAL payload must contain the materialized JSON put"
-        );
-        assert_eq!(
-            payload.puts[0].0, json_key,
-            "WAL payload put key must match the JSON document key"
-        );
-        // Verify the WAL value is the correctly patched document, not just any bytes
-        let wal_bytes = match &payload.puts[0].1 {
-            Value::Bytes(b) => b,
-            other => panic!("Expected Value::Bytes in WAL payload, got {:?}", other),
-        };
-        assert_eq!(wal_bytes.first().copied(), Some(0x02));
-        let wal_doc: StoredDoc = rmp_serde::from_slice(&wal_bytes[1..]).unwrap();
-        assert_eq!(wal_doc.id, "doc1");
-        assert!(wal_doc.version >= 1);
-        assert!(wal_doc.created_at <= wal_doc.updated_at);
-        assert_eq!(
-            wal_doc.value,
-            serde_json::json!({"x": 99}),
-            "WAL payload must contain the correctly patched document"
-        );
-    }
-
-    // ========================================================================
     // Issue #1739: OCC-M1 — Same-key put + CAS must be rejected.
     // ========================================================================
 
@@ -3096,158 +2839,6 @@ mod tests {
         }
         manager.mark_version_applied(v3);
         assert_eq!(manager.visible_version(), v3);
-    }
-
-    /// Issue #1915: json_exists(), json_get(), and json_set() don't record reads
-    /// for non-existent documents, making OCC blind to create-if-absent races.
-    ///
-    /// Scenario: T1 and T2 both call json_exists() → false, then json_set() to
-    /// create the doc. Both should record snapshot_version=0 for the missing doc.
-    /// T1 commits first (creating the doc). T2's commit must detect the conflict
-    /// because the doc now exists (version > 0) but T2 recorded version 0.
-    #[test]
-    fn test_issue_1915_json_missing_doc_read_invisible_to_occ() {
-        use strata_core::primitives::json::JsonPath;
-
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let json_key = Key::new_json(ns.clone(), "unique_doc");
-
-        // T1: check existence → false, then set the document
-        let mut txn1 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let exists1 = txn1.json_exists(&json_key).unwrap();
-        assert!(!exists1, "doc should not exist yet");
-
-        // T1 creates the document via json_set at root
-        let doc = serde_json::json!({"from": "txn1"});
-        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
-            .unwrap();
-
-        // T2: also check existence → false, then set the document
-        let mut txn2 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let exists2 = txn2.json_exists(&json_key).unwrap();
-        assert!(!exists2, "doc should not exist yet for T2 either");
-
-        let doc2 = serde_json::json!({"from": "txn2"});
-        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
-            .unwrap();
-
-        // T1 commits first — should succeed
-        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
-        assert!(v1.is_ok(), "T1 commit should succeed: {:?}", v1.err());
-
-        // T2 commits second — MUST fail with conflict because the doc now exists
-        // but T2 observed it as missing (snapshot_version=0, current_version > 0)
-        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
-        assert!(
-            v2.is_err(),
-            "T2 commit must fail: json_exists() saw missing doc but T1 created it"
-        );
-    }
-
-    /// Issue #1915: json_get() for a non-existent document must record
-    /// snapshot_version=0 so that a concurrent create is detected.
-    #[test]
-    fn test_issue_1915_json_get_missing_doc_records_read() {
-        use strata_core::primitives::json::JsonPath;
-
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let json_key = Key::new_json(ns.clone(), "phantom_doc");
-
-        // T1: json_get on non-existent doc → None, then write something
-        let mut txn1 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let result = txn1.json_get(&json_key, &JsonPath::root()).unwrap();
-        assert!(result.is_none(), "doc should not exist");
-
-        // T1 creates the doc
-        let doc = serde_json::json!({"data": 1});
-        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
-            .unwrap();
-
-        // T2: also json_get on non-existent doc → None, then create
-        let mut txn2 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let result2 = txn2.json_get(&json_key, &JsonPath::root()).unwrap();
-        assert!(result2.is_none(), "doc should not exist for T2");
-
-        let doc2 = serde_json::json!({"data": 2});
-        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
-            .unwrap();
-
-        // T1 commits
-        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
-        assert!(v1.is_ok(), "T1 commit should succeed");
-
-        // T2 must fail — json_get saw doc as absent, but T1 created it
-        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
-        assert!(
-            v2.is_err(),
-            "T2 commit must fail: json_get() saw missing doc but T1 created it"
-        );
-    }
-
-    /// Issue #1915: json_set() on a non-existent document must record
-    /// snapshot_version=0 so that concurrent creation is detected.
-    #[test]
-    fn test_issue_1915_json_set_missing_doc_records_read() {
-        use strata_core::primitives::json::JsonPath;
-
-        let store = Arc::new(SegmentedStore::new());
-        let manager = TransactionManager::new(CommitVersion::ZERO);
-        let branch_id = BranchId::new();
-        let ns = create_test_namespace(branch_id);
-        let json_key = Key::new_json(ns.clone(), "set_race_doc");
-
-        // T1: json_set on a non-existent doc (blind create)
-        let mut txn1 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let doc = serde_json::json!({"from": "txn1"});
-        txn1.json_set(&json_key, &JsonPath::root(), doc.into())
-            .unwrap();
-
-        // T2: also json_set on the same non-existent doc
-        let mut txn2 = TransactionContext::with_store(
-            manager.next_txn_id().unwrap(),
-            branch_id,
-            Arc::clone(&store),
-        );
-        let doc2 = serde_json::json!({"from": "txn2"});
-        txn2.json_set(&json_key, &JsonPath::root(), doc2.into())
-            .unwrap();
-
-        // T1 commits first
-        let v1 = manager.commit(&mut txn1, store.as_ref(), None);
-        assert!(v1.is_ok(), "T1 commit should succeed");
-
-        // T2 must fail — both read the doc as absent and tried to create it
-        let v2 = manager.commit(&mut txn2, store.as_ref(), None);
-        assert!(
-            v2.is_err(),
-            "T2 commit must fail: json_set() on missing doc but T1 created it"
-        );
     }
 
     // ========================================================================

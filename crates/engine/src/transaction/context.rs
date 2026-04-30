@@ -16,13 +16,17 @@
 //! - JSON document operations via TransactionContext
 
 use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
+use crate::primitives::json::JsonStore;
 use crate::transaction_ops::TransactionOps;
 use crate::{Event, JsonPath, JsonValue};
 use std::sync::Arc;
-use strata_concurrency::{JsonStoreExt, TransactionContext};
+use strata_concurrency::TransactionContext;
+use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{EntityRef, StrataError, Timestamp, Value, Version, Versioned};
-use strata_storage::{Key, Namespace, TypeTag};
+use strata_storage::{Key, Namespace, SegmentedStore, TypeTag};
+
+use super::json_state::JsonTxnState;
 
 /// Transaction wrapper that implements TransactionOps
 ///
@@ -61,6 +65,18 @@ pub struct Transaction<'a> {
     /// Wrappers created with `with_base_sequence()` keep the caller-provided
     /// state authoritative.
     event_state_initialized: bool,
+    /// Optional engine-owned JSON transaction semantics.
+    ///
+    /// Manual transaction handles can borrow shared state from an outer owned
+    /// transaction. Generic scoped wrappers do not own JSON state because
+    /// there is no matching commit hook for them.
+    json_state: Option<&'a mut JsonTxnState>,
+    /// Snapshot store for first-seen JSON snapshot version tracking.
+    ///
+    /// JSON document reads themselves should come from the transaction view so
+    /// generic raw writes/deletes remain visible when JSON semantics are mixed
+    /// with lower write buffers in the same transaction.
+    json_snapshot_store: Option<Arc<SegmentedStore>>,
 }
 
 impl<'a> Transaction<'a> {
@@ -78,6 +94,8 @@ impl<'a> Transaction<'a> {
             base_sequence: 0,
             last_hash: [0u8; 32],
             event_state_initialized: false,
+            json_state: None,
+            json_snapshot_store: None,
         }
     }
 
@@ -97,6 +115,27 @@ impl<'a> Transaction<'a> {
             base_sequence,
             last_hash,
             event_state_initialized: true,
+            json_state: None,
+            json_snapshot_store: None,
+        }
+    }
+
+    /// Create a transaction wrapper that shares engine-owned JSON semantics.
+    pub fn with_json_state(
+        ctx: &'a mut TransactionContext,
+        namespace: Arc<Namespace>,
+        json_state: &'a mut JsonTxnState,
+        json_snapshot_store: Arc<SegmentedStore>,
+    ) -> Self {
+        Self {
+            ctx,
+            namespace,
+            pending_events: Vec::new(),
+            base_sequence: 0,
+            last_hash: [0u8; 32],
+            event_state_initialized: false,
+            json_state: Some(json_state),
+            json_snapshot_store: Some(json_snapshot_store),
         }
     }
 
@@ -139,6 +178,120 @@ impl<'a> Transaction<'a> {
     /// Create a JSON key for the given document ID
     fn json_key(&self, doc_id: &str) -> Key {
         Key::new_json(self.namespace.clone(), doc_id)
+    }
+
+    fn json_state(&self) -> Option<&JsonTxnState> {
+        self.json_state.as_deref()
+    }
+
+    fn json_state_mut(&mut self) -> Option<&mut JsonTxnState> {
+        self.json_state.as_deref_mut()
+    }
+
+    fn has_engine_json_state(&self) -> bool {
+        self.json_state().is_some()
+    }
+
+    fn json_state_required_error() -> StrataError {
+        StrataError::invalid_input(
+            "JSON operations require a scoped transaction created from an owned transaction handle"
+                .to_string(),
+        )
+    }
+
+    fn ensure_json_writable(&self) -> Result<(), StrataError> {
+        if self.ctx.is_read_only_mode() {
+            return Err(StrataError::invalid_input(
+                "Cannot write JSON in a read-only transaction".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn load_json_snapshot_base(&mut self, key: &Key) -> Result<Option<Value>, StrataError> {
+        let store = self.json_snapshot_store.as_ref().ok_or_else(|| {
+            StrataError::internal("engine-owned JSON state requires a snapshot store")
+        })?;
+        let versioned = store.get_versioned(key, self.ctx.start_version)?;
+
+        if let Some(state) = self.json_state_mut() {
+            if !state.snapshot_versions().contains_key(key) {
+                match versioned.as_ref() {
+                    Some(vv) => state
+                        .record_snapshot_version(key.clone(), CommitVersion(vv.version.as_u64())),
+                    None => state.record_snapshot_version(key.clone(), CommitVersion::ZERO),
+                }
+            }
+        }
+
+        Ok(versioned.map(|vv| vv.value))
+    }
+
+    fn load_json_effective_base(&mut self, key: &Key) -> Result<Option<Value>, StrataError> {
+        let _ = self.load_json_snapshot_base(key)?;
+        self.ctx.get(key)
+    }
+
+    fn load_json_document(&mut self, doc_id: &str) -> Result<Option<JsonValue>, StrataError> {
+        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            let has_writes = self
+                .json_state()
+                .expect("json state should be present")
+                .has_writes_for_key(&full_key);
+            let base = self.load_json_effective_base(&full_key)?;
+            if has_writes {
+                return self
+                    .json_state()
+                    .expect("json state should be present")
+                    .preview_document(&full_key, |_| Ok(base.clone()))
+                    .map(|doc| doc.map(|doc| doc.value));
+            }
+
+            return match base {
+                Some(stored) => Ok(Some(
+                    JsonStore::deserialize_doc_with_fallback_id(&stored, doc_id)?.value,
+                )),
+                None => Ok(None),
+            };
+        }
+
+        Err(Self::json_state_required_error())
+    }
+
+    /// List JSON document ids visible in the current transaction view.
+    pub fn json_list_keys(&mut self, prefix: Option<&str>) -> Result<Vec<String>, StrataError> {
+        let prefix_key = match prefix {
+            Some(prefix) if !prefix.is_empty() => Key::new_json(self.namespace.clone(), prefix),
+            _ => Key::new(self.namespace.clone(), TypeTag::Json, vec![]),
+        };
+
+        let mut keys = self
+            .ctx
+            .scan_prefix(&prefix_key)?
+            .into_iter()
+            .filter_map(|(key, _)| key.user_key_string())
+            .collect::<std::collections::BTreeSet<_>>();
+
+        if let Some(state) = self.json_state() {
+            let touched_doc_ids = state
+                .writes()
+                .iter()
+                .filter(|write| write.key.namespace == self.namespace)
+                .filter_map(|write| write.key.user_key_string())
+                .filter(|doc_id| prefix.is_none_or(|prefix| doc_id.starts_with(prefix)))
+                .collect::<std::collections::BTreeSet<_>>();
+
+            for doc_id in touched_doc_ids {
+                if self.load_json_document(&doc_id)?.is_some() {
+                    keys.insert(doc_id);
+                } else {
+                    keys.remove(&doc_id);
+                }
+            }
+        }
+
+        Ok(keys.into_iter().collect())
     }
 }
 
@@ -376,39 +529,40 @@ impl<'a> TransactionOps for Transaction<'a> {
     // =========================================================================
 
     fn json_create(&mut self, doc_id: &str, value: JsonValue) -> Result<Version, StrataError> {
-        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            self.ensure_json_writable()?;
+            let full_key = self.json_key(doc_id);
 
-        // Check if document already exists (in write buffer or snapshot)
-        if self.ctx.json_exists(&full_key)? {
-            return Err(StrataError::invalid_operation(
-                EntityRef::json(self.branch_id(), self.namespace.space.as_str(), doc_id),
-                "document already exists",
-            ));
+            if self.json_exists(doc_id)? {
+                return Err(StrataError::invalid_operation(
+                    EntityRef::json(self.branch_id(), self.namespace.space.as_str(), doc_id),
+                    "document already exists",
+                ));
+            }
+
+            let branch_id = self.branch_id();
+            let space = self.namespace.space.as_str();
+            crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
+
+            let _ = self.load_json_snapshot_base(&full_key)?;
+            self.json_state_mut()
+                .expect("json state should be present")
+                .record_set(full_key, JsonPath::root(), value);
+
+            return Ok(Version::txn(self.ctx.txn_id.as_u64()));
         }
 
-        // Phase 3 contract: register the space atomically with the
-        // first write. See `kv_put` for the rationale.
-        let branch_id = self.branch_id();
-        let space = self.namespace.space.as_str();
-        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
-
-        // Create the document by setting at root path
-        self.ctx.json_set(&full_key, &JsonPath::root(), value)?;
-
-        Ok(Version::txn(self.ctx.txn_id.as_u64()))
+        Err(Self::json_state_required_error())
     }
 
     fn json_get(&mut self, doc_id: &str) -> Result<Option<Versioned<JsonValue>>, StrataError> {
-        let full_key = self.json_key(doc_id);
-
-        // Delegate to ctx which checks json_writes buffer → snapshot
-        match self.ctx.json_get_document(&full_key)? {
-            Some(jv) => Ok(Some(Versioned::new(
-                jv,
-                Version::txn(self.ctx.txn_id.as_u64()),
-            ))),
-            None => Ok(None),
+        if self.has_engine_json_state() {
+            return Ok(self
+                .load_json_document(doc_id)?
+                .map(|value| Versioned::new(value, Version::txn(self.ctx.txn_id.as_u64()))));
         }
+
+        Err(Self::json_state_required_error())
     }
 
     fn json_get_path(
@@ -416,10 +570,13 @@ impl<'a> TransactionOps for Transaction<'a> {
         doc_id: &str,
         path: &JsonPath,
     ) -> Result<Option<JsonValue>, StrataError> {
-        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            return Ok(self
+                .load_json_document(doc_id)?
+                .and_then(|value| crate::get_at_path(&value, path).cloned()));
+        }
 
-        // Delegate to ctx which checks json_writes buffer → snapshot
-        self.ctx.json_get(&full_key, path)
+        Err(Self::json_state_required_error())
     }
 
     fn json_set(
@@ -428,37 +585,48 @@ impl<'a> TransactionOps for Transaction<'a> {
         path: &JsonPath,
         value: JsonValue,
     ) -> Result<Version, StrataError> {
-        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            self.ensure_json_writable()?;
+            let full_key = self.json_key(doc_id);
 
-        // Phase 3 contract: register the space atomically with the
-        // first write. See `kv_put` for the rationale.
-        let branch_id = self.branch_id();
-        let space = self.namespace.space.as_str();
-        crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
+            let branch_id = self.branch_id();
+            let space = self.namespace.space.as_str();
+            crate::primitives::space::ensure_space_registered_in_txn(self.ctx, &branch_id, space)?;
 
-        // Call ctx.json_set (same pattern as kv_put calling ctx.put)
-        self.ctx.json_set(&full_key, path, value)?;
+            let _ = self.load_json_snapshot_base(&full_key)?;
+            self.json_state_mut()
+                .expect("json state should be present")
+                .record_set(full_key, path.clone(), value);
 
-        Ok(Version::txn(self.ctx.txn_id.as_u64()))
+            return Ok(Version::txn(self.ctx.txn_id.as_u64()));
+        }
+
+        Err(Self::json_state_required_error())
     }
 
     fn json_delete(&mut self, doc_id: &str) -> Result<bool, StrataError> {
-        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            self.ensure_json_writable()?;
+            let full_key = self.json_key(doc_id);
+            let existed = self.json_exists(doc_id)?;
+            if existed {
+                let _ = self.load_json_snapshot_base(&full_key)?;
+                self.json_state_mut()
+                    .expect("json state should be present")
+                    .record_delete(full_key, JsonPath::root());
+            }
+            return Ok(existed);
+        }
 
-        // Check if document exists (for return value, same pattern as kv_delete)
-        let existed = self.json_exists(doc_id)?;
-
-        // Delete the entire document by deleting at root path
-        self.ctx.json_delete(&full_key, &JsonPath::root())?;
-
-        Ok(existed)
+        Err(Self::json_state_required_error())
     }
 
     fn json_exists(&mut self, doc_id: &str) -> Result<bool, StrataError> {
-        let full_key = self.json_key(doc_id);
+        if self.has_engine_json_state() {
+            return Ok(self.load_json_document(doc_id)?.is_some());
+        }
 
-        // Delegate to ctx which checks json_writes buffer → snapshot
-        self.ctx.json_exists(&full_key)
+        Err(Self::json_state_required_error())
     }
 }
 
@@ -922,8 +1090,10 @@ mod tests {
     #[test]
     fn test_json_create_and_get() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(4), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Create a JSON document
         let doc: JsonValue = serde_json::json!({"name": "Alice", "age": 30}).into();
@@ -940,8 +1110,10 @@ mod tests {
     #[test]
     fn test_json_create_duplicate_fails() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(5), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Create twice should fail
         let doc: JsonValue = serde_json::json!({"key": "value"}).into();
@@ -960,8 +1132,10 @@ mod tests {
     #[test]
     fn test_json_set_and_get_path() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(6), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Create a document
         let doc: JsonValue = serde_json::json!({"user": {"name": "Bob"}}).into();
@@ -981,8 +1155,10 @@ mod tests {
     #[test]
     fn test_json_delete() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(7), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Create then delete
         let doc: JsonValue = serde_json::json!({"key": "value"}).into();
@@ -998,8 +1174,10 @@ mod tests {
     #[test]
     fn test_json_exists() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(8), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Document doesn't exist initially
         assert!(!txn.json_exists("missing").unwrap());
@@ -1013,8 +1191,10 @@ mod tests {
     #[test]
     fn test_json_get_nonexistent() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(9), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Getting non-existent document returns None
         let result = txn.json_get("nonexistent").unwrap();
@@ -1024,8 +1204,10 @@ mod tests {
     #[test]
     fn test_json_get_path_root() {
         let ns = create_test_namespace();
-        let mut ctx = create_test_context(&ns);
-        let mut txn = Transaction::new(&mut ctx, ns.clone());
+        let store = Arc::new(SegmentedStore::new());
+        let mut ctx = TransactionContext::with_store(TxnId(10), ns.branch_id, store.clone());
+        let mut json_state = JsonTxnState::new();
+        let mut txn = Transaction::with_json_state(&mut ctx, ns.clone(), &mut json_state, store);
 
         // Create a document
         let doc: JsonValue = serde_json::json!({"name": "Test"}).into();
@@ -1034,6 +1216,18 @@ mod tests {
         // Get at root path returns the whole document
         let result = txn.json_get_path("doc", &JsonPath::root()).unwrap();
         assert_eq!(result, Some(doc));
+    }
+
+    #[test]
+    fn test_json_requires_owned_transaction_handle() {
+        let ns = create_test_namespace();
+        let mut ctx = create_test_context(&ns);
+        let mut txn = Transaction::new(&mut ctx, ns.clone());
+
+        let err = txn
+            .json_get("doc")
+            .expect_err("generic scoped wrappers should not own JSON semantics");
+        assert!(matches!(err, StrataError::InvalidInput { .. }));
     }
 
     // =========================================================================

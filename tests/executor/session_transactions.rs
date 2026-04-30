@@ -2658,6 +2658,107 @@ fn json_list_sees_uncommitted() {
 }
 
 #[test]
+fn json_list_sees_new_uncommitted_document() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc-new".into(),
+            path: "$.profile.name".into(),
+            value: Value::String("Ada".into()),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: 100,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::JsonListResult { keys, .. } => {
+            assert!(
+                keys.contains(&"doc-new".to_string()),
+                "JsonList should see newly created doc in txn JSON state, got: {:?}",
+                keys
+            );
+        }
+        _ => panic!("Expected JsonListResult, got {:?}", output),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
+fn json_list_hides_root_deleted_document() {
+    let mut session = create_session();
+
+    session
+        .execute(Command::JsonSet {
+            branch: None,
+            space: None,
+            key: "doc-delete".into(),
+            path: "$".into(),
+            value: Value::String("before".into()),
+        })
+        .unwrap();
+
+    session
+        .execute(Command::TxnBegin {
+            branch: None,
+            options: None,
+        })
+        .unwrap();
+
+    session
+        .execute(Command::JsonDelete {
+            branch: None,
+            space: None,
+            key: "doc-delete".into(),
+            path: "$".into(),
+        })
+        .unwrap();
+
+    let output = session
+        .execute(Command::JsonList {
+            branch: None,
+            space: None,
+            prefix: None,
+            cursor: None,
+            limit: 100,
+            as_of: None,
+        })
+        .unwrap();
+
+    match output {
+        Output::JsonListResult { keys, .. } => {
+            assert!(
+                !keys.contains(&"doc-delete".to_string()),
+                "JsonList should hide root-deleted doc in txn JSON state, got: {:?}",
+                keys
+            );
+        }
+        _ => panic!("Expected JsonListResult, got {:?}", output),
+    }
+
+    session.execute(Command::TxnRollback).unwrap();
+}
+
+#[test]
 fn batch_put_in_txn_with_rollback() {
     let mut session = create_session();
 

@@ -7,130 +7,13 @@
 //! See `docs/architecture/M2_TRANSACTION_SEMANTICS.md` for the full specification.
 
 use crate::validation::{validate_transaction, ValidationResult};
-use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::primitives::json::{get_at_path, JsonPatch, JsonPath, JsonValue};
 use strata_core::value::Value;
 use strata_core::{BranchId, StrataError, StrataResult, Version, Versioned, VersionedValue};
 use strata_storage::{Key, SegmentedStore, Storage, TypeTag, WriteMode};
-
-const JSON_DOC_FORMAT_VERSION: u8 = 0x02;
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct StoredJsonDoc {
-    id: String,
-    value: JsonValue,
-    version: u64,
-    created_at: u64,
-    updated_at: u64,
-}
-
-impl StoredJsonDoc {
-    fn new(id: impl Into<String>, value: JsonValue) -> Self {
-        let now = current_time_micros();
-        Self {
-            id: id.into(),
-            value,
-            version: 1,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-
-    fn from_legacy_value(id: impl Into<String>, value: JsonValue) -> Self {
-        Self {
-            id: id.into(),
-            value,
-            version: 1,
-            created_at: 0,
-            updated_at: 0,
-        }
-    }
-
-    fn touch(&mut self) {
-        self.version += 1;
-        self.updated_at = current_time_micros();
-    }
-}
-
-fn current_time_micros() -> u64 {
-    SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_micros() as u64
-}
-
-/// Strict MessagePack decode that requires the input to be fully consumed.
-///
-/// Mirrors the engine-side helper: short garbage byte sequences must surface
-/// as errors instead of being silently interpreted as a leading scalar.
-fn decode_full_msgpack<T: serde::de::DeserializeOwned>(payload: &[u8]) -> StrataResult<T> {
-    let mut cursor = std::io::Cursor::new(payload);
-    let value = rmp_serde::decode::from_read(&mut cursor)
-        .map_err(|e| StrataError::serialization(e.to_string()))?;
-    if (cursor.position() as usize) != payload.len() {
-        return Err(StrataError::serialization(
-            "trailing bytes after legacy JSON payload".to_string(),
-        ));
-    }
-    Ok(value)
-}
-
-fn deserialize_stored_json_doc(value: &Value, fallback_id: &str) -> StrataResult<StoredJsonDoc> {
-    match value {
-        Value::Bytes(bytes) if bytes.is_empty() => {
-            Err(StrataError::serialization("empty JsonDoc bytes"))
-        }
-        Value::Bytes(bytes) => {
-            let decode_doc = |payload: &[u8]| {
-                rmp_serde::from_slice::<StoredJsonDoc>(payload)
-                    .map_err(|e| StrataError::serialization(e.to_string()))
-            };
-            let decode_legacy_doc = |payload: &[u8]| {
-                let doc = decode_doc(payload)?;
-                if fallback_id.is_empty() || doc.id == fallback_id {
-                    Ok(doc)
-                } else {
-                    Err(StrataError::serialization(
-                        "legacy JsonDoc id mismatch".to_string(),
-                    ))
-                }
-            };
-            let decode_value = |payload: &[u8]| {
-                // Strict-decode the legacy raw payload: require the
-                // MessagePack stream to consume the entire byte slice.
-                // Without this, garbage byte sequences like
-                // `[0, 1, 2, 3, 4, 5]` decode as a single positive fixint
-                // (the leading `0`) and silently mask real corruption as
-                // a "legacy" scalar document.
-                let value = decode_full_msgpack::<JsonValue>(payload)?;
-                Ok(StoredJsonDoc::from_legacy_value(fallback_id, value))
-            };
-
-            if bytes[0] == JSON_DOC_FORMAT_VERSION {
-                decode_doc(&bytes[1..])
-                    .or_else(|_| decode_doc(bytes))
-                    .or_else(|_| decode_value(bytes))
-            } else {
-                decode_legacy_doc(bytes).or_else(|_| decode_value(bytes))
-            }
-        }
-        other => Err(StrataError::invalid_input(format!(
-            "expected bytes for JsonDoc, got {other:?}"
-        ))),
-    }
-}
-
-fn serialize_stored_json_doc(doc: &StoredJsonDoc) -> StrataResult<Value> {
-    let payload = rmp_serde::to_vec(doc).map_err(|e| StrataError::serialization(e.to_string()))?;
-    let mut bytes = Vec::with_capacity(1 + payload.len());
-    bytes.push(JSON_DOC_FORMAT_VERSION);
-    bytes.extend_from_slice(&payload);
-    Ok(Value::Bytes(bytes))
-}
 
 /// Error type for commit failures
 ///
@@ -372,159 +255,6 @@ pub struct CASOperation {
     pub new_value: Value,
 }
 
-// ============================================================================
-// JSON Transaction Types (M5 Epic 30)
-// ============================================================================
-
-/// Record of a JSON path read (for conflict detection)
-///
-/// Tracks which paths within JSON documents were read during a transaction.
-/// Used for fine-grained conflict detection at commit time.
-#[derive(Debug, Clone)]
-pub struct JsonPathRead {
-    /// Key of the JSON document
-    pub key: Key,
-    /// Path that was read
-    pub path: JsonPath,
-    /// Version of the document when read
-    pub version: CommitVersion,
-}
-
-impl JsonPathRead {
-    /// Create a new JSON path read record
-    pub fn new(key: Key, path: JsonPath, version: CommitVersion) -> Self {
-        Self { key, path, version }
-    }
-}
-
-/// Record of a JSON patch operation (for commit)
-///
-/// Stores a patch to be applied to a JSON document at commit time.
-/// Patches are applied in order to compute the final document state.
-#[derive(Debug, Clone)]
-pub struct JsonPatchEntry {
-    /// Key of the JSON document
-    pub key: Key,
-    /// Patch to apply
-    pub patch: JsonPatch,
-    /// Version the document will have after this patch
-    pub resulting_version: CommitVersion,
-}
-
-impl JsonPatchEntry {
-    /// Create a new JSON patch entry
-    pub fn new(key: Key, patch: JsonPatch, resulting_version: CommitVersion) -> Self {
-        Self {
-            key,
-            patch,
-            resulting_version,
-        }
-    }
-}
-
-// ============================================================================
-// JsonStoreExt Trait (M5 Epic 30)
-// ============================================================================
-
-/// Extension trait for JSON operations within transactions (M5 Rule 3)
-///
-/// This trait enables JSON operations to be performed within a TransactionContext,
-/// allowing atomic cross-primitive transactions between JSON and other primitives.
-///
-/// # Architecture (M5 Architecture Rule 3)
-///
-/// Per M5 Rule 3: "Add `JsonStoreExt` trait to TransactionContext. NO separate
-/// JsonTransaction type." This enables cross-primitive atomic transactions
-/// without additional coordination.
-///
-/// # Usage
-///
-/// ```no_run
-/// # use strata_concurrency::{TransactionContext, JsonStoreExt};
-/// # use strata_core::BranchId;
-/// # use strata_storage::{Key, Namespace, TypeTag};
-/// # use strata_core::value::Value;
-/// # use strata_core::primitives::json::JsonPath;
-/// # use std::sync::Arc;
-/// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
-/// # let ns = Arc::new(Namespace::for_branch(BranchId::default()));
-/// # let key = Key::new(ns.clone(), TypeTag::Json, b"doc".to_vec());
-/// # let path = JsonPath::root();
-/// # let other_key = Key::new_kv(ns, "other");
-/// // JSON operation
-/// let value = txn.json_get(&key, &path)?;
-/// txn.json_set(&key, &path, serde_json::json!({"updated": true}).into())?;
-///
-/// // KV operation in same transaction
-/// txn.put(other_key, Value::Bytes(b"done".to_vec()))?;
-/// # Ok(())
-/// # }
-/// ```
-///
-/// # Read-Your-Writes
-///
-/// JSON operations support read-your-writes semantics:
-/// - `json_set` writes are visible to subsequent `json_get` calls in the same transaction
-/// - Writes are buffered until commit
-///
-/// # Conflict Detection
-///
-/// JSON reads and writes are tracked for region-based conflict detection:
-/// - All reads track the document version at read time
-/// - At commit time, if any read document's version has changed, conflict is detected
-pub trait JsonStoreExt {
-    /// Get a value at a JSON path within a document
-    ///
-    /// # Arguments
-    /// * `key` - Key of the JSON document
-    /// * `path` - JSON path to read from
-    ///
-    /// # Returns
-    /// - `Ok(Some(value))` if path exists
-    /// - `Ok(None)` if document exists but path doesn't
-    /// - `Err` if document doesn't exist or transaction is invalid
-    fn json_get(&mut self, key: &Key, path: &JsonPath) -> StrataResult<Option<JsonValue>>;
-
-    /// Set a value at a JSON path within a document
-    ///
-    /// # Arguments
-    /// * `key` - Key of the JSON document
-    /// * `path` - JSON path to write to
-    /// * `value` - Value to set
-    ///
-    /// # Returns
-    /// - `Ok(())` on success
-    /// - `Err` if document doesn't exist or transaction is invalid
-    fn json_set(&mut self, key: &Key, path: &JsonPath, value: JsonValue) -> StrataResult<()>;
-
-    /// Delete a value at a JSON path within a document
-    ///
-    /// # Arguments
-    /// * `key` - Key of the JSON document
-    /// * `path` - JSON path to delete
-    ///
-    /// # Returns
-    /// - `Ok(())` on success (even if path didn't exist)
-    /// - `Err` if document doesn't exist or transaction is invalid
-    fn json_delete(&mut self, key: &Key, path: &JsonPath) -> StrataResult<()>;
-
-    /// Get the entire JSON document
-    ///
-    /// # Arguments
-    /// * `key` - Key of the JSON document
-    ///
-    /// # Returns
-    /// - `Ok(Some(value))` if document exists
-    /// - `Ok(None)` if document doesn't exist
-    fn json_get_document(&mut self, key: &Key) -> StrataResult<Option<JsonValue>>;
-
-    /// Check if a JSON document exists
-    ///
-    /// # Arguments
-    /// * `key` - Key of the JSON document
-    fn json_exists(&mut self, key: &Key) -> StrataResult<bool>;
-}
-
 /// Transaction context for OCC with snapshot isolation
 ///
 /// Tracks all reads, writes, deletes, and CAS operations for a transaction.
@@ -622,23 +352,6 @@ pub struct TransactionContext {
     /// version, independent of the read_set.
     pub cas_set: Vec<CASOperation>,
 
-    // JSON Operations (M5 - lazy allocation for zero overhead when not using JSON)
-    /// JSON path reads for fine-grained conflict detection
-    ///
-    /// Only allocated when JSON operations are performed.
-    json_reads: Option<Vec<JsonPathRead>>,
-
-    /// JSON patches to apply at commit
-    ///
-    /// Only allocated when JSON operations are performed.
-    json_writes: Option<Vec<JsonPatchEntry>>,
-
-    /// Snapshot versions of JSON documents at read time
-    ///
-    /// Maps document key to the version observed during read.
-    /// Only allocated when JSON operations are performed.
-    json_snapshot_versions: Option<HashMap<Key, CommitVersion>>,
-
     // State
     /// Current transaction status
     pub status: TransactionStatus,
@@ -716,9 +429,6 @@ impl TransactionContext {
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
             cas_set: Vec::new(),
-            json_reads: None,
-            json_writes: None,
-            json_snapshot_versions: None,
             status: TransactionStatus::Active,
             start_time: Instant::now(),
             max_write_entries: 0,
@@ -767,9 +477,6 @@ impl TransactionContext {
             write_set: HashMap::new(),
             delete_set: HashSet::new(),
             cas_set: Vec::new(),
-            json_reads: None,
-            json_writes: None,
-            json_snapshot_versions: None,
             status: TransactionStatus::Active,
             start_time: Instant::now(),
             max_write_entries: 0,
@@ -778,6 +485,14 @@ impl TransactionContext {
             ttl_map: HashMap::new(),
             allow_cross_branch: false,
         }
+    }
+
+    /// Return the snapshot store backing this transaction, if any.
+    ///
+    /// Engine-owned transaction semantics use the same bounded snapshot view
+    /// as generic reads, so exposing the shared store handle is sufficient.
+    pub fn snapshot_store(&self) -> Option<Arc<SegmentedStore>> {
+        self.store.clone()
     }
 
     // === Read Operations ===
@@ -1343,111 +1058,6 @@ impl TransactionContext {
         Ok(())
     }
 
-    // === JSON Operations (M5 Epic 30) ===
-
-    /// Check if this transaction has any JSON operations
-    ///
-    /// Returns true if any JSON reads, writes, or snapshot versions are recorded.
-    /// Useful for determining if JSON-specific validation is needed.
-    pub fn has_json_ops(&self) -> bool {
-        self.json_reads.is_some()
-            || self.json_writes.is_some()
-            || self.json_snapshot_versions.is_some()
-    }
-
-    /// Get JSON patch writes (immutable)
-    ///
-    /// Returns an empty slice if no JSON writes have been recorded.
-    pub fn json_writes(&self) -> &[JsonPatchEntry] {
-        self.json_writes.as_deref().unwrap_or(&[])
-    }
-
-    /// Get JSON snapshot versions (immutable)
-    ///
-    /// Returns None if no JSON snapshot versions have been recorded.
-    pub fn json_snapshot_versions(&self) -> Option<&HashMap<Key, CommitVersion>> {
-        self.json_snapshot_versions.as_ref()
-    }
-
-    /// Ensure json_reads is initialized and return mutable reference
-    ///
-    /// Lazily allocates the Vec on first use.
-    pub fn ensure_json_reads(&mut self) -> &mut Vec<JsonPathRead> {
-        self.json_reads.get_or_insert_with(Vec::new)
-    }
-
-    /// Ensure json_writes is initialized and return mutable reference
-    ///
-    /// Lazily allocates the Vec on first use.
-    pub fn ensure_json_writes(&mut self) -> &mut Vec<JsonPatchEntry> {
-        self.json_writes.get_or_insert_with(Vec::new)
-    }
-
-    /// Ensure json_snapshot_versions is initialized and return mutable reference
-    ///
-    /// Lazily allocates the HashMap on first use.
-    pub fn ensure_json_snapshot_versions(&mut self) -> &mut HashMap<Key, CommitVersion> {
-        self.json_snapshot_versions.get_or_insert_with(HashMap::new)
-    }
-
-    /// Record a JSON path read for conflict detection
-    ///
-    /// This should be called when reading a specific path from a JSON document.
-    /// The read will be validated at commit time to detect conflicts.
-    pub fn record_json_read(&mut self, key: Key, path: JsonPath, version: CommitVersion) {
-        self.ensure_json_reads()
-            .push(JsonPathRead::new(key, path, version));
-    }
-
-    /// Record a JSON patch for commit
-    ///
-    /// This should be called when modifying a JSON document via patch.
-    /// The patch will be applied at commit time.
-    pub fn record_json_write(
-        &mut self,
-        key: Key,
-        patch: JsonPatch,
-        resulting_version: CommitVersion,
-    ) {
-        self.ensure_json_writes()
-            .push(JsonPatchEntry::new(key, patch, resulting_version));
-    }
-
-    /// Record JSON document snapshot version
-    ///
-    /// Tracks the version of a JSON document when it was first read.
-    /// Used for document-level conflict detection.
-    pub fn record_json_snapshot_version(&mut self, key: Key, version: CommitVersion) {
-        self.ensure_json_snapshot_versions().insert(key, version);
-    }
-
-    /// Ensure the snapshot version for a JSON document is tracked.
-    ///
-    /// If the document's version is not yet recorded, reads it from the store
-    /// and records it for conflict detection at commit time. Errors from the
-    /// store are silently ignored (best-effort tracking).
-    fn ensure_json_snapshot_tracked(&mut self, key: &Key) {
-        if self
-            .json_snapshot_versions()
-            .map_or(true, |v| !v.contains_key(key))
-        {
-            if let Some(store) = &self.store {
-                match store.get_versioned(key, self.start_version) {
-                    Ok(Some(vv)) => {
-                        self.record_json_snapshot_version(
-                            key.clone(),
-                            CommitVersion(vv.version.as_u64()),
-                        );
-                    }
-                    Ok(None) => {
-                        self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
-                    }
-                    Err(_) => {}
-                }
-            }
-        }
-    }
-
     /// Clear all buffered operations
     ///
     /// This is useful for retry scenarios where you want to restart
@@ -1466,10 +1076,6 @@ impl TransactionContext {
         self.write_set.clear();
         self.delete_set.clear();
         self.cas_set.clear();
-        // Clear JSON sets (set to None to deallocate)
-        self.json_reads = None;
-        self.json_writes = None;
-        self.json_snapshot_versions = None;
         Ok(())
     }
 
@@ -1872,101 +1478,6 @@ impl TransactionContext {
         })
     }
 
-    /// Materialize JSON patches into the write_set as full-document puts.
-    ///
-    /// For each key in `json_writes`, reads the base document from the snapshot
-    /// store, applies all patches in order, serializes the result to msgpack bytes,
-    /// and inserts into `write_set`. After this call, `json_writes` is cleared and
-    /// the existing `TransactionPayload` / `apply_writes` path handles persistence.
-    ///
-    /// Must be called after validation but before building `TransactionPayload`.
-    pub fn materialize_json_writes(&mut self) -> StrataResult<()> {
-        use strata_core::primitives::json::{apply_patches, JsonValue};
-
-        let json_writes = match self.json_writes.take() {
-            Some(w) if !w.is_empty() => w,
-            _ => return Ok(()),
-        };
-
-        // Group patches by key, preserving insertion order.
-        let mut patches_by_key: Vec<(Key, Vec<strata_core::primitives::json::JsonPatch>)> =
-            Vec::new();
-        for entry in json_writes {
-            if let Some((_k, patches)) = patches_by_key.iter_mut().find(|(k, _)| *k == entry.key) {
-                patches.push(entry.patch);
-            } else {
-                patches_by_key.push((entry.key, vec![entry.patch]));
-            }
-        }
-
-        let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::internal("Cannot materialize JSON writes: no snapshot store")
-        })?;
-
-        for (key, patches) in patches_by_key {
-            let doc_id = key.user_key_string().ok_or_else(|| {
-                StrataError::internal("JSON materialization requires a string document id")
-            })?;
-            let mut base_doc = store
-                .get_versioned(&key, self.start_version)?
-                .map(|vv| deserialize_stored_json_doc(&vv.value, &doc_id))
-                .transpose()?;
-
-            let has_set_patch = patches
-                .iter()
-                .any(|patch| matches!(patch, JsonPatch::Set { .. }));
-            let delete_document = patches.iter().fold(false, |deleted, patch| match patch {
-                JsonPatch::Delete { path } if path.is_root() => true,
-                JsonPatch::Set { path, .. } if path.is_root() => false,
-                _ => deleted,
-            });
-
-            if delete_document {
-                self.write_set.remove(&key);
-                self.delete_set.insert(key);
-                continue;
-            }
-
-            if base_doc.is_none() && !has_set_patch {
-                continue;
-            }
-
-            let existing = base_doc.is_some();
-            let mut doc = base_doc
-                .take()
-                .unwrap_or_else(|| StoredJsonDoc::new(&doc_id, JsonValue::object()));
-
-            apply_patches(&mut doc.value, &patches).map_err(|e| {
-                StrataError::internal(format!("Failed to apply JSON patches: {}", e))
-            })?;
-            doc.value.validate().map_err(|e| {
-                StrataError::invalid_input(format!("JSON document exceeds limits: {}", e))
-            })?;
-
-            let version_bumps = if existing {
-                patches
-                    .iter()
-                    .filter(|patch| !matches!(patch, JsonPatch::Delete { path } if path.is_root()))
-                    .count()
-            } else {
-                patches
-                    .iter()
-                    .filter(|patch| !matches!(patch, JsonPatch::Delete { path } if path.is_root()))
-                    .count()
-                    .saturating_sub(1)
-            };
-            for _ in 0..version_bumps {
-                doc.touch();
-            }
-
-            let doc_value = serialize_stored_json_doc(&doc)?;
-            self.delete_set.remove(&key);
-            self.write_set.insert(key, doc_value);
-        }
-
-        Ok(())
-    }
-
     // === Introspection ===
 
     /// Get the number of keys in the read set
@@ -2109,11 +1620,6 @@ impl TransactionContext {
         shrink_if_large!(self.key_write_modes);
         shrink_if_large!(self.ttl_map);
 
-        // Clear JSON fields (deallocate, since JSON ops are rare)
-        self.json_reads = None;
-        self.json_writes = None;
-        self.json_snapshot_versions = None;
-
         // Reset state
         self.status = TransactionStatus::Active;
         self.start_time = Instant::now();
@@ -2146,160 +1652,6 @@ impl TransactionContext {
     }
 }
 
-// ============================================================================
-// JsonStoreExt Implementation (M5 Epic 30)
-// ============================================================================
-
-impl JsonStoreExt for TransactionContext {
-    fn json_get(&mut self, key: &Key, path: &JsonPath) -> StrataResult<Option<JsonValue>> {
-        self.guard(key)?;
-
-        // Check write set first (read-your-writes)
-        // Look for the most recent write that affects this path
-        if let Some(writes) = &self.json_writes {
-            for entry in writes.iter().rev() {
-                if entry.key == *key {
-                    // Check if the patch affects this path
-                    match &entry.patch {
-                        JsonPatch::Set {
-                            path: set_path,
-                            value,
-                        } if set_path.is_ancestor_of(path) => {
-                            // If set_path equals our path, return the value directly
-                            if set_path == path {
-                                return Ok(Some(value.clone()));
-                            }
-                            // Navigate into the written value using the relative path
-                            // Build a relative path by skipping the set_path segments
-                            let relative_segments: Vec<_> = path
-                                .segments()
-                                .iter()
-                                .skip(set_path.len())
-                                .cloned()
-                                .collect();
-                            let relative_path = JsonPath::from_segments(relative_segments);
-                            return Ok(get_at_path(value, &relative_path).cloned());
-                        }
-                        JsonPatch::Delete { path: del_path } if del_path.is_ancestor_of(path) => {
-                            // Path was deleted
-                            return Ok(None);
-                        }
-                        _ => {}
-                    }
-                }
-            }
-        }
-
-        // Read from store
-        let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no store for reads".to_string())
-        })?;
-
-        // Get the document from store (bounded by start_version)
-        let versioned = store.get_versioned(key, self.start_version)?;
-        let Some(vv) = versioned else {
-            // Document doesn't exist — record version ZERO so OCC detects
-            // concurrent creation (mirrors KV get() behavior for missing keys)
-            self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
-            return Ok(None);
-        };
-
-        // Track the document version for conflict detection
-        let doc_version = CommitVersion(vv.version.as_u64());
-        self.record_json_snapshot_version(key.clone(), doc_version);
-        self.record_json_read(key.clone(), path.clone(), doc_version);
-
-        // Deserialize the document
-        let doc_bytes = match &vv.value {
-            Value::Bytes(b) => b,
-            _ => {
-                return Err(StrataError::invalid_input(
-                    "Expected JSON document to be stored as bytes".to_string(),
-                ))
-            }
-        };
-
-        let doc = deserialize_stored_json_doc(
-            &Value::Bytes(doc_bytes.clone()),
-            &key.user_key_string().unwrap_or_default(),
-        )?;
-
-        // Get value at path
-        Ok(get_at_path(&doc.value, path).cloned())
-    }
-
-    fn json_set(&mut self, key: &Key, path: &JsonPath, value: JsonValue) -> StrataResult<()> {
-        self.guard(key)?;
-        self.ensure_json_snapshot_tracked(key);
-
-        // Record the write
-        let patch = JsonPatch::set_at(path.clone(), value);
-        // We don't know the resulting version until commit, use 0 as placeholder
-        self.record_json_write(key.clone(), patch, CommitVersion(0));
-
-        Ok(())
-    }
-
-    fn json_delete(&mut self, key: &Key, path: &JsonPath) -> StrataResult<()> {
-        self.guard(key)?;
-        self.ensure_json_snapshot_tracked(key);
-
-        // Record the delete
-        let patch = JsonPatch::delete_at(path.clone());
-        self.record_json_write(key.clone(), patch, CommitVersion(0));
-
-        Ok(())
-    }
-
-    fn json_get_document(&mut self, key: &Key) -> StrataResult<Option<JsonValue>> {
-        // Get the root path
-        let root = JsonPath::root();
-        self.json_get(key, &root)
-    }
-
-    fn json_exists(&mut self, key: &Key) -> StrataResult<bool> {
-        self.guard(key)?;
-
-        // Check write buffer first (read-your-writes)
-        // Look for root-level Set or Delete operations on this key
-        if let Some(writes) = &self.json_writes {
-            for entry in writes.iter().rev() {
-                if entry.key == *key {
-                    match &entry.patch {
-                        JsonPatch::Set { path, .. } if path.is_root() => {
-                            // Document was created/replaced in this transaction
-                            return Ok(true);
-                        }
-                        JsonPatch::Delete { path } if path.is_root() => {
-                            // Document was deleted in this transaction
-                            return Ok(false);
-                        }
-                        _ => {
-                            // Partial update - continue checking for root operations
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fall back to store
-        let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no store for reads".to_string())
-        })?;
-
-        match store.get_versioned(key, self.start_version)? {
-            Some(vv) => {
-                self.record_json_snapshot_version(key.clone(), CommitVersion(vv.version.as_u64()));
-                Ok(true)
-            }
-            None => {
-                self.record_json_snapshot_version(key.clone(), CommitVersion::ZERO);
-                Ok(false)
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2314,10 +1666,6 @@ mod tests {
 
     fn test_key(ns: &Arc<Namespace>, name: &str) -> Key {
         Key::new(ns.clone(), TypeTag::KV, name.as_bytes().to_vec())
-    }
-
-    fn test_json_key(ns: &Arc<Namespace>, name: &str) -> Key {
-        Key::new_json(ns.clone(), name)
     }
 
     /// Create a store with a single key-value at the given version.
@@ -2338,136 +1686,6 @@ mod tests {
     /// Create an empty store (no data).
     fn empty_store() -> Arc<SegmentedStore> {
         Arc::new(SegmentedStore::new())
-    }
-
-    #[test]
-    fn test_json_get_reads_committed_json_doc_shape() {
-        let branch_id = BranchId::new();
-        let ns = test_namespace_for(branch_id);
-        let key = test_json_key(&ns, "doc1");
-        let store = Arc::new(SegmentedStore::new());
-        let doc = StoredJsonDoc::new("doc1", JsonValue::from("hello"));
-        let stored = serialize_stored_json_doc(&doc).unwrap();
-        store
-            .put_with_version_mode(
-                key.clone(),
-                stored,
-                CommitVersion(5),
-                None,
-                WriteMode::Append,
-            )
-            .unwrap();
-
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
-        let value = txn.json_get_document(&key).unwrap();
-        assert_eq!(value, Some(JsonValue::from("hello")));
-    }
-
-    #[test]
-    fn test_materialize_json_writes_emits_json_doc_shape() {
-        let branch_id = BranchId::new();
-        let ns = test_namespace_for(branch_id);
-        let key = test_json_key(&ns, "doc1");
-        let store = empty_store();
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
-
-        txn.json_set(&key, &JsonPath::root(), JsonValue::from("hello"))
-            .unwrap();
-        txn.materialize_json_writes().unwrap();
-
-        let stored = txn.write_set.get(&key).expect("materialized JSON write");
-        let doc = deserialize_stored_json_doc(stored, "doc1").unwrap();
-        assert_eq!(doc.id, "doc1");
-        assert_eq!(doc.value, JsonValue::from("hello"));
-        assert_eq!(doc.version, 1);
-    }
-
-    #[test]
-    fn test_json_get_reads_legacy_raw_json_value_when_first_byte_matches_doc_version() {
-        let branch_id = BranchId::new();
-        let ns = test_namespace_for(branch_id);
-        let key = test_json_key(&ns, "doc1");
-        let store = Arc::new(SegmentedStore::new());
-        let raw = rmp_serde::to_vec(&JsonValue::from(2)).unwrap();
-        store
-            .put_with_version_mode(
-                key.clone(),
-                Value::Bytes(raw),
-                CommitVersion(5),
-                None,
-                WriteMode::Append,
-            )
-            .unwrap();
-
-        let stored = store
-            .get_versioned(&key, CommitVersion(5))
-            .unwrap()
-            .expect("legacy raw JSON should be present");
-        let doc = deserialize_stored_json_doc(&stored.value, "doc1").unwrap();
-        assert_eq!(doc.id, "doc1");
-        assert_eq!(doc.value, JsonValue::from(2));
-        assert_eq!(doc.version, 1);
-        assert_eq!(doc.created_at, 0);
-        assert_eq!(doc.updated_at, 0);
-
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
-        let value = txn.json_get_document(&key).unwrap();
-        assert_eq!(value, Some(JsonValue::from(2)));
-    }
-
-    #[test]
-    fn test_json_get_reads_legacy_raw_json_object_with_doc_like_keys_as_user_data() {
-        let branch_id = BranchId::new();
-        let ns = test_namespace_for(branch_id);
-        let key = test_json_key(&ns, "doc1");
-        let store = Arc::new(SegmentedStore::new());
-        let raw = rmp_serde::to_vec(&JsonValue::from_value(serde_json::json!({
-            "id": "embedded-id",
-            "value": { "payload": "user-data" },
-            "version": 7,
-            "created_at": 100u64,
-            "updated_at": 200u64
-        })))
-        .unwrap();
-        store
-            .put_with_version_mode(
-                key.clone(),
-                Value::Bytes(raw),
-                CommitVersion(5),
-                None,
-                WriteMode::Append,
-            )
-            .unwrap();
-
-        let stored = store
-            .get_versioned(&key, CommitVersion(5))
-            .unwrap()
-            .expect("legacy raw JSON should be present");
-        let doc = deserialize_stored_json_doc(&stored.value, "doc1").unwrap();
-        assert_eq!(doc.id, "doc1");
-        assert_eq!(
-            doc.value,
-            JsonValue::from_value(serde_json::json!({
-                "id": "embedded-id",
-                "value": { "payload": "user-data" },
-                "version": 7,
-                "created_at": 100u64,
-                "updated_at": 200u64
-            }))
-        );
-
-        let mut txn = TransactionContext::with_store(TxnId(1), branch_id, store);
-        let value = txn.json_get_document(&key).unwrap();
-        assert_eq!(
-            value,
-            Some(JsonValue::from_value(serde_json::json!({
-                "id": "embedded-id",
-                "value": { "payload": "user-data" },
-                "version": 7,
-                "created_at": 100u64,
-                "updated_at": 200u64
-            })))
-        );
     }
 
     #[test]

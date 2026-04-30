@@ -3,9 +3,12 @@
 use std::ops::{Deref, DerefMut};
 use std::sync::Arc;
 
+use super::context::Transaction as ScopedTransaction;
+use super::json_state::JsonTxnState;
 use crate::{StrataError, StrataResult};
 use strata_concurrency::TransactionContext;
 use strata_core::types::BranchId;
+use strata_storage::Namespace;
 
 use crate::Database;
 
@@ -16,12 +19,17 @@ use crate::Database;
 pub struct Transaction {
     db: Arc<Database>,
     ctx: Option<TransactionContext>,
+    json_state: JsonTxnState,
 }
 
 impl Transaction {
     /// Construct an owned transaction handle from an active context.
     pub(crate) fn new(db: Arc<Database>, ctx: TransactionContext) -> Self {
-        Self { db, ctx: Some(ctx) }
+        Self {
+            db,
+            ctx: Some(ctx),
+            json_state: JsonTxnState::new(),
+        }
     }
 
     /// Commit the transaction and return its commit version.
@@ -30,6 +38,15 @@ impl Transaction {
             .ctx
             .take()
             .ok_or_else(|| StrataError::transaction_not_active("finished"))?;
+        if let Err(error) = self
+            .db
+            .prepare_json_transaction_context(&mut ctx, &mut self.json_state)
+        {
+            self.db
+                .abort_transaction_in_place(&mut ctx, format!("Commit failed: {}", error));
+            self.db.end_transaction_context(ctx);
+            return Err(error);
+        }
         let result = self.db.commit_transaction_context(&mut ctx);
         self.db.end_transaction_context(ctx);
         result
@@ -54,6 +71,21 @@ impl Transaction {
     /// Get a mutable reference to the underlying context.
     pub fn context_mut(&mut self) -> Option<&mut TransactionContext> {
         self.ctx.as_mut()
+    }
+
+    /// Create a scoped primitive wrapper that shares this manual transaction's
+    /// engine-owned JSON state.
+    pub fn scoped(&mut self, namespace: Arc<Namespace>) -> ScopedTransaction<'_> {
+        let ctx = self
+            .ctx
+            .as_mut()
+            .expect("transaction context not available after commit/abort");
+        ScopedTransaction::with_json_state(
+            ctx,
+            namespace,
+            &mut self.json_state,
+            self.db.storage().clone(),
+        )
     }
 
     fn context(&self) -> Option<&TransactionContext> {

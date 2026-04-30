@@ -8,12 +8,14 @@ use std::sync::Arc;
 use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
+use strata_core::{EntityRef, Version};
 use strata_durability::wal::DurabilityMode;
 use strata_durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::SegmentedStore;
 
 use super::Database;
 use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore};
+use crate::transaction::json_state::{JsonTxnState, MaterializedJsonWrite};
 use crate::transaction::{Transaction, TransactionPool};
 
 /// Return freed heap pages to the OS.
@@ -793,6 +795,76 @@ impl Database {
     /// Internal pool-return helper for transaction contexts.
     pub(crate) fn end_transaction_context(&self, ctx: TransactionContext) {
         TransactionPool::release(ctx);
+    }
+
+    /// Validate and materialize engine-owned JSON semantics into generic
+    /// transaction buffers before lower commit validation runs.
+    ///
+    /// The explicit snapshot-version probe below is only an early-bailout
+    /// optimization. The correctness path is the subsequent call to
+    /// `JsonTxnState::materialize` with `txn.get` as the loader: that read-set
+    /// participation is what lets the lower OCC validator, which runs under the
+    /// branch commit lock, catch concurrent writers that race after this
+    /// preparation step begins.
+    pub(crate) fn prepare_json_transaction_context(
+        &self,
+        txn: &mut TransactionContext,
+        json_state: &mut JsonTxnState,
+    ) -> StrataResult<()> {
+        if txn.is_read_only_mode() && json_state.has_writes() {
+            return Err(StrataError::invalid_input(
+                "Cannot write JSON in a read-only transaction".to_string(),
+            ));
+        }
+
+        if !json_state.has_writes() {
+            json_state.clear();
+            return Ok(());
+        }
+
+        if let Some(conflict) = json_state.write_conflicts().into_iter().next() {
+            let doc_id = conflict.key.user_key_string().ok_or_else(|| {
+                StrataError::internal("JSON conflict requires a string document id")
+            })?;
+            return Err(StrataError::write_conflict(EntityRef::json(
+                txn.branch_id,
+                conflict.key.namespace.space.clone(),
+                doc_id,
+            )));
+        }
+
+        for (key, snapshot_version) in json_state.snapshot_versions() {
+            let current_version = self
+                .storage
+                .get_version_only(key)?
+                .unwrap_or(CommitVersion::ZERO);
+            if current_version != *snapshot_version {
+                let doc_id = key.user_key_string().ok_or_else(|| {
+                    StrataError::internal("JSON OCC requires a string document id")
+                })?;
+                return Err(StrataError::version_conflict(
+                    EntityRef::json(txn.branch_id, key.namespace.space.clone(), doc_id),
+                    Version::txn(snapshot_version.as_u64()),
+                    Version::txn(current_version.as_u64()),
+                ));
+            }
+        }
+
+        let materialized = json_state.materialize(|key| txn.get(key))?;
+        for (key, write) in materialized {
+            match write {
+                MaterializedJsonWrite::Put(value) => {
+                    txn.delete_set.remove(&key);
+                    txn.write_set.insert(key, value);
+                }
+                MaterializedJsonWrite::Delete => {
+                    txn.write_set.remove(&key);
+                    txn.delete_set.insert(key);
+                }
+            }
+        }
+        json_state.clear();
+        Ok(())
     }
 
     /// End a transaction explicitly.

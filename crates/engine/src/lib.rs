@@ -120,6 +120,7 @@ pub use primitives::{
     BranchHandle,
     BranchMetadata,
     BranchStatus,
+    BranchTransaction,
     Event,
     EventLog,
     EventLogExt,
