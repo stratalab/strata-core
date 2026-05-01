@@ -25,9 +25,15 @@ the consolidation work.
 
 It should be read together with:
 
+- [storage-minimal-surface-implementation-plan.md](./storage-minimal-surface-implementation-plan.md)
+- [storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md)
 - [../core/core-charter.md](../core/core-charter.md)
+- [../engine/engine-crate-map.md](../engine/engine-crate-map.md)
 - [../core/co4-storage-boundary-eviction-plan.md](../core/co4-storage-boundary-eviction-plan.md)
 - [../engine/engine-pending-items.md](../engine/engine-pending-items.md)
+- [storage-crate-map.md](./storage-crate-map.md)
+- [concurrency-crate-map.md](./concurrency-crate-map.md)
+- [durability-crate-map.md](./durability-crate-map.md)
 
 ## Storage Thesis
 
@@ -109,8 +115,8 @@ These are the substrate data structures that make persistence work.
 
 ### 3. Transaction Runtime
 
-`storage` should absorb the generic lower-level responsibilities that are
-currently split across `strata-concurrency`.
+`storage` owns the generic lower-level responsibilities that were formerly
+split across `strata-concurrency`.
 
 That includes:
 
@@ -131,7 +137,7 @@ substrate. They are not engine-domain behavior.
 
 ### 4. Durability Runtime
 
-`storage` should also absorb the substrate runtime currently split across
+`storage` owns the substrate runtime that was formerly split across
 `strata-durability`.
 
 That includes:
@@ -219,6 +225,7 @@ The intended consolidation is explicit.
 ### `strata-concurrency`
 
 The standalone `strata-concurrency` crate should not survive long-term.
+That deletion is now complete.
 
 Its generic runtime responsibilities move into `storage`:
 
@@ -291,7 +298,7 @@ true:
 1. `strata-storage` owns the persistence substrate, transaction runtime, and
    durability runtime.
 2. Generic OCC/commit/recovery code no longer lives in a separate
-   `strata-concurrency` crate.
+   deleted `strata-concurrency` crate.
 3. WAL/snapshot/manifest/layout/codec code no longer lives in a separate
    `strata-durability` crate.
 4. JSON path semantics no longer live below `engine`.

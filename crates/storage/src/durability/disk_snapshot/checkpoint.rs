@@ -5,11 +5,11 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::codec::StorageCodec;
-use crate::disk_snapshot::{SnapshotSection, SnapshotWriter};
-use crate::format::primitive_tags;
-use crate::format::primitives::SnapshotSerializer;
-use crate::format::watermark::{CheckpointInfo, SnapshotWatermark};
+use crate::durability::codec::StorageCodec;
+use crate::durability::disk_snapshot::{SnapshotSection, SnapshotWriter};
+use crate::durability::format::primitive_tags;
+use crate::durability::format::primitives::SnapshotSerializer;
+use crate::durability::format::watermark::{CheckpointInfo, SnapshotWatermark};
 use strata_core::id::TxnId;
 
 /// Checkpoint coordinator
@@ -32,7 +32,8 @@ impl CheckpointCoordinator {
         codec: Box<dyn StorageCodec>,
         database_uuid: [u8; 16],
     ) -> std::io::Result<Self> {
-        let serializer_codec: Box<dyn StorageCodec> = Box::new(crate::codec::IdentityCodec);
+        let serializer_codec: Box<dyn StorageCodec> =
+            Box::new(crate::durability::codec::IdentityCodec);
         let snapshot_writer = SnapshotWriter::new(snapshots_dir, codec, database_uuid)?;
         let serializer = SnapshotSerializer::new(serializer_codec);
 
@@ -50,7 +51,8 @@ impl CheckpointCoordinator {
         database_uuid: [u8; 16],
         watermark: SnapshotWatermark,
     ) -> std::io::Result<Self> {
-        let serializer_codec: Box<dyn StorageCodec> = Box::new(crate::codec::IdentityCodec);
+        let serializer_codec: Box<dyn StorageCodec> =
+            Box::new(crate::durability::codec::IdentityCodec);
         let snapshot_writer = SnapshotWriter::new(snapshots_dir, codec, database_uuid)?;
         let serializer = SnapshotSerializer::new(serializer_codec);
 
@@ -159,15 +161,15 @@ impl CheckpointCoordinator {
 #[derive(Debug, Default)]
 pub struct CheckpointData {
     /// KV primitive entries
-    pub kv: Option<Vec<crate::format::primitives::KvSnapshotEntry>>,
+    pub kv: Option<Vec<crate::durability::format::primitives::KvSnapshotEntry>>,
     /// Event primitive entries
-    pub events: Option<Vec<crate::format::primitives::EventSnapshotEntry>>,
+    pub events: Option<Vec<crate::durability::format::primitives::EventSnapshotEntry>>,
     /// Branch primitive entries
-    pub branches: Option<Vec<crate::format::primitives::BranchSnapshotEntry>>,
+    pub branches: Option<Vec<crate::durability::format::primitives::BranchSnapshotEntry>>,
     /// JSON primitive entries
-    pub json: Option<Vec<crate::format::primitives::JsonSnapshotEntry>>,
+    pub json: Option<Vec<crate::durability::format::primitives::JsonSnapshotEntry>>,
     /// Vector primitive entries
-    pub vectors: Option<Vec<crate::format::primitives::VectorCollectionSnapshotEntry>>,
+    pub vectors: Option<Vec<crate::durability::format::primitives::VectorCollectionSnapshotEntry>>,
 }
 
 impl CheckpointData {
@@ -177,7 +179,10 @@ impl CheckpointData {
     }
 
     /// Set KV entries
-    pub fn with_kv(mut self, entries: Vec<crate::format::primitives::KvSnapshotEntry>) -> Self {
+    pub fn with_kv(
+        mut self,
+        entries: Vec<crate::durability::format::primitives::KvSnapshotEntry>,
+    ) -> Self {
         self.kv = Some(entries);
         self
     }
@@ -185,7 +190,7 @@ impl CheckpointData {
     /// Set Event entries
     pub fn with_events(
         mut self,
-        entries: Vec<crate::format::primitives::EventSnapshotEntry>,
+        entries: Vec<crate::durability::format::primitives::EventSnapshotEntry>,
     ) -> Self {
         self.events = Some(entries);
         self
@@ -194,14 +199,17 @@ impl CheckpointData {
     /// Set Branch entries
     pub fn with_branches(
         mut self,
-        entries: Vec<crate::format::primitives::BranchSnapshotEntry>,
+        entries: Vec<crate::durability::format::primitives::BranchSnapshotEntry>,
     ) -> Self {
         self.branches = Some(entries);
         self
     }
 
     /// Set JSON entries
-    pub fn with_json(mut self, entries: Vec<crate::format::primitives::JsonSnapshotEntry>) -> Self {
+    pub fn with_json(
+        mut self,
+        entries: Vec<crate::durability::format::primitives::JsonSnapshotEntry>,
+    ) -> Self {
         self.json = Some(entries);
         self
     }
@@ -209,7 +217,7 @@ impl CheckpointData {
     /// Set Vector entries
     pub fn with_vectors(
         mut self,
-        entries: Vec<crate::format::primitives::VectorCollectionSnapshotEntry>,
+        entries: Vec<crate::durability::format::primitives::VectorCollectionSnapshotEntry>,
     ) -> Self {
         self.vectors = Some(entries);
         self
@@ -228,8 +236,8 @@ pub enum CheckpointError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
-    use crate::format::primitives::{EventSnapshotEntry, KvSnapshotEntry};
+    use crate::durability::codec::IdentityCodec;
+    use crate::durability::format::primitives::{EventSnapshotEntry, KvSnapshotEntry};
 
     fn test_uuid() -> [u8; 16] {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

@@ -16,8 +16,6 @@ workspace = true
 strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-engine = { path = "../engine" }
 strata-storage = { path = "../storage" }
-strata-durability = { path = "../durability" }
-strata-concurrency = { path = "../concurrency" }
 dashmap = { workspace = true }
 memmap2 = { workspace = true }
 rayon = { workspace = true }

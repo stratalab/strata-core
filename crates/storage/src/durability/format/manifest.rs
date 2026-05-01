@@ -34,7 +34,7 @@ pub const MANIFEST_FORMAT_VERSION: u32 = 2;
 /// Oldest MANIFEST format version this build can read. Files with a
 /// `format_version` below this value are rejected with
 /// [`ManifestError::LegacyFormat`] — mirroring the WAL clean-break contract
-/// at [`crate::format::wal_record::MIN_SUPPORTED_SEGMENT_FORMAT_VERSION`].
+/// at [`crate::durability::format::wal_record::MIN_SUPPORTED_SEGMENT_FORMAT_VERSION`].
 /// Operators wipe the `manifest` file and reopen.
 ///
 /// v2 added `flushed_through_commit_id` (required for delta-only WAL replay);

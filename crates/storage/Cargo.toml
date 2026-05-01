@@ -11,6 +11,12 @@ publish = false
 [lints]
 workspace = true
 
+[features]
+default = []
+engine-internal = []
+fault-injection = []
+perf-trace = []
+
 [dependencies]
 strata-core = { package = "strata-core", path = "../core" }
 dashmap = { workspace = true }
@@ -25,6 +31,9 @@ arc-swap = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }
 serde = { workspace = true }
+rmp-serde = { workspace = true }
+aes-gcm = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

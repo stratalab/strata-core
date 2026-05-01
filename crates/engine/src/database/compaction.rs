@@ -3,8 +3,8 @@
 use crate::{StrataError, StrataResult};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_durability::__internal::WalWriterEngineExt;
-use strata_durability::{
+use strata_storage::durability::__internal::WalWriterEngineExt;
+use strata_storage::durability::{
     BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,
     EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, ManifestError, ManifestManager,
     VectorCollectionSnapshotEntry, VectorSnapshotEntry, WalOnlyCompactor,
@@ -120,21 +120,20 @@ impl Database {
         let mut manifest = self.load_or_create_manifest()?;
 
         // Build watermark state from existing MANIFEST if present
-        let existing_watermark =
-            {
-                let m = manifest.manifest();
-                match (m.snapshot_id, m.snapshot_watermark) {
-                    (Some(sid), Some(wtxn)) => Some(
-                        strata_durability::SnapshotWatermark::with_values(sid, TxnId(wtxn), 0),
-                    ),
-                    _ => None,
-                }
-            };
+        let existing_watermark = {
+            let m = manifest.manifest();
+            match (m.snapshot_id, m.snapshot_watermark) {
+                (Some(sid), Some(wtxn)) => Some(
+                    strata_storage::durability::SnapshotWatermark::with_values(sid, TxnId(wtxn), 0),
+                ),
+                _ => None,
+            }
+        };
 
         // Create CheckpointCoordinator with the configured codec and database UUID
         let db_uuid = self.database_uuid;
         let codec_id = self.config.read().storage.codec.clone();
-        let codec = strata_durability::get_codec(&codec_id)
+        let codec = strata_storage::durability::get_codec(&codec_id)
             .map_err(|e| StrataError::internal(format!("checkpoint codec: {}", e)))?;
         let mut coordinator = if let Some(wm) = existing_watermark {
             CheckpointCoordinator::with_watermark(snapshots_dir, codec, db_uuid, wm)
@@ -211,7 +210,7 @@ impl Database {
         // than the raw-byte path that bypasses both the v3 envelope and
         // the installed codec.
         let compactor = WalOnlyCompactor::new(wal_dir, manifest_arc).with_codec(
-            strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
+            strata_storage::durability::codec::clone_codec(self.wal_codec.as_ref()),
         );
         let compact_info = compactor
             .compact_with_active_override(writer_active)

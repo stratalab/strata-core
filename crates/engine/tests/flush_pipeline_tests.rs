@@ -81,10 +81,10 @@ fn scheduler_flushes_after_rotation() {
 // ============================================================================
 
 use parking_lot::Mutex;
-use strata_durability::codec::IdentityCodec;
-use strata_durability::format::{ManifestManager, WalRecord};
-use strata_durability::wal::{WalConfig, WalReader, WalWriter};
-use strata_durability::DurabilityMode;
+use strata_storage::durability::codec::IdentityCodec;
+use strata_storage::durability::format::{ManifestManager, WalRecord};
+use strata_storage::durability::wal::{WalConfig, WalReader, WalWriter};
+use strata_storage::durability::DurabilityMode;
 
 fn test_uuid() -> [u8; 16] {
     [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
@@ -344,7 +344,7 @@ fn lifecycle_multiple_flush_cycles() {
 
 #[test]
 fn lifecycle_wal_truncation_after_flush() {
-    use strata_durability::compaction::WalOnlyCompactor;
+    use strata_storage::durability::compaction::WalOnlyCompactor;
 
     let dir = tempfile::tempdir().unwrap();
     let wal_dir = dir.path().join("WAL");

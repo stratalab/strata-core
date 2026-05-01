@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
-use strata_durability::__internal::WalWriterEngineExt;
-use strata_durability::codec::clone_codec;
-use strata_durability::layout::DatabaseLayout;
-use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
+use strata_storage::durability::__internal::WalWriterEngineExt;
+use strata_storage::durability::codec::clone_codec;
+use strata_storage::durability::layout::DatabaseLayout;
+use strata_storage::durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
 
@@ -932,8 +932,8 @@ impl Database {
         // `Option`, so the type signature does not leak "this is a
         // cache database" into the field type. `IdentityCodec` is the
         // typical resolution here and is effectively a no-op at runtime.
-        let wal_codec_for_cache =
-            strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+        let wal_codec_for_cache = strata_storage::durability::get_codec(&cfg.storage.codec)
+            .map_err(|e| {
                 StrataError::internal(format!(
                     "cache database could not initialize codec '{}': {}",
                     cfg.storage.codec, e
@@ -1235,7 +1235,7 @@ impl Database {
         // Validate the configured codec exists before touching any state.
         // Mirrors the primary path so a follower with an unknown codec is
         // rejected consistently — with or without an on-disk MANIFEST.
-        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| {
+        strata_storage::durability::get_codec(&cfg.storage.codec).map_err(|e| {
             StrataError::internal(format!(
                 "invalid storage codec '{}': {}",
                 cfg.storage.codec, e

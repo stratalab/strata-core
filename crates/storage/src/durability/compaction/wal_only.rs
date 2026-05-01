@@ -20,10 +20,10 @@
 //! - Only removes segments fully covered by snapshot
 //! - Requires a valid snapshot to exist
 
-use crate::codec::{clone_codec, StorageCodec};
-use crate::format::segment_meta::SegmentMeta;
-use crate::format::ManifestManager;
-use crate::wal::WalReader;
+use crate::durability::codec::{clone_codec, StorageCodec};
+use crate::durability::format::segment_meta::SegmentMeta;
+use crate::durability::format::ManifestManager;
+use crate::durability::wal::WalReader;
 use parking_lot::Mutex;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -306,7 +306,7 @@ impl WalOnlyCompactor {
 /// install decoder. Before that work, WAL retention could only trust the
 /// flush watermark (the original `#1730` defensive hardening); after it,
 /// either source is sufficient.
-fn effective_watermark(manifest: &crate::format::Manifest) -> Option<u64> {
+fn effective_watermark(manifest: &crate::durability::format::Manifest) -> Option<u64> {
     match (
         manifest.flushed_through_commit_id,
         manifest.snapshot_watermark,
@@ -328,7 +328,7 @@ fn segment_path(dir: &Path, segment_number: u64) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::{WalRecord, WalSegment};
+    use crate::durability::format::{WalRecord, WalSegment};
     use strata_core::id::{CommitVersion, TxnId};
     use tempfile::tempdir;
 

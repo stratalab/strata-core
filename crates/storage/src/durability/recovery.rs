@@ -17,17 +17,16 @@
 
 use std::path::PathBuf;
 
-use crate::payload::TransactionPayload;
-use strata_core::id::{CommitVersion, TxnId};
-use strata_core::{StrataError, StrataResult};
-use strata_durability::codec::{clone_codec, StorageCodec};
-use strata_durability::format::{snapshot_path, SegmentMeta, WalRecord, WalSegment};
-use strata_durability::layout::DatabaseLayout;
-use strata_durability::wal::{WalReader, WalReaderError};
-use strata_durability::{
+use crate::durability::codec::{clone_codec, StorageCodec};
+use crate::durability::format::{snapshot_path, SegmentMeta, WalRecord, WalSegment};
+use crate::durability::layout::DatabaseLayout;
+use crate::durability::wal::{WalReader, WalReaderError};
+use crate::durability::TransactionPayload;
+use crate::durability::{
     LoadedSnapshot, ManifestError, ManifestManager, SnapshotReadError, SnapshotReader,
 };
-use strata_storage::SegmentedStore;
+use crate::{SegmentedStore, StorageError, StorageResult};
+use strata_core::id::{CommitVersion, TxnId};
 use tracing::{info, warn};
 
 /// Recovery plan summarizing MANIFEST state before WAL bytes are read.
@@ -115,17 +114,34 @@ pub struct RecoveryCoordinator {
     codec: Option<Box<dyn StorageCodec>>,
 }
 
+/// Typed failures from [`RecoveryCoordinator::plan_recovery`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum CoordinatorPlanError {
+    /// MANIFEST load failed while building the recovery plan.
+    #[error("failed to load MANIFEST: {0}")]
+    Manifest(#[source] ManifestError),
+
+    /// MANIFEST codec id did not match the caller's configured codec id.
+    #[error(
+        "codec mismatch: database was created with '{stored}' but config specifies '{expected}'. \
+         A database cannot be reopened with a different codec."
+    )]
+    CodecMismatch {
+        /// Codec id recorded in the on-disk MANIFEST.
+        stored: String,
+        /// Codec id supplied by the caller.
+        expected: String,
+    },
+}
+
 /// Typed recovery failures produced by [`RecoveryCoordinator::recover_typed`].
-///
-/// `recover()` remains the legacy `StrataResult` wrapper for the wider
-/// workspace; engine recovery uses this typed form so D3 can preserve
-/// snapshot/WAL taxonomy past the coordinator boundary.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum CoordinatorRecoveryError {
     /// `plan_recovery()` failed while resolving snapshot state.
     #[error(transparent)]
-    Plan(StrataError),
+    Plan(CoordinatorPlanError),
 
     /// MANIFEST references a snapshot file that does not exist.
     #[error("MANIFEST references snapshot {snapshot_id} but {path} is missing")]
@@ -163,7 +179,7 @@ pub enum CoordinatorRecoveryError {
 
     /// Caller-supplied snapshot or record callback returned an error.
     #[error(transparent)]
-    Callback(StrataError),
+    Callback(StorageError),
 }
 
 impl CoordinatorRecoveryError {
@@ -186,36 +202,6 @@ impl CoordinatorRecoveryError {
     /// in-memory store cannot heal them.
     pub fn should_bypass_lossy(&self) -> bool {
         matches!(self, CoordinatorRecoveryError::Plan(_)) || self.is_legacy_format()
-    }
-}
-
-impl From<CoordinatorRecoveryError> for StrataError {
-    fn from(value: CoordinatorRecoveryError) -> Self {
-        match value {
-            CoordinatorRecoveryError::Plan(inner) | CoordinatorRecoveryError::Callback(inner) => {
-                inner
-            }
-            CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path } => {
-                StrataError::corruption(format!(
-                    "MANIFEST references snapshot {snapshot_id} but {} is missing",
-                    path.display()
-                ))
-            }
-            CoordinatorRecoveryError::SnapshotRead {
-                snapshot_id,
-                path,
-                source,
-            } => map_snapshot_read_error_to_strata_error(source, |other| {
-                StrataError::corruption(format!(
-                    "failed to load snapshot {snapshot_id} at {}: {other}",
-                    path.display(),
-                ))
-            }),
-            CoordinatorRecoveryError::WalRead(inner) => wal_read_error_to_strata_error(inner),
-            CoordinatorRecoveryError::PayloadDecode { txn_id, detail } => StrataError::storage(
-                format!("Failed to decode transaction payload for txn {txn_id}: {detail}"),
-            ),
-        }
     }
 }
 
@@ -313,26 +299,25 @@ impl RecoveryCoordinator {
     ///
     /// # Errors
     ///
-    /// - `StrataError::corruption` (or `StrataError::LegacyFormat` for pre-v2
-    ///   MANIFESTs) if the MANIFEST cannot be parsed.
-    /// - `StrataError::IncompatibleReuse` if the MANIFEST codec does not match
-    ///   `expected_codec_id`. Codec mismatch is a configuration error, not
-    ///   data corruption — the engine open paths at `database/open.rs` surface
-    ///   the same variant so the coordinator-only codepath agrees.
-    pub fn plan_recovery(&self, expected_codec_id: &str) -> StrataResult<RecoveryPlan> {
+    /// - [`CoordinatorPlanError::Manifest`] when the MANIFEST cannot be parsed.
+    /// - [`CoordinatorPlanError::CodecMismatch`] when the on-disk codec id does
+    ///   not match `expected_codec_id`.
+    pub fn plan_recovery(
+        &self,
+        expected_codec_id: &str,
+    ) -> Result<RecoveryPlan, CoordinatorPlanError> {
         let manifest_path = self.layout.manifest_path();
         if !ManifestManager::exists(manifest_path) {
             return Ok(RecoveryPlan::fresh());
         }
         let mgr = ManifestManager::load(manifest_path.to_path_buf())
-            .map_err(manifest_error_to_strata_error)?;
+            .map_err(CoordinatorPlanError::Manifest)?;
         let m = mgr.manifest();
         if m.codec_id != expected_codec_id {
-            return Err(StrataError::incompatible_reuse(format!(
-                "codec mismatch: database was created with '{}' but config specifies '{}'. \
-                 A database cannot be reopened with a different codec.",
-                m.codec_id, expected_codec_id
-            )));
+            return Err(CoordinatorPlanError::CodecMismatch {
+                stored: m.codec_id.clone(),
+                expected: expected_codec_id.to_owned(),
+            });
         }
         Ok(RecoveryPlan {
             manifest_present: true,
@@ -354,7 +339,6 @@ impl RecoveryCoordinator {
     /// 2. Snapshot-level: `SnapshotReader::load` rejects if the snapshot file's
     ///    embedded codec id doesn't match. These should align when the
     ///    MANIFEST and snapshot were written by the same process; snapshot
-    ///    codec mismatch is elevated to `StrataError::corruption` here.
     fn load_snapshot_if_present(
         &self,
         codec: &dyn StorageCodec,
@@ -408,20 +392,18 @@ impl RecoveryCoordinator {
     /// callers that need the decoded payload perform their own decode
     /// inside `on_record` to preserve the inline-decode invariant.
     ///
-    /// Typed recovery driver used by the engine's D3 recovery
-    /// orchestration.
+    /// Typed recovery driver used by the engine's recovery orchestration.
     ///
-    /// The legacy [`recover`](Self::recover) API is a thin wrapper over this
-    /// method that maps the typed error back to the historical
-    /// `StrataError` surface for existing callers.
+    /// [`recover`](Self::recover) is the canonical storage-owned callback API
+    /// and forwards directly to this method.
     pub fn recover_typed<FS, FR>(
         self,
         on_snapshot: FS,
         mut on_record: FR,
     ) -> Result<RecoveryStats, CoordinatorRecoveryError>
     where
-        FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
-        FR: FnMut(&WalRecord) -> StrataResult<()>,
+        FS: FnOnce(LoadedSnapshot) -> StorageResult<()>,
+        FR: FnMut(&WalRecord) -> StorageResult<()>,
     {
         let mut stats = RecoveryStats::default();
         let mut max_version = 0u64;
@@ -535,21 +517,20 @@ impl RecoveryCoordinator {
         Ok(stats)
     }
 
-    /// Drive recovery through caller-supplied callbacks and map the typed
-    /// coordinator error back to the historical `StrataError` surface.
-    ///
-    /// # Errors
+    /// Drive recovery through caller-supplied callbacks.
     ///
     /// Propagates errors from `on_snapshot`, `on_record`, and WAL reading.
-    /// A hard error from `on_record` halts replay immediately — the caller
-    /// is expected to surface it.
-    pub fn recover<FS, FR>(self, on_snapshot: FS, on_record: FR) -> StrataResult<RecoveryStats>
+    /// A hard error from `on_record` halts replay immediately.
+    pub fn recover<FS, FR>(
+        self,
+        on_snapshot: FS,
+        on_record: FR,
+    ) -> Result<RecoveryStats, CoordinatorRecoveryError>
     where
-        FS: FnOnce(LoadedSnapshot) -> StrataResult<()>,
-        FR: FnMut(&WalRecord) -> StrataResult<()>,
+        FS: FnOnce(LoadedSnapshot) -> StorageResult<()>,
+        FR: FnMut(&WalRecord) -> StorageResult<()>,
     {
         self.recover_typed(on_snapshot, on_record)
-            .map_err(StrataError::from)
     }
 
     /// Best-effort sidecar rebuild for closed WAL segments whose `.meta`
@@ -648,16 +629,24 @@ impl RecoveryCoordinator {
     /// drives `recover` directly with its own snapshot and WAL apply
     /// closures, so the shipped open path does not go through this
     /// wrapper. Snapshot loading is not performed here — this entry
-    /// point intentionally skips the codec + snapshot path to keep
-    /// test fixtures simple.
-    pub fn recover_into_memory_storage(self) -> StrataResult<RecoveryResult> {
+    /// point intentionally drops any installed codec and uses full WAL
+    /// replay only, keeping the convenience API deterministic for
+    /// snapshot-less tests and tooling fixtures.
+    pub fn recover_into_memory_storage(self) -> Result<RecoveryResult, CoordinatorRecoveryError> {
+        let mut coordinator = self;
+        // This convenience wrapper is deliberately WAL-only. If a caller
+        // previously installed a codec for `recover()`, do not let that
+        // trigger snapshot loading here: the wrapper has no storage-owned
+        // snapshot install path and must therefore ignore the codec rather
+        // than load-and-discard checkpoint state.
+        coordinator.codec = None;
         let storage = SegmentedStore::with_dir(
-            self.layout.segments_dir().to_path_buf(),
-            self.write_buffer_size,
+            coordinator.layout.segments_dir().to_path_buf(),
+            coordinator.write_buffer_size,
         );
         let stats = {
             let storage_ref = &storage;
-            self.recover(
+            coordinator.recover(
                 |_snapshot| Ok(()),
                 |record| apply_wal_record_to_memory_storage(storage_ref, record),
             )?
@@ -674,67 +663,12 @@ impl RecoveryCoordinator {
 /// [`RecoveryCoordinator::recover_into_memory_storage`] and is exposed so
 /// engine open paths that drive the callback-driven [`RecoveryCoordinator::recover`]
 /// directly can reuse the exact same apply semantics in their `on_record`
-/// closure without duplicating the decode/apply ladder.
-/// Map a `WalReaderError` to the matching typed `StrataError` variant.
-///
-/// T3-E12 §D8: `CodecDecode` and `LegacyFormat` get typed pass-through
-/// so the engine's open path can `matches!(err, StrataError::LegacyFormat { .. })`
-/// to skip the lossy wipe (D6) and so
-/// `LossyErrorKind::from_strata_error` can classify codec-decode
-/// failures as `LossyErrorKind::CodecDecode` (D5). Everything else
-/// renders as `StrataError::storage`.
-fn wal_read_error_to_strata_error(err: WalReaderError) -> StrataError {
-    match err {
-        WalReaderError::CodecDecode { detail, .. } => StrataError::codec_decode(detail),
-        WalReaderError::LegacyFormat {
-            found_version,
-            hint,
-        } => StrataError::legacy_format(found_version, hint),
-        other => StrataError::storage(format!("WAL read failed: {}", other)),
-    }
-}
-
-/// Map a `ManifestError` into a typed `StrataError`, passing `LegacyFormat`
-/// through so the engine's open path can `matches!(err, StrataError::LegacyFormat { .. })`
-/// to skip the lossy wipe. Everything else collapses to
-/// `StrataError::corruption` — the same generic surface callers had before.
-pub fn manifest_error_to_strata_error(err: ManifestError) -> StrataError {
-    match err {
-        ManifestError::LegacyFormat {
-            detected_version,
-            supported_range,
-            remediation,
-        } => StrataError::legacy_format(
-            detected_version,
-            format!("{supported_range}. {remediation}"),
-        ),
-        other => StrataError::corruption(format!("failed to load MANIFEST: {other}")),
-    }
-}
-
-fn map_snapshot_read_error_to_strata_error<F>(err: SnapshotReadError, non_legacy: F) -> StrataError
-where
-    F: FnOnce(SnapshotReadError) -> StrataError,
-{
-    match err {
-        SnapshotReadError::LegacyFormat {
-            detected_version,
-            supported_range,
-            remediation,
-        } => StrataError::legacy_format(
-            detected_version,
-            format!("{supported_range}. {remediation}"),
-        ),
-        other => non_legacy(other),
-    }
-}
-
 pub fn apply_wal_record_to_memory_storage(
     storage: &SegmentedStore,
     record: &WalRecord,
-) -> StrataResult<()> {
+) -> StorageResult<()> {
     let payload = TransactionPayload::from_bytes(&record.writeset).map_err(|e| {
-        StrataError::storage(format!(
+        StorageError::corruption(format!(
             "Failed to decode transaction payload for txn {}: {}",
             record.txn_id, e
         ))
@@ -847,16 +781,17 @@ impl RecoveryStats {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::payload::TransactionPayload;
+    use crate as strata_storage;
+    use crate::durability::TransactionPayload;
     use std::path::Path;
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::value::Value;
     use strata_core::BranchId;
-    use strata_durability::codec::IdentityCodec;
-    use strata_durability::format::WalRecord;
-    use strata_durability::now_micros;
-    use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
+    use strata_storage::durability::codec::IdentityCodec;
+    use strata_storage::durability::format::WalRecord;
+    use strata_storage::durability::now_micros;
+    use strata_storage::durability::wal::{DurabilityMode, WalConfig, WalWriter};
     use strata_storage::{Key, Namespace, TransactionManager as StorageTransactionManager};
     use tempfile::TempDir;
 
@@ -1258,7 +1193,8 @@ mod tests {
         }
 
         // Append garbage to simulate crash mid-write of a second record
-        let segment_path = strata_durability::format::WalSegment::segment_path(&wal_dir, 1);
+        let segment_path =
+            strata_storage::durability::format::WalSegment::segment_path(&wal_dir, 1);
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -1657,7 +1593,7 @@ mod tests {
     /// partial record and the later committed records are lost.
     #[test]
     fn test_issue_1741_partial_tail_truncated_before_reopen() {
-        use strata_durability::format::WalSegment;
+        use strata_storage::durability::format::WalSegment;
 
         let temp_dir = TempDir::new().unwrap();
         let wal_dir = temp_dir.path().join("wal");
@@ -1758,7 +1694,7 @@ mod tests {
     // plan_recovery + callback API tests
     // ========================================
 
-    use strata_durability::ManifestManager;
+    use strata_storage::durability::ManifestManager;
 
     /// A fresh database (no MANIFEST) yields the zero-valued plan.
     #[test]
@@ -1933,7 +1869,7 @@ mod tests {
             |_record| {
                 seen += 1;
                 if seen == 2 {
-                    Err(strata_core::StrataError::internal("injected apply failure"))
+                    Err(StorageError::corruption("injected apply failure"))
                 } else {
                     Ok(())
                 }
@@ -1996,7 +1932,7 @@ mod tests {
             |_record| {
                 seen += 1;
                 if seen == 2 {
-                    Err(strata_core::StrataError::internal("injected"))
+                    Err(StorageError::corruption("injected"))
                 } else {
                     Ok(())
                 }
@@ -2017,8 +1953,8 @@ mod tests {
         assert_eq!(stats.max_txn_id, TxnId(3));
     }
 
-    /// A corrupt MANIFEST file surfaces as `StrataError::corruption`, not a
-    /// silent empty plan or a generic storage error.
+    /// A corrupt MANIFEST fails `plan_recovery()` loudly instead of returning
+    /// a silent empty plan.
     #[test]
     fn test_plan_recovery_reports_corrupt_manifest() {
         let temp_dir = TempDir::new().unwrap();
@@ -2030,8 +1966,6 @@ mod tests {
         let err = coordinator
             .plan_recovery("identity")
             .expect_err("corrupt MANIFEST must fail plan_recovery");
-        // StrataError::corruption carries the "corruption" category; the
-        // underlying ManifestError message is preserved in the text.
         let message = err.to_string();
         assert!(
             message.to_lowercase().contains("manifest"),
@@ -2041,20 +1975,20 @@ mod tests {
     }
 
     /// Snapshot load failures must keep the snapshot id and on-disk path in the
-    /// surfaced corruption message so operators can delete the exact artifact.
+    /// surfaced error message so operators can delete the exact artifact.
     #[test]
     fn test_recover_reports_snapshot_id_and_path_on_snapshot_load_failure() {
         let temp_dir = TempDir::new().unwrap();
         let layout = test_layout(temp_dir.path());
         seed_snapshot(&layout, 9, 100);
 
-        let snap = strata_durability::format::snapshot_path(layout.snapshots_dir(), 9);
+        let snap = strata_storage::durability::format::snapshot_path(layout.snapshots_dir(), 9);
         std::fs::write(&snap, b"bad").unwrap();
 
         let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));
         let err = coord
             .recover(|_| Ok(()), |_| Ok(()))
-            .expect_err("corrupt snapshot must surface as corruption");
+            .expect_err("corrupt snapshot must surface as a typed recovery error");
         let msg = err.to_string();
         assert!(
             msg.contains("failed to load snapshot 9"),
@@ -2094,8 +2028,8 @@ mod tests {
         assert_eq!(stats.max_txn_id, TxnId::ZERO);
     }
 
-    /// The legacy compat wrapper must produce identical stats to the
-    /// callback API's default-apply path.
+    /// The memory-storage convenience wrapper must produce identical stats to
+    /// the callback API's default-apply path.
     #[test]
     fn test_recover_into_memory_storage_matches_callback_apply() {
         let temp_dir = TempDir::new().unwrap();
@@ -2140,8 +2074,8 @@ mod tests {
     // Coordinator snapshot-loading tests
     // ========================================
 
-    use strata_durability::disk_snapshot::{SnapshotSection, SnapshotWriter};
-    use strata_durability::format::primitive_tags;
+    use strata_storage::durability::disk_snapshot::{SnapshotSection, SnapshotWriter};
+    use strata_storage::durability::format::primitive_tags;
 
     /// Helper: seed a snapshot file and matching MANIFEST entry so the
     /// coordinator's snapshot-loading path can find them.
@@ -2221,6 +2155,53 @@ mod tests {
             .unwrap();
         assert_eq!(fired, 0);
         assert!(!stats.from_checkpoint);
+    }
+
+    /// The convenience wrapper is intentionally WAL-only even if a codec is
+    /// installed. A recorded snapshot watermark must not suppress replay
+    /// unless the caller uses the callback API and installs the snapshot.
+    #[test]
+    fn test_recover_into_memory_storage_ignores_installed_codec_and_snapshot_ref() {
+        let temp_dir = TempDir::new().unwrap();
+        let wal_dir = temp_dir.path().join("wal");
+        let branch_id = BranchId::new();
+        let ns = create_test_namespace(branch_id);
+        let layout = test_layout(temp_dir.path());
+        seed_snapshot(&layout, 9, 100);
+
+        {
+            let mut wal = create_test_wal(&wal_dir);
+            for i in 1u64..=3 {
+                write_txn(
+                    &mut wal,
+                    i,
+                    branch_id,
+                    vec![(
+                        Key::new_kv(ns.clone(), format!("k{}", i)),
+                        Value::Int(i as i64),
+                    )],
+                    vec![],
+                    i,
+                );
+            }
+        }
+
+        let result = RecoveryCoordinator::new(layout, 0)
+            .with_codec(Box::new(IdentityCodec))
+            .recover_into_memory_storage()
+            .unwrap();
+
+        assert!(!result.stats.from_checkpoint);
+        assert_eq!(result.stats.txns_replayed, 3);
+        assert_eq!(result.stats.txns_skipped_below_watermark, 0);
+        assert_eq!(result.stats.max_txn_id, TxnId(3));
+
+        let restored = result
+            .storage
+            .get_versioned(&Key::new_kv(ns, "k3"), CommitVersion::MAX)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.value, Value::Int(3));
     }
 
     /// Delta-WAL replay: when a snapshot with watermark=N is loaded, records
@@ -2414,7 +2395,8 @@ mod tests {
 
         // Delete the sidecar for the closed segment (segment 1) so recovery
         // has something to rebuild.
-        let closed_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        let closed_sidecar =
+            strata_storage::durability::format::SegmentMeta::meta_path(&wal_dir, 1);
         if closed_sidecar.exists() {
             std::fs::remove_file(&closed_sidecar).unwrap();
         }
@@ -2428,7 +2410,7 @@ mod tests {
             closed_sidecar.exists(),
             "closed-segment sidecar must be rebuilt by recovery"
         );
-        let rebuilt = strata_durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
+        let rebuilt = strata_storage::durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
             .expect("rebuilt sidecar must be readable")
             .expect("rebuilt sidecar must exist");
         assert_eq!(rebuilt.segment_number, 1);
@@ -2471,13 +2453,14 @@ mod tests {
 
         // Overwrite the closed sidecar with bytes that will fail magic/CRC
         // validation in `SegmentMeta::from_bytes`.
-        let closed_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 1);
+        let closed_sidecar =
+            strata_storage::durability::format::SegmentMeta::meta_path(&wal_dir, 1);
         std::fs::write(&closed_sidecar, b"CORRUPT_GARBAGE_NOT_A_VALID_META").unwrap();
 
         let coord = test_recovery(temp_dir.path());
         let _ = coord.recover(|_| Ok(()), |_| Ok(())).unwrap();
 
-        let rebuilt = strata_durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
+        let rebuilt = strata_storage::durability::format::SegmentMeta::read_from_file(&wal_dir, 1)
             .expect("rebuilt sidecar must be readable after corruption")
             .expect("rebuilt sidecar must exist");
         assert_eq!(rebuilt.segment_number, 1);
@@ -2517,7 +2500,8 @@ mod tests {
         }
 
         // Delete the active-segment sidecar (segment 2 is the tail here).
-        let active_sidecar = strata_durability::format::SegmentMeta::meta_path(&wal_dir, 2);
+        let active_sidecar =
+            strata_storage::durability::format::SegmentMeta::meta_path(&wal_dir, 2);
         if active_sidecar.exists() {
             std::fs::remove_file(&active_sidecar).unwrap();
         }
@@ -2534,8 +2518,8 @@ mod tests {
     }
 
     /// MANIFEST references a snapshot id but the corresponding .chk file was
-    /// deleted from disk. Recovery must fail loud with `StrataError::corruption`,
-    /// not silently fall back to WAL-only or produce an empty plan.
+    /// deleted from disk. Recovery must fail loudly, not silently fall back to
+    /// WAL-only or produce an empty plan.
     #[test]
     fn test_recover_rejects_missing_snapshot_file() {
         let temp_dir = TempDir::new().unwrap();
@@ -2543,7 +2527,7 @@ mod tests {
         seed_snapshot(&layout, 3, 100);
 
         // Remove the snapshot file the MANIFEST still points at.
-        let snap = strata_durability::format::snapshot_path(layout.snapshots_dir(), 3);
+        let snap = strata_storage::durability::format::snapshot_path(layout.snapshots_dir(), 3);
         std::fs::remove_file(&snap).unwrap();
 
         let coord = RecoveryCoordinator::new(layout, 0).with_codec(Box::new(IdentityCodec));

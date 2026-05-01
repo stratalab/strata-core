@@ -90,8 +90,8 @@ use std::time::Instant;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::VersionedValue;
-use strata_durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
-use strata_durability::wal::{DurabilityMode, WalWriter};
+use strata_storage::durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
+use strata_storage::durability::wal::{DurabilityMode, WalWriter};
 use strata_storage::Key;
 use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator, StorageResult};
 
@@ -239,7 +239,7 @@ impl std::fmt::Display for WalWriterHealth {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatabaseDiskUsage {
     /// WAL directory usage.
-    pub wal: strata_durability::WalDiskUsage,
+    pub wal: strata_storage::durability::WalDiskUsage,
     /// Snapshot directory usage in bytes.
     pub snapshot_bytes: u64,
 }
@@ -430,9 +430,9 @@ pub struct SystemMetrics {
     /// Transaction metrics.
     pub transactions: crate::coordinator::TransactionMetrics,
     /// WAL counters (None for ephemeral databases).
-    pub wal_counters: Option<strata_durability::WalCounters>,
+    pub wal_counters: Option<strata_storage::durability::WalCounters>,
     /// WAL disk usage (None for ephemeral databases).
-    pub wal_disk_usage: Option<strata_durability::WalDiskUsage>,
+    pub wal_disk_usage: Option<strata_storage::durability::WalDiskUsage>,
     /// Background scheduler metrics.
     pub scheduler: crate::background::SchedulerStats,
     /// Storage memory usage summary.
@@ -545,7 +545,7 @@ pub struct Database {
     /// field, encrypted followers would recover at open but then fail
     /// every subsequent refresh with a codec-decode error on the first
     /// new record.
-    wal_codec: Box<dyn strata_durability::codec::StorageCodec>,
+    wal_codec: Box<dyn strata_storage::durability::codec::StorageCodec>,
 
     /// Persistence mode (ephemeral vs disk-backed)
     persistence_mode: PersistenceMode,
@@ -1399,7 +1399,7 @@ impl Database {
     ///
     /// Returns `None` for ephemeral databases (no WAL).
     /// Briefly locks the WAL mutex to read counter values.
-    pub fn durability_counters(&self) -> Option<strata_durability::WalCounters> {
+    pub fn durability_counters(&self) -> Option<strata_storage::durability::WalCounters> {
         self.wal_writer.as_ref().map(|w| w.lock().counters())
     }
 

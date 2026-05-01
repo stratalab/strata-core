@@ -130,7 +130,8 @@ fn test_partial_record_discarded() {
         );
 
         // Append garbage to simulate crash mid-write of second record
-        let segment_path = strata_durability::format::WalSegment::segment_path(&wal_dir, 1);
+        let segment_path =
+            strata_storage::durability::format::WalSegment::segment_path(&wal_dir, 1);
         use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .append(true)
@@ -441,7 +442,7 @@ fn run_primary_recovery(
     db_path: &std::path::Path,
     cfg: StrataConfig,
 ) -> Result<crate::database::recovery::RecoveryOutcome, crate::database::RecoveryError> {
-    let layout = strata_durability::layout::DatabaseLayout::from_root(db_path);
+    let layout = strata_storage::durability::layout::DatabaseLayout::from_root(db_path);
     Database::run_recovery(
         db_path,
         &layout,
@@ -455,21 +456,21 @@ fn seed_snapshot_fixture(db_path: &std::path::Path, snapshot_id: u64, watermark:
 
     let snapshots_dir = db_path.join("snapshots");
     std::fs::create_dir_all(&snapshots_dir).unwrap();
-    let writer = strata_durability::SnapshotWriter::new(
+    let writer = strata_storage::durability::SnapshotWriter::new(
         snapshots_dir.clone(),
-        Box::new(strata_durability::codec::IdentityCodec),
+        Box::new(strata_storage::durability::codec::IdentityCodec),
         TEST_UUID,
     )
     .unwrap();
-    let sections = vec![strata_durability::SnapshotSection::new(
-        strata_durability::format::primitive_tags::KV,
+    let sections = vec![strata_storage::durability::SnapshotSection::new(
+        strata_storage::durability::format::primitive_tags::KV,
         vec![0, 0, 0, 0],
     )];
     let info = writer
         .create_snapshot(snapshot_id, watermark, sections)
         .unwrap();
 
-    let mut mgr = strata_durability::ManifestManager::create(
+    let mut mgr = strata_storage::durability::ManifestManager::create(
         db_path.join("MANIFEST"),
         TEST_UUID,
         "identity".to_string(),
@@ -484,12 +485,12 @@ fn seed_snapshot_fixture(db_path: &std::path::Path, snapshot_id: u64, watermark:
 fn write_invalid_payload_wal(db_path: &std::path::Path) {
     let wal_dir = db_path.join("wal");
     std::fs::create_dir_all(&wal_dir).unwrap();
-    let mut wal = strata_durability::wal::WalWriter::new(
+    let mut wal = strata_storage::durability::wal::WalWriter::new(
         wal_dir,
         [0u8; 16],
-        strata_durability::wal::DurabilityMode::Always,
+        strata_storage::durability::wal::DurabilityMode::Always,
         WalConfig::for_testing(),
-        Box::new(strata_durability::codec::IdentityCodec),
+        Box::new(strata_storage::durability::codec::IdentityCodec),
     )
     .unwrap();
     let record = WalRecord::new(TxnId(1), [7u8; 16], now_micros(), vec![0xFF]);
@@ -514,7 +515,7 @@ fn seed_outer_len_crc_mismatch(db_path: &std::path::Path) {
 
     let segment_path = wal_dir.join("wal-000001.seg");
     let mut bytes = std::fs::read(&segment_path).unwrap();
-    bytes[strata_durability::SEGMENT_HEADER_SIZE_V2 + 5] ^= 0xFF;
+    bytes[strata_storage::durability::SEGMENT_HEADER_SIZE_V2 + 5] ^= 0xFF;
     std::fs::write(&segment_path, &bytes).unwrap();
 }
 
@@ -1014,7 +1015,7 @@ fn test_legacy_snapshot_under_lossy_flag_still_hard_fails() {
     let snapshots_dir = db_path.join("snapshots");
     std::fs::create_dir_all(&snapshots_dir).unwrap();
 
-    let mut mgr = strata_durability::ManifestManager::create(
+    let mut mgr = strata_storage::durability::ManifestManager::create(
         db_path.join("MANIFEST"),
         [0xAAu8; 16],
         "identity".to_string(),
@@ -1022,9 +1023,9 @@ fn test_legacy_snapshot_under_lossy_flag_still_hard_fails() {
     .unwrap();
     mgr.set_snapshot_watermark(1, TxnId(100)).unwrap();
 
-    let snapshot_path = strata_durability::format::snapshot_path(&snapshots_dir, 1);
-    let mut header = [0u8; strata_durability::SNAPSHOT_HEADER_SIZE];
-    header[0..4].copy_from_slice(&strata_durability::SNAPSHOT_MAGIC);
+    let snapshot_path = strata_storage::durability::format::snapshot_path(&snapshots_dir, 1);
+    let mut header = [0u8; strata_storage::durability::SNAPSHOT_HEADER_SIZE];
+    header[0..4].copy_from_slice(&strata_storage::durability::SNAPSHOT_MAGIC);
     header[4..8].copy_from_slice(&1u32.to_le_bytes()); // format_version = 1 (legacy)
     header[8..16].copy_from_slice(&1u64.to_le_bytes()); // snapshot_id
     header[16..24].copy_from_slice(&100u64.to_le_bytes()); // watermark_txn
@@ -1132,7 +1133,7 @@ fn test_run_recovery_reports_snapshot_crc_typed() {
             role: crate::database::ErrorRole::Primary,
             snapshot_id,
             path,
-            inner: strata_durability::SnapshotReadError::CrcMismatch { .. },
+            inner: strata_storage::durability::SnapshotReadError::CrcMismatch { .. },
         } => {
             assert_eq!(snapshot_id, 9);
             assert_eq!(path, snapshot_path);

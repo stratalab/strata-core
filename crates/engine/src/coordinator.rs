@@ -16,13 +16,13 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use strata_concurrency::{
-    commit_durable_with_version, commit_durable_with_wal, commit_durable_with_wal_arc,
-    RecoveryResult,
-};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::BranchId;
-use strata_durability::wal::WalWriter;
+use strata_storage::durability::wal::WalWriter;
+use strata_storage::durability::{
+    commit_with_version as commit_durable_with_version, commit_with_wal as commit_durable_with_wal,
+    commit_with_wal_arc as commit_durable_with_wal_arc, RecoveryResult,
+};
 use strata_storage::{
     CommitError, RecoveredState, SegmentedStore, Storage, TransactionContext, TransactionManager,
 };
@@ -700,6 +700,7 @@ impl TransactionCoordinator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_storage::durability::{RecoveryCoordinator, RecoveryStats};
 
     fn create_test_storage() -> Arc<SegmentedStore> {
         Arc::new(SegmentedStore::new())
@@ -719,8 +720,6 @@ mod tests {
 
     #[test]
     fn test_coordinator_from_recovery() {
-        use strata_concurrency::RecoveryStats;
-
         let stats = RecoveryStats {
             txns_replayed: 5,
             incomplete_txns: 1,
@@ -744,9 +743,8 @@ mod tests {
 
     #[test]
     fn test_issue_1726_version_counter_from_segments() {
-        use strata_concurrency::RecoveryCoordinator;
         use strata_core::value::Value;
-        use strata_durability::layout::DatabaseLayout;
+        use strata_storage::durability::layout::DatabaseLayout;
         use strata_storage::{Key, Namespace, TypeTag, WriteMode};
 
         fn branch() -> BranchId {
@@ -1181,8 +1179,6 @@ mod tests {
 
     #[test]
     fn test_from_recovery_restores_txn_id() {
-        use strata_concurrency::RecoveryStats;
-
         let stats = RecoveryStats {
             txns_replayed: 10,
             incomplete_txns: 2,

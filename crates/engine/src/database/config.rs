@@ -7,8 +7,8 @@
 use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use strata_durability::wal::DurabilityMode;
 use strata_security::SensitiveString;
+use strata_storage::durability::wal::DurabilityMode;
 
 // ============================================================================
 // Shadow Collection Names

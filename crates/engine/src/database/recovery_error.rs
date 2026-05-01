@@ -9,10 +9,11 @@ use std::io;
 use std::path::PathBuf;
 
 use crate::StrataError;
-use strata_concurrency::CoordinatorRecoveryError;
 use strata_core::id::TxnId;
-use strata_durability::wal::WalReaderError;
-use strata_durability::{ManifestError, SnapshotReadError};
+use strata_storage::durability::wal::WalReaderError;
+use strata_storage::durability::{
+    CoordinatorPlanError, CoordinatorRecoveryError, ManifestError, SnapshotReadError,
+};
 use strata_storage::{RecoveryHealth, StorageError};
 use thiserror::Error;
 
@@ -79,7 +80,7 @@ pub enum RecoveryError {
     #[error("failed to create MANIFEST: {0}")]
     ManifestCreate(#[source] ManifestError),
 
-    /// `strata_durability::get_codec(id)` returned an error.
+    /// `strata_storage::durability::get_codec(id)` returned an error.
     #[error("could not initialize storage codec '{codec_id}': {detail}")]
     CodecInit {
         /// Codec id that could not be resolved.
@@ -91,9 +92,10 @@ pub enum RecoveryError {
     /// Hard failure from the coordinator's `plan_recovery()` step.
     ///
     /// This is the coordinator's second MANIFEST read while it resolves
-    /// snapshot state. The engine preserves the original `StrataError`
-    /// verbatim because the lossy WAL fallback cannot heal a planning
-    /// failure.
+    /// snapshot state. The storage-owned coordinator reports this through
+    /// `CoordinatorPlanError`; the engine reconstructs the corresponding
+    /// `StrataError` shape because the lossy WAL fallback cannot heal a
+    /// planning failure.
     #[error(transparent)]
     CoordinatorPlan(StrataError),
 
@@ -376,7 +378,9 @@ pub(crate) fn from_coordinator_error(
     err: CoordinatorRecoveryError,
 ) -> RecoveryError {
     match err {
-        CoordinatorRecoveryError::Plan(inner) => RecoveryError::CoordinatorPlan(inner),
+        CoordinatorRecoveryError::Plan(inner) => {
+            RecoveryError::CoordinatorPlan(coordinator_plan_to_strata_error(inner))
+        }
         CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path } => {
             RecoveryError::SnapshotMissing {
                 role,
@@ -420,13 +424,37 @@ pub(crate) fn from_coordinator_error(
                 detail,
             }
         }
-        CoordinatorRecoveryError::Callback(inner) => {
-            RecoveryError::WalRecoveryFailed { role, inner }
-        }
+        CoordinatorRecoveryError::Callback(inner) => RecoveryError::WalRecoveryFailed {
+            role,
+            inner: StrataError::from(inner),
+        },
         _ => RecoveryError::WalRecoveryFailed {
             role,
             inner: StrataError::internal("unknown coordinator recovery error"),
         },
+    }
+}
+
+fn coordinator_plan_to_strata_error(err: CoordinatorPlanError) -> StrataError {
+    match err {
+        CoordinatorPlanError::Manifest(ManifestError::LegacyFormat {
+            detected_version,
+            supported_range,
+            remediation,
+        }) => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        CoordinatorPlanError::Manifest(inner) => {
+            StrataError::corruption(format!("failed to load MANIFEST: {inner}"))
+        }
+        CoordinatorPlanError::CodecMismatch { stored, expected } => {
+            StrataError::incompatible_reuse(format!(
+                "codec mismatch: database was created with '{stored}' but config specifies '{expected}'. \
+                 A database cannot be reopened with a different codec."
+            ))
+        }
+        _ => StrataError::internal("unknown coordinator plan error"),
     }
 }
 
@@ -539,9 +567,10 @@ mod tests {
     fn coordinator_plan_roundtrips_to_original_variant() {
         let err = from_coordinator_error(
             ErrorRole::Follower,
-            CoordinatorRecoveryError::Plan(StrataError::incompatible_reuse(
-                "codec mismatch while re-reading MANIFEST",
-            )),
+            CoordinatorRecoveryError::Plan(CoordinatorPlanError::CodecMismatch {
+                stored: "identity".into(),
+                expected: "aes-gcm-256".into(),
+            }),
         );
         let strata = StrataError::from(err);
         assert!(matches!(strata, StrataError::IncompatibleReuse { .. }));
@@ -551,9 +580,12 @@ mod tests {
     fn coordinator_plan_legacy_roundtrips_to_legacy_format() {
         let err = from_coordinator_error(
             ErrorRole::Primary,
-            CoordinatorRecoveryError::Plan(StrataError::legacy_format(
-                1,
-                "this build requires MANIFEST format version 2",
+            CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(
+                ManifestError::LegacyFormat {
+                    detected_version: 1,
+                    supported_range: "this build requires MANIFEST format version 2".into(),
+                    remediation: "delete the offending MANIFEST".into(),
+                },
             )),
         );
         let strata = StrataError::from(err);
@@ -594,7 +626,7 @@ mod tests {
 
     #[test]
     fn coordinator_callback_falls_back_to_wal_recovery_failed() {
-        let err = CoordinatorRecoveryError::Callback(StrataError::storage("apply failed"));
+        let err = CoordinatorRecoveryError::Callback(StorageError::corruption("apply failed"));
         assert!(matches!(
             from_coordinator_error(ErrorRole::Primary, err),
             RecoveryError::WalRecoveryFailed {

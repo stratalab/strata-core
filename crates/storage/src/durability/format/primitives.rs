@@ -9,7 +9,7 @@
 //! Strings are length-prefixed (4-byte length + bytes).
 //! All integers are little-endian.
 
-use crate::codec::StorageCodec;
+use crate::durability::codec::StorageCodec;
 
 /// Cursor-based reader for length-prefixed binary snapshot data.
 ///
@@ -630,13 +630,13 @@ pub enum PrimitiveSerializeError {
     InvalidUtf8,
     /// Codec error
     #[error("Codec error: {0}")]
-    Codec(#[from] crate::codec::CodecError),
+    Codec(#[from] crate::durability::codec::CodecError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
+    use crate::durability::codec::IdentityCodec;
 
     fn test_serializer() -> SnapshotSerializer {
         SnapshotSerializer::new(Box::new(IdentityCodec))

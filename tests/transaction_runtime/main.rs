@@ -1,6 +1,7 @@
-//! Concurrency Integration Tests
+//! Transaction Runtime Integration Tests
 //!
-//! Tests for OCC (Optimistic Concurrency Control) with snapshot isolation.
+//! Tests for the storage-owned OCC transaction runtime: snapshot isolation,
+//! CAS, conflict detection, lifecycle, and the durability commit adapter.
 
 #[path = "../common/mod.rs"]
 mod common;

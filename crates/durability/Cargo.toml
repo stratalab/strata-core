@@ -11,34 +11,20 @@ publish = false
 [lints]
 workspace = true
 
-[features]
-default = []
-engine-internal = []
-
 [dependencies]
 strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-storage = { path = "../storage" }
-parking_lot = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rmp-serde = { workspace = true }
 thiserror = { workspace = true }
-tracing = { workspace = true }
-uuid = { workspace = true }
 crc32fast = { workspace = true }
-fs2 = { workspace = true }
-aes-gcm = { workspace = true }
-rand = { workspace = true }
 
 # RunBundle support
 tar = { workspace = true }
 zstd = { workspace = true }
 xxhash-rust = { workspace = true }
 
-[target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-
 [dev-dependencies]
 tempfile = { workspace = true }
-chrono = { workspace = true }
 serde_json = { workspace = true }
