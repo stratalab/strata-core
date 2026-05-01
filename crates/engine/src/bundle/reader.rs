@@ -2,12 +2,12 @@
 //!
 //! Reads .branchbundle.tar.zst archives and validates their contents.
 
-use crate::branch_bundle::error::{BranchBundleError, BranchBundleResult};
-use crate::branch_bundle::types::{
+use super::error::{BranchBundleError, BranchBundleResult};
+use super::types::{
     paths, xxh3_hex, BundleBranchInfo, BundleManifest, BundleVerifyInfo,
     BRANCHBUNDLE_FORMAT_VERSION,
 };
-use crate::branch_bundle::wal_log::{BranchlogPayload, WalLogReader};
+use super::wal_log::{BranchlogPayload, WalLogReader};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -337,9 +337,9 @@ pub struct BundleContents {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::branch_bundle::types::ExportOptions;
-    use crate::branch_bundle::wal_log::BranchlogPayload;
-    use crate::branch_bundle::writer::BranchBundleWriter;
+    use crate::bundle::types::ExportOptions;
+    use crate::bundle::wal_log::BranchlogPayload;
+    use crate::bundle::writer::BranchBundleWriter;
     use std::sync::Arc;
     use strata_core::value::Value;
     use strata_core::BranchId;

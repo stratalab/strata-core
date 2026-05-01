@@ -157,18 +157,12 @@ fn should_skip(path: &Path) -> bool {
     let rel = path.to_string_lossy();
     rel.contains("/target/")
         || rel.contains("/crates/core-legacy/")
-        || rel.contains("/crates/durability/")
-        || rel.ends_with("/crates/engine/src/bundle.rs")
-        || rel.ends_with("/tests/integration/branching_generation_migration.rs")
         || rel.ends_with("/tests/storage_surface_imports.rs")
 }
 
 fn should_skip_manifest(path: &Path) -> bool {
     let rel = path.to_string_lossy();
     rel.contains("/target/")
-        || rel.ends_with("/crates/engine/Cargo.toml")
-        || rel.ends_with("/crates/durability/Cargo.toml")
-        || rel.ends_with("/Cargo.toml")
 }
 
 fn find_violations(contents: &str) -> Vec<String> {
@@ -290,7 +284,7 @@ fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
             || line.contains("path = \"crates/durability\"")
         {
             violations.push(format!(
-                "{}:{}: manifest references transitional `strata-durability` outside designated seams",
+                "{}:{}: manifest references deleted `strata-durability` surface",
                 rel,
                 line_no + 1
             ));

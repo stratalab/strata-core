@@ -5,12 +5,12 @@
 //! - BRANCH.json - Branch metadata
 //! - WAL.branchlog - Branch-scoped transaction payloads (msgpack v2 format)
 
-use crate::branch_bundle::error::{BranchBundleError, BranchBundleResult};
-use crate::branch_bundle::types::{
+use super::error::{BranchBundleError, BranchBundleResult};
+use super::types::{
     paths, xxh3_hex, BranchExportInfo, BundleBranchInfo, BundleContents, BundleManifest,
     ExportOptions,
 };
-use crate::branch_bundle::wal_log::{BranchlogPayload, WalLogWriter};
+use super::wal_log::{BranchlogPayload, WalLogWriter};
 use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
@@ -226,8 +226,8 @@ impl BranchBundleWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::branch_bundle::types::BRANCHBUNDLE_FORMAT_VERSION;
-    use crate::branch_bundle::wal_log::BranchlogPayload;
+    use crate::bundle::types::BRANCHBUNDLE_FORMAT_VERSION;
+    use crate::bundle::wal_log::BranchlogPayload;
     use std::io::Read;
     use std::sync::Arc;
     use strata_core::value::Value;

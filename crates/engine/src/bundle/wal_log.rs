@@ -22,8 +22,8 @@
 //! └─────────────────────────────────────────────────────────────────┘
 //! ```
 
-use crate::branch_bundle::error::{BranchBundleError, BranchBundleResult};
-use crate::branch_bundle::types::{xxh3_hex, WAL_BRANCHLOG_MAGIC, WAL_BRANCHLOG_VERSION};
+use super::error::{BranchBundleError, BranchBundleResult};
+use super::types::{xxh3_hex, WAL_BRANCHLOG_MAGIC, WAL_BRANCHLOG_VERSION};
 use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 use strata_core::value::Value;
