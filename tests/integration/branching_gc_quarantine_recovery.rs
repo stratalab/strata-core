@@ -14,8 +14,8 @@
 
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)
@@ -416,7 +416,7 @@ fn retention_report_refuses_when_quarantine_inventory_is_unreadable_in_session()
     assert!(
         matches!(
             err,
-            strata_core::StrataError::RetentionReportUnavailable { .. }
+            strata_engine::StrataError::RetentionReportUnavailable { .. }
         ),
         "retention_report must fail closed on unreadable quarantine inventory; got {err:?}",
     );
@@ -445,7 +445,7 @@ fn retention_report_refuses_when_manifest_truth_is_unreadable_in_session() {
     assert!(
         matches!(
             err,
-            strata_core::StrataError::RetentionReportUnavailable { .. }
+            strata_engine::StrataError::RetentionReportUnavailable { .. }
         ),
         "retention_report must fail closed on unreadable manifest truth; got {err:?}",
     );

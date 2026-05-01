@@ -15,7 +15,7 @@
 
 use std::sync::Arc;
 
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::primitives::{resolve_branch_name, BranchMetadata};
@@ -287,7 +287,7 @@ fn engine_reopen_rejects_historical_default_branch_nil_uuid_alias_metadata() {
         Ok(_) => panic!("reopen should reject historical nil-UUID alias metadata"),
         Err(err) => err,
     };
-    assert!(matches!(err, strata_core::StrataError::Corruption { .. }));
+    assert!(matches!(err, strata_engine::StrataError::Corruption { .. }));
     assert!(err
         .to_string()
         .contains("branch metadata contains reserved default-branch sentinel alias"));

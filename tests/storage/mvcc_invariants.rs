@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use strata_core::id::CommitVersion;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {

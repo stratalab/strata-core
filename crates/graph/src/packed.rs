@@ -17,7 +17,7 @@
 //!   [u8 × len: properties_json]                 (only if len > 0)
 //! ```
 
-use strata_core::{StrataError, StrataResult};
+use strata_engine::{StrataError, StrataResult};
 
 use super::types::EdgeData;
 

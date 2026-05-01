@@ -36,9 +36,10 @@ use std::cell::Cell;
 use std::io;
 
 use strata_core::id::CommitVersion;
-use strata_core::{BranchId, StrataResult};
+use strata_core::BranchId;
 use strata_engine::database::observers::{AbortInfo, AbortObserver};
 use strata_engine::Database;
+use strata_engine::StrataResult;
 use strata_storage::{Key, Storage, TypeTag};
 use tracing::info;
 
@@ -171,7 +172,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
     use crate::heap::VectorHeap;
     use std::sync::Arc;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace, Storage};
 
     // Skip recovery for cache databases
@@ -290,7 +291,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                            strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
                             format!("{e}"),
                         );
                         continue;
@@ -314,7 +315,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_core::PrimitiveDegradedReason::ConfigShapeConversion,
+                            strata_engine::PrimitiveDegradedReason::ConfigShapeConversion,
                             format!("{e}"),
                         );
                         continue;
@@ -392,7 +393,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                             format!("failed to scan vectors during recovery: {e}"),
                         );
                         continue;
@@ -420,7 +421,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -452,7 +453,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -487,7 +488,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -612,14 +613,14 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
     fn recover(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         recover_vector_state(db)
     }
 
     fn initialize(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         let state = db.extension::<super::VectorBackendState>()?;
         ensure_runtime_wiring(db, &state);
         Ok(())
@@ -630,16 +631,16 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
         db: &std::sync::Arc<strata_engine::Database>,
         branch_id: &BranchId,
         _branch_name: &str,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         let store = crate::VectorStore::new(db.clone());
         store
             .purge_collections_in_branch(*branch_id)
-            .map_err(|e| strata_core::StrataError::internal(e.to_string()))?;
+            .map_err(|e| strata_engine::StrataError::internal(e.to_string()))?;
         purge_branch_disk_cache(db.data_dir(), *branch_id);
         Ok(())
     }
 
-    fn freeze(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
+    fn freeze(&self, db: &strata_engine::Database) -> strata_engine::StrataResult<()> {
         db.freeze_vector_heaps()
     }
 }
@@ -884,7 +885,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                     .ok()
                     .and_then(|value| value)
                     .and_then(|versioned| match versioned.value {
-                        strata_core::value::Value::Bytes(bytes) => Some(bytes),
+                        strata_core::Value::Bytes(bytes) => Some(bytes),
                         _ => None,
                     })
                     .unwrap_or_default();
@@ -895,7 +896,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
 
     fn apply_refresh(
         &self,
-        puts: &[(Key, strata_core::value::Value)],
+        puts: &[(Key, strata_core::Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
     ) -> Result<Box<dyn strata_engine::PreparedRefresh>, strata_engine::RefreshHookError> {
         use crate::{CollectionId, VectorId};
@@ -919,7 +920,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
 
             if let Some(collection_name) = user_key.strip_prefix("__config__/") {
                 let bytes = match value {
-                    strata_core::value::Value::Bytes(bytes) => bytes,
+                    strata_core::Value::Bytes(bytes) => bytes,
                     _ => {
                         return Err(strata_engine::RefreshHookError::new(
                             "vector",
@@ -999,7 +1000,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                 })?;
 
             let bytes = match value {
-                strata_core::value::Value::Bytes(bytes) => bytes,
+                strata_core::Value::Bytes(bytes) => bytes,
                 _ => {
                     return Err(strata_engine::RefreshHookError::new(
                         "vector",
@@ -1161,7 +1162,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
         }))
     }
 
-    fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_core::StrataResult<()> {
+    fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_engine::StrataResult<()> {
         let data_dir = db.data_dir();
         if data_dir.as_os_str().is_empty() {
             return Ok(()); // Ephemeral database — no mmap
@@ -1237,7 +1238,7 @@ mod tests {
 
         fn apply_refresh(
             &self,
-            puts: &[(Key, strata_core::value::Value)],
+            puts: &[(Key, strata_core::Value)],
             _pre_read_deletes: &[(Key, Vec<u8>)],
         ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
             if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
@@ -1249,7 +1250,7 @@ mod tests {
             Ok(Box::new(NoopPreparedRefresh))
         }
 
-        fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+        fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
             Ok(())
         }
     }
@@ -1259,11 +1260,11 @@ mod tests {
             "vector-test-fail-once"
         }
 
-        fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
             Ok(())
         }
 
-        fn initialize(&self, db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        fn initialize(&self, db: &Arc<Database>) -> strata_engine::StrataResult<()> {
             let hooks = db.extension::<RefreshHooks>()?;
             hooks.register(Arc::new(FailOnceRefreshHook {
                 fail_once: self.fail_once.clone(),
@@ -1279,7 +1280,7 @@ mod tests {
     /// Part 4. The `space` subdirectory enforces isolation.
     #[test]
     fn test_mmap_path_includes_space() {
-        let bid = strata_core::types::BranchId::new();
+        let bid = strata_core::BranchId::new();
         let root = std::path::Path::new("/tmp/strata-vec-test");
 
         let a = mmap_path(root, bid, "tenant_a", "embeddings");
@@ -1355,7 +1356,7 @@ mod tests {
             .expect("scan failure must mark the collection degraded");
         assert_eq!(
             entry.reason,
-            strata_core::PrimitiveDegradedReason::ConfigMismatch
+            strata_engine::PrimitiveDegradedReason::ConfigMismatch
         );
 
         let err = store
@@ -1368,8 +1369,8 @@ mod tests {
                 None,
             )
             .expect_err("degraded collection must fail closed after reopen");
-        match strata_core::StrataError::from(err) {
-            strata_core::StrataError::PrimitiveDegraded {
+        match strata_engine::StrataError::from(err) {
+            strata_engine::StrataError::PrimitiveDegraded {
                 primitive, name, ..
             } => {
                 assert_eq!(primitive, strata_core::contract::PrimitiveType::Vector);
@@ -1513,7 +1514,7 @@ mod tests {
     #[test]
     fn test_follower_refresh_replays_collection_create_insert_and_delete() {
         let temp = tempfile::TempDir::new().unwrap();
-        let branch_id = strata_core::types::BranchId::default();
+        let branch_id = strata_core::BranchId::default();
 
         let primary =
             Database::open_runtime(OpenSpec::primary(temp.path()).with_subsystem(VectorSubsystem))
@@ -1605,7 +1606,7 @@ mod tests {
     #[test]
     fn test_vector_refresh_does_not_perturb_visible_results_before_visibility_advance() {
         let temp = tempfile::TempDir::new().unwrap();
-        let branch_id = strata_core::types::BranchId::default();
+        let branch_id = strata_core::BranchId::default();
         let fail_once = Arc::new(AtomicBool::new(false));
 
         let primary = Database::open_runtime(
@@ -1700,7 +1701,7 @@ mod tests {
     #[test]
     fn test_blocked_follower_restart_does_not_load_newer_vector_caches() {
         let temp = tempfile::TempDir::new().unwrap();
-        let branch_id = strata_core::types::BranchId::default();
+        let branch_id = strata_core::BranchId::default();
         let fail_once = Arc::new(AtomicBool::new(false));
 
         let primary = Database::open_runtime(
@@ -1794,7 +1795,7 @@ mod tests {
     #[test]
     fn test_blocked_follower_lazy_load_does_not_load_newer_vector_caches() {
         let temp = tempfile::TempDir::new().unwrap();
-        let branch_id = strata_core::types::BranchId::default();
+        let branch_id = strata_core::BranchId::default();
         let fail_once = Arc::new(AtomicBool::new(false));
 
         let primary = Database::open_runtime(

@@ -97,7 +97,7 @@ use std::sync::Arc;
 use crate::branch_domain::{BranchControlRecord, BranchLifecycleStatus, BranchRef};
 use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_core::EntityRef;
 
 use crate::branch_ops::branch_control_store::{
@@ -1410,7 +1410,7 @@ impl BranchService {
         )?;
 
         let system_branch_id = resolve_branch_name(SYSTEM_BRANCH);
-        let payload = strata_core::value::Value::object(
+        let payload = strata_core::Value::object(
             [
                 ("branch".to_string(), branch.into()),
                 (
@@ -1653,7 +1653,7 @@ mod tests {
     use crate::database::dag_hook::{BranchDagError, MergeBaseResult as DagMergeBaseResult};
     use crate::database::OpenSpec;
     use crate::primitives::kv::KVStore;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, TypeTag};
     use tempfile::TempDir;
 

@@ -9,8 +9,8 @@ use strata_engine::background::{BackgroundScheduler, TaskPriority};
 use strata_storage::segmented::SegmentedStore;
 
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{Key, Namespace, TypeTag, WriteMode};
 
 fn branch() -> BranchId {

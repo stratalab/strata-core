@@ -9,8 +9,8 @@
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::Database;
 use strata_engine::{EventLog, EventLogExt, KVStore, KVStoreExt, SearchSubsystem};

@@ -1,11 +1,8 @@
 //! Downstream validation for the direct `strata-core` surface.
 
-use strata_core as legacy_core;
-use strata_core_foundation::{
-    branch::aliases_default_branch_sentinel,
-    contract::{EntityRef, PrimitiveType, Version, Versioned},
-    id::BranchId,
-    value::Value,
+use strata_core::{
+    branch::aliases_default_branch_sentinel, BranchId, EntityRef, PrimitiveType, Value, Version,
+    Versioned,
 };
 
 #[test]
@@ -23,39 +20,4 @@ fn foundation_surface_is_directly_usable_from_downstream_package() {
     assert!(aliases_default_branch_sentinel(
         "00000000-0000-0000-0000-000000000000"
     ));
-}
-
-#[test]
-fn branch_id_derivation_matches_legacy_shell_on_locked_cases() {
-    for name in [
-        "",
-        "default",
-        "feature/downstream",
-        "00000000-0000-0000-0000-000000000000",
-    ] {
-        assert_eq!(
-            BranchId::from_user_name(name),
-            legacy_core::BranchId::from_user_name(name),
-            "branch derivation drifted for {name:?}"
-        );
-    }
-}
-
-#[test]
-fn foundational_values_cross_legacy_shell_boundary_without_conversion() {
-    let branch_id = BranchId::from_user_name("feature/cross-shell");
-    let entity: legacy_core::EntityRef = EntityRef::json(branch_id, "profiles", "user-1");
-    let versioned: legacy_core::Versioned<Value> = Versioned::new(
-        Value::array(vec![Value::Int(1), Value::String("a".into())]),
-        Version::txn(11),
-    );
-
-    assert_eq!(entity.branch_id(), branch_id);
-    assert_eq!(entity.primitive_type(), PrimitiveType::Json);
-    assert_eq!(entity.space(), Some("profiles"));
-    assert_eq!(entity.json_doc_id(), Some("user-1"));
-
-    let versioned_value = versioned.value().as_array().unwrap();
-    assert_eq!(versioned.version(), legacy_core::Version::txn(11));
-    assert_eq!(versioned_value, &[Value::Int(1), Value::String("a".into())]);
 }

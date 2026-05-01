@@ -9,8 +9,8 @@
 //! Per specification: Hot path must have zero allocations after warmup.
 
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem, TransactionPool, MAX_POOL_SIZE};
 use strata_storage::{Key, Namespace, TypeTag};
@@ -187,7 +187,7 @@ fn test_aborted_transactions_return_to_pool() {
 
     // Run a transaction that fails (returns error from closure)
     let result: Result<(), _> = db.transaction(branch_id, |_txn| {
-        Err(strata_core::StrataError::invalid_input(
+        Err(strata_engine::StrataError::invalid_input(
             "Test error".to_string(),
         ))
     });

@@ -39,8 +39,9 @@
 
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::value::Value;
-use strata_core::{BranchId, StrataError};
+use strata_core::BranchId;
+use strata_core::Value;
+use strata_engine::StrataError;
 use strata_engine::{
     BranchLifecycleStatus, DagBranchStatus, SearchSubsystem, Searchable, Subsystem,
 };

@@ -325,7 +325,7 @@ fn keyword_search(executor: &Executor, query: &str) -> Vec<strata_executor::Sear
 
 #[cfg(feature = "embed")]
 fn shadow_keys(vector: &VectorStore, collection: &str) -> Vec<String> {
-    let branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+    let branch = strata_core::BranchId::from_bytes([0u8; 16]);
     vector
         .list_keys(branch, SYSTEM_SPACE, collection)
         .unwrap_or_default()
@@ -779,7 +779,7 @@ fn committed_transaction_writes_queue_and_remove_local_auto_embed_work() {
     let executor = Executor::new(db.clone());
     let mut session = Session::new(db.clone());
     let vector = VectorStore::new(db);
-    let branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+    let branch = strata_core::BranchId::from_bytes([0u8; 16]);
 
     executor
         .execute(Command::ConfigSetAutoEmbed { enabled: true })

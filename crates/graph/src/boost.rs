@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
-use strata_core::types::BranchId;
-use strata_core::StrataResult;
+use strata_core::BranchId;
+use strata_engine::StrataResult;
 
 use super::types::{BfsOptions, Direction};
 use super::GraphStore;

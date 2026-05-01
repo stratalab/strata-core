@@ -435,7 +435,7 @@ impl Database {
                 };
 
                 let config_bytes = match &entry.value {
-                    strata_core::value::Value::Bytes(b) => b.clone(),
+                    strata_core::Value::Bytes(b) => b.clone(),
                     _ => serde_json::to_vec(&entry.value).unwrap_or_default(),
                 };
 
@@ -475,7 +475,7 @@ impl Database {
                         continue;
                     }
 
-                    if let strata_core::value::Value::Bytes(bytes) = &vec_entry.value {
+                    if let strata_core::Value::Bytes(bytes) = &vec_entry.value {
                         if let Ok(record) = VectorRecord::from_bytes(bytes) {
                             let metadata_bytes = record
                                 .metadata

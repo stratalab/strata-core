@@ -1,3 +1,9 @@
+//! Deferred intelligence-suite harness.
+//!
+//! This suite is intentionally out of the active root test matrix while the
+//! older search DTO layer is being rewritten. Even while deferred, these tests
+//! must stay on the modern `strata_core` / `strata_engine` search surfaces.
+
 mod common;
 
 mod architectural_invariants;

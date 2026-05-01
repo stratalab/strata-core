@@ -91,7 +91,7 @@ fn transaction_error_aborts() {
     let result: Result<(), _> = test_db.db.transaction(branch_id, |txn| {
         txn.kv_put("abort_test", Value::Int(999))?;
         // Return an error
-        Err(strata_core::StrataError::invalid_input("forced error"))
+        Err(strata_engine::StrataError::invalid_input("forced error"))
     });
 
     assert!(result.is_err());

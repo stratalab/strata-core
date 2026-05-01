@@ -16,7 +16,7 @@ use crate::{BranchId, Error, Output, Result};
 /// convert it to `GraphNotFound` with fuzzy-match suggestions.
 fn enrich_graph_error(
     p: &Primitives,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     graph: &str,
     err: Error,
 ) -> Error {
@@ -48,7 +48,7 @@ fn enrich_graph_error(
 /// suggest similar types from the ontology.
 fn enrich_ontology_error(
     p: &Primitives,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     graph: &str,
     err: Error,
 ) -> Error {

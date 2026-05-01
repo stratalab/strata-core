@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use strata_core::types::BranchId;
-use strata_core::StrataResult;
+use strata_core::BranchId;
+use strata_engine::StrataResult;
 
 use super::adjacency::AdjacencyIndex;
 use super::types::*;

@@ -17,7 +17,7 @@ use crate::{Error, Result};
 /// Convert a VectorResult to an executor Result.
 fn convert_vector_result<T>(
     r: std::result::Result<T, strata_vector::VectorError>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
 ) -> Result<T> {
     convert_result(r.map_err(|e| e.into_strata_error(branch_id)))
 }
@@ -62,7 +62,7 @@ pub enum ExportSource {
 /// (or an empty vec if no data exists).
 pub fn export_to_batches(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     source: ExportSource,
     limit: Option<usize>,
@@ -149,7 +149,7 @@ fn kv_schema() -> Schema {
 
 fn export_kv(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     prefix: Option<String>,
     limit: Option<usize>,
@@ -206,7 +206,7 @@ fn json_schema() -> Schema {
 
 fn export_json(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     prefix: Option<String>,
     limit: Option<usize>,
@@ -286,7 +286,7 @@ fn event_schema() -> Schema {
 
 fn export_event(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     event_type: Option<String>,
     limit: Option<usize>,
@@ -344,7 +344,7 @@ fn export_event(
 
 fn export_vector(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     collection: &str,
     limit: Option<usize>,
@@ -427,7 +427,7 @@ fn export_vector(
 
 fn export_graph_nodes(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     graph: &str,
     limit: Option<usize>,
@@ -486,7 +486,7 @@ fn export_graph_nodes(
 
 fn export_graph_edges(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     graph: &str,
     limit: Option<usize>,
@@ -548,7 +548,7 @@ fn export_graph_edges(
 mod tests {
     use super::*;
     use arrow::array::{Array, StringArray, UInt64Array};
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_core::Value;
     /// The "default" branch maps to all-zero UUID in core.
     fn default_branch() -> BranchId {

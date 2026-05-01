@@ -46,7 +46,7 @@ impl Primitives {
     }
 }
 
-pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types::BranchId> {
+pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::BranchId> {
     if strata_engine::branch_domain::aliases_default_branch_sentinel(branch.as_str()) {
         return Err(StrataError::invalid_input(
             "branch name aliases reserved default-branch sentinel",
@@ -54,9 +54,7 @@ pub(crate) fn to_core_branch_id(branch: &BranchId) -> Result<strata_core::types:
         .into());
     }
 
-    Ok(strata_core::types::BranchId::from_user_name(
-        branch.as_str(),
-    ))
+    Ok(strata_core::BranchId::from_user_name(branch.as_str()))
 }
 
 pub(crate) fn runtime_default_branch(db: &Database) -> BranchId {

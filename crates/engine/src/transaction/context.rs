@@ -18,11 +18,12 @@
 use crate::primitives::event::{EventLogMeta, HASH_VERSION_SHA256};
 use crate::primitives::json::JsonStore;
 use crate::transaction_ops::TransactionOps;
+use crate::StrataError;
 use crate::{Event, JsonPath, JsonValue};
 use std::sync::Arc;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::{EntityRef, StrataError, Timestamp, Value, Version, Versioned};
+use strata_core::BranchId;
+use strata_core::{EntityRef, Timestamp, Value, Version, Versioned};
 use strata_storage::{Key, Namespace, SegmentedStore, TransactionContext, TypeTag};
 
 use super::json_state::JsonTxnState;

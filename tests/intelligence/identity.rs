@@ -3,12 +3,28 @@
 //! Tests for DocRef identity policies and deduplication behavior.
 
 use crate::common::*;
-use strata_core::search_types::{DocRef, PrimitiveType, SearchRequest};
-use strata_core::types::{JsonDocId, BranchId};
-use strata_core::value::Value;
-use strata_engine::KVStore;
 use crate::common::search::substrate_search;
+use strata_core::{BranchId, EntityRef as DocRef, PrimitiveType, Value};
+use strata_engine::{KVStore, SearchRequest};
 use std::collections::HashSet;
+
+const DEFAULT_SPACE: &str = "default";
+
+fn kv_doc_ref(branch_id: &BranchId, key: &str) -> DocRef {
+    DocRef::kv(branch_id.clone(), DEFAULT_SPACE, key)
+}
+
+fn json_doc_ref(branch_id: &BranchId, doc_id: &str) -> DocRef {
+    DocRef::json(branch_id.clone(), DEFAULT_SPACE, doc_id)
+}
+
+fn event_doc_ref(branch_id: &BranchId, sequence: u64) -> DocRef {
+    DocRef::event(branch_id.clone(), DEFAULT_SPACE, sequence)
+}
+
+fn branch_doc_ref(branch_id: &BranchId) -> DocRef {
+    DocRef::branch(branch_id.clone())
+}
 
 // ============================================================================
 // DocRef Identity Policy Tests
@@ -19,17 +35,9 @@ use std::collections::HashSet;
 fn test_tier6_docrefs_different_primitives_never_equal() {
     let branch_id = BranchId::new();
 
-    let kv_ref = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "shared_name".to_string(),
-    };
-    let json_ref = DocRef::Json {
-        branch_id: branch_id.clone(),
-        doc_id: JsonDocId::new(),
-    };
-    let branch_ref = DocRef::Run {
-        branch_id: branch_id.clone(),
-    };
+    let kv_ref = kv_doc_ref(&branch_id, "shared_name");
+    let json_ref = json_doc_ref(&branch_id, "json-doc");
+    let branch_ref = branch_doc_ref(&branch_id);
 
     // POLICY: DocRefs from different primitives are NEVER equal
     assert_ne!(kv_ref, json_ref);
@@ -42,14 +50,8 @@ fn test_tier6_docrefs_different_primitives_never_equal() {
 fn test_tier6_docrefs_same_primitive_same_key_equal() {
     let branch_id = BranchId::new();
 
-    let ref1 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "same_key".to_string(),
-    };
-    let ref2 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "same_key".to_string(),
-    };
+    let ref1 = kv_doc_ref(&branch_id, "same_key");
+    let ref2 = kv_doc_ref(&branch_id, "same_key");
 
     assert_eq!(ref1, ref2);
 }
@@ -59,14 +61,8 @@ fn test_tier6_docrefs_same_primitive_same_key_equal() {
 fn test_tier6_docrefs_same_primitive_different_key_not_equal() {
     let branch_id = BranchId::new();
 
-    let ref1 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "key1".to_string(),
-    };
-    let ref2 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "key2".to_string(),
-    };
+    let ref1 = kv_doc_ref(&branch_id, "key1");
+    let ref2 = kv_doc_ref(&branch_id, "key2");
 
     assert_ne!(ref1, ref2);
 }
@@ -77,14 +73,8 @@ fn test_tier6_docrefs_different_branches_not_equal() {
     let branch1 = BranchId::new();
     let branch2 = BranchId::new();
 
-    let ref1 = DocRef::Kv {
-        branch_id: branch1,
-        key: "same_key".to_string(),
-    };
-    let ref2 = DocRef::Kv {
-        branch_id: branch2,
-        key: "same_key".to_string(),
-    };
+    let ref1 = kv_doc_ref(&branch1, "same_key");
+    let ref2 = kv_doc_ref(&branch2, "same_key");
 
     // Same key name but different branches = NOT equal
     assert_ne!(ref1, ref2);
@@ -99,18 +89,9 @@ fn test_tier6_docrefs_different_branches_not_equal() {
 fn test_tier6_docrefs_hashable() {
     let branch_id = BranchId::new();
 
-    let ref1 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "key1".to_string(),
-    };
-    let ref2 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "key2".to_string(),
-    };
-    let ref3 = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "key1".to_string(), // Duplicate of ref1
-    };
+    let ref1 = kv_doc_ref(&branch_id, "key1");
+    let ref2 = kv_doc_ref(&branch_id, "key2");
+    let ref3 = kv_doc_ref(&branch_id, "key1"); // Duplicate of ref1
 
     let mut set = HashSet::new();
     set.insert(ref1.clone());
@@ -189,27 +170,16 @@ fn test_tier6_cross_primitive_no_deduplication() {
 fn test_tier6_primitive_type_correct() {
     let branch_id = BranchId::new();
 
-    let kv_ref = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "test".to_string(),
-    };
+    let kv_ref = kv_doc_ref(&branch_id, "test");
     assert_eq!(kv_ref.primitive_type(), PrimitiveType::Kv);
 
-    let json_ref = DocRef::Json {
-        branch_id: branch_id.clone(),
-        doc_id: JsonDocId::new(),
-    };
+    let json_ref = json_doc_ref(&branch_id, "json-doc");
     assert_eq!(json_ref.primitive_type(), PrimitiveType::Json);
 
-    let event_ref = DocRef::Event {
-        branch_id: branch_id.clone(),
-        sequence: 42,
-    };
+    let event_ref = event_doc_ref(&branch_id, 42);
     assert_eq!(event_ref.primitive_type(), PrimitiveType::Event);
 
-    let branch_ref = DocRef::Run {
-        branch_id: branch_id.clone(),
-    };
+    let branch_ref = branch_doc_ref(&branch_id);
     assert_eq!(branch_ref.primitive_type(), PrimitiveType::Branch);
 }
 
@@ -218,14 +188,9 @@ fn test_tier6_primitive_type_correct() {
 fn test_tier6_branch_id_correct() {
     let branch_id = BranchId::new();
 
-    let kv_ref = DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: "test".to_string(),
-    };
+    let kv_ref = kv_doc_ref(&branch_id, "test");
     assert_eq!(kv_ref.branch_id(), branch_id);
 
-    let branch_ref = DocRef::Run {
-        branch_id: branch_id.clone(),
-    };
+    let branch_ref = branch_doc_ref(&branch_id);
     assert_eq!(branch_ref.branch_id(), branch_id);
 }

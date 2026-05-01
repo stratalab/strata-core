@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 use crate::JsonValue;
 
@@ -125,7 +125,7 @@ pub enum SearchMode {
 ///
 /// ```
 /// use strata_engine::{SearchRequest, SearchBudget};
-/// use strata_core::types::BranchId;
+/// use strata_core::BranchId;
 ///
 /// let branch_id = BranchId::new();
 /// let req = SearchRequest::new(branch_id, "authentication error")

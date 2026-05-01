@@ -5,14 +5,18 @@
 
 use crate::common::*;
 use crate::common::search::substrate_search;
-use strata_core::search_types::{PrimitiveType, SearchRequest, SearchResponse};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_engine::KVStore;
 use strata_engine::search::{BM25LiteScorer, Scorer};
+use strata_core::{BranchId, EntityRef as DocRef, PrimitiveType, Value};
+use strata_engine::{KVStore, SearchRequest, SearchResponse};
 use strata_search::RRFFuser;
 use std::collections::HashSet;
 use std::sync::Arc;
+
+const DEFAULT_SPACE: &str = "default";
+
+fn kv_doc_ref(branch_id: &BranchId, key: &str) -> DocRef {
+    DocRef::kv(branch_id.clone(), DEFAULT_SPACE, key)
+}
 
 // ============================================================================
 // Rule 1: No Data Movement (DocRef references only)
@@ -43,8 +47,6 @@ fn test_tier1_rule1_search_returns_docref_not_data() {
 /// DocRef size is bounded
 #[test]
 fn test_tier1_rule1_docref_size_bounded() {
-    use strata_core::search_types::DocRef;
-
     // DocRef should be reasonably small
     assert!(
         std::mem::size_of::<DocRef>() < 256,
@@ -176,15 +178,11 @@ fn test_tier1_rule5_index_disabled_by_default() {
 /// No index overhead when disabled
 #[test]
 fn test_tier1_rule5_no_overhead_when_disabled() {
-    use strata_core::search_types::DocRef;
     use strata_engine::search::InvertedIndex;
 
     let index = InvertedIndex::new();
     let branch_id = BranchId::new();
-    let doc_ref = DocRef::Kv {
-        branch_id,
-        key: "test".to_string(),
-    };
+    let doc_ref = kv_doc_ref(&branch_id, "test");
 
     // Adding documents when disabled should be a no-op
     index.index_document(&doc_ref, "test content", None);

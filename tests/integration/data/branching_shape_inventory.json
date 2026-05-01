@@ -2,9 +2,9 @@
   "schema_version": 1,
   "description": "Locked counts of branching shape inventory. See tests/integration/branching_guardrails.rs for what each key tracks and why.",
   "shapes": {
-    "branch_id_random_new_sites": 641,
+    "branch_id_random_new_sites": 4,
     "branch_namespace_const_sites": 1,
     "merge_base_override_occurrences": 0,
-    "merge_strategy_lastwriterwins_literals": 74
+    "merge_strategy_lastwriterwins_literals": 31
   }
 }

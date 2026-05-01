@@ -16,11 +16,11 @@
 
 use std::collections::HashMap;
 
-use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult};
+use strata_core::Value;
 use strata_engine::{
     ConflictEntry, MergeAction, MergeActionKind, MergePlanCtx, PrimitiveMergePlan,
 };
+use strata_engine::{StrataError, StrataResult};
 use strata_storage::TypeTag;
 
 use crate::merge::{self, GraphMergeConflict};

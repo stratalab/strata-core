@@ -18,6 +18,9 @@ accidental leftovers later.
 It should be read together with:
 
 - [engine-crate-map.md](./engine-crate-map.md)
+- [st5-branch-bundle-lift-plan.md](./st5-branch-bundle-lift-plan.md)
+- [st6-legacy-core-dependency-severance-plan.md](./st6-legacy-core-dependency-severance-plan.md)
+- [st7-core-legacy-deletion-plan.md](./st7-core-legacy-deletion-plan.md)
 - [engine-error-architecture.md](./engine-error-architecture.md)
 - [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
 - [../core/core-error-review.md](../core/core-error-review.md)
@@ -28,40 +31,19 @@ It should be read together with:
 ## Current State
 
 The current architecture is already pointing at `engine` as the right owner of
-database/runtime semantics, but several concrete implementations still live
-elsewhere because the dependency graph is not ready for the final move yet.
+database/runtime semantics. The old `core-legacy` split is gone, and the
+remaining engine work is now about tightening the settled runtime boundaries
+rather than deleting transitional crates.
 
 The most important example is `StrataError`:
 
 - `engine` is now the public architectural owner
 - downstream layers should import it from `strata_engine`
-- but the actual enum definition still physically lives in `core-legacy`
-
-That is intentional. Similar staged states are likely to appear in later
-engine cleanup work.
+- the actual enum definition now physically lives in `engine`
 
 ## Pending Items
 
-### 1. Move the `StrataError` definition from `core-legacy` into `engine`
-
-Current state:
-
-- `strata_engine` re-exports `StrataError` and `StrataResult`
-- the actual definition still lives in `crates/core-legacy/src/error.rs`
-
-Why it is still pending:
-
-- `storage` still depends on the legacy parent error
-- moving the definition today would either create a `storage -> engine`
-  dependency or force a larger boundary rewrite in the same step
-
-What completion looks like:
-
-- `StrataError` is physically defined in `engine`
-- `core` no longer owns or forwards the parent database/runtime error
-- `core-legacy` no longer acts as the host of the operational monolith
-
-### 2. Make `storage` consistently own `StorageError`
+### 1. Make `storage` consistently own `StorageError`
 
 Current state:
 
@@ -80,7 +62,7 @@ What completion looks like:
 - storage no longer depends on `StrataError`
 - storage-to-engine conversion becomes explicit and semantic
 
-### 3. Move product open/bootstrap policy into `engine`
+### 2. Move product open/bootstrap policy into `engine`
 
 Current state:
 
@@ -104,7 +86,7 @@ Representative policy that should end up in engine:
 - startup policy around lock/socket/IPC handoff
 - recipe seeding and similar product boot composition
 
-### 4. Define the engine runtime/product pillar explicitly
+### 3. Define the engine runtime/product pillar explicitly
 
 Current state:
 
@@ -127,17 +109,14 @@ What completion looks like:
 - executor can dispatch into engine without having to host product/runtime
   behavior itself
 
-### 5. Absorb the remaining core-owned engine domain types and helpers
+### 4. Absorb the remaining core-owned engine domain types and helpers
 
 Current state:
 
-- several engine-domain or primitive-domain items still live in `core-legacy`
-  because `CO4` and `CO5` are not done yet
-- branch-domain and limits ownership have already moved in active code
-- JSON/vector active callers above the lower seam now import through
-  `strata-engine`
-- but the physical JSON/vector helper implementations still live in
-  `core-legacy`
+- branch-domain, limits, event/value helpers, JSON helpers, vector helpers,
+  and the parent error now all physically live in `engine`
+- active upper crates now depend on modern `strata-core` for foundational DTOs
+- `core-legacy` is no longer an active owner of those families
 
 Examples already identified in the core plan:
 
@@ -150,70 +129,52 @@ Examples already identified in the core plan:
 
 Why it is still pending:
 
-- these moves belong to the later core cleanup phases and the engine rewrite,
-  not to `CO1`–`CO3`
-- the remaining primitive-family move is now blocked by the current dependency
-  graph:
-  - `engine` depends on `core-legacy`
-  - `core-legacy` cannot depend back on `engine` without a cycle
-  - `concurrency` is a lower layer and still depends directly on the legacy
-    JSON helper surface
+- the physical ownership move is done, but the compatibility shell still
+  exists while parity and legacy-only DTO seams are being contracted
 
 What is specifically still pending here:
 
-- move the physical JSON helper implementation out of
-  `crates/core-legacy/src/primitives/json.rs`
-- move the physical vector helper/config/preset implementation out of
-  `crates/core-legacy/src/primitives/vector.rs`
-- remove the lower-layer `concurrency -> core-legacy` JSON helper seam
-- replace the current `engine::semantics::{json,vector}` forwarding layer
-  with truly engine-owned implementations
+- delete the temporary cross-owner parity seams once `core-legacy` is ready to
+  disappear
+- remove any remaining legacy-only DTO/test dependencies that are not part of
+  the final compatibility story
 
-### 5a. Finish the remaining branch/limits/event/value definition move
+### 4a. Finish the remaining branch/limits/event/value definition move
 
 Current state:
 
 - active code imports these families from `strata-engine`
-- `core-legacy` no longer presents them as the canonical home
-- but the physical definitions for several of those families still live in:
-  - `crates/core-legacy/src/branch.rs`
-  - `crates/core-legacy/src/branch_dag.rs`
-  - `crates/core-legacy/src/branch_types.rs`
-  - `crates/core-legacy/src/limits.rs`
-  - `crates/core-legacy/src/primitives/event.rs`
-  - `crates/core-legacy/src/value.rs`
+- the physical definitions now also live in `engine`
+- `core-legacy` is reduced to compatibility forwarding
 
 Why it is still pending:
 
-- `engine` still depends on `core-legacy`
-- `core-legacy` cannot depend back to `engine` without a package cycle
-- the current state is a presentation and import-ownership contraction, not a
-  full physical definition inversion
+- the legacy shell still exists and should be deleted rather than left as a
+  permanent forwarding layer
 
 What completion looks like:
 
-- the physical definitions move into `engine` or the final owning crate
-- `core-legacy` stops being the host of these engine-domain families
-- the remaining root exports become removable rather than just non-canonical
+- the compatibility forwarders disappear with the final legacy-crate deletion
 
 One staging detail here is intentional:
 
-- `branch_domain`, `semantics::json`, and `semantics::vector` are still
-  engine-facing re-export seams
-- `limits` and `semantics::event` already exist as engine-side parallel
-  definitions with explicit conversions to and from the older surface
+- `branch_domain` is now physically engine-owned, including `BranchRef`
+- `semantics::json` and `semantics::vector` are now physically engine-owned
+  definitions
+- `limits`, `semantics::event`, and `semantics::value` are also physically
+  engine-owned
 
 That asymmetry is not accidental. The re-export seams are still waiting on the
-dependency rewrite that removes the lower-layer cycles. The parallel
-definitions were pulled forward because engine-local policy and behavior tests
-already needed a stable home before the final physical move.
+last compatibility contraction. The definitions were pulled forward because
+engine-local policy and behavior tests already needed a stable home before the
+legacy shell could disappear.
 
 What completion looks like:
 
 - engine owns its own domain schema and primitive behavior
 - core retains only foundational shared language
 
-### 6. Implement the real engine-owned error system, not just the ownership handoff
+### 5. Implement the real engine-owned error system, not just the ownership handoff
 
 Current state:
 
@@ -234,7 +195,7 @@ What completion looks like:
 - the engine error system matches [engine-error-architecture.md](./engine-error-architecture.md)
 - `StrataError` is truly engine-native, not just re-exported from legacy core
 
-### 7. Reduce executor-owned product workflow where engine should own it
+### 6. Reduce executor-owned product workflow where engine should own it
 
 Current state:
 
@@ -257,7 +218,7 @@ What completion looks like:
 - workflow-heavy product/runtime behavior moves down into engine where
   appropriate
 
-### 8. Remove the final legacy forwarders after the engine boundary is ready
+### 7. Remove the final legacy forwarders after the engine boundary is ready
 
 Current state:
 

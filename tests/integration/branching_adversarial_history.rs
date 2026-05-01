@@ -51,9 +51,9 @@ use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
-use strata_core::value::Value;
-use strata_core::{PrimitiveDegradedReason, StrataError};
+use strata_core::Value;
 use strata_engine::{BranchRef, PrimitiveDegradationRegistry, ReclaimStatus};
+use strata_engine::{PrimitiveDegradedReason, StrataError};
 use strata_graph::GraphSubsystem;
 use strata_vector::VectorSubsystem;
 

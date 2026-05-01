@@ -611,7 +611,7 @@ pub fn build_search_response_with_scorer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     #[test]
     fn test_simple_scorer_basic() {

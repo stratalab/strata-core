@@ -47,7 +47,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 // ============================================================================
 // Phrase matching
@@ -1640,7 +1640,7 @@ impl InvertedIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     fn test_doc_ref(name: &str) -> EntityRef {
         let branch_id = BranchId::new();

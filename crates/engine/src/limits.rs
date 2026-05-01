@@ -225,28 +225,6 @@ impl Limits {
     }
 }
 
-impl From<&strata_core::Limits> for Limits {
-    fn from(value: &strata_core::Limits) -> Self {
-        Self {
-            max_key_bytes: value.max_key_bytes,
-            max_string_bytes: value.max_string_bytes,
-            max_bytes_len: value.max_bytes_len,
-            max_value_bytes_encoded: value.max_value_bytes_encoded,
-            max_array_len: value.max_array_len,
-            max_object_entries: value.max_object_entries,
-            max_nesting_depth: value.max_nesting_depth,
-            max_vector_dim: value.max_vector_dim,
-            max_fuzzy_candidates: value.max_fuzzy_candidates,
-        }
-    }
-}
-
-impl From<strata_core::Limits> for Limits {
-    fn from(value: strata_core::Limits) -> Self {
-        Self::from(&value)
-    }
-}
-
 /// Limit validation errors.
 ///
 /// These errors map to `ConstraintViolation` error codes in the wire protocol.
@@ -342,42 +320,10 @@ impl LimitError {
     }
 }
 
-impl From<strata_core::LimitError> for LimitError {
-    fn from(value: strata_core::LimitError) -> Self {
-        match value {
-            strata_core::LimitError::KeyTooLong { actual, max } => Self::KeyTooLong { actual, max },
-            strata_core::LimitError::ValueTooLarge {
-                reason,
-                actual,
-                max,
-            } => Self::ValueTooLarge {
-                reason,
-                actual,
-                max,
-            },
-            strata_core::LimitError::NestingTooDeep { actual, max } => {
-                Self::NestingTooDeep { actual, max }
-            }
-            strata_core::LimitError::VectorDimExceeded { actual, max } => {
-                Self::VectorDimExceeded { actual, max }
-            }
-            strata_core::LimitError::VectorDimMismatch { expected, actual } => {
-                Self::VectorDimMismatch { expected, actual }
-            }
-            _ => Self::ValueTooLarge {
-                reason: "legacy_limit_error".to_string(),
-                actual: 0,
-                max: 0,
-            },
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use strata_core::{LimitError as LegacyLimitError, Limits as LegacyLimits};
 
     fn create_nested_array(depth: usize) -> Value {
         let mut value = Value::Null;
@@ -584,116 +530,5 @@ mod tests {
             smaller.validate_value_full(&value),
             Err(LimitError::ValueTooLarge { reason, .. }) if reason == "encoded_value_too_large"
         ));
-    }
-
-    #[test]
-    fn legacy_limits_convert_without_drift() {
-        let legacy = LegacyLimits::with_small_limits();
-        let engine = Limits::from(&legacy);
-
-        assert_eq!(engine.max_key_bytes, legacy.max_key_bytes);
-        assert_eq!(engine.max_string_bytes, legacy.max_string_bytes);
-        assert_eq!(engine.max_bytes_len, legacy.max_bytes_len);
-        assert_eq!(
-            engine.max_value_bytes_encoded,
-            legacy.max_value_bytes_encoded
-        );
-        assert_eq!(engine.max_array_len, legacy.max_array_len);
-        assert_eq!(engine.max_object_entries, legacy.max_object_entries);
-        assert_eq!(engine.max_nesting_depth, legacy.max_nesting_depth);
-        assert_eq!(engine.max_vector_dim, legacy.max_vector_dim);
-        assert_eq!(engine.max_fuzzy_candidates, legacy.max_fuzzy_candidates);
-
-        let boundary_string = Value::String("x".repeat(legacy.max_string_bytes));
-        assert_eq!(
-            legacy.validate_value(&boundary_string).is_ok(),
-            engine.validate_value(&boundary_string).is_ok()
-        );
-    }
-
-    #[test]
-    fn legacy_limit_errors_convert_without_drift() {
-        let cases = vec![
-            LegacyLimitError::KeyTooLong {
-                actual: 2048,
-                max: 1024,
-            },
-            LegacyLimitError::ValueTooLarge {
-                reason: "encoded_value_too_large".to_string(),
-                actual: 8193,
-                max: 8192,
-            },
-            LegacyLimitError::NestingTooDeep {
-                actual: 129,
-                max: 128,
-            },
-            LegacyLimitError::VectorDimExceeded {
-                actual: 4097,
-                max: 4096,
-            },
-            LegacyLimitError::VectorDimMismatch {
-                expected: 256,
-                actual: 128,
-            },
-        ];
-
-        for legacy in cases {
-            let legacy_display = legacy.to_string();
-            let legacy_reason = legacy.reason_code();
-            let legacy_actual = legacy.actual();
-            let legacy_max = legacy.max();
-
-            let engine: LimitError = legacy.into();
-            assert_eq!(engine.to_string(), legacy_display);
-            assert_eq!(engine.reason_code(), legacy_reason);
-            assert_eq!(engine.actual(), legacy_actual);
-            assert_eq!(engine.max(), legacy_max);
-        }
-    }
-
-    #[test]
-    fn engine_and_legacy_limits_remain_behaviorally_aligned() {
-        let engine = Limits::with_small_limits();
-        let legacy = LegacyLimits::with_small_limits();
-
-        let cases = [
-            Value::Null,
-            Value::Bool(true),
-            Value::Bool(false),
-            Value::Int(0),
-            Value::Int(i64::MIN),
-            Value::Int(i64::MAX),
-            Value::Float(0.0),
-            Value::Float(2.78),
-            Value::array(vec![]),
-            Value::object(HashMap::new()),
-        ];
-
-        for case in cases {
-            assert_eq!(
-                legacy.validate_value(&case).is_ok(),
-                engine.validate_value(&case).is_ok()
-            );
-            assert_eq!(
-                legacy.validate_value_full(&case).is_ok(),
-                engine.validate_value_full(&case).is_ok()
-            );
-        }
-
-        let nan = Value::Float(f64::NAN);
-        assert_eq!(
-            legacy.validate_value(&nan).is_ok(),
-            engine.validate_value(&nan).is_ok()
-        );
-        assert_eq!(
-            legacy
-                .validate_value_full(&nan)
-                .err()
-                .map(|e| e.reason_code().to_string()),
-            engine
-                .validate_value_full(&nan)
-                .err()
-                .map(|e| e.reason_code().to_string())
-        );
     }
 }

@@ -6,7 +6,7 @@
 use arrow::array::{self, Array};
 use arrow::datatypes::{DataType, Schema};
 use arrow::record_batch::RecordBatch;
-use strata_core::value::Value;
+use strata_core::Value;
 
 use crate::{Error, Result};
 

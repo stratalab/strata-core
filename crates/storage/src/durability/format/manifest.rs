@@ -372,7 +372,7 @@ pub enum ManifestError {
     /// Produced when a file's `format_version` is older than
     /// [`MIN_SUPPORTED_MANIFEST_FORMAT_VERSION`]. Surfaces unconditionally
     /// (strict and lossy open alike); the engine's open path re-raises as
-    /// [`strata_core::StrataError::LegacyFormat`] and the operator must
+    /// [`strata_engine::StrataError::LegacyFormat`] and the operator must
     /// delete the file manually before reopening. Mirrors the WAL
     /// `SegmentHeaderError::LegacyFormat` contract.
     #[error(

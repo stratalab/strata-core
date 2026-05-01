@@ -27,10 +27,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use crate::{BranchControlRecord, BranchLifecycleStatus, BranchRef};
+use crate::{PrimitiveDegradedReason, StrataError, StrataResult};
 use strata_core::contract::PrimitiveType;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::{PrimitiveDegradedReason, StrataError, StrataResult};
+use strata_core::BranchId;
 use strata_storage::{
     DegradationClass, RecoveryHealth, StorageBranchRetention, StorageError,
     StorageInheritedLayerInfo,

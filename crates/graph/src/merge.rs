@@ -44,9 +44,10 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use strata_core::value::Value;
-use strata_core::{StrataError, StrataResult, VersionedValue};
+use strata_core::Value;
+use strata_core::VersionedValue;
 use strata_engine::{MergeStrategy, VersionedEntry};
+use strata_engine::{StrataError, StrataResult};
 use strata_storage::Key;
 
 use crate::keys;

@@ -3976,7 +3976,7 @@ fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
 fn entity_ref_graph_distinguishes_spaces() {
     use strata_engine::search::EntityRef;
 
-    let branch_id = strata_core::types::BranchId::new();
+    let branch_id = strata_core::BranchId::new();
 
     let tenant_a_alice = EntityRef::Graph {
         branch_id,

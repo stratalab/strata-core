@@ -234,7 +234,7 @@ fn empty_transaction_is_read_only() {
 #[test]
 fn transaction_with_write_is_not_read_only() {
     use std::sync::Arc;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
@@ -263,7 +263,7 @@ fn transaction_with_delete_is_not_read_only() {
 #[test]
 fn transaction_with_cas_is_not_read_only() {
     use std::sync::Arc;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
@@ -300,7 +300,7 @@ fn transaction_with_only_reads_is_read_only() {
 #[test]
 fn pending_operations_count() {
     use std::sync::Arc;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();
@@ -344,7 +344,7 @@ fn read_count_tracks_reads() {
 #[test]
 fn write_count_tracks_only_writes() {
     use std::sync::Arc;
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace};
 
     let branch_id = BranchId::new();

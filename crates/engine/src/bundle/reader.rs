@@ -341,8 +341,8 @@ mod tests {
     use crate::bundle::wal_log::BranchlogPayload;
     use crate::bundle::writer::BranchBundleWriter;
     use std::sync::Arc;
-    use strata_core::value::Value;
     use strata_core::BranchId;
+    use strata_core::Value;
     use strata_storage::{Key, Namespace, TypeTag};
     use tempfile::tempdir;
 

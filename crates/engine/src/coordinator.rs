@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_storage::durability::wal::WalWriter;
 use strata_storage::durability::{
     commit_with_version as commit_durable_with_version, commit_with_wal as commit_durable_with_wal,
@@ -743,7 +743,7 @@ mod tests {
 
     #[test]
     fn test_issue_1726_version_counter_from_segments() {
-        use strata_core::value::Value;
+        use strata_core::Value;
         use strata_storage::durability::layout::DatabaseLayout;
         use strata_storage::{Key, Namespace, TypeTag, WriteMode};
 

@@ -2,9 +2,11 @@
 //!
 //! Tests for RRF fusion correctness.
 
-use strata_core::search_types::{DocRef, PrimitiveType, SearchHit, SearchResponse, SearchStats};
-use strata_core::types::BranchId;
+use strata_core::{BranchId, EntityRef as DocRef, PrimitiveType};
+use strata_engine::{SearchHit, SearchResponse, SearchStats};
 use strata_search::{Fuser, RRFFuser};
+
+const DEFAULT_SPACE: &str = "default";
 
 // ============================================================================
 // Test Helpers
@@ -29,10 +31,7 @@ fn make_response(hits: Vec<SearchHit>) -> SearchResponse {
 
 /// Returns DocRef for a KV entity with a given branch_id
 fn make_kv_doc_ref_with_branch(branch_id: &BranchId, name: &str) -> DocRef {
-    DocRef::Kv {
-        branch_id: branch_id.clone(),
-        key: name.to_string(),
-    }
+    DocRef::kv(branch_id.clone(), DEFAULT_SPACE, name)
 }
 
 // ============================================================================

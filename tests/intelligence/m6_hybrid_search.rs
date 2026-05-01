@@ -1,7 +1,7 @@
 //! Tier 7: M6 Hybrid Search Tests
 
 use crate::common::*;
-use strata_core::value::Value;
+use strata_core::Value;
 
 #[test]
 fn test_vector_with_kv_coexistence() {

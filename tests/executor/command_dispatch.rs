@@ -2797,7 +2797,7 @@ fn space_delete_force_clears_shadow_embeddings() {
     let db = create_db();
     let executor = Executor::new(db.clone());
     let vector = VectorStore::new(db);
-    let core_branch = strata_core::types::BranchId::from_bytes([0u8; 16]);
+    let core_branch = strata_core::BranchId::from_bytes([0u8; 16]);
 
     executor
         .execute(Command::KvPut {
@@ -3342,14 +3342,11 @@ fn config_set_rejects_zero_embed_batch_size() {
 
 #[test]
 fn version_conflict_includes_retry_hint() {
-    use strata_core::{EntityRef, StrataError, Version};
+    use strata_core::{EntityRef, Version};
+    use strata_engine::StrataError;
 
     let err = StrataError::version_conflict(
-        EntityRef::kv(
-            strata_core::types::BranchId::from_bytes([0; 16]),
-            "default",
-            "k",
-        ),
+        EntityRef::kv(strata_core::BranchId::from_bytes([0; 16]), "default", "k"),
         Version::Txn(1),
         Version::Txn(2),
     );
@@ -3365,7 +3362,7 @@ fn version_conflict_includes_retry_hint() {
 
 #[test]
 fn internal_error_includes_bug_report_hint() {
-    use strata_core::StrataError;
+    use strata_engine::StrataError;
 
     let err = StrataError::internal("test invariant");
     let converted: Error = err.into();

@@ -288,7 +288,7 @@ pub enum SnapshotReadError {
     /// [`crate::durability::format::snapshot::MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION`].
     /// Surfaces unconditionally (strict and lossy open alike); the engine's
     /// open path re-raises as
-    /// [`strata_core::StrataError::LegacyFormat`] and the operator must
+    /// [`strata_engine::StrataError::LegacyFormat`] and the operator must
     /// delete the file manually before reopening. Mirrors the WAL
     /// `SegmentHeaderError::LegacyFormat` contract.
     #[error(

@@ -38,7 +38,7 @@
 use crate::database::Database;
 use crate::StrataResult;
 use std::sync::Arc;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 /// Trait for subsystems that need recovery on open and cleanup on shutdown.
 ///

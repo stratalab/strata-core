@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
-use strata_core::{BranchId, StrataError, StrataResult};
+use strata_core::BranchId;
+use strata_engine::{StrataError, StrataResult};
 #[cfg(test)]
 use strata_storage::TypeTag;
 use strata_storage::{Key, Namespace};

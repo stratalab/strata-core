@@ -10,8 +10,8 @@ use serial_test::serial;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::SearchSubsystem;
 use strata_engine::{Database, SearchRequest};
@@ -1529,7 +1529,7 @@ impl strata_engine::Subsystem for SlowRecoverySubsystem {
         "slow-recovery-regression-test"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         self.started
             .store(true, std::sync::atomic::Ordering::SeqCst);
         std::thread::sleep(self.delay);
@@ -1548,7 +1548,7 @@ impl strata_engine::Subsystem for SlowRecoveryMarker {
         "slow-recovery-regression-test"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 }
@@ -1661,7 +1661,7 @@ impl strata_engine::Subsystem for PanickingSubsystem {
         "panicking-regression-test"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         panic!("test subsystem intentionally panics during recover");
     }
 }
@@ -1676,8 +1676,8 @@ impl strata_engine::Subsystem for AlwaysFailingSubsystem {
         "always-failing-regression-test"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
-        Err(strata_core::StrataError::internal(
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
+        Err(strata_engine::StrataError::internal(
             "test subsystem intentionally fails recovery",
         ))
     }
@@ -1830,7 +1830,7 @@ impl strata_engine::Subsystem for NoopRegressionSubsystem {
         "noop-mixed-opener-regression"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 }
@@ -1874,7 +1874,7 @@ fn test_mixed_opener_rejects_subsystem_mismatch() {
     assert!(
         matches!(
             &result,
-            Err(strata_core::StrataError::IncompatibleReuse { .. })
+            Err(strata_engine::StrataError::IncompatibleReuse { .. })
         ),
         "mixed-opener with different subsystems must return IncompatibleReuse, got {}",
         if result.is_ok() {

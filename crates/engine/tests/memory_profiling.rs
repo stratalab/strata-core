@@ -4,8 +4,8 @@
 //! and TransactionContext footprint.
 
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::Database;
 use strata_engine::SearchSubsystem;
@@ -119,13 +119,13 @@ fn test_aborted_transaction_cleanup() {
 
     // Create and abort many transactions
     for round in 0..100 {
-        let result: Result<(), strata_core::StrataError> = db.transaction(branch_id, |txn| {
+        let result: Result<(), strata_engine::StrataError> = db.transaction(branch_id, |txn| {
             for i in 0..100 {
                 let key = Key::new_kv(ns.clone(), format!("abort_{}_key_{}", round, i));
                 txn.put(key, Value::Int(i as i64))?;
             }
             // Force abort
-            Err(strata_core::StrataError::invalid_input(
+            Err(strata_engine::StrataError::invalid_input(
                 "intentional abort".to_string(),
             ))
         });

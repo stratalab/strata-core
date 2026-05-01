@@ -16,8 +16,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use strata_core::contract::{EntityRef, PrimitiveType, Version};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::extensions::*;
 use strata_engine::*;
@@ -358,12 +358,12 @@ mod invariant_3_transactional {
     fn cross_primitive_transaction_rolls_back_completely() {
         let (db, branch_id) = setup();
 
-        let result: Result<(), strata_core::StrataError> = db.transaction(branch_id, |txn| {
+        let result: Result<(), strata_engine::StrataError> = db.transaction(branch_id, |txn| {
             txn.kv_put("key", Value::Int(1))?;
             txn.event_append("event", string_payload("payload"))?;
 
             // Force rollback
-            Err(strata_core::StrataError::invalid_input("intentional"))
+            Err(strata_engine::StrataError::invalid_input("intentional"))
         });
 
         assert!(result.is_err());

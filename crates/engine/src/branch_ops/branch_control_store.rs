@@ -54,7 +54,7 @@ static FOLLOWER_SYNTHESIS_WARNED: Once = Once::new();
 
 use serde::{Deserialize, Serialize};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_storage::{Key, Namespace, TransactionContext, TypeTag};
 use tracing::{info, warn};
 
@@ -272,17 +272,15 @@ pub(crate) fn parse_control_record_key(user_key: &[u8]) -> Option<BranchRef> {
 // Serialization helpers
 // =============================================================================
 
-fn to_stored_value<T: Serialize>(v: &T) -> StrataResult<strata_core::value::Value> {
+fn to_stored_value<T: Serialize>(v: &T) -> StrataResult<strata_core::Value> {
     serde_json::to_string(v)
-        .map(strata_core::value::Value::String)
+        .map(strata_core::Value::String)
         .map_err(|e| StrataError::serialization(e.to_string()))
 }
 
-fn from_stored_value<T: for<'de> Deserialize<'de>>(
-    v: &strata_core::value::Value,
-) -> StrataResult<T> {
+fn from_stored_value<T: for<'de> Deserialize<'de>>(v: &strata_core::Value) -> StrataResult<T> {
     match v {
-        strata_core::value::Value::String(s) => {
+        strata_core::Value::String(s) => {
             serde_json::from_str(s).map_err(|e| StrataError::serialization(e.to_string()))
         }
         _ => Err(StrataError::serialization(
@@ -291,14 +289,14 @@ fn from_stored_value<T: for<'de> Deserialize<'de>>(
     }
 }
 
-fn encode_u64_value(v: u64) -> strata_core::value::Value {
-    strata_core::value::Value::Int(v as i64)
+fn encode_u64_value(v: u64) -> strata_core::Value {
+    strata_core::Value::Int(v as i64)
 }
 
-fn decode_u64_value(v: &strata_core::value::Value) -> StrataResult<u64> {
+fn decode_u64_value(v: &strata_core::Value) -> StrataResult<u64> {
     match v {
-        strata_core::value::Value::Int(n) if *n >= 0 => Ok(*n as u64),
-        strata_core::value::Value::Int(n) => Err(StrataError::serialization(format!(
+        strata_core::Value::Int(n) if *n >= 0 => Ok(*n as u64),
+        strata_core::Value::Int(n) => Err(StrataError::serialization(format!(
             "control-store counter must be non-negative; got {n}"
         ))),
         other => Err(StrataError::serialization(format!(
@@ -1740,9 +1738,9 @@ mod tests {
         assert_eq!(decode_u64_value(&v).unwrap(), 42);
 
         // Reject negative / wrong-typed values.
-        let neg = strata_core::value::Value::Int(-1);
+        let neg = strata_core::Value::Int(-1);
         assert!(decode_u64_value(&neg).is_err());
-        let str_v = strata_core::value::Value::String("nope".into());
+        let str_v = strata_core::Value::String("nope".into());
         assert!(decode_u64_value(&str_v).is_err());
     }
 
@@ -2382,7 +2380,7 @@ mod tests {
                 TypeTag::Branch,
                 name.as_bytes().to_vec(),
             );
-            Ok(txn.put(key, strata_core::value::Value::String(json))?)
+            Ok(txn.put(key, strata_core::Value::String(json))?)
         })
         .unwrap();
     }
@@ -2571,7 +2569,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"legacy-only".to_vec());
-                Ok(txn.put(key, strata_core::value::Value::String(json))?)
+                Ok(txn.put(key, strata_core::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2599,7 +2597,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"b".to_vec());
-                Ok(txn.put(key, strata_core::value::Value::String(json))?)
+                Ok(txn.put(key, strata_core::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2625,7 +2623,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"persistent".to_vec());
-                Ok(txn.put(key, strata_core::value::Value::String(json))?)
+                Ok(txn.put(key, strata_core::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2741,7 +2739,7 @@ mod tests {
             db.transaction(BranchId::from_user_name("parent"), |txn| {
                 let ns = Arc::new(Namespace::for_branch(BranchId::from_user_name("parent")));
                 let k = Key::new(ns, TypeTag::KV, b"seed".to_vec());
-                Ok(txn.put(k, strata_core::value::Value::Int(1))?)
+                Ok(txn.put(k, strata_core::Value::Int(1))?)
             })
             .unwrap();
             db.branches().fork("parent", "child").unwrap();
@@ -2878,7 +2876,7 @@ mod tests {
                     TypeTag::Branch,
                     name.as_bytes().to_vec(),
                 );
-                Ok(txn.put(key, strata_core::value::Value::String(json))?)
+                Ok(txn.put(key, strata_core::Value::String(json))?)
             })
             .unwrap();
         }

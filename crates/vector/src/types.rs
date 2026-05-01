@@ -1,12 +1,12 @@
 //! Core types for the Vector primitive
 //!
-//! This module re-exports canonical types from strata-core and defines
+//! This module re-exports canonical helper types from the engine-owned surface and defines
 //! implementation-specific types for vector storage and search.
 
 use serde_json::Value as JsonValue;
 
-// Re-export canonical vector types from core
-pub use strata_core::primitives::{
+// Re-export canonical vector helper types from the engine-owned surface.
+pub use strata_engine::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
@@ -15,7 +15,7 @@ pub use strata_core::primitives::{
 pub use strata_core::EntityRef;
 
 // Re-export BranchId for CollectionId usage
-pub use strata_core::types::BranchId;
+pub use strata_core::BranchId;
 
 // ============================================================================
 // VectorRecord and CollectionRecord (Implementation types)
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_vector_config_zero_dimension() {
-        use strata_core::StrataError;
+        use strata_engine::StrataError;
         let result = VectorConfig::new(0, DistanceMetric::Cosine);
         assert!(matches!(result, Err(StrataError::InvalidInput { .. })));
     }

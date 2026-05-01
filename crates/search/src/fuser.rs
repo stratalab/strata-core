@@ -309,7 +309,7 @@ pub fn weighted_rrf_fuse(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_engine::search::{EntityRef, SearchStats};
 
     fn make_hit(doc_ref: EntityRef, score: f32, rank: u32) -> SearchHit {

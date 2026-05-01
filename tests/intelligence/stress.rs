@@ -3,10 +3,9 @@
 //! These tests are marked #[ignore] and run manually with --ignored flag.
 
 use crate::common::*;
-use strata_core::search_types::{SearchBudget, SearchRequest};
-use strata_core::value::Value;
-use strata_engine::KVStore;
+use strata_core::Value;
 use crate::common::search::{substrate_search, verify_substrate_scores_decreasing, verify_substrate_ranks_sequential};
+use strata_engine::{KVStore, SearchBudget, SearchRequest};
 use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};

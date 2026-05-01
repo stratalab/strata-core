@@ -16,7 +16,7 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use strata_core::id::TxnId;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_storage::{SegmentedStore, TransactionContext};
 
 /// Maximum contexts per thread
@@ -171,7 +171,7 @@ impl TransactionPool {
 mod tests {
     use super::*;
     use strata_core::id::{CommitVersion, TxnId};
-    use strata_core::value::Value;
+    use strata_core::Value;
     use strata_storage::{Namespace, Storage, TypeTag, WriteMode};
 
     fn create_test_namespace() -> Arc<Namespace> {

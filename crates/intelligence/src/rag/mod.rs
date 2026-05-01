@@ -281,7 +281,7 @@ fn load_generation_engine(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_core::EntityRef;
     use strata_engine::search::recipe::{ModelsConfig, Recipe};
 

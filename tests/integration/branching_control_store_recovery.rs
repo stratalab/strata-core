@@ -30,8 +30,8 @@
 
 use crate::common::*;
 use strata_core::id::CommitVersion;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::BranchRef;
 
 fn resolve(name: &str) -> BranchId {

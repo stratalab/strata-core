@@ -26,14 +26,14 @@ use std::time::Instant;
 
 use rayon::prelude::*;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::StrataResult;
+use strata_core::BranchId;
 use strata_engine::search::recipe::FusionConfig;
 use strata_engine::search::{
     EntityRef, PrimitiveType, Recipe, SearchHit, SearchMode, SearchRequest, Searchable,
 };
 use strata_engine::system_space::SYSTEM_SPACE;
 use strata_engine::Database;
+use strata_engine::StrataResult;
 use strata_storage::{Key, Namespace};
 
 // Primitive facades

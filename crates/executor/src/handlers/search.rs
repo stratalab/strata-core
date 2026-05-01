@@ -312,7 +312,7 @@ fn try_expand_query(
     query: &str,
     recipe: &Recipe,
     _embed_model: &str,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
 ) -> (Vec<strata_search::expand::ExpandedQuery>, bool) {
     use strata_search::expand::{ExpandedQuery, QueryType};
@@ -403,7 +403,7 @@ fn try_expand_query(
     query: &str,
     _recipe: &Recipe,
     _embed_model: &str,
-    _branch_id: strata_core::types::BranchId,
+    _branch_id: strata_core::BranchId,
     _space: &str,
 ) -> (Vec<strata_search::expand::ExpandedQuery>, bool) {
     use strata_search::expand::{ExpandedQuery, QueryType};
@@ -433,7 +433,7 @@ fn multi_pass_retrieve(
     recipe: &Recipe,
     original_embedding: Option<&[f32]>,
     embed_model: &str,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     time_range: Option<(u64, u64)>,
     primitive_filter: Option<&[strata_engine::search::PrimitiveType]>,
@@ -724,7 +724,7 @@ fn compute_diff(
 /// that dispatch — always carry a real space.
 fn enrich_versions(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     _request_space: &str,
     hit_refs: &[strata_engine::search::SearchHit],
     hits: &mut [SearchResultHit],
@@ -751,7 +751,7 @@ fn enrich_versions(
 
 fn get_kv_versions(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
     depth: usize,
@@ -779,7 +779,7 @@ fn get_kv_versions(
 
 fn get_json_versions(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     doc_id: &str,
     depth: usize,

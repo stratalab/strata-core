@@ -30,12 +30,11 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-use crate::BranchRef;
+use crate::{BranchRef, PrimitiveDegradedReason};
 use strata_core::contract::PrimitiveType;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_core::PrimitiveDegradedReason;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::Key;
 
 // =============================================================================

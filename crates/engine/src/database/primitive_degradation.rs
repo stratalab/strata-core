@@ -28,13 +28,11 @@
 
 use std::time::SystemTime;
 
-use crate::{BranchRef, StrataError};
+use crate::database::observers::{PrimitiveDegradedEvent, PrimitiveDegradedObserverRegistry};
+use crate::{BranchRef, PrimitiveDegradedReason, StrataError};
 use dashmap::DashMap;
 use strata_core::contract::PrimitiveType;
-use strata_core::types::BranchId;
-use strata_core::PrimitiveDegradedReason;
-
-use crate::database::observers::{PrimitiveDegradedEvent, PrimitiveDegradedObserverRegistry};
+use strata_core::BranchId;
 
 /// One record of a fail-closed degraded primitive state.
 ///
@@ -62,7 +60,12 @@ pub struct PrimitiveDegradationEntry {
 impl PrimitiveDegradationEntry {
     /// Build the matching typed `StrataError` for this degradation.
     pub fn to_error(&self) -> StrataError {
-        StrataError::primitive_degraded(self.branch_ref, self.primitive, &self.name, self.reason)
+        StrataError::primitive_degraded(
+            self.branch_ref.into(),
+            self.primitive,
+            &self.name,
+            self.reason,
+        )
     }
 }
 

@@ -125,8 +125,10 @@ local module move.
 
 One staging detail is intentional:
 
-- `branch_domain`, `semantics::json`, and `semantics::vector` currently act as
-  engine-facing re-export seams
+- `branch_domain` still acts as an engine-facing compatibility seam because
+  `BranchRef` is staged behind the parent error move
+- `semantics::json` and `semantics::vector` are already physically moved into
+  `engine`
 - `limits` and `semantics::event` already carry engine-side parallel
   definitions plus explicit legacy conversions
 

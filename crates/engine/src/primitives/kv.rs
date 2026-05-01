@@ -29,8 +29,8 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_core::{Version, VersionedHistory};
 use strata_storage::{Key, Namespace, StorageIterator, TransactionContext};
 
@@ -683,7 +683,7 @@ impl crate::search::Searchable for KVStore {
                             .ok()
                             .flatten()
                             .map(|v| match &v {
-                                strata_core::value::Value::String(s) => truncate_text(s, 100),
+                                strata_core::Value::String(s) => truncate_text(s, 100),
                                 other => truncate_text(
                                     &serde_json::to_string(other).unwrap_or_default(),
                                     100,

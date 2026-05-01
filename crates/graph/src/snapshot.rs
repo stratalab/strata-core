@@ -5,7 +5,7 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
 
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     use crate::types::*;
     use crate::GraphStore;

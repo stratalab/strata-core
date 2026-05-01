@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use strata_core::value::Value;
+use strata_core::Value;
 use strata_core::{BranchId, EntityRef, Version};
 use strata_storage::{Key, Namespace, TransactionContext};
 

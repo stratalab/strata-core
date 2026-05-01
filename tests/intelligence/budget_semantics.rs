@@ -4,9 +4,8 @@
 //! These tests verify truncation behavior, ordering preservation, and isolation.
 
 use crate::common::*;
-use strata_core::search_types::{SearchBudget, SearchRequest};
-use strata_engine::KVStore;
 use crate::common::search::substrate_search;
+use strata_engine::{KVStore, SearchBudget, SearchRequest};
 use std::collections::HashSet;
 
 // ============================================================================

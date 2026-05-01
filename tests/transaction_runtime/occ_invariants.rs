@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{
     validate_transaction, ConflictType, Key, Namespace, SegmentedStore, Storage,
     TransactionContext, ValidationResult, WriteMode,

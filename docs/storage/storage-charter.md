@@ -243,20 +243,9 @@ What must leave before that merge is finalized:
 
 ### `strata-durability`
 
-The standalone `strata-durability` crate should also not survive long-term.
-
-Its substrate responsibilities move into `storage`:
-
-- WAL runtime
-- snapshots
-- manifest/layout
-- codecs
-- compaction
-- on-disk formats
-
-What should move upward instead:
-
-- `branch_bundle`
+`strata-durability` was a temporary peer crate. Its substrate
+responsibilities moved into `storage`, and its final `branch_bundle` outlier
+has now moved upward into `engine`.
 
 ## Engine-Side Countermoves
 
@@ -299,14 +288,14 @@ true:
    durability runtime.
 2. Generic OCC/commit/recovery code no longer lives in a separate
    deleted `strata-concurrency` crate.
-3. WAL/snapshot/manifest/layout/codec code no longer lives in a separate
-   `strata-durability` crate.
+3. WAL/snapshot/manifest/layout/codec code no longer lives in a separate,
+   now-deleted `strata-durability` crate.
 4. JSON path semantics no longer live below `engine`.
 5. Branch bundle no longer lives below `engine`.
 6. `engine` no longer depends on `core-legacy` in order to reach lower runtime
    machinery.
-7. The remaining `core-legacy` surface is small enough to delete in the final
-   convergence step.
+7. The former `core-legacy` surface has been deleted rather than preserved as a
+   compatibility shell.
 
 ## Design Guardrails
 

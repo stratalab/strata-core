@@ -9,8 +9,8 @@ use crate::search::recipe::{builtin_defaults, get_builtin_recipe, Recipe, BUILTI
 use crate::system_space::system_kv_key;
 use crate::SYSTEM_BRANCH;
 use crate::{Database, StrataError, StrataResult};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 
 /// The branch ID for `_system_` where built-in recipes are stored.
 fn system_branch_id() -> BranchId {

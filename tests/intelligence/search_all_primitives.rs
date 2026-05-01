@@ -3,11 +3,8 @@
 //! Tests Searchable trait implementation across all primitives.
 
 use crate::common::*;
-use strata_core::json::JsonValue;
-use strata_core::contract::PrimitiveType;
-use strata_core::search_types::SearchRequest;
-use strata_core::types::JsonDocId;
-use strata_engine::Searchable;
+use strata_core::PrimitiveType;
+use strata_engine::{JsonValue, SearchRequest, Searchable};
 
 /// Test that implemented primitives have Searchable trait.
 #[test]
@@ -48,10 +45,10 @@ fn test_search_returns_response() {
     let p = test_db.all_primitives();
 
     // Populate primitives with searchable data
-    p.kv.put(&branch_id, "search_test", strata_core::value::Value::String("searchable content".into()))
+    p.kv.put(&branch_id, "search_test", strata_core::Value::String("searchable content".into()))
         .expect("kv");
-    let doc_id = JsonDocId::new();
-    p.json.create(&branch_id, &doc_id, JsonValue::from(serde_json::json!({"text": "searchable json content"})))
+    let doc_id = "search-doc";
+    p.json.create(&branch_id, "default", doc_id, JsonValue::from(serde_json::json!({"text": "searchable json content"})))
         .expect("json");
 
     let search_req = SearchRequest::new(branch_id, "searchable").with_k(10);

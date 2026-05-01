@@ -33,8 +33,8 @@ use crate::common::*;
 use parking_lot::Mutex;
 use std::path::PathBuf;
 use std::sync::Arc;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::bundle::{self, BundleBranchInfo};
 use strata_engine::database::observers::{
     BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError,

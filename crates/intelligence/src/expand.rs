@@ -5,7 +5,7 @@
 //! The caller (search handler) routes each variant to the appropriate
 //! substrate retrieval pass.
 
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_engine::search::recipe::ExpansionConfig;
 use strata_engine::search::tokenize_unique;
 use strata_search::expand::{ExpandedQuery, QueryType};
@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn test_has_strong_signal_high() {
-        use strata_core::types::BranchId;
+        use strata_core::BranchId;
         use strata_engine::search::{EntityRef, SearchHit};
 
         let hits = vec![

@@ -30,9 +30,7 @@ strata-core/
   Cargo.toml                  # Workspace root (re-exports strata-executor)
   crates/
     core/                     # Shared types: Value, BranchId, Key, Namespace
-    storage/                  # ShardedStore (DashMap), inverted index, TTL
-    concurrency/              # OCC transactions, conflict detection, CAS
-    durability/               # WAL, snapshots, crash recovery, BranchBundle
+    storage/                  # MVCC storage, WAL/snapshots, recovery, OCC runtime
     engine/                   # Database, primitives, transaction coordination
     intelligence/             # BM25, RRF, hybrid search
     executor/                 # Public API: Strata, Session, Command, Output
@@ -40,9 +38,8 @@ strata-core/
   tests/                      # Integration tests
 ```
 
-Dependencies generally flow downward: `executor` → `engine` → `storage`.
-`engine` still carries temporary direct seams to `core-legacy` and
-`security` until the final convergence work lands.
+Dependencies generally flow downward: `executor` → `engine` → `storage` → `core`.
+`engine` also depends directly on `security`.
 
 ## Running Tests
 

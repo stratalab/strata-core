@@ -153,15 +153,15 @@ fn ensure_default_branch(db: &Arc<Database>) -> Result<()> {
     Ok(())
 }
 
-fn engine_open_error(error: strata_core::StrataError) -> Error {
+fn engine_open_error(error: strata_engine::StrataError) -> Error {
     Error::Internal {
         reason: format!("Failed to open database: {error}"),
     }
 }
 
-fn engine_error(error: strata_core::StrataError) -> Error {
+fn engine_error(error: strata_engine::StrataError) -> Error {
     match error {
-        strata_core::StrataError::Storage { .. } => Error::Io {
+        strata_engine::StrataError::Storage { .. } => Error::Io {
             reason: error.to_string(),
         },
         _ => Error::Internal {

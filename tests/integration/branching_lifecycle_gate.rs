@@ -49,8 +49,8 @@ use crate::common::branching::{
 use crate::common::*;
 use std::sync::Arc;
 use strata_core::id::CommitVersion;
-use strata_core::value::Value;
-use strata_core::StrataError;
+use strata_core::Value;
+use strata_engine::StrataError;
 use strata_engine::{
     bundle, BranchLifecycleStatus, BranchRef, CherryPickFilter, Database, MergeOptions,
 };

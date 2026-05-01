@@ -3,9 +3,9 @@
 //! Tests for result provenance and debugging capabilities.
 
 use crate::common::*;
-use strata_core::search_types::{PrimitiveType, SearchRequest, SearchStats};
-use strata_engine::KVStore;
 use crate::common::search::substrate_search;
+use strata_core::PrimitiveType;
+use strata_engine::{KVStore, SearchRequest, SearchStats};
 
 // ============================================================================
 // Result Provenance Tests

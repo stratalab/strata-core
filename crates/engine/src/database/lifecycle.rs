@@ -4,7 +4,7 @@ use crate::{StrataError, StrataResult};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_storage::durability::{ManifestError, ManifestManager};
 use strata_storage::Key;
 use tracing::{info, warn};
@@ -570,7 +570,7 @@ impl Database {
                 .iter()
                 .map(|hook| hook.pre_delete_read(self, &payload.deletes))
                 .collect();
-            let deleted_values: Vec<(Key, strata_core::value::Value)> = payload
+            let deleted_values: Vec<(Key, strata_core::Value)> = payload
                 .deletes
                 .iter()
                 .filter_map(
@@ -616,7 +616,7 @@ impl Database {
             }
 
             // --- Update refresh hooks (vector backends, search index, etc.) ---
-            let puts_slice: Vec<(Key, strata_core::value::Value)> = payload
+            let puts_slice: Vec<(Key, strata_core::Value)> = payload
                 .puts
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))

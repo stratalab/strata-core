@@ -25,8 +25,8 @@ use std::collections::HashMap;
 
 use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::durability::codec::{clone_codec, StorageCodec};
 use strata_storage::durability::format::primitive_tags;
 use strata_storage::durability::{LoadedSnapshot, SnapshotSerializer};
@@ -390,8 +390,8 @@ mod tests {
     use std::sync::Arc;
     use strata_core::contract::Version;
     use strata_core::id::CommitVersion;
-    use strata_core::value::Value;
     use strata_core::BranchId;
+    use strata_core::Value;
     use strata_storage::durability::codec::IdentityCodec;
     use strata_storage::durability::format::{
         EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, VectorCollectionSnapshotEntry,
