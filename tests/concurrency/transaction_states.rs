@@ -5,9 +5,9 @@
 //! - Active → Validating → Aborted
 //! - Active → Aborted (explicit)
 
-use strata_concurrency::transaction::{TransactionContext, TransactionStatus};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::BranchId;
+use strata_storage::{CASOperation, TransactionContext, TransactionStatus};
 
 // ============================================================================
 // State Inspection
@@ -263,7 +263,6 @@ fn transaction_with_delete_is_not_read_only() {
 #[test]
 fn transaction_with_cas_is_not_read_only() {
     use std::sync::Arc;
-    use strata_concurrency::transaction::CASOperation;
     use strata_core::value::Value;
     use strata_storage::{Key, Namespace};
 

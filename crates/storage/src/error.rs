@@ -53,6 +53,24 @@ pub enum StorageError {
     #[error(transparent)]
     Io(#[from] io::Error),
 
+    /// Invalid storage/runtime input or call ordering.
+    #[error("{message}")]
+    InvalidInput {
+        /// Human-readable validation detail.
+        message: String,
+    },
+
+    /// Capacity or configured limit was exceeded.
+    #[error("capacity exceeded for {resource}: requested {requested}, limit {limit}")]
+    CapacityExceeded {
+        /// Human-readable resource name.
+        resource: String,
+        /// Configured or hard limit.
+        limit: usize,
+        /// Requested amount that exceeded the limit.
+        requested: usize,
+    },
+
     /// `recover_segments()` was invoked more than once on the same store.
     #[error("recover_segments() can only run once per SegmentedStore instance")]
     RecoveryAlreadyApplied,
@@ -208,6 +226,22 @@ impl StorageError {
         }
     }
 
+    /// Build an invalid-input error owned by the storage layer.
+    pub fn invalid_input(message: impl Into<String>) -> Self {
+        Self::InvalidInput {
+            message: message.into(),
+        }
+    }
+
+    /// Build a capacity-exceeded error owned by the storage layer.
+    pub fn capacity_exceeded(resource: impl Into<String>, limit: usize, requested: usize) -> Self {
+        Self::CapacityExceeded {
+            resource: resource.into(),
+            limit,
+            requested,
+        }
+    }
+
     /// Returns the underlying `io::ErrorKind` for callers and tests that only
     /// need the coarse I/O classification.
     ///
@@ -216,11 +250,13 @@ impl StorageError {
     pub fn kind(&self) -> io::ErrorKind {
         match self {
             StorageError::Io(inner) => inner.kind(),
+            StorageError::InvalidInput { .. } => io::ErrorKind::InvalidInput,
             StorageError::ManifestPublish { inner, .. } => inner.kind(),
             StorageError::DirFsync { inner, .. } => inner.kind(),
             StorageError::RecoveryFault(fault) => recovery_fault_kind(fault),
             StorageError::QuarantinePublishFailed { inner, .. } => inner.kind(),
             StorageError::RecoveryAlreadyApplied
+            | StorageError::CapacityExceeded { .. }
             | StorageError::RecoveryHealthResetRequiresSuccessfulRecovery
             | StorageError::GcRefusedDegradedRecovery { .. }
             | StorageError::RecoveryHealthResetRequiresReopen { .. }

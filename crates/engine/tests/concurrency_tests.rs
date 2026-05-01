@@ -181,7 +181,7 @@ fn test_multi_threaded_contention() {
     let val = db
         .transaction(branch_id, |txn| {
             let key = Key::new_kv(ns.clone(), "t0_op0");
-            txn.get(&key)
+            Ok(txn.get(&key)?)
         })
         .unwrap()
         .unwrap();

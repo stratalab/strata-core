@@ -27,13 +27,12 @@ use crate::database::Database;
 use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_storage::StorageError;
-use strata_storage::{Key, Namespace, TypeTag};
+use strata_storage::{Key, Namespace, TransactionContext, TypeTag};
 use tracing::{info, warn};
 
 /// Internal metadata key storing the effective default branch name for
@@ -736,7 +735,7 @@ impl BranchIndex {
 
     /// Delete all branch-scoped data within an existing transaction context.
     fn delete_namespace_data(
-        txn: &mut strata_concurrency::TransactionContext,
+        txn: &mut strata_storage::TransactionContext,
         branch_id: BranchId,
     ) -> StrataResult<()> {
         let ns = Arc::new(Namespace::for_branch(branch_id));

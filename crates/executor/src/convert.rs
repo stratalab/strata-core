@@ -3,6 +3,7 @@
 use crate::Error;
 use strata_core::EntityRef;
 use strata_engine::{StrataError, StrataResult};
+use strata_storage::StorageError;
 
 pub(crate) fn convert_result<T>(result: StrataResult<T>) -> crate::Result<T> {
     result.map_err(Error::from)
@@ -150,6 +151,36 @@ impl From<StrataError> for Error {
                     "A new error variant was added that the executor doesn't handle yet."
                         .to_string(),
                 ),
+            },
+        }
+    }
+}
+
+impl From<StorageError> for Error {
+    fn from(err: StorageError) -> Self {
+        match err {
+            StorageError::Io(inner) => Error::Io {
+                reason: inner.to_string(),
+                hint: None,
+            },
+            StorageError::InvalidInput { message } => Error::InvalidInput {
+                reason: message,
+                hint: None,
+            },
+            StorageError::CapacityExceeded {
+                resource,
+                limit,
+                requested,
+            } => Error::ConstraintViolation {
+                reason: format!(
+                    "Capacity exceeded for {}: limit {}, requested {}",
+                    resource, limit, requested
+                ),
+            },
+            StorageError::Corruption { message } => Error::Serialization { reason: message },
+            other => Error::Internal {
+                reason: other.to_string(),
+                hint: None,
             },
         }
     }

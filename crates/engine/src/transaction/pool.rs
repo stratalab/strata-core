@@ -15,10 +15,9 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::id::TxnId;
 use strata_core::types::BranchId;
-use strata_storage::SegmentedStore;
+use strata_storage::{SegmentedStore, TransactionContext};
 
 /// Maximum contexts per thread
 ///

@@ -6,9 +6,8 @@ use std::sync::Arc;
 use super::context::Transaction as ScopedTransaction;
 use super::json_state::JsonTxnState;
 use crate::{StrataError, StrataResult};
-use strata_concurrency::TransactionContext;
 use strata_core::types::BranchId;
-use strata_storage::Namespace;
+use strata_storage::{Namespace, TransactionContext};
 
 use crate::Database;
 

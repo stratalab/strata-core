@@ -12,10 +12,9 @@
 
 use std::collections::HashMap;
 
-use strata_concurrency::TransactionContext;
 use strata_core::value::Value;
 use strata_core::{BranchId, StrataError, StrataResult};
-use strata_storage::Key;
+use strata_storage::{Key, TransactionContext};
 
 use crate::keys;
 use crate::packed;
@@ -45,7 +44,7 @@ pub(crate) fn write_edge_type_count(
     count_sk: &Key,
     count: u64,
 ) -> StrataResult<()> {
-    txn.put(count_sk.clone(), Value::String(count.to_string()))
+    Ok(txn.put(count_sk.clone(), Value::String(count.to_string()))?)
 }
 
 // ============================================================================

@@ -117,6 +117,10 @@ struct BranchModel {
     /// the child's frontier.
     fork_frontier: Option<i64>,
     fork_parent: Option<String>,
+    /// Generation of the parent branch when this branch was forked.
+    /// Needed to distinguish descendants that still reference an older
+    /// lifecycle from descendants forked from the current live generation.
+    fork_parent_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -214,6 +218,7 @@ fn apply_op(test_db: &mut TestDb, model: &mut ModelState, op: &Op) -> Result<boo
                     value,
                     fork_frontier: None,
                     fork_parent: None,
+                    fork_parent_generation: None,
                 },
             );
             Ok(true)
@@ -251,7 +256,11 @@ fn apply_op(test_db: &mut TestDb, model: &mut ModelState, op: &Op) -> Result<boo
                 .branches()
                 .fork(src, dst)
                 .map_err(|e| unexpected_engine_error(op, "fork", &e))?;
-            let src_value = model.branches.get(src).map(|b| b.value).unwrap_or(0);
+            let (src_value, src_generation) = model
+                .branches
+                .get(src)
+                .map(|b| (b.value, b.generation))
+                .unwrap_or((0, 0));
             model.branches.insert(
                 dst.clone(),
                 BranchModel {
@@ -260,6 +269,7 @@ fn apply_op(test_db: &mut TestDb, model: &mut ModelState, op: &Op) -> Result<boo
                     value: src_value,
                     fork_frontier: Some(src_value),
                     fork_parent: Some(src.clone()),
+                    fork_parent_generation: Some(src_generation),
                 },
             );
             Ok(true)
@@ -396,6 +406,7 @@ fn follower_seed_model() -> ModelState {
             value: 1,
             fork_frontier: None,
             fork_parent: None,
+            fork_parent_generation: None,
         },
     );
     model.next_value = 2;
@@ -523,18 +534,23 @@ fn assert_invariants(
     );
 
     // Postcondition 5 — recreated-parent orphan attribution. A live
-    // branch at generation >= 1 that still has a live descendant forked
-    // from it must not claim shared bytes owned by the old (pre-delete)
-    // lifecycle — those bytes live in orphan_storage keyed by BranchId.
+    // branch at generation >= 1 that still has a live descendant from an
+    // older lifecycle must not claim shared bytes owned by the pre-delete
+    // generation — those bytes live in orphan_storage keyed by BranchId.
+    //
+    // Descendants forked from the current live generation may create
+    // legitimate `shared_bytes` on the recreated parent and are not
+    // part of this invariant.
     for (name, b) in &model.branches {
         if !b.live || b.generation == 0 {
             continue;
         }
-        let has_live_descendant = model
-            .branches
-            .iter()
-            .any(|(_, c)| c.live && c.fork_parent.as_deref() == Some(name.as_str()));
-        if !has_live_descendant {
+        let has_old_lifecycle_descendant = model.branches.iter().any(|(_, c)| {
+            c.live
+                && c.fork_parent.as_deref() == Some(name.as_str())
+                && c.fork_parent_generation.is_some_and(|g| g < b.generation)
+        });
+        if !has_old_lifecycle_descendant {
             continue;
         }
         // Every live branch must appear in report.branches (postcondition
@@ -665,6 +681,7 @@ proptest! {
                 value: 1,
                 fork_frontier: None,
                 fork_parent: None,
+                fork_parent_generation: None,
             },
         );
         model.next_value = 2;

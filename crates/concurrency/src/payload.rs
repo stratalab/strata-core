@@ -13,9 +13,7 @@
 use serde::{Deserialize, Serialize};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
-use strata_storage::Key;
-
-use crate::TransactionContext;
+use strata_storage::{Key, TransactionContext};
 
 /// Serializable payload for a committed transaction.
 ///
@@ -275,8 +273,8 @@ mod tests {
     /// `WalRecord::new().to_bytes()`.
     #[test]
     fn test_fused_serialization_byte_equality() {
-        use crate::TransactionContext;
         use strata_durability::format::WalRecord;
+        use strata_storage::TransactionContext;
 
         let ns = test_ns();
         let branch_id = ns.branch_id;

@@ -75,12 +75,11 @@ pub use semantics::vector::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
-pub use strata_concurrency::TransactionContext;
 pub use strata_durability::wal::DurabilityMode;
 pub use strata_durability::WalCounters;
 pub use strata_storage::StorageIterator;
 pub use strata_storage::VersionedEntry;
-pub use strata_storage::{DegradationClass, RecoveryHealth};
+pub use strata_storage::{DegradationClass, RecoveryHealth, TransactionContext};
 pub use transaction::{ScopedTransaction, Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
 

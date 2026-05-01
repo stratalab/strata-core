@@ -5,13 +5,12 @@ use parking_lot::Mutex as ParkingMutex;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{EntityRef, Version};
 use strata_durability::wal::DurabilityMode;
 use strata_durability::{ManifestManager, WalOnlyCompactor};
-use strata_storage::SegmentedStore;
+use strata_storage::{SegmentedStore, TransactionContext};
 
 use super::Database;
 use crate::branch_ops::branch_control_store::{active_ptr_key, BranchControlStore};
@@ -850,7 +849,7 @@ impl Database {
             }
         }
 
-        let materialized = json_state.materialize(|key| txn.get(key))?;
+        let materialized = json_state.materialize(|key| Ok(txn.get(key)?))?;
         for (key, write) in materialized {
             match write {
                 MaterializedJsonWrite::Put(value) => {
@@ -1010,11 +1009,15 @@ impl Database {
 
     /// Internal commit implementation shared by commit_transaction and transaction closures
     ///
-    /// Delegates the commit protocol to the concurrency layer (TransactionManager)
-    /// via the TransactionCoordinator. The engine is responsible only for:
+    /// Delegates the generic commit protocol to the storage-owned transaction
+    /// manager via the `TransactionCoordinator`. When durability is enabled,
+    /// the coordinator routes through the concurrency shell only for the
+    /// WAL-before-apply step.
+    ///
+    /// The engine is responsible only for:
     /// - Determining whether to pass the WAL (based on durability mode + persistence)
     ///
-    /// The concurrency layer handles:
+    /// The lower runtime handles:
     /// - Per-run commit locking (TOCTOU prevention)
     /// - Validation (first-committer-wins)
     /// - Version allocation

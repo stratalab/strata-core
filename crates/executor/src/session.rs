@@ -1034,7 +1034,8 @@ mod tests {
             "corrupt-json",
         );
         db.transaction(branch_id, |txn| {
-            txn.put(corrupt_json_key.clone(), Value::Bytes(vec![0xff, 0x00]))
+            txn.put(corrupt_json_key.clone(), Value::Bytes(vec![0xff, 0x00]))?;
+            Ok(())
         })
         .expect("corrupt fixture should be written directly");
 

@@ -35,7 +35,7 @@ pub fn seed_builtin_recipes(db: &Database) -> StrataResult<()> {
         let key = system_kv_key(sys_branch, &format!("recipe:{name}"));
         let json = serde_json::to_string(&recipe)?;
         db.transaction(sys_branch, |txn| {
-            txn.put(key.clone(), Value::String(json.clone()))
+            Ok(txn.put(key.clone(), Value::String(json.clone()))?)
         })?;
     }
     Ok(())
@@ -60,7 +60,7 @@ pub fn set_recipe(
     let key = system_kv_key(branch_id, &format!("recipe:{name}"));
     let json = serde_json::to_string(recipe)?;
     db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::String(json.clone()))
+        Ok(txn.put(key.clone(), Value::String(json.clone()))?)
     })?;
     Ok(())
 }
@@ -76,7 +76,7 @@ pub fn delete_recipe(db: &Database, branch_id: BranchId, name: &str) -> StrataRe
         });
     }
     let key = system_kv_key(branch_id, &format!("recipe:{name}"));
-    db.transaction(branch_id, |txn| txn.delete(key.clone()))?;
+    db.transaction(branch_id, |txn| Ok(txn.delete(key.clone())?))?;
     Ok(())
 }
 

@@ -9,8 +9,8 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_concurrency::manager::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
+use strata_storage::TransactionManager;
 
 // ============================================================================
 // Monotonic Increment

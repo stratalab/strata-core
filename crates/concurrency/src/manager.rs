@@ -1,7 +1,7 @@
 //! Transaction manager for coordinating commit operations
 //!
 //! Provides atomic commit by orchestrating:
-//! 1. Validation (first-committer-wins)
+//! 1. Generic validation/version allocation through `strata-storage`
 //! 2. WAL writing (durability)
 //! 3. Storage application (visibility)
 //!
@@ -28,20 +28,20 @@
 //! If crash occurs after step 7: Transaction is durable, replayed on recovery.
 
 use crate::payload;
-use crate::{CommitError, TransactionContext, TransactionStatus};
-use dashmap::{DashMap, DashSet};
-use parking_lot::{Mutex, RwLock};
+use parking_lot::Mutex;
 use std::cell::RefCell;
-use std::collections::BTreeSet;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::perf_time;
+#[cfg(test)]
 use strata_core::BranchId;
 use strata_durability::__internal::WalWriterEngineExt;
 use strata_durability::now_micros;
 use strata_durability::wal::WalWriter;
-use strata_storage::Storage;
+use strata_storage::{
+    CommitError, Storage, TransactionContext, TransactionManager as StorageTransactionManager,
+};
 
 // Thread-local reusable buffers for WAL record serialization.
 // After warmup, these grow to accommodate the largest record and are
@@ -55,7 +55,6 @@ thread_local! {
 // Enabled by setting STRATA_PROFILE_COMMIT=1 environment variable.
 // Prints a breakdown every PROFILE_INTERVAL commits.
 
-use std::sync::atomic::AtomicBool;
 use std::time::Instant;
 
 static COMMIT_PROFILE_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -130,85 +129,9 @@ thread_local! {
     }) };
 }
 
-/// Manages transaction lifecycle and atomic commits
-///
-/// TransactionManager coordinates the commit protocol:
-/// - Validation against current storage state
-/// - WAL writing for durability
-/// - Storage application for visibility
-///
-/// Per spec Section 6.1: Global version counter is incremented once per transaction.
-/// All keys in a transaction get the same commit version.
-///
-/// # Thread Safety
-///
-/// Commits are serialized per-branch via internal locks to prevent TOCTOU
-/// (time-of-check-to-time-of-use) races between validation and storage application.
-/// This ensures that no other transaction on the same branch can modify storage
-/// between the time we validate and the time we apply our writes.
-///
-/// Transactions on different branches can commit in parallel, as SegmentedStore
-/// maintains per-branch shards and there's no cross-branch conflict.
-pub struct TransactionManager {
-    /// Global version counter
-    ///
-    /// Monotonically increasing. Each committed transaction increments by 1.
-    /// Shared across all branches for consistent MVCC ordering.
-    version: AtomicU64,
-
-    /// Next transaction ID
-    ///
-    /// Unique identifier for transactions. Used in WAL entries.
-    next_txn_id: AtomicU64,
-
-    /// Per-branch commit locks
-    ///
-    /// Prevents TOCTOU race between validation and apply within the same branch.
-    /// Without this lock, the following race can occur:
-    /// 1. T1 validates (succeeds, storage at v1)
-    /// 2. T2 validates (succeeds, storage still at v1)
-    /// 3. T1 applies (storage now at v2)
-    /// 4. T2 applies (uses stale validation from step 2)
-    ///
-    /// Using per-branch locks allows parallel commits for different branches while
-    /// still preventing TOCTOU within each branch.
-    commit_locks: DashMap<BranchId, Arc<Mutex<()>>>,
-
-    /// Quiesce lock for checkpoint safety (#1710).
-    ///
-    /// Commit paths acquire a **shared** (read) lock, allowing concurrent commits.
-    /// `quiesced_version()` acquires an **exclusive** (write) lock, which blocks
-    /// until every in-flight commit's `apply_writes` has completed. The returned
-    /// version is then safe to use as a checkpoint watermark — no version ≤ that
-    /// value has storage application still in progress.
-    commit_quiesce: RwLock<()>,
-
-    /// Highest version V where all data at versions ≤ V is fully applied (#1913).
-    ///
-    /// Unlike `version` (which reflects allocated versions), this only advances
-    /// when the contiguous prefix of applied versions grows. Transactions use
-    /// this for their snapshot to avoid seeing a state that never existed
-    /// (e.g., branch B committed but branch A's earlier version not yet applied).
-    visible_version: AtomicU64,
-
-    /// Set of allocated but not-yet-applied versions (#1913).
-    ///
-    /// When `allocate_version()` returns V, V is inserted here. When
-    /// `mark_version_applied(V)` is called, V is removed and `visible_version`
-    /// is advanced if the contiguous applied prefix grew.
-    pending_versions: Mutex<BTreeSet<u64>>,
-
-    /// Branches currently being deleted (#1916).
-    ///
-    /// Commit paths check this set after acquiring the per-branch lock and
-    /// reject commits on branches that are mid-deletion. This prevents
-    /// concurrent commits from resurrecting data on a deleted branch.
-    deleting_branches: DashSet<BranchId>,
-}
-
 /// Describes how the WAL record should be written during commit.
 ///
-/// Used by [`TransactionManager::commit_inner`] to abstract over the three
+/// Used by the durability adapter to abstract over the three
 /// WAL passing styles: direct reference, shared Arc, or no WAL.
 enum WalMode<'a> {
     /// No WAL — ephemeral/cache mode.
@@ -225,12 +148,256 @@ impl WalMode<'_> {
     }
 }
 
+/// Core durability-aware commit implementation shared by the shell entry
+/// points below.
+fn commit_inner<S: Storage>(
+    manager: &StorageTransactionManager,
+    txn: &mut TransactionContext,
+    store: &S,
+    wal_mode: WalMode<'_>,
+    external_version: Option<CommitVersion>,
+) -> std::result::Result<CommitVersion, CommitError> {
+    let profiling = commit_profile_enabled();
+    let t_total = Instant::now();
+
+    #[cfg(feature = "perf-trace")]
+    let commit_start = std::time::Instant::now();
+    #[allow(unused_mut, unused_variables)]
+    let mut trace = strata_core::instrumentation::PerfTrace::new();
+
+    // WAL write (durability)
+    //
+    // Uses fused zero-clone serialization: iterates write_set/delete_set
+    // by reference (no Key/Value clones), serializes msgpack + WAL envelope
+    // into thread-local reusable buffers (zero alloc after warmup).
+    let has_wal = wal_mode.has_wal();
+    let mut wal_serialize_ns = 0u64;
+    let mut wal_mutex_ns = 0u64;
+    let mut wal_io_ns = 0u64;
+    let apply_ns = 0u64;
+    let mark_version_ns = 0u64;
+    let commit_version = manager.commit_with_hook(txn, store, external_version, has_wal, |txn, commit_version| {
+        perf_time!(trace, wal_append_ns, {
+            match wal_mode {
+                WalMode::Direct(wal) => {
+                    let timestamp = now_micros();
+                    let wal_txn_id = TxnId(commit_version.as_u64());
+                    let result = WAL_RECORD_BUF.with(|rec_cell| {
+                        MSGPACK_BUF.with(|msg_cell| {
+                            let mut rec_buf = rec_cell.borrow_mut();
+                            let mut msg_buf = msg_cell.borrow_mut();
+                            let ts = Instant::now();
+                            payload::serialize_wal_record_into(
+                                &mut rec_buf,
+                                &mut msg_buf,
+                                txn,
+                                commit_version,
+                                wal_txn_id,
+                                *txn.branch_id.as_bytes(),
+                                timestamp,
+                            );
+                            wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                            if let Some(err) = writer_halted_commit_error(wal) {
+                                return Err(err);
+                            }
+                            let tw = Instant::now();
+                            wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                .map_err(|e| CommitError::WALError(e.to_string()))?;
+                            wal_io_ns = tw.elapsed().as_nanos() as u64;
+                            Ok(())
+                        })
+                    });
+                    result?;
+                    tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
+                }
+                WalMode::Shared(wal_arc) => {
+                    let timestamp = now_micros();
+                    let wal_txn_id = TxnId(commit_version.as_u64());
+                    let result = WAL_RECORD_BUF.with(|rec_cell| {
+                        MSGPACK_BUF.with(|msg_cell| {
+                            let mut rec_buf = rec_cell.borrow_mut();
+                            let mut msg_buf = msg_cell.borrow_mut();
+                            let ts = Instant::now();
+                            payload::serialize_wal_record_into(
+                                &mut rec_buf,
+                                &mut msg_buf,
+                                txn,
+                                commit_version,
+                                wal_txn_id,
+                                *txn.branch_id.as_bytes(),
+                                timestamp,
+                            );
+                            wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                            let tm = Instant::now();
+                            let mut wal = wal_arc.lock();
+                            wal_mutex_ns = tm.elapsed().as_nanos() as u64;
+                            if let Some(err) = writer_halted_commit_error(&wal) {
+                                return Err(err);
+                            }
+                            let tw = Instant::now();
+                            wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                .map_err(|e| CommitError::WALError(e.to_string()))?;
+                            wal_io_ns = tw.elapsed().as_nanos() as u64;
+                            Ok(())
+                        })
+                    });
+                    result?;
+                    tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
+                }
+                WalMode::None => {}
+            }
+        });
+
+        #[cfg(any(test, feature = "fault-injection"))]
+        if let Some(reason) = maybe_take_apply_failure_injection() {
+            if has_wal {
+                tracing::error!(
+                    target: "strata::txn",
+                    txn_id = txn.txn_id.as_u64(),
+                    commit_version = commit_version.as_u64(),
+                    reason,
+                    "Injected storage-apply failure after WAL commit"
+                );
+                return Err(CommitError::DurableButNotVisible {
+                    txn_id: txn.txn_id.as_u64(),
+                    commit_version: commit_version.as_u64(),
+                    reason,
+                });
+            }
+
+            return Err(CommitError::WALError(reason));
+        }
+
+        Ok(())
+    })?;
+
+    // Profile accumulation
+    if profiling {
+        let total_ns = t_total.elapsed().as_nanos() as u64;
+        COMMIT_PROF.with(|p| {
+            let mut p = p.borrow_mut();
+            p.count += 1;
+            p.wal_serialize_ns += wal_serialize_ns;
+            p.wal_mutex_ns += wal_mutex_ns;
+            p.wal_io_ns += wal_io_ns;
+            p.apply_ns += apply_ns;
+            p.mark_version_ns += mark_version_ns;
+            p.total_ns += total_ns;
+
+            if p.count % PROFILE_INTERVAL == 0 {
+                let n = PROFILE_INTERVAL as f64;
+                let wal_total = p.wal_serialize_ns + p.wal_mutex_ns + p.wal_io_ns;
+                eprintln!(
+                    "[commit-profile] {} commits | avg(us): \
+                     total={:.1}  branch_lock={:.1}  validate={:.1}  ver_alloc={:.1}  \
+                     wal[ser={:.1} mutex={:.1} io={:.1} sum={:.1}]  \
+                     apply={:.1}  mark_ver={:.1}",
+                    p.count,
+                    p.total_ns as f64 / n / 1000.0,
+                    p.lock_acquire_ns as f64 / n / 1000.0,
+                    p.validation_ns as f64 / n / 1000.0,
+                    p.version_alloc_ns as f64 / n / 1000.0,
+                    p.wal_serialize_ns as f64 / n / 1000.0,
+                    p.wal_mutex_ns as f64 / n / 1000.0,
+                    p.wal_io_ns as f64 / n / 1000.0,
+                    wal_total as f64 / n / 1000.0,
+                    p.apply_ns as f64 / n / 1000.0,
+                    p.mark_version_ns as f64 / n / 1000.0,
+                );
+                // Reset for next interval
+                p.lock_acquire_ns = 0;
+                p.validation_ns = 0;
+                p.version_alloc_ns = 0;
+                p.wal_serialize_ns = 0;
+                p.wal_mutex_ns = 0;
+                p.wal_io_ns = 0;
+                p.apply_ns = 0;
+                p.mark_version_ns = 0;
+                p.total_ns = 0;
+            }
+        });
+    }
+
+    #[cfg(feature = "perf-trace")]
+    {
+        trace.commit_total_ns = commit_start.elapsed().as_nanos() as u64;
+        trace.keys_read = txn.read_set.len();
+        trace.keys_written = txn.write_set.len();
+        tracing::info!(
+            target: "strata::perf",
+            txn_id = txn.txn_id.as_u64(),
+            commit_version = commit_version.as_u64(),
+            total_us = trace.commit_total_ns / 1000,
+            validate_us = trace.read_set_validate_ns / 1000,
+            wal_us = trace.wal_append_ns / 1000,
+            apply_us = trace.write_set_apply_ns / 1000,
+            keys_read = trace.keys_read,
+            keys_written = trace.keys_written,
+            "commit perf trace"
+        );
+    }
+
+    Ok(commit_version)
+}
+
+/// Commit a transaction through the durability shell with an optional direct
+/// WAL writer.
+pub fn commit_with_wal<S: Storage>(
+    manager: &StorageTransactionManager,
+    txn: &mut TransactionContext,
+    store: &S,
+    wal: Option<&mut WalWriter>,
+) -> std::result::Result<CommitVersion, CommitError> {
+    let wal_mode = match wal {
+        Some(w) => WalMode::Direct(w),
+        None => WalMode::None,
+    };
+    commit_inner(manager, txn, store, wal_mode, None)
+}
+
+/// Commit a transaction through the durability shell with an optional shared
+/// WAL writer.
+pub fn commit_with_wal_arc<S: Storage>(
+    manager: &StorageTransactionManager,
+    txn: &mut TransactionContext,
+    store: &S,
+    wal_arc: Option<&Arc<Mutex<WalWriter>>>,
+) -> std::result::Result<CommitVersion, CommitError> {
+    let wal_mode = match wal_arc {
+        Some(arc) => WalMode::Shared(arc),
+        None => WalMode::None,
+    };
+    commit_inner(manager, txn, store, wal_mode, None)
+}
+
+/// Commit a transaction through the durability shell using an externally
+/// allocated version.
+pub fn commit_with_version<S: Storage>(
+    manager: &StorageTransactionManager,
+    txn: &mut TransactionContext,
+    store: &S,
+    wal: Option<&mut WalWriter>,
+    version: CommitVersion,
+) -> std::result::Result<CommitVersion, CommitError> {
+    let wal_mode = match wal {
+        Some(w) => WalMode::Direct(w),
+        None => WalMode::None,
+    };
+    commit_inner(manager, txn, store, wal_mode, Some(version))
+}
+
+#[cfg(test)]
+struct TransactionManager {
+    inner: StorageTransactionManager,
+}
+
+#[cfg(test)]
 impl TransactionManager {
     /// Create a new transaction manager
     ///
     /// # Arguments
     /// * `initial_version` - Starting version (typically from recovery's final_version)
-    pub fn new(initial_version: CommitVersion) -> Self {
+    fn new(initial_version: CommitVersion) -> Self {
         Self::with_txn_id(initial_version, TxnId::ZERO)
     }
 
@@ -242,162 +409,48 @@ impl TransactionManager {
     /// # Arguments
     /// * `initial_version` - Starting version (from recovery's final_version)
     /// * `max_txn_id` - Maximum txn_id seen in WAL (new transactions start at max_txn_id + 1)
-    pub fn with_txn_id(initial_version: CommitVersion, max_txn_id: TxnId) -> Self {
+    fn with_txn_id(initial_version: CommitVersion, max_txn_id: TxnId) -> Self {
         TransactionManager {
-            version: AtomicU64::new(initial_version.as_u64()),
-            // Start next_txn_id at max_txn_id + 1 to avoid conflicts
-            next_txn_id: AtomicU64::new(max_txn_id.as_u64() + 1),
-            commit_locks: DashMap::new(),
-            commit_quiesce: RwLock::new(()),
-            visible_version: AtomicU64::new(initial_version.as_u64()),
-            pending_versions: Mutex::new(BTreeSet::new()),
-            deleting_branches: DashSet::new(),
+            inner: StorageTransactionManager::with_txn_id(initial_version, max_txn_id),
         }
     }
 
-    /// Get current global version
-    pub fn current_version(&self) -> CommitVersion {
-        CommitVersion(self.version.load(Ordering::Acquire))
+    fn current_version(&self) -> CommitVersion {
+        self.inner.current_version()
     }
 
-    /// Get the highest version where all data at versions ≤ V is fully applied.
-    ///
-    /// Unlike `current_version()` (which reflects allocated versions), this
-    /// returns a version safe for snapshot reads: no in-flight `apply_writes`
-    /// exists at any version ≤ the returned value.
-    ///
-    /// This prevents the cross-branch snapshot gap described in #1913:
-    /// if branch A allocates version N and branch B allocates N+1, B can
-    /// finish apply before A. A reader using `current_version()` (= N+1)
-    /// would miss A's writes. `visible_version()` only advances to N+1
-    /// once both A and B have completed their applies.
-    pub fn visible_version(&self) -> CommitVersion {
-        CommitVersion(self.visible_version.load(Ordering::Acquire))
+    fn visible_version(&self) -> CommitVersion {
+        self.inner.visible_version()
     }
 
-    /// Mark a version as fully applied to storage.
-    ///
-    /// Called after `apply_writes_atomic` completes (or after a version is
-    /// allocated but the commit fails, creating a version gap). Removes the
-    /// version from the in-flight set and advances `visible_version` if the
-    /// contiguous applied prefix has grown.
-    pub fn mark_version_applied(&self, version: CommitVersion) {
-        let mut pending = self.pending_versions.lock();
-        pending.remove(&version.as_u64());
-        let new_visible = match pending.iter().next() {
-            // Some versions still in-flight: safe up to (lowest_pending - 1)
-            Some(&min_pending) => min_pending.saturating_sub(1),
-            // All allocated versions applied: safe up to last allocated
-            // (counter value = last allocated, since allocate_version
-            // returns prev+1 and sets counter to prev+1).
-            None => self.version.load(Ordering::Acquire),
-        };
-        self.visible_version
-            .fetch_max(new_visible, Ordering::AcqRel);
+    fn mark_version_applied(&self, version: CommitVersion) {
+        self.inner.mark_version_applied(version);
     }
 
-    /// Ensure the version counter is at least `floor` (#1726).
-    ///
-    /// Used after segment recovery to prevent version collisions when the WAL
-    /// has been fully compacted and contains no records.  Segments may hold
-    /// data at versions higher than what the WAL reports; this method bumps
-    /// the counter so that new transactions start above all existing data.
-    pub fn bump_version_floor(&self, floor: CommitVersion) {
-        self.version.fetch_max(floor.as_u64(), Ordering::AcqRel);
-        // Recovery data at versions ≤ floor is already in storage,
-        // so visible_version must reflect this (#1913).
-        self.visible_version
-            .fetch_max(floor.as_u64(), Ordering::AcqRel);
+    fn bump_version_floor(&self, floor: CommitVersion) {
+        self.inner.bump_version_floor(floor);
     }
 
-    /// Get the current version after draining all in-flight commits (#1710).
-    ///
-    /// Acquires the exclusive (write) side of `commit_quiesce`, which blocks
-    /// until every concurrent commit has finished its `apply_writes`. The
-    /// returned version is safe to use as a checkpoint watermark because no
-    /// version ≤ this value has storage application still in progress.
-    pub fn quiesced_version(&self) -> u64 {
-        // Lock Level 1 (exclusive): drains all in-flight commits.
-        let _guard = self.commit_quiesce.write();
-        self.version.load(Ordering::Acquire)
+    fn quiesced_version(&self) -> u64 {
+        self.inner.quiesced_version()
     }
 
-    /// Acquire the commit quiesce lock, blocking until all in-flight commits
-    /// have finished their `apply_writes`.
-    ///
-    /// The returned guard prevents new commits from starting (they need the
-    /// shared read side). Hold it across operations that require a stable
-    /// storage version, such as `fork_branch` (#2105).
-    pub fn quiesce_commits(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
-        self.commit_quiesce.write()
+    fn quiesce_commits(&self) -> parking_lot::RwLockWriteGuard<'_, ()> {
+        self.inner.quiesce_commits()
     }
 
-    /// Allocate next transaction ID
-    ///
-    /// Uses a single `fetch_add` (LOCK XADD on x86) instead of a CAS loop.
-    /// Overflow at `u64::MAX` is detected and repaired — practically unreachable
-    /// (584 years at 1 billion txn/sec).
-    ///
-    /// # Overflow race tradeoff
-    ///
-    /// At `u64::MAX`, `fetch_add` wraps to 0 before the `store` repair runs.
-    /// A concurrent caller could observe the wrapped value and return a
-    /// duplicate ID. The old `fetch_update` (CAS loop) was atomic at this
-    /// boundary but suffered thundering-herd contention at 16+ threads.
-    /// Since reaching `u64::MAX` is physically impossible at any realistic
-    /// throughput, we accept this theoretical race in exchange for
-    /// contention-free allocation.
-    pub fn next_txn_id(&self) -> std::result::Result<TxnId, CommitError> {
-        let prev = self.next_txn_id.fetch_add(1, Ordering::AcqRel);
-        if prev == u64::MAX {
-            // Undo the wrapping increment: restore counter to u64::MAX
-            self.next_txn_id.store(u64::MAX, Ordering::Release);
-            return Err(CommitError::CounterOverflow(
-                "transaction ID counter at u64::MAX".into(),
-            ));
-        }
-        Ok(TxnId(prev))
+    fn next_txn_id(&self) -> std::result::Result<TxnId, CommitError> {
+        self.inner.next_txn_id()
     }
 
-    /// Allocate next commit version (increment global version)
-    ///
-    /// Per spec Section 6.1: Version incremented ONCE for the whole transaction.
-    ///
-    /// # Version Gaps
-    ///
-    /// Version gaps may occur if a transaction fails after version allocation
-    /// but before successful commit (e.g., WAL write failure). Consumers should
-    /// not assume version numbers are contiguous. A gap means the version was
-    /// allocated but no data was committed with that version.
-    ///
-    /// This is by design - version allocation is atomic and non-blocking,
-    /// while failure handling during commit does not attempt to "return"
-    /// the allocated version.
-    ///
-    /// Uses a single `fetch_add` (LOCK XADD on x86) instead of a CAS loop.
-    /// Overflow at `u64::MAX` is detected and repaired — practically unreachable
-    /// (584 years at 1 billion txn/sec). See `next_txn_id` for the overflow
-    /// race tradeoff rationale.
-    pub fn allocate_version(&self) -> std::result::Result<CommitVersion, CommitError> {
-        let mut pending = self.pending_versions.lock();
-        let prev = self.version.fetch_add(1, Ordering::AcqRel);
-        if prev == u64::MAX {
-            // Undo the wrapping increment: restore counter to u64::MAX
-            self.version.store(u64::MAX, Ordering::Release);
-            return Err(CommitError::CounterOverflow(
-                "version counter at u64::MAX".into(),
-            ));
-        }
-        let version = prev + 1;
-        pending.insert(version);
-        Ok(CommitVersion(version))
+    fn allocate_version(&self) -> std::result::Result<CommitVersion, CommitError> {
+        self.inner.allocate_version()
     }
 
-    /// Core commit implementation shared by all public commit methods.
     ///
     /// Implements the full commit protocol: read-only fast path, quiesce lock,
-    /// per-branch lock, OCC validation, version allocation, JSON materialization,
-    /// WAL write, storage application, and visible-version advancement.
+    /// generic validation/version allocation, WAL write, storage application,
+    /// and visible-version advancement.
     ///
     /// # Arguments
     /// * `txn` - Transaction to commit (must be in Active state)
@@ -412,19 +465,6 @@ impl TransactionManager {
         wal_mode: WalMode<'_>,
         external_version: Option<CommitVersion>,
     ) -> std::result::Result<CommitVersion, CommitError> {
-        // Fast path: read-only transactions skip lock, validation, version alloc, WAL, apply
-        if txn.is_read_only() {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-            return Ok(external_version
-                .unwrap_or_else(|| CommitVersion(self.version.load(Ordering::Acquire))));
-        }
-
         let profiling = commit_profile_enabled();
         let t_total = Instant::now();
 
@@ -433,237 +473,117 @@ impl TransactionManager {
         #[allow(unused_mut, unused_variables)]
         let mut trace = strata_core::instrumentation::PerfTrace::new();
 
-        // Lock Level 1 (shared): Acquire quiesce read lock so checkpoint's
-        // quiesced_version() can drain all in-flight commits before reading
-        // the version counter (#1710).
-        let t0 = Instant::now();
-        let _quiesce_guard = self.commit_quiesce.read();
-
-        // Lock Level 5 → Level 2: Acquire per-branch commit lock.
-        // DashMap shard guard (Level 5) is dropped by the .clone() before
-        // we lock the Mutex (Level 2). Must be held from validation through
-        // version allocation and apply_writes (prevents TOCTOU, #1708, #1781).
-        let commit_mutex = self
-            .commit_locks
-            .entry(txn.branch_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone(); // clone Arc, drop RefMut → releases shard lock (#1781)
-        let _commit_guard = commit_mutex.lock(); // Lock Level 2
-        let lock_acquire_ns = t0.elapsed().as_nanos() as u64;
-
-        // Reject commits on branches that are mid-deletion (#1916).
-        if self.deleting_branches.contains(&txn.branch_id) {
-            return Err(CommitError::BranchDeleting(txn.branch_id));
-        }
-
-        // Skip OCC validation for blind writes (no reads, no CAS)
-        let t0 = Instant::now();
-        let can_skip_validation = txn.read_set.is_empty() && txn.cas_set.is_empty();
-
-        if can_skip_validation {
-            if !txn.is_active() {
-                return Err(CommitError::InvalidState(format!(
-                    "Cannot commit transaction {} from {:?} state - must be Active",
-                    txn.txn_id, txn.status
-                )));
-            }
-            txn.status = TransactionStatus::Committed;
-        } else {
-            perf_time!(trace, read_set_validate_ns, {
-                txn.commit(store)?;
-            });
-            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), "Validation passed");
-        }
-        let validation_ns = t0.elapsed().as_nanos() as u64;
-
-        // Version allocation: either from local counter or externally provided
-        let t0 = Instant::now();
-        let commit_version = match external_version {
-            None => self.allocate_version()?,
-            Some(v) => {
-                // Register external version as pending BEFORE advancing the counter.
-                // If we advance first, a concurrent mark_version_applied could see
-                // the higher counter with an empty pending set and advance
-                // visible_version to include this not-yet-applied version (#1913).
-                let mut pending = self.pending_versions.lock();
-                self.version.fetch_max(v.as_u64(), Ordering::AcqRel);
-                pending.insert(v.as_u64());
-                v
-            }
-        };
-        let version_alloc_ns = t0.elapsed().as_nanos() as u64;
-
         // WAL write (durability)
         //
         // Uses fused zero-clone serialization: iterates write_set/delete_set
         // by reference (no Key/Value clones), serializes msgpack + WAL envelope
         // into thread-local reusable buffers (zero alloc after warmup).
         let has_wal = wal_mode.has_wal();
-        let has_mutations = !txn.is_read_only();
         let mut wal_serialize_ns = 0u64;
         let mut wal_mutex_ns = 0u64;
         let mut wal_io_ns = 0u64;
-        if has_mutations {
-            perf_time!(trace, wal_append_ns, {
-                match wal_mode {
-                    WalMode::Direct(wal) => {
-                        let timestamp = now_micros();
-                        let wal_txn_id = TxnId(commit_version.as_u64());
-                        let result = WAL_RECORD_BUF.with(|rec_cell| {
-                            MSGPACK_BUF.with(|msg_cell| {
-                                let mut rec_buf = rec_cell.borrow_mut();
-                                let mut msg_buf = msg_cell.borrow_mut();
-                                let ts = Instant::now();
-                                // Issue #1696: Use commit_version as WAL record ordering key
-                                payload::serialize_wal_record_into(
-                                    &mut rec_buf,
-                                    &mut msg_buf,
-                                    txn,
-                                    commit_version,
-                                    wal_txn_id,
-                                    *txn.branch_id.as_bytes(),
-                                    timestamp,
-                                );
-                                wal_serialize_ns = ts.elapsed().as_nanos() as u64;
-                                if let Some(err) = writer_halted_commit_error(wal) {
-                                    return Err(err);
-                                }
-                                // Direct mode: no separate mutex
-                                let tw = Instant::now();
-                                wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
-                                    .map_err(|e| CommitError::WALError(e.to_string()))?;
-                                wal_io_ns = tw.elapsed().as_nanos() as u64;
-                                Ok(())
-                            })
-                        });
-                        if let Err(e) = result {
-                            let abort_reason = match &e {
-                                CommitError::WriterHalted { reason, .. } => {
-                                    format!("WAL writer halted: {}", reason)
-                                }
-                                CommitError::WALError(msg) => format!("WAL write failed: {}", msg),
-                                other => format!("WAL write failed: {}", other),
-                            };
-                            txn.status = TransactionStatus::Aborted {
-                                reason: abort_reason,
-                            };
-                            self.mark_version_applied(commit_version);
-                            return Err(e);
+        let apply_ns = 0u64;
+        let mark_version_ns = 0u64;
+        let commit_version = self.inner.commit_with_hook(
+            txn,
+            store,
+            external_version,
+            has_wal,
+            |txn, commit_version| {
+                perf_time!(trace, wal_append_ns, {
+                    match wal_mode {
+                        WalMode::Direct(wal) => {
+                            let timestamp = now_micros();
+                            let wal_txn_id = TxnId(commit_version.as_u64());
+                            let result = WAL_RECORD_BUF.with(|rec_cell| {
+                                MSGPACK_BUF.with(|msg_cell| {
+                                    let mut rec_buf = rec_cell.borrow_mut();
+                                    let mut msg_buf = msg_cell.borrow_mut();
+                                    let ts = Instant::now();
+                                    payload::serialize_wal_record_into(
+                                        &mut rec_buf,
+                                        &mut msg_buf,
+                                        txn,
+                                        commit_version,
+                                        wal_txn_id,
+                                        *txn.branch_id.as_bytes(),
+                                        timestamp,
+                                    );
+                                    wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                                    if let Some(err) = writer_halted_commit_error(wal) {
+                                        return Err(err);
+                                    }
+                                    let tw = Instant::now();
+                                    wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                        .map_err(|e| CommitError::WALError(e.to_string()))?;
+                                    wal_io_ns = tw.elapsed().as_nanos() as u64;
+                                    Ok(())
+                                })
+                            });
+                            result?;
+                            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                         }
-                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
-                    }
-                    WalMode::Shared(wal_arc) => {
-                        let timestamp = now_micros();
-                        let wal_txn_id = TxnId(commit_version.as_u64());
-                        let result = WAL_RECORD_BUF.with(|rec_cell| {
-                            MSGPACK_BUF.with(|msg_cell| {
-                                let mut rec_buf = rec_cell.borrow_mut();
-                                let mut msg_buf = msg_cell.borrow_mut();
-                                // Issue #1696: Use commit_version as WAL record ordering key
-                                let ts = Instant::now();
-                                payload::serialize_wal_record_into(
-                                    &mut rec_buf,
-                                    &mut msg_buf,
-                                    txn,
-                                    commit_version,
-                                    wal_txn_id,
-                                    *txn.branch_id.as_bytes(),
-                                    timestamp,
-                                );
-                                wal_serialize_ns = ts.elapsed().as_nanos() as u64;
-                                let tm = Instant::now();
-                                let mut wal = wal_arc.lock(); // Lock Level 4: WAL append
-                                wal_mutex_ns = tm.elapsed().as_nanos() as u64;
-                                if let Some(err) = writer_halted_commit_error(&wal) {
-                                    return Err(err);
-                                }
-                                let tw = Instant::now();
-                                wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
-                                    .map_err(|e| CommitError::WALError(e.to_string()))?;
-                                wal_io_ns = tw.elapsed().as_nanos() as u64;
-                                Ok(())
-                            })
-                        });
-                        if let Err(e) = result {
-                            let abort_reason = match &e {
-                                CommitError::WriterHalted { reason, .. } => {
-                                    format!("WAL writer halted: {}", reason)
-                                }
-                                CommitError::WALError(msg) => format!("WAL write failed: {}", msg),
-                                other => format!("WAL write failed: {}", other),
-                            };
-                            txn.status = TransactionStatus::Aborted {
-                                reason: abort_reason,
-                            };
-                            self.mark_version_applied(commit_version);
-                            return Err(e);
+                        WalMode::Shared(wal_arc) => {
+                            let timestamp = now_micros();
+                            let wal_txn_id = TxnId(commit_version.as_u64());
+                            let result = WAL_RECORD_BUF.with(|rec_cell| {
+                                MSGPACK_BUF.with(|msg_cell| {
+                                    let mut rec_buf = rec_cell.borrow_mut();
+                                    let mut msg_buf = msg_cell.borrow_mut();
+                                    let ts = Instant::now();
+                                    payload::serialize_wal_record_into(
+                                        &mut rec_buf,
+                                        &mut msg_buf,
+                                        txn,
+                                        commit_version,
+                                        wal_txn_id,
+                                        *txn.branch_id.as_bytes(),
+                                        timestamp,
+                                    );
+                                    wal_serialize_ns = ts.elapsed().as_nanos() as u64;
+                                    let tm = Instant::now();
+                                    let mut wal = wal_arc.lock();
+                                    wal_mutex_ns = tm.elapsed().as_nanos() as u64;
+                                    if let Some(err) = writer_halted_commit_error(&wal) {
+                                        return Err(err);
+                                    }
+                                    let tw = Instant::now();
+                                    wal.append_pre_serialized(&rec_buf, wal_txn_id, timestamp)
+                                        .map_err(|e| CommitError::WALError(e.to_string()))?;
+                                    wal_io_ns = tw.elapsed().as_nanos() as u64;
+                                    Ok(())
+                                })
+                            });
+                            result?;
+                            tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
                         }
-                        tracing::debug!(target: "strata::txn", txn_id = txn.txn_id.as_u64(), commit_version = commit_version.as_u64(), "WAL durable");
+                        WalMode::None => {}
                     }
-                    WalMode::None => {}
-                }
-            });
-        }
+                });
 
-        // Apply to storage
-        let t0 = Instant::now();
-        perf_time!(trace, write_set_apply_ns, {
-            #[cfg(any(test, feature = "fault-injection"))]
-            if let Some(reason) = maybe_take_apply_failure_injection() {
-                self.mark_version_applied(commit_version);
-                if has_wal {
-                    tracing::error!(
-                        target: "strata::txn",
-                        txn_id = txn.txn_id.as_u64(),
-                        commit_version = commit_version.as_u64(),
-                        reason,
-                        "Injected storage-apply failure after WAL commit"
-                    );
-                    return Err(CommitError::DurableButNotVisible {
-                        txn_id: txn.txn_id.as_u64(),
-                        commit_version: commit_version.as_u64(),
-                        reason,
-                    });
-                } else {
-                    txn.status = TransactionStatus::Aborted {
-                        reason: reason.clone(),
-                    };
+                #[cfg(any(test, feature = "fault-injection"))]
+                if let Some(reason) = maybe_take_apply_failure_injection() {
+                    if has_wal {
+                        tracing::error!(
+                            target: "strata::txn",
+                            txn_id = txn.txn_id.as_u64(),
+                            commit_version = commit_version.as_u64(),
+                            reason,
+                            "Injected storage-apply failure after WAL commit"
+                        );
+                        return Err(CommitError::DurableButNotVisible {
+                            txn_id: txn.txn_id.as_u64(),
+                            commit_version: commit_version.as_u64(),
+                            reason,
+                        });
+                    }
+
                     return Err(CommitError::WALError(reason));
                 }
-            }
 
-            if let Err(e) = txn.apply_writes(store, commit_version) {
-                self.mark_version_applied(commit_version);
-                if has_wal {
-                    tracing::error!(
-                        target: "strata::txn",
-                        txn_id = txn.txn_id.as_u64(),
-                        commit_version = commit_version.as_u64(),
-                        error = %e,
-                        "Storage application failed after WAL commit - will be recovered on restart"
-                    );
-                    return Err(CommitError::DurableButNotVisible {
-                        txn_id: txn.txn_id.as_u64(),
-                        commit_version: commit_version.as_u64(),
-                        reason: format!("Storage application failed: {}", e),
-                    });
-                } else {
-                    txn.status = TransactionStatus::Aborted {
-                        reason: format!("Storage application failed: {}", e),
-                    };
-                    return Err(CommitError::WALError(format!(
-                        "Storage application failed (no WAL): {}",
-                        e
-                    )));
-                }
-            }
-        });
-        let apply_ns = t0.elapsed().as_nanos() as u64;
-
-        // Version fully applied — advance visible_version (#1913)
-        let t0 = Instant::now();
-        self.mark_version_applied(commit_version);
-        let mark_version_ns = t0.elapsed().as_nanos() as u64;
+                Ok(())
+            },
+        )?;
 
         // Profile accumulation
         if profiling {
@@ -671,9 +591,6 @@ impl TransactionManager {
             COMMIT_PROF.with(|p| {
                 let mut p = p.borrow_mut();
                 p.count += 1;
-                p.lock_acquire_ns += lock_acquire_ns;
-                p.validation_ns += validation_ns;
-                p.version_alloc_ns += version_alloc_ns;
                 p.wal_serialize_ns += wal_serialize_ns;
                 p.wal_mutex_ns += wal_mutex_ns;
                 p.wal_io_ns += wal_io_ns;
@@ -750,7 +667,7 @@ impl TransactionManager {
     /// * `store` - Storage to validate against and apply writes to
     /// * `wal` - Optional WAL for durability. Pass `None` for ephemeral databases
     ///   or when durability is not required (DurabilityMode::Cache).
-    pub fn commit<S: Storage>(
+    fn commit<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -773,14 +690,14 @@ impl TransactionManager {
     /// # Lock ordering
     ///
     /// Level 1 (shared) → Level 2 → Level 4 (brief).
-    /// See [`lock_ordering`](crate::lock_ordering) for the full hierarchy.
+    /// See `strata_storage::txn::lock_ordering` for the full hierarchy.
     ///
     /// # Arguments
     /// * `txn` - Transaction to commit (must be in Active state)
     /// * `store` - Storage to validate against and apply writes to
     /// * `wal_arc` - Optional WAL for durability. Pass `None` for ephemeral
     ///   databases or when durability is not required.
-    pub fn commit_with_wal_arc<S: Storage>(
+    fn commit_with_wal_arc<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -802,33 +719,26 @@ impl TransactionManager {
     /// and is unaffected by the removal — the Mutex stays alive via the Arc
     /// and the commit completes normally. The next commit on this branch
     /// (if any) will recreate the entry via `entry().or_insert_with()`.
-    pub fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
-        // DashMap::remove() atomically acquires the shard write lock and
-        // removes the entry.  A concurrent commit may still hold the
-        // Arc<Mutex> it cloned earlier — that's fine, the Mutex stays
-        // alive via the Arc and the commit completes normally.  The next
-        // commit on this branch will recreate the entry via
-        // `entry().or_insert_with()`.  (#1621, #1781)
-        self.commit_locks.remove(branch_id);
-        true
+    fn remove_branch_lock(&self, branch_id: &BranchId) -> bool {
+        self.inner.remove_branch_lock(branch_id)
     }
 
     /// Mark a branch as being deleted (#1916).
     ///
     /// Subsequent commits on this branch will be rejected with
     /// `CommitError::BranchDeleting` after they acquire the per-branch lock.
-    pub fn mark_branch_deleting(&self, branch_id: &BranchId) {
-        self.deleting_branches.insert(*branch_id);
+    fn mark_branch_deleting(&self, branch_id: &BranchId) {
+        self.inner.mark_branch_deleting(branch_id);
     }
 
     /// Check if a branch is currently marked as deleting (#2108).
-    pub fn is_branch_deleting(&self, branch_id: &BranchId) -> bool {
-        self.deleting_branches.contains(branch_id)
+    fn is_branch_deleting(&self, branch_id: &BranchId) -> bool {
+        self.inner.is_branch_deleting(branch_id)
     }
 
     /// Remove the deleting mark for a branch (#1916).
-    pub fn unmark_branch_deleting(&self, branch_id: &BranchId) {
-        self.deleting_branches.remove(branch_id);
+    fn unmark_branch_deleting(&self, branch_id: &BranchId) {
+        self.inner.unmark_branch_deleting(branch_id);
     }
 
     /// Clone the `Arc<Mutex<()>>` for a branch's commit lock (#1916).
@@ -836,11 +746,8 @@ impl TransactionManager {
     /// The caller can lock this to serialize with (and drain) in-flight
     /// commits on the branch. Used by `delete_branch` to ensure no commit
     /// is mid-apply before scanning and deleting branch data.
-    pub fn branch_commit_lock(&self, branch_id: &BranchId) -> Arc<Mutex<()>> {
-        self.commit_locks
-            .entry(*branch_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
-            .clone()
+    fn branch_commit_lock(&self, branch_id: &BranchId) -> Arc<Mutex<()>> {
+        self.inner.branch_commit_lock(branch_id)
     }
 
     /// Advance the version counter to at least `v`.
@@ -848,11 +755,8 @@ impl TransactionManager {
     /// Used during multi-process refresh to ensure the local version counter
     /// reflects writes applied from other processes' WAL entries.
     /// Uses `fetch_max` so the counter never goes backward.
-    pub fn catch_up_version(&self, v: u64) {
-        self.version.fetch_max(v, Ordering::AcqRel);
-        // Data at version v was applied by another process, so it is
-        // already visible in storage (#1913).
-        self.visible_version.fetch_max(v, Ordering::AcqRel);
+    fn catch_up_version(&self, v: u64) {
+        self.inner.catch_up_version(v);
     }
 
     /// Set the visible version exactly.
@@ -860,17 +764,16 @@ impl TransactionManager {
     /// Used when reopening a blocked follower: recovery restores the full WAL
     /// state into storage, then the engine clamps visibility back below the
     /// blocked record until an operator explicitly skips it.
-    pub fn set_visible_version(&self, version: CommitVersion) {
-        self.visible_version
-            .store(version.as_u64(), Ordering::Release);
+    fn set_visible_version(&self, version: CommitVersion) {
+        self.inner.set_visible_version(version);
     }
 
     /// Advance the next_txn_id counter to at least `id + 1`.
     ///
     /// Used during multi-process refresh to ensure locally-allocated transaction
     /// IDs never collide with IDs already used by other processes.
-    pub fn catch_up_txn_id(&self, id: u64) {
-        self.next_txn_id.fetch_max(id + 1, Ordering::AcqRel);
+    fn catch_up_txn_id(&self, id: u64) {
+        self.inner.catch_up_txn_id(id);
     }
 
     /// Commit a transaction with an externally-allocated version.
@@ -881,7 +784,7 @@ impl TransactionManager {
     /// WAL file lock via the shared counter file.
     ///
     /// The per-branch commit lock is still acquired for thread safety.
-    pub fn commit_with_version<S: Storage>(
+    fn commit_with_version<S: Storage>(
         &self,
         txn: &mut TransactionContext,
         store: &S,
@@ -894,8 +797,14 @@ impl TransactionManager {
         };
         self.commit_inner(txn, store, wal_mode, Some(version))
     }
+
+    #[doc(hidden)]
+    fn has_branch_lock(&self, branch_id: &BranchId) -> bool {
+        self.inner.has_branch_lock(branch_id)
+    }
 }
 
+#[cfg(test)]
 impl Default for TransactionManager {
     fn default() -> Self {
         Self::new(CommitVersion::ZERO)
@@ -905,7 +814,6 @@ impl Default for TransactionManager {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::TransactionContext;
     use parking_lot::Mutex as ParkingMutex;
     use std::path::Path;
     use std::sync::Arc;
@@ -915,7 +823,7 @@ mod tests {
     use strata_durability::codec::IdentityCodec;
     use strata_durability::layout::DatabaseLayout;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalReader};
-    use strata_storage::{Key, Namespace, SegmentedStore};
+    use strata_storage::{Key, Namespace, SegmentedStore, TransactionContext, TransactionStatus};
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
@@ -1825,15 +1733,12 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Insert a lock entry by accessing it (simulates a prior commit)
-        manager
-            .commit_locks
-            .entry(branch_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())));
-        assert!(manager.commit_locks.contains_key(&branch_id));
+        let _lock = manager.branch_commit_lock(&branch_id);
+        assert!(manager.has_branch_lock(&branch_id));
 
         // Removal should succeed since no one holds the lock
         assert!(manager.remove_branch_lock(&branch_id));
-        assert!(!manager.commit_locks.contains_key(&branch_id));
+        assert!(!manager.has_branch_lock(&branch_id));
     }
 
     #[test]
@@ -1853,27 +1758,16 @@ mod tests {
         let branch_id = BranchId::new();
 
         // Insert a lock entry via the same path as commit()
-        {
-            let _entry = manager
-                .commit_locks
-                .entry(branch_id)
-                .or_insert_with(|| Arc::new(Mutex::new(())));
-            // entry guard dropped here, releasing shard lock
-        }
-        assert!(manager.commit_locks.contains_key(&branch_id));
+        let _lock = manager.branch_commit_lock(&branch_id);
+        assert!(manager.has_branch_lock(&branch_id));
 
         // Removal should succeed since no commit is in-flight
         assert!(manager.remove_branch_lock(&branch_id));
-        assert!(!manager.commit_locks.contains_key(&branch_id));
+        assert!(!manager.has_branch_lock(&branch_id));
 
         // Next commit should recreate the entry via or_insert_with
-        {
-            let _entry = manager
-                .commit_locks
-                .entry(branch_id)
-                .or_insert_with(|| Arc::new(Mutex::new(())));
-        }
-        assert!(manager.commit_locks.contains_key(&branch_id));
+        let _lock = manager.branch_commit_lock(&branch_id);
+        assert!(manager.has_branch_lock(&branch_id));
     }
 
     // ========================================================================
@@ -2069,7 +1963,7 @@ mod tests {
         let key = create_test_key(&ns, "blind_key");
 
         // No lock entry should exist initially
-        assert!(!manager.commit_locks.contains_key(&branch_id));
+        assert!(!manager.has_branch_lock(&branch_id));
 
         // Commit a blind write via commit_with_wal_arc
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
@@ -2083,7 +1977,7 @@ mod tests {
         // After the commit, the branch lock entry must exist — proving the
         // blind-write path acquired the per-branch lock.
         assert!(
-            manager.commit_locks.contains_key(&branch_id),
+            manager.has_branch_lock(&branch_id),
             "commit_with_wal_arc blind-write path must acquire the per-branch lock"
         );
     }
@@ -2102,7 +1996,7 @@ mod tests {
         let ns = create_test_namespace(branch_id);
         let key = create_test_key(&ns, "blind_key");
 
-        assert!(!manager.commit_locks.contains_key(&branch_id));
+        assert!(!manager.has_branch_lock(&branch_id));
 
         let mut txn = TransactionContext::with_store(TxnId(1), branch_id, Arc::clone(&store));
         txn.put(key, Value::Int(42)).unwrap();
@@ -2114,7 +2008,7 @@ mod tests {
 
         // commit() correctly acquires the lock for blind writes
         assert!(
-            manager.commit_locks.contains_key(&branch_id),
+            manager.has_branch_lock(&branch_id),
             "commit() acquires per-branch lock even for blind writes"
         );
     }

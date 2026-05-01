@@ -539,12 +539,7 @@ fn test_concurrent_json_set_to_same_missing_doc_allows_only_one_commit() {
 
     let loser = if r1.is_err() { r1.err() } else { r2.err() }.expect("one loser expected");
     assert!(
-        matches!(loser, StrataError::VersionConflict { .. })
-            || matches!(
-                &loser,
-                StrataError::TransactionAborted { reason }
-                    if reason.contains("Validation failed")
-            ),
+        matches!(loser, StrataError::TransactionAborted { .. }),
         "losing concurrent JSON commit should fail with an OCC conflict, got {loser:?}"
     );
 
@@ -560,6 +555,39 @@ fn test_concurrent_json_set_to_same_missing_doc_allows_only_one_commit() {
             || doc.value == JsonValue::from_value(serde_json::json!({ "from": "txn2" })),
         "unexpected winning document payload: {:?}",
         doc.value
+    );
+}
+
+#[test]
+fn test_manual_transaction_kv_read_write_conflict_surfaces_transaction_aborted() {
+    let temp_dir = TempDir::new().unwrap();
+    let db = Database::open(temp_dir.path().join("db")).unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    let key = Key::new_kv(ns, "rw_conflict");
+
+    db.transaction(branch_id, |txn| {
+        txn.put(key.clone(), Value::Int(0))?;
+        Ok(())
+    })
+    .unwrap();
+
+    let mut txn1 = db.begin_transaction(branch_id).unwrap();
+    let mut txn2 = db.begin_transaction(branch_id).unwrap();
+
+    assert_eq!(txn1.get(&key).unwrap(), Some(Value::Int(0)));
+    assert_eq!(txn2.get(&key).unwrap(), Some(Value::Int(0)));
+    txn1.put(key.clone(), Value::Int(1)).unwrap();
+    txn2.put(key.clone(), Value::Int(2)).unwrap();
+
+    txn1.commit().unwrap();
+    let err = txn2
+        .commit()
+        .expect_err("second read-write transaction should fail OCC validation");
+    assert!(
+        matches!(err, StrataError::TransactionAborted { .. }),
+        "expected transaction-aborted OCC error, got {err:?}"
     );
 }
 

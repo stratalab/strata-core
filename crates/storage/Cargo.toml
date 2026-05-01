@@ -20,7 +20,7 @@ crossbeam-skiplist = { workspace = true }
 crc32fast = { workspace = true }
 bincode = { workspace = true }
 zstd = { workspace = true }
-parking_lot = { workspace = true }
+parking_lot = { workspace = true, features = ["arc_lock"] }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
 xxhash-rust = { workspace = true }

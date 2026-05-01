@@ -107,7 +107,7 @@ impl VectorStore {
                 strata_engine::primitives::space::ensure_space_registered_in_txn(
                     txn, &branch_id, space,
                 )?;
-                txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))
+                Ok(txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))?)
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -205,7 +205,7 @@ impl VectorStore {
         // Delete config from KV
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         self.db
-            .transaction(branch_id, |txn| txn.delete(config_key.clone()))
+            .transaction(branch_id, |txn| Ok(txn.delete(config_key.clone())?))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         // Remove in-memory backend

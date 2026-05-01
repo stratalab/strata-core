@@ -1738,7 +1738,7 @@ mod tests {
         let meta = BranchMetadata::new(name);
         let json = serde_json::to_string(&meta).unwrap();
         db.transaction(BranchId::from_bytes([0u8; 16]), |txn| {
-            txn.put(
+            Ok(txn.put(
                 Key::new(
                     Arc::new(strata_storage::Namespace::for_branch(BranchId::from_bytes(
                         [0u8; 16],
@@ -1747,7 +1747,7 @@ mod tests {
                     name.as_bytes().to_vec(),
                 ),
                 Value::String(json),
-            )
+            )?)
         })
         .unwrap();
     }

@@ -18,7 +18,6 @@
 use std::path::PathBuf;
 
 use crate::payload::TransactionPayload;
-use crate::TransactionManager;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::{StrataError, StrataResult};
 use strata_durability::codec::{clone_codec, StorageCodec};
@@ -663,12 +662,7 @@ impl RecoveryCoordinator {
                 |record| apply_wal_record_to_memory_storage(storage_ref, record),
             )?
         };
-        let txn_manager = TransactionManager::with_txn_id(stats.final_version, stats.max_txn_id);
-        Ok(RecoveryResult {
-            storage,
-            txn_manager,
-            stats,
-        })
+        Ok(RecoveryResult { storage, stats })
     }
 }
 
@@ -766,12 +760,6 @@ pub fn apply_wal_record_to_memory_storage(
 pub struct RecoveryResult {
     /// Recovered storage with all committed transactions applied
     pub storage: SegmentedStore,
-    /// Transaction manager initialized with recovered version
-    ///
-    /// Per spec Section 6.1: The global version counter is set to the
-    /// highest version seen in the WAL, ensuring new transactions get
-    /// monotonically increasing versions.
-    pub txn_manager: TransactionManager,
     /// Statistics about the recovery process
     pub stats: RecoveryStats,
 }
@@ -785,7 +773,6 @@ impl RecoveryResult {
     pub fn empty() -> Self {
         RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(CommitVersion::ZERO),
             stats: RecoveryStats::default(),
         }
     }
@@ -821,17 +808,16 @@ pub struct RecoveryStats {
     /// Number of delete operations applied
     pub deletes_applied: usize,
 
-    /// Final version after recovery
+    /// Final version after recovery.
     ///
-    /// This is the highest version seen in the WAL, used to initialize
-    /// the TransactionManager's version counter.
+    /// This is the highest version seen in the WAL, used to initialize the
+    /// storage-owned transaction manager's version counter.
     pub final_version: CommitVersion,
 
-    /// Maximum transaction ID seen in WAL
+    /// Maximum transaction ID seen in WAL.
     ///
-    /// This is used to initialize the TransactionManager's next_txn_id counter
-    /// to ensure new transactions get unique IDs that don't conflict with
-    /// transactions already in the WAL.
+    /// This is used to initialize the storage-owned transaction manager's
+    /// `next_txn_id` counter so new transactions stay unique across restarts.
     pub max_txn_id: TxnId,
 
     /// Whether a snapshot was loaded during recovery. Set to `true` when
@@ -871,7 +857,7 @@ mod tests {
     use strata_durability::format::WalRecord;
     use strata_durability::now_micros;
     use strata_durability::wal::{DurabilityMode, WalConfig, WalWriter};
-    use strata_storage::{Key, Namespace};
+    use strata_storage::{Key, Namespace, TransactionManager as StorageTransactionManager};
     use tempfile::TempDir;
 
     fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
@@ -936,7 +922,6 @@ mod tests {
 
         assert_eq!(result.stats.txns_replayed, 0);
         assert_eq!(result.stats.final_version, CommitVersion(0));
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(0));
     }
 
     #[test]
@@ -976,7 +961,6 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 1);
         assert_eq!(result.stats.writes_applied, 1);
         assert_eq!(result.stats.final_version, CommitVersion(100));
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
 
         let stored = result
             .storage
@@ -1026,7 +1010,6 @@ mod tests {
         let result = coordinator.recover_into_memory_storage().unwrap();
 
         assert_eq!(result.stats.final_version, CommitVersion(200));
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(200));
 
         let key1 = Key::new_kv(ns.clone(), "key1");
         assert_eq!(
@@ -1212,7 +1195,6 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 0);
         assert_eq!(result.stats.final_version, CommitVersion(0));
         assert_eq!(result.stats.incomplete_txns, 0);
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(0));
     }
 
     #[test]
@@ -1364,7 +1346,6 @@ mod tests {
         let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover_into_memory_storage().unwrap();
 
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(999));
         assert_eq!(result.stats.final_version, CommitVersion(999));
     }
 
@@ -1398,7 +1379,6 @@ mod tests {
 
         assert_eq!(result.stats.txns_replayed, 10);
         assert_eq!(result.stats.final_version, CommitVersion(10));
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(10));
 
         for i in 1..=10u64 {
             let key = Key::new_kv(ns.clone(), format!("key{}", i));
@@ -1564,8 +1544,11 @@ mod tests {
         let coordinator = test_recovery(temp_dir.path());
         let result = coordinator.recover_into_memory_storage().unwrap();
 
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(100));
-        let new_txn_id = result.txn_manager.next_txn_id().unwrap();
+        let txn_manager = StorageTransactionManager::with_txn_id(
+            result.stats.final_version,
+            result.stats.max_txn_id,
+        );
+        let new_txn_id = txn_manager.next_txn_id().unwrap();
         assert!(new_txn_id > TxnId::ZERO);
     }
 
@@ -1647,7 +1630,6 @@ mod tests {
         assert_eq!(result.stats.txns_replayed, 20);
         assert_eq!(result.stats.final_version, CommitVersion(20));
         assert_eq!(result.stats.writes_applied, 20);
-        assert_eq!(result.txn_manager.current_version(), CommitVersion(20));
 
         // Cross-check: read_all should yield the same records
         let reader = WalReader::new();

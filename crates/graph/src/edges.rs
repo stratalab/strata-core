@@ -301,7 +301,7 @@ impl GraphStore {
 
     /// Read an edge type count from a transaction.
     pub(crate) fn read_edge_type_count(
-        txn: &mut strata_concurrency::TransactionContext,
+        txn: &mut strata_storage::TransactionContext,
         count_sk: &Key,
     ) -> StrataResult<u64> {
         match txn.get(count_sk)? {
@@ -314,11 +314,11 @@ impl GraphStore {
 
     /// Write an edge type count in a transaction.
     pub(crate) fn write_edge_type_count(
-        txn: &mut strata_concurrency::TransactionContext,
+        txn: &mut strata_storage::TransactionContext,
         count_sk: &Key,
         count: u64,
     ) -> StrataResult<()> {
-        txn.put(count_sk.clone(), Value::String(count.to_string()))
+        Ok(txn.put(count_sk.clone(), Value::String(count.to_string()))?)
     }
 }
 
@@ -432,8 +432,14 @@ mod tests {
         let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
         let rev_sk = keys::storage_key(branch, "default", &rev_uk);
 
-        let fwd_exists = gs.db.transaction(branch, |txn| txn.get(&fwd_sk)).unwrap();
-        let rev_exists = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
+        let fwd_exists = gs
+            .db
+            .transaction(branch, |txn| Ok(txn.get(&fwd_sk)?))
+            .unwrap();
+        let rev_exists = gs
+            .db
+            .transaction(branch, |txn| Ok(txn.get(&rev_sk)?))
+            .unwrap();
         assert!(fwd_exists.is_some());
         assert!(rev_exists.is_some());
 
@@ -476,7 +482,10 @@ mod tests {
         // Verify reverse adjacency list no longer contains the edge
         let rev_uk = keys::reverse_adj_key("eg", "B");
         let rev_sk = keys::storage_key(branch, "default", &rev_uk);
-        let rev_val = gs.db.transaction(branch, |txn| txn.get(&rev_sk)).unwrap();
+        let rev_val = gs
+            .db
+            .transaction(branch, |txn| Ok(txn.get(&rev_sk)?))
+            .unwrap();
         // Should be deleted entirely (last edge was removed)
         assert!(rev_val.is_none());
     }
@@ -621,7 +630,7 @@ mod tests {
         let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
         db.transaction(branch, |txn| {
             // Header says 1 edge, but no actual edge data follows
-            txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+            Ok(txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))?)
         })
         .unwrap();
 
@@ -659,7 +668,7 @@ mod tests {
         let rev_uk = keys::reverse_adj_key("g", "B");
         let rev_sk = keys::storage_key(branch, "default", &rev_uk);
         db.transaction(branch, |txn| {
-            txn.put(rev_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+            Ok(txn.put(rev_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))?)
         })
         .unwrap();
 
@@ -697,7 +706,7 @@ mod tests {
         let fwd_uk = keys::forward_adj_key("g", "A");
         let fwd_sk = keys::storage_key(branch, "default", &fwd_uk);
         db.transaction(branch, |txn| {
-            txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))
+            Ok(txn.put(fwd_sk.clone(), Value::Bytes(vec![1, 0, 0, 0]))?)
         })
         .unwrap();
 

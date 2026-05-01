@@ -690,7 +690,7 @@ mod tests {
         let node_uk = keys::node_key("g", "A");
         let node_sk = keys::storage_key(branch, "default", &node_uk);
         db.transaction(branch, |txn| {
-            txn.put(node_sk.clone(), Value::String("NOT VALID JSON{{".into()))
+            Ok(txn.put(node_sk.clone(), Value::String("NOT VALID JSON{{".into()))?)
         })
         .unwrap();
 

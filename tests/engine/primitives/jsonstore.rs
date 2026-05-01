@@ -535,7 +535,7 @@ fn index_entries_created_on_document_write() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
 
     // Should have 3 index entries
@@ -589,7 +589,7 @@ fn index_entries_updated_on_document_update() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 1);
 
@@ -626,7 +626,7 @@ fn index_entries_removed_on_document_destroy() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 1);
 
@@ -636,7 +636,7 @@ fn index_entries_removed_on_document_destroy() {
     // Index entry should be gone
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 0);
 }
@@ -668,7 +668,7 @@ fn index_missing_field_no_entry() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 0);
 }
@@ -701,7 +701,7 @@ fn index_type_mismatch_no_entry() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 0);
 }
@@ -738,7 +738,7 @@ fn index_tag_type_exact_match() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 3);
 
@@ -818,7 +818,7 @@ fn index_multiple_indexes_on_same_space() {
     );
     let price_entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&price_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&price_prefix)?))
         .unwrap();
     assert_eq!(price_entries.len(), 1);
 
@@ -830,7 +830,10 @@ fn index_multiple_indexes_on_same_space() {
     );
     let status_entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&status_prefix))
+        .transaction(
+            test_db.branch_id,
+            |txn| Ok(txn.scan_prefix(&status_prefix)?),
+        )
         .unwrap();
     assert_eq!(status_entries.len(), 1);
 }
@@ -876,7 +879,7 @@ fn index_batch_set_updates_indexes() {
     );
     let index_entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(index_entries.len(), 3);
 }
@@ -917,7 +920,7 @@ fn index_batch_destroy_removes_entries() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 0);
 }
@@ -948,7 +951,7 @@ fn index_delete_at_path_updates_entries() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 1);
 
@@ -959,7 +962,7 @@ fn index_delete_at_path_updates_entries() {
     // Index entry for price should be gone (field no longer exists)
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 0);
 }
@@ -1013,7 +1016,7 @@ fn index_numeric_handles_integers() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 1);
 }
@@ -1045,7 +1048,7 @@ fn index_nested_field_path() {
     );
     let entries: Vec<_> = test_db
         .db
-        .transaction(test_db.branch_id, |txn| txn.scan_prefix(&scan_prefix))
+        .transaction(test_db.branch_id, |txn| Ok(txn.scan_prefix(&scan_prefix)?))
         .unwrap();
     assert_eq!(entries.len(), 1);
 

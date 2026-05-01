@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::StrataError;
 use strata_concurrency::{
     apply_wal_record_to_memory_storage, CoordinatorRecoveryError, RecoveryCoordinator,
-    RecoveryResult, RecoveryStats, TransactionManager,
+    RecoveryResult, RecoveryStats,
 };
 use strata_core::id::CommitVersion;
 use strata_durability::codec::{clone_codec, StorageCodec};
@@ -204,11 +204,7 @@ impl Database {
         );
 
         // 8. Coordinator bootstrap + storage config.
-        let result = RecoveryResult {
-            storage,
-            txn_manager: TransactionManager::with_txn_id(stats.final_version, stats.max_txn_id),
-            stats,
-        };
+        let result = RecoveryResult { storage, stats };
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
             &result,
             cfg.storage.max_write_buffer_entries,

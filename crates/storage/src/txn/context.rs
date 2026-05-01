@@ -6,14 +6,17 @@
 //!
 //! See `docs/architecture/M2_TRANSACTION_SEMANTICS.md` for the full specification.
 
-use crate::validation::{validate_transaction, ValidationResult};
+use super::validation::{validate_transaction, ValidationResult};
+use crate::{Key, SegmentedStore, Storage, StorageError, StorageResult, TypeTag, WriteMode};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
-use strata_core::{BranchId, StrataError, StrataResult, Version, Versioned, VersionedValue};
-use strata_storage::{Key, SegmentedStore, Storage, TypeTag, WriteMode};
+use strata_core::{BranchId, Version, Versioned, VersionedValue};
+
+type StrataError = StorageError;
+type StrataResult<T> = StorageResult<T>;
 
 /// Error type for commit failures
 ///
@@ -119,47 +122,6 @@ impl std::fmt::Display for CommitError {
 }
 
 impl std::error::Error for CommitError {}
-
-// Conversion to StrataError
-impl From<CommitError> for StrataError {
-    fn from(e: CommitError) -> Self {
-        match e {
-            CommitError::ValidationFailed(result) => StrataError::TransactionAborted {
-                reason: format!("Validation failed: {} conflict(s)", result.conflict_count()),
-            },
-            CommitError::InvalidState(msg) => StrataError::TransactionNotActive { state: msg },
-            CommitError::WALError(msg) => StrataError::Storage {
-                message: format!("WAL error: {}", msg),
-                source: None,
-            },
-            CommitError::WriterHalted {
-                reason,
-                first_observed_at,
-            } => StrataError::WriterHalted {
-                reason,
-                first_observed_at,
-            },
-            CommitError::StorageError(msg) => StrataError::Storage {
-                message: format!("Storage error during validation: {}", msg),
-                source: None,
-            },
-            CommitError::CounterOverflow(msg) => {
-                StrataError::capacity_exceeded(msg, usize::MAX, usize::MAX)
-            }
-            CommitError::DurableButNotVisible {
-                txn_id,
-                commit_version,
-                ..
-            } => StrataError::DurableButNotVisible {
-                txn_id,
-                commit_version,
-            },
-            CommitError::BranchDeleting(branch_id) => StrataError::TransactionAborted {
-                reason: format!("Branch {} is being deleted", branch_id),
-            },
-        }
-    }
-}
 
 /// Result of applying transaction writes to storage
 ///
@@ -408,8 +370,8 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```
-    /// use strata_concurrency::TransactionContext;
-    /// use strata_core::types::BranchId;
+    /// use strata_core::BranchId;
+    /// use strata_storage::TransactionContext;
     /// use strata_core::id::{TxnId, CommitVersion};
     ///
     /// let branch_id = BranchId::new();
@@ -452,8 +414,8 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```
-    /// use strata_concurrency::TransactionContext;
-    /// use strata_core::types::BranchId;
+    /// use strata_core::BranchId;
+    /// use strata_storage::TransactionContext;
     /// use strata_core::id::TxnId;
     /// use strata_storage::SegmentedStore;
     /// use std::sync::Arc;
@@ -516,11 +478,12 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::StorageResult;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::BranchId;
     /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
-    /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
+    /// # fn example(txn: &mut TransactionContext) -> StorageResult<()> {
     /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// let value = txn.get(&key)?;
     /// if let Some(v) = value {
@@ -656,11 +619,12 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::StorageResult;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::BranchId;
     /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
-    /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
+    /// # fn example(txn: &mut TransactionContext) -> StorageResult<()> {
     /// let namespace = Arc::new(Namespace::for_branch(BranchId::default()));
     /// let prefix = Key::new_kv(namespace, "user:");
     /// let users = txn.scan_prefix(&prefix)?;
@@ -843,12 +807,13 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::StorageResult;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::BranchId;
     /// # use strata_storage::{Key, Namespace};
     /// # use strata_core::value::Value;
     /// # use std::sync::Arc;
-    /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
+    /// # fn example(txn: &mut TransactionContext) -> StorageResult<()> {
     /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// txn.put(key, Value::Bytes(b"value".to_vec()))?;
     /// // Value is NOT visible to other transactions yet
@@ -933,11 +898,12 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::StorageResult;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::BranchId;
     /// # use strata_storage::{Key, Namespace};
     /// # use std::sync::Arc;
-    /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
+    /// # fn example(txn: &mut TransactionContext) -> StorageResult<()> {
     /// # let key = Key::new_kv(Arc::new(Namespace::for_branch(BranchId::default())), "key");
     /// txn.delete(key)?;
     /// // Key is NOT deleted from storage yet
@@ -986,13 +952,14 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::StorageResult;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::BranchId;
     /// # use strata_storage::{Key, Namespace};
     /// # use strata_core::id::CommitVersion;
     /// # use strata_core::value::Value;
     /// # use std::sync::Arc;
-    /// # fn example(txn: &mut TransactionContext) -> strata_core::StrataResult<()> {
+    /// # fn example(txn: &mut TransactionContext) -> StorageResult<()> {
     /// # let ns = Arc::new(Namespace::for_branch(BranchId::default()));
     /// # let key = Key::new_kv(ns.clone(), "key");
     /// # let other_key = Key::new_kv(ns, "other");
@@ -1121,9 +1088,9 @@ impl TransactionContext {
     ///
     /// # Example
     /// ```
-    /// use strata_concurrency::TransactionContext;
+    /// use strata_storage::TransactionContext;
     /// use strata_core::id::{TxnId, CommitVersion};
-    /// use strata_core::types::BranchId;
+    /// use strata_core::BranchId;
     /// use std::time::Duration;
     ///
     /// let branch_id = BranchId::new();
@@ -1142,9 +1109,9 @@ impl TransactionContext {
     ///
     /// # Example
     /// ```
-    /// use strata_concurrency::TransactionContext;
+    /// use strata_storage::TransactionContext;
     /// use strata_core::id::{TxnId, CommitVersion};
-    /// use strata_core::types::BranchId;
+    /// use strata_core::BranchId;
     /// use std::time::Duration;
     ///
     /// let branch_id = BranchId::new();
@@ -1555,8 +1522,8 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
-    /// # use strata_core::types::BranchId;
+    /// # use strata_core::BranchId;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::id::{TxnId, CommitVersion};
     /// # use strata_storage::SegmentedStore;
     /// # use std::sync::Arc;
@@ -1635,9 +1602,9 @@ impl TransactionContext {
     /// # Example
     ///
     /// ```no_run
-    /// # use strata_concurrency::TransactionContext;
+    /// # use strata_storage::TransactionContext;
     /// # use strata_core::id::{TxnId, CommitVersion};
-    /// # use strata_core::types::BranchId;
+    /// # use strata_core::BranchId;
     /// let branch_id = BranchId::default();
     /// let ctx = TransactionContext::new(TxnId(1), branch_id, CommitVersion(100));
     /// let (read_cap, write_cap, delete_cap, cas_cap) = ctx.capacity();
@@ -1655,10 +1622,10 @@ impl TransactionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Namespace, Storage, TypeTag};
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::value::Value;
     use strata_core::BranchId;
-    use strata_storage::{Namespace, TypeTag};
 
     fn test_namespace_for(branch_id: BranchId) -> Arc<Namespace> {
         Arc::new(Namespace::new(branch_id, "default".to_string()))
@@ -2001,8 +1968,6 @@ mod tests {
 
     #[test]
     fn test_apply_writes_with_keep_last_mode() {
-        use strata_storage::Storage;
-
         let branch_id = BranchId::new();
         let ns = test_namespace_for(branch_id);
         let store = empty_store();

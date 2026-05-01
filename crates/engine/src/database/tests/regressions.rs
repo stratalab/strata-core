@@ -280,13 +280,10 @@ fn test_issue_1736_compaction_runs_in_background() {
     // Each write ~100 bytes; write_buffer_size=256 → rotation every ~2-3 writes.
     for i in 0..20 {
         let key = Key::new_kv(ns.clone(), format!("key_{:04}", i));
-        db.transaction(
-            branch_id,
-            |txn: &mut strata_concurrency::TransactionContext| {
-                txn.put(key.clone(), Value::String(format!("value_{}", i)))?;
-                Ok(())
-            },
-        )
+        db.transaction(branch_id, |txn: &mut strata_storage::TransactionContext| {
+            txn.put(key.clone(), Value::String(format!("value_{}", i)))?;
+            Ok(())
+        })
         .unwrap();
     }
 
@@ -1004,10 +1001,12 @@ fn test_issue_1914_concurrent_event_append_occ_conflict() {
     let result = db.commit_transaction(&mut txn2);
     db.end_transaction(txn2);
 
+    let err = result.expect_err(
+        "T2 must conflict: both transactions appended to the same event log but OCC did not detect the conflict because meta_key was never read",
+    );
     assert!(
-        result.is_err(),
-        "T2 must conflict: both transactions appended to the same event log \
-         but OCC did not detect the conflict because meta_key was never read"
+        matches!(err, StrataError::TransactionAborted { .. }),
+        "expected the legacy transaction-aborted OCC error, got {err:?}"
     );
 }
 
