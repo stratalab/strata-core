@@ -40,7 +40,9 @@ strata-core/
   tests/                      # Integration tests
 ```
 
-Dependencies flow downward: `executor` → `engine` → `concurrency`/`storage`/`durability` → `core`.
+Dependencies generally flow downward: `executor` → `engine` → `storage`.
+`engine` still carries temporary direct seams to `core-legacy` and
+`security` until the final convergence work lands.
 
 ## Running Tests
 
@@ -51,7 +53,7 @@ cargo test --workspace
 # Specific crate
 cargo test -p strata-executor
 cargo test -p strata-engine
-cargo test -p strata-durability
+cargo test -p strata-storage
 
 # With output
 cargo test --workspace -- --nocapture

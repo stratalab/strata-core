@@ -1,8 +1,9 @@
 //! Engine-level branch export/import API
 //!
 //! This module provides high-level functions for exporting and importing
-//! branches as `.branchbundle.tar.zst` archives. It bridges the engine's
-//! `Database`/`BranchIndex` types with the durability crate's BranchBundle format.
+//! branches as `.branchbundle.tar.zst` archives. It owns both the engine
+//! workflow and the bundle-format helpers used to read and write portable
+//! branch archives.
 //!
 //! ## Export
 //!
@@ -23,12 +24,30 @@ use std::sync::Arc;
 
 use std::collections::BTreeMap;
 
-use strata_core::types::BranchId;
-use strata_durability::branch_bundle::{
-    BranchBundleReader, BranchBundleWriter, BranchlogPayload, BundleBranchInfo, ExportOptions,
+pub mod error;
+pub mod reader;
+pub mod types;
+pub mod wal_log;
+pub mod writer;
+
+use self::reader::BranchBundleReader as FormatBranchBundleReader;
+use self::types::{
+    BundleBranchInfo as FormatBundleBranchInfo, ExportOptions as FormatExportOptions,
 };
+use self::wal_log::BranchlogPayload as FormatBranchlogPayload;
+use self::writer::BranchBundleWriter as FormatBranchBundleWriter;
+pub use error::{BranchBundleError, BranchBundleResult};
+pub use reader::{BranchBundleReader, BundleContents as ReadBundleContents};
+use strata_core::types::BranchId;
 use strata_storage::{Key, TypeTag};
 use tracing::info;
+pub use types::{
+    paths, xxh3_hex, BranchExportInfo, BundleBranchInfo, BundleContents, BundleManifest,
+    BundleVerifyInfo, ExportOptions, ImportedBranchInfo, BRANCHBUNDLE_EXTENSION,
+    BRANCHBUNDLE_FORMAT_VERSION, WAL_BRANCHLOG_MAGIC, WAL_BRANCHLOG_VERSION,
+};
+pub use wal_log::{BranchlogPayload, WalLogInfo, WalLogIterator, WalLogReader, WalLogWriter};
+pub use writer::BranchBundleWriter;
 
 // =============================================================================
 // Public result types
@@ -87,7 +106,7 @@ pub struct BundleInfo {
 /// - Branch does not exist
 /// - I/O errors writing the archive
 pub fn export_branch(db: &Arc<Database>, branch_id: &str, path: &Path) -> StrataResult<ExportInfo> {
-    export_branch_with_options(db, branch_id, path, &ExportOptions::default())
+    export_branch_with_options(db, branch_id, path, &FormatExportOptions::default())
 }
 
 /// Export a branch with custom options (e.g., compression level)
@@ -95,7 +114,7 @@ pub fn export_branch_with_options(
     db: &Arc<Database>,
     branch_id: &str,
     path: &Path,
-    options: &ExportOptions,
+    options: &FormatExportOptions,
 ) -> StrataResult<ExportInfo> {
     let branch_index = BranchIndex::new(db.clone());
 
@@ -120,7 +139,7 @@ pub fn export_branch_with_options(
                 branch_meta.name
             ))
         })?;
-    let bundle_branch_info = BundleBranchInfo {
+    let bundle_branch_info = FormatBundleBranchInfo {
         branch_id: branch_meta.branch_id.clone(),
         name: branch_meta.name.clone(),
         state: branch_meta.status.as_str().to_lowercase(),
@@ -142,7 +161,7 @@ pub fn export_branch_with_options(
     let payloads = scan_branch_data(db, core_branch_id, branch_id)?;
 
     // 4. Write bundle
-    let writer = BranchBundleWriter::new(options);
+    let writer = FormatBranchBundleWriter::new(options);
     let export_info = writer
         .write(&bundle_branch_info, &payloads, path)
         .map_err(|e| StrataError::storage(format!("Failed to write bundle: {}", e)))?;
@@ -213,9 +232,9 @@ fn scan_branch_data(
     }
 
     // Convert grouped entries into payloads sorted by version
-    let payloads: Vec<BranchlogPayload> = version_groups
+    let payloads: Vec<FormatBranchlogPayload> = version_groups
         .into_iter()
-        .map(|(version, puts)| BranchlogPayload {
+        .map(|(version, puts)| FormatBranchlogPayload {
             branch_id: branch_id_str.to_string(),
             version,
             puts,
@@ -255,7 +274,7 @@ fn scan_branch_data(
 /// - I/O errors reading the archive
 pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo> {
     // 1. Read and validate bundle
-    let contents = BranchBundleReader::read_all(path)
+    let contents = FormatBranchBundleReader::read_all(path)
         .map_err(|e| StrataError::storage(format!("Failed to read bundle: {}", e)))?;
 
     let branch_id_str = &contents.branch_info.name;
@@ -326,7 +345,7 @@ pub fn import_branch(db: &Arc<Database>, path: &Path) -> StrataResult<ImportInfo
 ///
 /// Checks the archive structure, checksums, and format version.
 pub fn validate_bundle(path: &Path) -> StrataResult<BundleInfo> {
-    let verify = BranchBundleReader::validate(path)
+    let verify = FormatBranchBundleReader::validate(path)
         .map_err(|e| StrataError::storage(format!("Bundle validation failed: {}", e)))?;
 
     Ok(BundleInfo {

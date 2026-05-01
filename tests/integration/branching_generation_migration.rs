@@ -35,13 +35,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_durability::branch_bundle::BundleBranchInfo;
-use strata_engine::bundle;
+use strata_engine::bundle::{self, BundleBranchInfo};
 use strata_engine::database::observers::{
     BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError,
 };
 use strata_engine::BranchRef;
 use tempfile::TempDir;
+
+const LEGACY_OWNER_BUNDLE_BYTES: &[u8] =
+    include_bytes!("../fixtures/branch_bundle/legacy_owner_v2.branchbundle.tar.zst");
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)
@@ -60,6 +62,14 @@ fn export_bundle(test_db: &TestDb, branch: &str) -> (TempDir, PathBuf) {
         .path()
         .join(format!("{branch}.branchbundle.tar.zst"));
     bundle::export_branch(&test_db.db, branch, &path).expect("export succeeds");
+    (bundle_dir, path)
+}
+
+fn write_legacy_owner_bundle_fixture() -> (TempDir, PathBuf) {
+    let bundle_dir = TempDir::new().unwrap();
+    let path = bundle_dir.path().join("legacy-owner.branchbundle.tar.zst");
+    std::fs::write(&path, LEGACY_OWNER_BUNDLE_BYTES)
+        .expect("write checked-in legacy owner bundle fixture");
     (bundle_dir, path)
 }
 
@@ -101,6 +111,51 @@ fn legacy_bundle_without_generation_field_imports_as_gen_zero() {
         .unwrap()
         .unwrap();
     assert_eq!(rec.branch.generation, 0);
+}
+
+#[test]
+fn pre_delete_owner_bundle_archive_still_validates_and_imports() {
+    let (_bundle_keepalive, path) = write_legacy_owner_bundle_fixture();
+
+    let bundle_info = bundle::validate_bundle(&path).expect("legacy owner fixture should validate");
+    assert_eq!(bundle_info.branch_name, "legacy-fixture");
+    assert_eq!(bundle_info.entry_count, 2);
+    assert!(bundle_info.checksums_valid);
+
+    let target_db = TestDb::new();
+    let import_info = bundle::import_branch(&target_db.db, &path)
+        .expect("legacy owner fixture should still import after crate deletion");
+    assert_eq!(import_info.branch_id, "legacy-fixture");
+    assert_eq!(import_info.transactions_applied, 2);
+    assert_eq!(import_info.keys_written, 3);
+
+    let rec = target_db
+        .db
+        .branches()
+        .control_record("legacy-fixture")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        rec.branch.generation, 3,
+        "engine bundle import must preserve the pre-delete owner's generation metadata"
+    );
+
+    let imported_branch_id = resolve("legacy-fixture");
+    assert_eq!(
+        target_db
+            .kv()
+            .get(&imported_branch_id, "default", "alpha")
+            .unwrap(),
+        Some(Value::String("two".to_string()))
+    );
+    assert_eq!(
+        target_db
+            .kv()
+            .get(&imported_branch_id, "default", "beta")
+            .unwrap(),
+        None,
+        "the legacy owner fixture's delete payload must still replay correctly"
+    );
 }
 
 // ============================================================================

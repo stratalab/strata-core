@@ -20,7 +20,6 @@ test-support = []  # Expose test helpers for downstream crates
 [dependencies]
 strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
 strata-storage = { path = "../storage", features = ["engine-internal"] }
-strata-durability = { path = "../durability" }
 strata-security = { path = "../security" }
 dashmap = { workspace = true }
 once_cell = { workspace = true }
@@ -35,6 +34,8 @@ sha2 = { workspace = true }
 base64 = { workspace = true }
 byteorder = { workspace = true }
 rmp-serde = { workspace = true }
+crc32fast = { workspace = true }
+tar = { workspace = true }
 toml = { workspace = true }
 memmap2 = { workspace = true }
 rayon = { workspace = true }
@@ -42,6 +43,8 @@ smallvec = { workspace = true }
 unicode-segmentation = "1.12"
 chrono = { workspace = true }
 libc = { workspace = true }
+xxhash-rust = { workspace = true }
+zstd = { workspace = true }
 
 [dev-dependencies]
 strata-storage = { path = "../storage", features = ["engine-internal", "fault-injection"] }
@@ -50,8 +53,6 @@ criterion = { workspace = true }
 serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 serial_test = { workspace = true }
-# Used by T3-E12 tests that craft raw pre-v3 WAL segment headers.
-crc32fast = { workspace = true }
 
 [[bench]]
 name = "transaction_benchmarks"
