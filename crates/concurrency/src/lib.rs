@@ -1,20 +1,16 @@
-//! Concurrency layer for Strata
+//! Durability-coupled transaction shell for Strata.
 //!
-//! This crate implements optimistic concurrency control (OCC) with:
-//! - TransactionContext: Read/write set tracking
-//! - TransactionManager: Atomic commit coordination
-//! - RecoveryCoordinator: Database recovery from WAL
-//! - Snapshot isolation via SegmentedStore + start_version bound
-//! - Conflict detection at commit time
-//! - Compare-and-swap (CAS) operations
-//! - WAL integration for durability
+//! The canonical home for the generic transaction runtime now lives in
+//! `strata-storage`. This crate is the remaining shell that still owns:
+//! - the WAL-aware commit adapter
+//! - transaction payload serialization for WAL records
+//! - recovery / replay coordination over the durability runtime
+//!
+//! It exists only until the durability runtime is absorbed by storage.
 
-pub mod lock_ordering;
-pub mod manager;
+mod manager;
 pub mod payload;
 pub mod recovery;
-pub mod transaction;
-pub mod validation;
 
 #[cfg(any(test, feature = "fault-injection"))]
 #[doc(hidden)]
@@ -30,10 +26,12 @@ pub mod __internal {
     }
 }
 
-pub use manager::TransactionManager;
+pub use manager::{
+    commit_with_version as commit_durable_with_version, commit_with_wal as commit_durable_with_wal,
+    commit_with_wal_arc as commit_durable_with_wal_arc,
+};
 pub use payload::TransactionPayload;
 pub use recovery::{
     apply_wal_record_to_memory_storage, manifest_error_to_strata_error, CoordinatorRecoveryError,
     RecoveryCoordinator, RecoveryPlan, RecoveryResult, RecoveryStats,
 };
-pub use transaction::{CommitError, TransactionContext, TransactionStatus};

@@ -1212,7 +1212,8 @@ fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
             ),
         }
 
-        let visible_now: Option<Value> = db.transaction(branch_id, |txn| txn.get(&key)).unwrap();
+        let visible_now: Option<Value> =
+            db.transaction(branch_id, |txn| Ok(txn.get(&key)?)).unwrap();
         assert!(
             visible_now.is_none(),
             "write must remain invisible in the current process"
@@ -1224,7 +1225,7 @@ fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
 
     let reopened = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
     let recovered: Option<Value> = reopened
-        .transaction(branch_id, |txn| txn.get(&key))
+        .transaction(branch_id, |txn| Ok(txn.get(&key)?))
         .unwrap();
     assert_eq!(
         recovered,

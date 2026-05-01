@@ -47,10 +47,10 @@ fn poison_vector_config(db: &Arc<Database>, branch: &str, space: &str, collectio
     let ns = vector_namespace(branch_id, space);
     let key = Key::new_vector_config(ns, collection);
     db.transaction(branch_id, |txn| {
-        txn.put(
+        Ok(txn.put(
             key,
             Value::Bytes(b"\x00\xFF\x00\xFFnot a collection record".to_vec()),
-        )
+        )?)
     })
     .expect("poison vector config write");
 }
@@ -68,10 +68,10 @@ fn poison_vector_record(
     let ns = vector_namespace(branch_id, space);
     let kv_key = Key::new_vector(ns, collection, key);
     db.transaction(branch_id, |txn| {
-        txn.put(
+        Ok(txn.put(
             kv_key,
             Value::Bytes(b"\x00\xFF\x00\xFFnot a vector record".to_vec()),
-        )
+        )?)
     })
     .expect("poison vector row");
 }
@@ -123,7 +123,7 @@ fn poison_json_idx_meta(
     let ns = Arc::new(Namespace::for_branch_space(branch_id, &meta_space));
     let key = Key::new_json(ns, index_name);
     db.transaction(branch_id, |txn| {
-        txn.put(key, Value::Bytes(b"not a valid IndexDef".to_vec()))
+        Ok(txn.put(key, Value::Bytes(b"not a valid IndexDef".to_vec()))?)
     })
     .expect("poison _idx_meta write");
 }
@@ -142,7 +142,7 @@ fn poison_json_idx_entry_missing_separator(
         strata_engine::primitives::json::index::index_space_name(collection_space, index_name);
     let ns = Arc::new(Namespace::for_branch_space(branch_id, &idx_space));
     let key = Key::new(ns, TypeTag::Json, raw_user_key.to_vec());
-    db.transaction(branch_id, |txn| txn.put(key, Value::Bytes(vec![])))
+    db.transaction(branch_id, |txn| Ok(txn.put(key, Value::Bytes(vec![]))?))
         .expect("poison _idx entry");
 }
 

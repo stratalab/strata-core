@@ -6,12 +6,13 @@
 //! - Transaction reset/reuse
 
 use std::sync::Arc;
-use strata_concurrency::transaction::TransactionContext;
-use strata_concurrency::validation::validate_transaction;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
+use strata_storage::{
+    validate_transaction, Key, Namespace, SegmentedStore, Storage, TransactionContext,
+    TransactionStatus, WriteMode,
+};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));
@@ -70,10 +71,7 @@ fn committed_status_is_committed() {
     txn.mark_committed().unwrap();
 
     assert!(txn.is_committed());
-    assert!(matches!(
-        txn.status,
-        strata_concurrency::transaction::TransactionStatus::Committed
-    ));
+    assert!(matches!(txn.status, TransactionStatus::Committed));
 }
 
 // ============================================================================
@@ -113,7 +111,7 @@ fn abort_reason_recorded_in_status() {
         .unwrap();
 
     match &txn.status {
-        strata_concurrency::transaction::TransactionStatus::Aborted { reason } => {
+        TransactionStatus::Aborted { reason } => {
             assert!(reason.contains("conflict"));
         }
         _ => panic!("Expected Aborted status"),

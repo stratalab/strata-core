@@ -7,12 +7,13 @@
 //! - Write skew is allowed (per spec)
 
 use std::sync::Arc;
-use strata_concurrency::transaction::TransactionContext;
-use strata_concurrency::validation::{validate_transaction, ConflictType, ValidationResult};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
+use strata_storage::{
+    validate_transaction, ConflictType, Key, Namespace, SegmentedStore, Storage,
+    TransactionContext, ValidationResult, WriteMode,
+};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));

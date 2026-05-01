@@ -45,7 +45,7 @@ impl GraphStore {
         let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         self.db.transaction(branch_id, |txn| {
-            txn.put(storage_key.clone(), Value::String(type_json.clone()))
+            Ok(txn.put(storage_key.clone(), Value::String(type_json.clone()))?)
         })
     }
 
@@ -121,7 +121,7 @@ impl GraphStore {
         let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         self.db
-            .transaction(branch_id, |txn| txn.delete(storage_key.clone()))
+            .transaction(branch_id, |txn| Ok(txn.delete(storage_key.clone())?))
     }
 
     // =========================================================================
@@ -153,7 +153,7 @@ impl GraphStore {
         let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         self.db.transaction(branch_id, |txn| {
-            txn.put(storage_key.clone(), Value::String(type_json.clone()))
+            Ok(txn.put(storage_key.clone(), Value::String(type_json.clone()))?)
         })
     }
 
@@ -229,7 +229,7 @@ impl GraphStore {
         let storage_key = keys::storage_key(branch_id, space, &user_key);
 
         self.db
-            .transaction(branch_id, |txn| txn.delete(storage_key.clone()))
+            .transaction(branch_id, |txn| Ok(txn.delete(storage_key.clone())?))
     }
 
     // =========================================================================
@@ -337,7 +337,7 @@ impl GraphStore {
             };
             let meta_json = serde_json::to_string(&new_meta)
                 .map_err(|e| StrataError::serialization(e.to_string()))?;
-            txn.put(meta_storage_key.clone(), Value::String(meta_json))
+            Ok(txn.put(meta_storage_key.clone(), Value::String(meta_json))?)
         })
     }
 
@@ -754,7 +754,7 @@ impl GraphStore {
                 let storage_key = keys::storage_key(branch_id, space, &user_key);
 
                 self.db.transaction(branch_id, |txn| {
-                    txn.put(storage_key.clone(), Value::String(meta_json.clone()))
+                    Ok(txn.put(storage_key.clone(), Value::String(meta_json.clone()))?)
                 })
             }
             None => {
@@ -829,7 +829,9 @@ impl GraphStore {
         let count_sk = keys::storage_key(branch_id, space, &count_uk);
 
         // Try counter first (fast path)
-        let counter_val = self.db.transaction(branch_id, |txn| txn.get(&count_sk))?;
+        let counter_val = self
+            .db
+            .transaction(branch_id, |txn| Ok(txn.get(&count_sk)?))?;
 
         if let Some(Value::String(s)) = counter_val {
             return s

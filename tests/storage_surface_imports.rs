@@ -16,6 +16,8 @@ const FORBIDDEN_DIRECT_PATTERNS: &[&str] = &[
     "strata_core::types::Key",
     "strata_core::types::Namespace",
     "strata_core::types::TypeTag",
+    "strata_concurrency::lock_ordering",
+    "strata_concurrency::TransactionManager",
 ];
 
 const ROOT_MOVED_TOKENS: &[&str] = &[
@@ -28,6 +30,27 @@ const ROOT_MOVED_TOKENS: &[&str] = &[
 ];
 
 const TYPES_MOVED_TOKENS: &[&str] = &["Key", "Namespace", "TypeTag"];
+const CONCURRENCY_ROOT_MOVED_TOKENS: &[&str] = &[
+    "TransactionContext",
+    "TransactionStatus",
+    "CommitError",
+    "TransactionManager",
+];
+const CONCURRENCY_TRANSACTION_MOVED_TOKENS: &[&str] = &[
+    "ApplyResult",
+    "CASOperation",
+    "CommitError",
+    "PendingOperations",
+    "TransactionContext",
+    "TransactionStatus",
+];
+const CONCURRENCY_VALIDATION_MOVED_TOKENS: &[&str] = &[
+    "validate_cas_set",
+    "validate_read_set",
+    "validate_transaction",
+    "ConflictType",
+    "ValidationResult",
+];
 
 #[test]
 fn storage_facing_types_are_not_imported_from_strata_core() {
@@ -50,7 +73,7 @@ fn storage_facing_types_are_not_imported_from_strata_core() {
 
     assert!(
         violations.is_empty(),
-        "storage-facing types must not be imported from strata_core outside designated modules:\n{}",
+        "storage-facing types and the storage-owned transaction runtime must not be imported from legacy surfaces outside designated modules:\n{}",
         violations.join("\n")
     );
 }
@@ -104,6 +127,21 @@ fn find_violations(contents: &str) -> Vec<String> {
         "strata_core::traits::{",
         &["Storage", "WriteMode"],
     ));
+    violations.extend(scan_import_blocks(
+        contents,
+        "strata_concurrency::{",
+        CONCURRENCY_ROOT_MOVED_TOKENS,
+    ));
+    violations.extend(scan_import_blocks(
+        contents,
+        "strata_concurrency::transaction::{",
+        CONCURRENCY_TRANSACTION_MOVED_TOKENS,
+    ));
+    violations.extend(scan_import_blocks(
+        contents,
+        "strata_concurrency::validation::{",
+        CONCURRENCY_VALIDATION_MOVED_TOKENS,
+    ));
     violations.extend(scan_alias_uses(
         contents,
         "strata_core",
@@ -126,6 +164,24 @@ fn find_violations(contents: &str) -> Vec<String> {
         contents,
         "strata_core::traits",
         &["Storage", "WriteMode"],
+        &[],
+    ));
+    violations.extend(scan_alias_uses(
+        contents,
+        "strata_concurrency",
+        CONCURRENCY_ROOT_MOVED_TOKENS,
+        &[],
+    ));
+    violations.extend(scan_alias_uses(
+        contents,
+        "strata_concurrency::transaction",
+        CONCURRENCY_TRANSACTION_MOVED_TOKENS,
+        &[],
+    ));
+    violations.extend(scan_alias_uses(
+        contents,
+        "strata_concurrency::validation",
+        CONCURRENCY_VALIDATION_MOVED_TOKENS,
         &[],
     ));
 

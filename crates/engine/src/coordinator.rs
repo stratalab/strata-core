@@ -4,7 +4,8 @@
 //! - Single monotonic counter for the entire database
 //! - Incremented on each COMMIT (not each write)
 //!
-//! The TransactionCoordinator wraps TransactionManager and adds:
+//! The TransactionCoordinator wraps the storage-owned transaction manager and
+//! adds:
 //! - Active transaction tracking
 //! - Transaction metrics (started, committed, aborted)
 //! - Commit rate calculation
@@ -15,12 +16,53 @@ use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use strata_concurrency::{RecoveryResult, TransactionContext, TransactionManager};
+use strata_concurrency::{
+    commit_durable_with_version, commit_durable_with_wal, commit_durable_with_wal_arc,
+    RecoveryResult,
+};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::BranchId;
 use strata_durability::wal::WalWriter;
-use strata_storage::{RecoveredState, SegmentedStore, Storage};
+use strata_storage::{
+    CommitError, RecoveredState, SegmentedStore, Storage, TransactionContext, TransactionManager,
+};
 use tracing::{debug, info, warn};
+
+fn map_commit_error(err: CommitError) -> StrataError {
+    match err {
+        CommitError::ValidationFailed(result) => StrataError::transaction_aborted(format!(
+            "Validation failed: {} conflict(s)",
+            result.conflict_count()
+        )),
+        CommitError::InvalidState(msg) => StrataError::transaction_not_active(msg),
+        CommitError::WALError(msg) => StrataError::storage(format!("WAL error: {}", msg)),
+        CommitError::WriterHalted {
+            reason,
+            first_observed_at,
+        } => StrataError::WriterHalted {
+            reason,
+            first_observed_at,
+        },
+        CommitError::StorageError(msg) => {
+            StrataError::storage(format!("Storage error during validation: {}", msg))
+        }
+        CommitError::CounterOverflow(msg) => {
+            StrataError::capacity_exceeded(msg, usize::MAX, usize::MAX)
+        }
+        CommitError::DurableButNotVisible {
+            txn_id,
+            commit_version,
+            ..
+        } => StrataError::DurableButNotVisible {
+            txn_id,
+            commit_version,
+        },
+        CommitError::BranchDeleting(branch_id) => {
+            StrataError::transaction_aborted(format!("Branch {} is being deleted", branch_id))
+        }
+        other => StrataError::internal(format!("unexpected commit error: {other}")),
+    }
+}
 
 /// Transaction coordinator for the database
 ///
@@ -36,7 +78,7 @@ use tracing::{debug, info, warn};
 /// 3. Approximate counts are acceptable for metrics purposes
 /// 4. The atomic operations (fetch_add/fetch_sub) guarantee no torn reads/writes
 pub struct TransactionCoordinator {
-    /// Transaction manager for ID/version allocation
+    /// Canonical storage-owned transaction manager for ID/version allocation
     manager: TransactionManager,
     /// Active transaction count (for metrics) - uses Relaxed ordering
     active_count: AtomicU64,
@@ -156,7 +198,7 @@ impl TransactionCoordinator {
         branch_id: BranchId,
         storage: &Arc<SegmentedStore>,
     ) -> StrataResult<TransactionContext> {
-        let txn_id = self.manager.next_txn_id().map_err(StrataError::from)?;
+        let txn_id = self.manager.next_txn_id().map_err(map_commit_error)?;
 
         // Register in active_count BEFORE creating the snapshot so that a
         // concurrent drain (active_count → 0) cannot set gc_safe_version
@@ -246,7 +288,11 @@ impl TransactionCoordinator {
     ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
-        self.handle_commit_result(txn_id, self.manager.commit(txn, store, wal))
+        let result = match wal {
+            Some(wal) => commit_durable_with_wal(&self.manager, txn, store, Some(wal)),
+            None => self.manager.commit(txn, store),
+        };
+        self.handle_commit_result(txn_id, result)
     }
 
     /// Commit a transaction with narrow WAL lock scope.
@@ -261,17 +307,18 @@ impl TransactionCoordinator {
     ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
-        self.handle_commit_result(
-            txn_id,
-            self.manager.commit_with_wal_arc(txn, store, wal_arc),
-        )
+        let result = match wal_arc {
+            Some(wal_arc) => commit_durable_with_wal_arc(&self.manager, txn, store, Some(wal_arc)),
+            None => self.manager.commit(txn, store),
+        };
+        self.handle_commit_result(txn_id, result)
     }
 
     /// Handle the result of a commit attempt: record metrics and convert errors.
     fn handle_commit_result(
         &self,
         txn_id: TxnId,
-        result: Result<CommitVersion, strata_concurrency::CommitError>,
+        result: Result<CommitVersion, strata_storage::CommitError>,
     ) -> StrataResult<CommitVersion> {
         match result {
             Ok(version) => {
@@ -282,7 +329,7 @@ impl TransactionCoordinator {
             Err(e) => {
                 self.record_abort(txn_id);
                 warn!(target: "strata::txn", error = %e, "Transaction aborted");
-                Err(StrataError::from(e))
+                Err(map_commit_error(e))
             }
         }
     }
@@ -440,7 +487,7 @@ impl TransactionCoordinator {
 
     /// Get next transaction ID (for internal use).
     pub fn next_txn_id(&self) -> StrataResult<TxnId> {
-        self.manager.next_txn_id().map_err(StrataError::from)
+        self.manager.next_txn_id().map_err(map_commit_error)
     }
 
     /// Remove the per-branch commit lock for a deleted branch.
@@ -519,10 +566,11 @@ impl TransactionCoordinator {
     ) -> StrataResult<CommitVersion> {
         self.enforce_timeout(txn)?;
         let txn_id = txn.txn_id;
-        self.handle_commit_result(
-            txn_id,
-            self.manager.commit_with_version(txn, store, wal, version),
-        )
+        let result = match wal {
+            Some(wal) => commit_durable_with_version(&self.manager, txn, store, Some(wal), version),
+            None => self.manager.commit_with_version(txn, store, version),
+        };
+        self.handle_commit_result(txn_id, result)
     }
 
     /// Get transaction metrics
@@ -640,7 +688,7 @@ impl TransactionMetrics {
 impl TransactionCoordinator {
     /// Allocate commit version (test-only)
     pub fn allocate_commit_version(&self) -> StrataResult<CommitVersion> {
-        self.manager.allocate_version().map_err(StrataError::from)
+        self.manager.allocate_version().map_err(map_commit_error)
     }
 
     /// Override the transaction timeout (test-only).
@@ -687,7 +735,6 @@ mod tests {
 
         let result = RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(CommitVersion(100)),
             stats,
         };
 
@@ -1150,7 +1197,6 @@ mod tests {
 
         let result = RecoveryResult {
             storage: SegmentedStore::new(),
-            txn_manager: TransactionManager::new(CommitVersion(500)),
             stats,
         };
 

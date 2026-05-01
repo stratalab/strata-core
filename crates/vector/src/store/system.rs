@@ -38,7 +38,7 @@ impl VectorStore {
 
         self.db
             .transaction(branch_id, |txn| {
-                txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))
+                Ok(txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))?)
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
@@ -118,7 +118,7 @@ impl VectorStore {
 
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, SYSTEM_SPACE), name);
         self.db
-            .transaction(branch_id, |txn| txn.delete(config_key.clone()))
+            .transaction(branch_id, |txn| Ok(txn.delete(config_key.clone())?))
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
         {

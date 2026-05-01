@@ -126,7 +126,7 @@ pub fn create_test_namespace(branch_id: BranchId) -> Arc<Namespace> {
 pub fn blind_write(db: &Database, key: Key, value: Value) -> u64 {
     let branch_id = key.namespace.branch_id;
     let ((), version) = db
-        .transaction_with_version(branch_id, |txn| txn.put(key, value))
+        .transaction_with_version(branch_id, |txn| Ok(txn.put(key, value)?))
         .expect("blind write failed");
     version
 }

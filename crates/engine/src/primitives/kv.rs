@@ -28,12 +28,11 @@ use crate::{StrataError, StrataResult};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::{Version, VersionedHistory};
-use strata_storage::{Key, Namespace, StorageIterator};
+use strata_storage::{Key, Namespace, StorageIterator, TransactionContext};
 
 /// Global cache of `Arc<Namespace>` per (branch, space) pair. One heap allocation
 /// per unique combination, ever — subsequent calls return `Arc::clone()`.
@@ -112,7 +111,7 @@ impl KVStore {
     ) -> StrataResult<Option<strata_core::VersionedValue>> {
         self.db.transaction(*branch_id, |txn| {
             let storage_key = self.key_for(branch_id, space, key);
-            txn.get_versioned(&storage_key)
+            Ok(txn.get_versioned(&storage_key)?)
         })
     }
 
@@ -170,7 +169,7 @@ impl KVStore {
         let branch_id = *branch_id;
         let ((), commit_version) = self.db.transaction_with_version(branch_id, |txn| {
             crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)?;
-            txn.put(storage_key, value)
+            Ok(txn.put(storage_key, value)?)
         })?;
 
         // Post-commit: update inverted index for BM25 search (zero overhead when disabled)
@@ -743,13 +742,13 @@ impl KVStoreExt for TransactionContext {
     fn kv_get_in_space(&mut self, space: &str, key: &str) -> StrataResult<Option<Value>> {
         let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
-        self.get(&storage_key)
+        Ok(self.get(&storage_key)?)
     }
 
     fn kv_put_in_space(&mut self, space: &str, key: &str, value: Value) -> StrataResult<()> {
         let ns = cached_namespace(self.branch_id, space);
         let storage_key = Key::new_kv(ns, key);
-        self.put(storage_key, value)
+        Ok(self.put(storage_key, value)?)
     }
 
     fn kv_delete_in_space(&mut self, space: &str, key: &str) -> StrataResult<()> {

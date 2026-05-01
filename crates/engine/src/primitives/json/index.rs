@@ -276,7 +276,7 @@ pub fn extract_field_value(doc_value: &JsonValue, field_path: &str) -> Option<Js
 // =============================================================================
 
 use std::collections::HashSet;
-use strata_concurrency::TransactionContext;
+use strata_storage::TransactionContext;
 
 /// Fail-closed helper (B5.4): extract `doc_id` from an index entry's
 /// `user_key` or register a degradation and return a typed error.

@@ -42,7 +42,7 @@ fn seed_with_ttl(db: &Arc<Database>, name: &str, key: &str, v: i64, ttl_ms: u64)
         key,
     );
     db.transaction(branch_id, |txn| {
-        txn.put_with_ttl(storage_key.clone(), Value::Int(v), ttl_ms)
+        Ok(txn.put_with_ttl(storage_key.clone(), Value::Int(v), ttl_ms)?)
     })
     .expect("ttl write succeeds");
 }

@@ -1284,7 +1284,7 @@ fn bypass_kv_put(
 
     let ns = StdArc::new(Namespace::for_branch_space(branch_id, space));
     let key = Key::new(ns, TypeTag::KV, user_key.to_vec());
-    db.transaction(branch_id, |txn| txn.put(key, value))
+    db.transaction(branch_id, |txn| Ok(txn.put(key, value)?))
         .unwrap();
 }
 
@@ -1402,10 +1402,11 @@ fn test_discover_used_spaces_filters_tombstones() {
     let ns = StdArc::new(Namespace::for_branch_space(branch_id, "tombstone-only"));
     let key = Key::new(ns, TypeTag::KV, b"k1".to_vec());
     db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::String("v".into()))
+        Ok(txn.put(key.clone(), Value::String("v".into()))?)
     })
     .unwrap();
-    db.transaction(branch_id, |txn| txn.delete(key)).unwrap();
+    db.transaction(branch_id, |txn| Ok(txn.delete(key)?))
+        .unwrap();
 
     let space_index = SpaceIndex::new(db.clone());
     let discovered = space_index.discover_used_spaces(branch_id).unwrap();

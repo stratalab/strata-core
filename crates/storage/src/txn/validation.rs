@@ -37,10 +37,12 @@
 //! - CAS is validated separately from read-set
 //! - Write skew is ALLOWED (do not try to prevent it)
 
-use crate::transaction::{CASOperation, TransactionContext};
+use super::context::{CASOperation, TransactionContext};
+use crate::{Key, Storage, StorageResult};
 use std::collections::HashMap;
 use strata_core::id::CommitVersion;
-use strata_storage::{Key, Storage};
+
+type StrataResult<T> = StorageResult<T>;
 
 /// Types of conflicts that can occur during transaction validation
 ///
@@ -134,7 +136,7 @@ impl ValidationResult {
 pub fn validate_read_set<S: Storage>(
     read_set: &HashMap<Key, CommitVersion>,
     store: &S,
-) -> strata_core::StrataResult<ValidationResult> {
+) -> StrataResult<ValidationResult> {
     let mut result = ValidationResult::ok();
 
     for (key, read_version) in read_set {
@@ -142,13 +144,7 @@ pub fn validate_read_set<S: Storage>(
         let current_version = match store.get_version_only(key) {
             Ok(Some(v)) => v,
             Ok(None) => CommitVersion::ZERO, // Key doesn't exist = version 0
-            Err(e) => {
-                // Storage error - abort validation to prevent incorrect commit
-                return Err(strata_core::StrataError::internal(format!(
-                    "Storage error during read-set validation for key {:?}: {}",
-                    key, e
-                )));
-            }
+            Err(e) => return Err(e),
         };
 
         // Check if version changed
@@ -183,7 +179,7 @@ pub fn validate_read_set<S: Storage>(
 pub fn validate_cas_set<S: Storage>(
     cas_set: &[CASOperation],
     store: &S,
-) -> strata_core::StrataResult<ValidationResult> {
+) -> StrataResult<ValidationResult> {
     let mut result = ValidationResult::ok();
 
     for cas_op in cas_set {
@@ -191,12 +187,7 @@ pub fn validate_cas_set<S: Storage>(
         let current_version = match store.get_version_only(&cas_op.key) {
             Ok(Some(v)) => v,
             Ok(None) => CommitVersion::ZERO, // Key doesn't exist = version 0
-            Err(e) => {
-                return Err(strata_core::StrataError::internal(format!(
-                    "Storage error during CAS validation for key {:?}: {}",
-                    cas_op.key, e
-                )));
-            }
+            Err(e) => return Err(e),
         };
 
         // Check if expected version matches
@@ -241,7 +232,7 @@ pub fn validate_cas_set<S: Storage>(
 pub fn validate_transaction<S: Storage>(
     txn: &TransactionContext,
     store: &S,
-) -> strata_core::StrataResult<ValidationResult> {
+) -> StrataResult<ValidationResult> {
     // Per spec Section 3.2 Scenario 3: Read-only transactions ALWAYS commit.
     // "Read-Only Transaction: T1 only reads keys, never writes any → ALWAYS COMMITS"
     // "Why: Read-only transactions have no writes to validate. They simply return their snapshot view."

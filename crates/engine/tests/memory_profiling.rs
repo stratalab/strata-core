@@ -164,7 +164,7 @@ fn test_large_value_memory() {
     let read_result = db
         .transaction(branch_id, |txn| {
             let key = Key::new_kv(ns.clone(), "large_value");
-            txn.get(&key)
+            Ok(txn.get(&key)?)
         })
         .unwrap()
         .unwrap();

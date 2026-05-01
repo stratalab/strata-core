@@ -41,13 +41,12 @@ use crate::{StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::SystemTime;
-use strata_concurrency::TransactionContext;
 use strata_core::contract::{Version, Versioned};
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
 use strata_core::VersionedHistory;
-use strata_storage::{Key, Namespace};
+use strata_storage::{Key, Namespace, TransactionContext};
 
 // =============================================================================
 // Limit Validation Helpers
@@ -3651,7 +3650,7 @@ mod tests {
                 "legacy-doc",
             );
             let raw_value = Value::Bytes(rmp_serde::to_vec(&JsonValue::from(2)).unwrap());
-            db.transaction(branch_id, |txn| txn.put(key.clone(), raw_value))
+            db.transaction(branch_id, |txn| Ok(txn.put(key.clone(), raw_value)?))
                 .unwrap();
             db.flush().unwrap();
             db.shutdown().unwrap();
@@ -3686,7 +3685,7 @@ mod tests {
                 })))
                 .unwrap(),
             );
-            db.transaction(branch_id, |txn| txn.put(key.clone(), raw_value))
+            db.transaction(branch_id, |txn| Ok(txn.put(key.clone(), raw_value)?))
                 .unwrap();
             db.flush().unwrap();
             db.shutdown().unwrap();

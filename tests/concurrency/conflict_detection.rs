@@ -3,19 +3,16 @@
 //! Tests for all conflict types:
 //! - Read-write conflicts
 //! - CAS conflicts
-//! - JSON document conflicts
-//! - JSON path conflicts
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use strata_concurrency::transaction::{CASOperation, TransactionContext};
-use strata_concurrency::validation::{
-    validate_cas_set, validate_read_set, validate_transaction, ConflictType,
-};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
+use strata_storage::{
+    validate_cas_set, validate_read_set, validate_transaction, CASOperation, ConflictType, Key,
+    Namespace, SegmentedStore, Storage, TransactionContext, WriteMode,
+};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));

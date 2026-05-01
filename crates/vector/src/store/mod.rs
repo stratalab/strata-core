@@ -2910,7 +2910,7 @@ mod tests {
             "test",
             "vec1",
         );
-        db.transaction(branch_id, |txn| txn.delete(kv_key.clone()))
+        db.transaction(branch_id, |txn| Ok(txn.delete(kv_key.clone())?))
             .unwrap();
 
         // Search should NOT return vec1 (it's deleted from KV)

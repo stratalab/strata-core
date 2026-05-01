@@ -33,6 +33,7 @@ pub mod stored_value;
 mod test_hooks;
 pub mod traits;
 pub mod ttl;
+pub mod txn;
 
 pub use bloom::BloomFilter;
 pub use compaction::{CompactionIterator, CompactionScheduler, TierMergeCandidate};
@@ -56,3 +57,8 @@ pub use segmented::{
 };
 pub use traits::{Storage, WriteMode};
 pub use ttl::TTLIndex;
+pub use txn::{
+    validate_cas_set, validate_read_set, validate_transaction, ApplyResult, CASOperation,
+    CommitError, ConflictType, PendingOperations, TransactionContext, TransactionManager,
+    TransactionStatus, ValidationResult,
+};

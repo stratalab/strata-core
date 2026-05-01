@@ -218,7 +218,7 @@ fn bench_read_only_transactions(c: &mut Criterion) {
     group.bench_function("single_read", |b| {
         let key = Key::new_kv(ns.clone(), "key_500");
         b.iter(|| {
-            let result = db.transaction(branch_id, |txn| txn.get(&key));
+            let result = db.transaction(branch_id, |txn| Ok(txn.get(&key)?));
             result.unwrap();
         });
     });
@@ -278,7 +278,7 @@ fn bench_direct_operations(c: &mut Criterion) {
 
     group.bench_function("direct_get", |b| {
         b.iter(|| {
-            let result = db.transaction(branch_id, |txn| txn.get(&get_key));
+            let result = db.transaction(branch_id, |txn| Ok(txn.get(&get_key)?));
             result.unwrap();
         });
     });

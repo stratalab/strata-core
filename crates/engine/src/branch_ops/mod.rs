@@ -92,7 +92,7 @@ fn note_prefix(branch: &str) -> String {
 /// sufficient. Keeping this cleanup in the same transaction as branch metadata
 /// deletion prevents same-name recreate from inheriting stale annotations.
 pub(crate) fn delete_annotations_for_branch_in_txn(
-    txn: &mut strata_concurrency::TransactionContext,
+    txn: &mut strata_storage::TransactionContext,
     branch: &str,
 ) -> StrataResult<()> {
     let system_id = resolve_branch_name(SYSTEM_BRANCH);
@@ -1577,7 +1577,7 @@ fn resolve_and_verify_with_expected(
 }
 
 fn verify_expected_active_ref_in_txn(
-    txn: &mut strata_concurrency::TransactionContext,
+    txn: &mut strata_storage::TransactionContext,
     branch_name: &str,
     expected: BranchRef,
 ) -> StrataResult<()> {

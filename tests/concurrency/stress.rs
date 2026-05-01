@@ -7,13 +7,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use std::time::{Duration, Instant};
-use strata_concurrency::manager::TransactionManager;
-use strata_concurrency::transaction::TransactionContext;
-use strata_concurrency::validation::validate_transaction;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_storage::{Key, Namespace, SegmentedStore, Storage, WriteMode};
+use strata_storage::{
+    validate_transaction, Key, Namespace, SegmentedStore, Storage, TransactionContext,
+    TransactionManager, WriteMode,
+};
 
 fn create_test_key(branch_id: BranchId, name: &str) -> Key {
     let ns = Arc::new(Namespace::for_branch(branch_id));

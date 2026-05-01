@@ -20,11 +20,10 @@ use crate::primitives::json::JsonStore;
 use crate::transaction_ops::TransactionOps;
 use crate::{Event, JsonPath, JsonValue};
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{EntityRef, StrataError, Timestamp, Value, Version, Versioned};
-use strata_storage::{Key, Namespace, SegmentedStore, TypeTag};
+use strata_storage::{Key, Namespace, SegmentedStore, TransactionContext, TypeTag};
 
 use super::json_state::JsonTxnState;
 
@@ -229,7 +228,7 @@ impl<'a> Transaction<'a> {
 
     fn load_json_effective_base(&mut self, key: &Key) -> Result<Option<Value>, StrataError> {
         let _ = self.load_json_snapshot_base(key)?;
-        self.ctx.get(key)
+        Ok(self.ctx.get(key)?)
     }
 
     fn load_json_document(&mut self, doc_id: &str) -> Result<Option<JsonValue>, StrataError> {

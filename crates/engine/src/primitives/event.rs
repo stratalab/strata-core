@@ -41,12 +41,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
-use strata_concurrency::TransactionContext;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::value::Value;
-use strata_storage::{Key, Namespace};
+use strata_storage::{Key, Namespace, TransactionContext};
 
 // Re-export event semantic types from the engine-owned surface.
 pub use crate::semantics::event::{ChainVerification, Event};
@@ -1308,7 +1307,7 @@ impl EventLogExt for TransactionContext {
     fn event_get_in_space(&mut self, space: &str, sequence: u64) -> StrataResult<Option<Value>> {
         let ns = Arc::new(Namespace::for_branch_space(self.branch_id, space));
         let event_key = Key::new_event(ns, sequence);
-        self.get(&event_key)
+        Ok(self.get(&event_key)?)
     }
 }
 

@@ -53,10 +53,9 @@ use std::sync::{Arc, Once};
 static FOLLOWER_SYNTHESIS_WARNED: Once = Once::new();
 
 use serde::{Deserialize, Serialize};
-use strata_concurrency::TransactionContext;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
-use strata_storage::{Key, Namespace, TypeTag};
+use strata_storage::{Key, Namespace, TransactionContext, TypeTag};
 use tracing::{info, warn};
 
 use crate::branch_domain::{
@@ -2383,7 +2382,7 @@ mod tests {
                 TypeTag::Branch,
                 name.as_bytes().to_vec(),
             );
-            txn.put(key, strata_core::value::Value::String(json))
+            Ok(txn.put(key, strata_core::value::Value::String(json))?)
         })
         .unwrap();
     }
@@ -2478,7 +2477,7 @@ mod tests {
         let (db, store) = fresh_store();
         let branch = BranchRef::new(BranchId::from_user_name("dangling"), 0);
         write(&db, |txn| {
-            txn.put(
+            Ok(txn.put(
                 control_record_key(branch),
                 to_stored_value(&BranchControlRecord {
                     branch,
@@ -2486,7 +2485,7 @@ mod tests {
                     lifecycle: BranchLifecycleStatus::Active,
                     fork: None,
                 })?,
-            )
+            )?)
         });
 
         let err = store.find_active_by_name("dangling").unwrap_err();
@@ -2572,7 +2571,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"legacy-only".to_vec());
-                txn.put(key, strata_core::value::Value::String(json))
+                Ok(txn.put(key, strata_core::value::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2600,7 +2599,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"b".to_vec());
-                txn.put(key, strata_core::value::Value::String(json))
+                Ok(txn.put(key, strata_core::value::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2626,7 +2625,7 @@ mod tests {
             let json = serde_json::to_string(&meta).unwrap();
             db.transaction(global_branch_id(), |txn| {
                 let key = Key::new(global_namespace(), TypeTag::Branch, b"persistent".to_vec());
-                txn.put(key, strata_core::value::Value::String(json))
+                Ok(txn.put(key, strata_core::value::Value::String(json))?)
             })
             .unwrap();
         }
@@ -2742,7 +2741,7 @@ mod tests {
             db.transaction(BranchId::from_user_name("parent"), |txn| {
                 let ns = Arc::new(Namespace::for_branch(BranchId::from_user_name("parent")));
                 let k = Key::new(ns, TypeTag::KV, b"seed".to_vec());
-                txn.put(k, strata_core::value::Value::Int(1))
+                Ok(txn.put(k, strata_core::value::Value::Int(1))?)
             })
             .unwrap();
             db.branches().fork("parent", "child").unwrap();
@@ -2879,7 +2878,7 @@ mod tests {
                     TypeTag::Branch,
                     name.as_bytes().to_vec(),
                 );
-                txn.put(key, strata_core::value::Value::String(json))
+                Ok(txn.put(key, strata_core::value::Value::String(json))?)
             })
             .unwrap();
         }

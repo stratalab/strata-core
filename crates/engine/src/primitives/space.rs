@@ -252,7 +252,7 @@ impl SpaceIndex {
 /// Centralising it here ensures every primitive uses the same skip rules
 /// and the same key encoding.
 pub fn ensure_space_registered_in_txn(
-    txn: &mut strata_concurrency::TransactionContext,
+    txn: &mut strata_storage::TransactionContext,
     branch_id: &BranchId,
     space: &str,
 ) -> StrataResult<()> {
@@ -410,7 +410,7 @@ mod tests {
 
         // Read it back and verify content
         let val = db
-            .transaction(bid, |txn| txn.get(&key))
+            .transaction(bid, |txn| Ok(txn.get(&key)?))
             .unwrap()
             .expect("system space value should be readable");
         assert_eq!(val.as_str().unwrap(), "{\"version\":1}");
