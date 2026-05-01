@@ -103,7 +103,7 @@ pub fn clone_codec(codec: &dyn StorageCodec) -> Box<dyn StorageCodec> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
+    use crate::durability::codec::IdentityCodec;
 
     // Test that trait is object-safe
     fn _accepts_box_dyn_codec(_codec: Box<dyn StorageCodec>) {}

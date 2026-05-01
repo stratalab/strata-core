@@ -5,7 +5,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::types::BranchId;
-use strata_durability::{ManifestError, ManifestManager};
+use strata_storage::durability::{ManifestError, ManifestManager};
 use strata_storage::Key;
 use tracing::{info, warn};
 
@@ -165,13 +165,14 @@ impl Database {
             None
         };
 
-        let snapshots = strata_durability::list_snapshots(&snapshots_dir).map_err(|e| {
-            StrataError::internal(format!(
-                "prune_snapshots: failed to list snapshots in {}: {}",
-                snapshots_dir.display(),
-                e
-            ))
-        })?;
+        let snapshots =
+            strata_storage::durability::list_snapshots(&snapshots_dir).map_err(|e| {
+                StrataError::internal(format!(
+                    "prune_snapshots: failed to list snapshots in {}: {}",
+                    snapshots_dir.display(),
+                    e
+                ))
+            })?;
 
         if snapshots.len() <= retain_count {
             return Ok(0);
@@ -492,8 +493,8 @@ impl Database {
         // the documented blocked-state path rather than panic the process, so
         // pin the follower at the next expected txn with the typed error
         // detail for operator visibility.
-        let reader = strata_durability::wal::WalReader::new().with_codec(
-            strata_durability::codec::clone_codec(self.wal_codec.as_ref()),
+        let reader = strata_storage::durability::wal::WalReader::new().with_codec(
+            strata_storage::durability::codec::clone_codec(self.wal_codec.as_ref()),
         );
         let read_result =
             match reader.read_all_after_watermark_contiguous(&self.wal_dir, received_watermark) {
@@ -541,8 +542,9 @@ impl Database {
             self.watermark.set_received(txn_id);
 
             // Decode the payload
-            let payload = match strata_concurrency::TransactionPayload::from_bytes(&record.writeset)
-            {
+            let payload = match strata_storage::durability::TransactionPayload::from_bytes(
+                &record.writeset,
+            ) {
                 Ok(p) => p,
                 Err(e) => {
                     let blocked = make_blocked_state(
@@ -698,7 +700,7 @@ impl Database {
             let skip_allowed = blocked.skip_allowed;
             let detail = blocked.detail;
             let reason = match blocked.stop_reason {
-                strata_durability::wal::ReadStopReason::Gap {
+                strata_storage::durability::wal::ReadStopReason::Gap {
                     expected_txn_id,
                     observed_txn_id,
                 } => BlockReason::Decode {
@@ -707,13 +709,13 @@ impl Database {
                         expected_txn_id, observed_txn_id
                     ),
                 },
-                strata_durability::wal::ReadStopReason::ChecksumMismatch { .. }
-                | strata_durability::wal::ReadStopReason::ParseError { .. }
-                | strata_durability::wal::ReadStopReason::CodecDecode { .. } => {
+                strata_storage::durability::wal::ReadStopReason::ChecksumMismatch { .. }
+                | strata_storage::durability::wal::ReadStopReason::ParseError { .. }
+                | strata_storage::durability::wal::ReadStopReason::CodecDecode { .. } => {
                     BlockReason::Decode { message: detail }
                 }
-                strata_durability::wal::ReadStopReason::EndOfData
-                | strata_durability::wal::ReadStopReason::PartialRecord => {
+                strata_storage::durability::wal::ReadStopReason::EndOfData
+                | strata_storage::durability::wal::ReadStopReason::PartialRecord => {
                     BlockReason::Decode { message: detail }
                 }
             };

@@ -6,9 +6,9 @@ use std::fs::File;
 use std::io::{BufReader, Read};
 use std::path::Path;
 
-use crate::codec::{CodecError, StorageCodec};
-use crate::format::primitive_tags;
-use crate::format::snapshot::{
+use crate::durability::codec::{CodecError, StorageCodec};
+use crate::durability::format::primitive_tags;
+use crate::durability::format::snapshot::{
     SectionHeader, SnapshotHeader, MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION, SNAPSHOT_FORMAT_VERSION,
     SNAPSHOT_HEADER_SIZE, SNAPSHOT_MAGIC,
 };
@@ -285,7 +285,7 @@ pub enum SnapshotReadError {
     /// Legacy snapshot format — rejected hard, even under lossy recovery.
     ///
     /// Produced when the snapshot's `format_version` is older than
-    /// [`crate::format::snapshot::MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION`].
+    /// [`crate::durability::format::snapshot::MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION`].
     /// Surfaces unconditionally (strict and lossy open alike); the engine's
     /// open path re-raises as
     /// [`strata_core::StrataError::LegacyFormat`] and the operator must
@@ -348,8 +348,8 @@ pub enum SnapshotReadError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
-    use crate::disk_snapshot::{SnapshotSection, SnapshotWriter};
+    use crate::durability::codec::IdentityCodec;
+    use crate::durability::disk_snapshot::{SnapshotSection, SnapshotWriter};
 
     fn test_uuid() -> [u8; 16] {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

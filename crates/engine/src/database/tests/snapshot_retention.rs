@@ -1,7 +1,7 @@
 //! Regression tests for D7 / DG-015 snapshot retention.
 
 use super::*;
-use strata_durability::list_snapshots;
+use strata_storage::durability::list_snapshots;
 
 fn write_one(db: &Database, branch_id: BranchId, key_name: &str) {
     let ns = create_test_namespace(branch_id);
@@ -78,7 +78,7 @@ fn prune_preserves_live_manifest_snapshot_in_steady_state() {
     );
 
     let manifest_path = db_path.canonicalize().unwrap().join("MANIFEST");
-    let manifest = strata_durability::ManifestManager::load(manifest_path).unwrap();
+    let manifest = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
     let live_id = manifest.manifest().snapshot_id.unwrap();
     assert_eq!(kept_ids[0], live_id);
 }
@@ -119,7 +119,8 @@ fn prune_preserves_live_manifest_snapshot_when_outside_retain_window() {
 
     // Snap ids are 1..=5; MANIFEST currently points at 5. Rewrite to 2.
     {
-        let mut manifest = strata_durability::ManifestManager::load(manifest_path.clone()).unwrap();
+        let mut manifest =
+            strata_storage::durability::ManifestManager::load(manifest_path.clone()).unwrap();
         let prev_watermark_txn = TxnId(manifest.manifest().snapshot_watermark.unwrap_or(0));
         manifest
             .set_snapshot_watermark(2, prev_watermark_txn)

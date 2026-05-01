@@ -13,7 +13,7 @@ use super::traits::{CodecError, StorageCodec};
 /// # Example
 ///
 /// ```
-/// use strata_durability::codec::{StorageCodec, IdentityCodec};
+/// use strata_storage::durability::codec::{IdentityCodec, StorageCodec};
 ///
 /// let codec = IdentityCodec;
 /// let data = b"hello world";

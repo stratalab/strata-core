@@ -27,9 +27,9 @@ use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::value::Value;
 use strata_core::BranchId;
-use strata_durability::codec::{clone_codec, StorageCodec};
-use strata_durability::format::primitive_tags;
-use strata_durability::{LoadedSnapshot, SnapshotSerializer};
+use strata_storage::durability::codec::{clone_codec, StorageCodec};
+use strata_storage::durability::format::primitive_tags;
+use strata_storage::durability::{LoadedSnapshot, SnapshotSerializer};
 use strata_storage::{DecodedSnapshotEntry, DecodedSnapshotValue, SegmentedStore, TypeTag};
 use tracing::warn;
 
@@ -392,12 +392,12 @@ mod tests {
     use strata_core::id::CommitVersion;
     use strata_core::value::Value;
     use strata_core::BranchId;
-    use strata_durability::codec::IdentityCodec;
-    use strata_durability::format::{
+    use strata_storage::durability::codec::IdentityCodec;
+    use strata_storage::durability::format::{
         EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, VectorCollectionSnapshotEntry,
         VectorSnapshotEntry,
     };
-    use strata_durability::{
+    use strata_storage::durability::{
         disk_snapshot::{SnapshotSection, SnapshotWriter},
         SnapshotReader,
     };
@@ -724,15 +724,16 @@ mod tests {
         // the DTO carries it explicitly so install dispatches correctly.
         let global_branch = BranchId::from_bytes([0; 16]);
 
-        let branch_bytes = strata_durability::SnapshotSerializer::new(Box::new(IdentityCodec))
-            .serialize_branches(&[strata_durability::format::BranchSnapshotEntry {
-                branch_id: *global_branch.as_bytes(),
-                key: "my-branch".to_string(),
-                value: serde_json::to_vec(&Value::String("branch-metadata".into())).unwrap(),
-                version: 42,
-                timestamp: 1_234,
-                is_tombstone: false,
-            }]);
+        let branch_bytes =
+            strata_storage::durability::SnapshotSerializer::new(Box::new(IdentityCodec))
+                .serialize_branches(&[strata_storage::durability::format::BranchSnapshotEntry {
+                    branch_id: *global_branch.as_bytes(),
+                    key: "my-branch".to_string(),
+                    value: serde_json::to_vec(&Value::String("branch-metadata".into())).unwrap(),
+                    version: 42,
+                    timestamp: 1_234,
+                    is_tombstone: false,
+                }]);
 
         let info = writer_for(dir.path())
             .create_snapshot(
@@ -769,15 +770,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let global_branch = BranchId::from_bytes([0; 16]);
 
-        let branch_bytes = strata_durability::SnapshotSerializer::new(Box::new(IdentityCodec))
-            .serialize_branches(&[strata_durability::format::BranchSnapshotEntry {
-                branch_id: *global_branch.as_bytes(),
-                key: "dropped".to_string(),
-                value: Vec::new(),
-                version: 99,
-                timestamp: 2_000,
-                is_tombstone: true,
-            }]);
+        let branch_bytes =
+            strata_storage::durability::SnapshotSerializer::new(Box::new(IdentityCodec))
+                .serialize_branches(&[strata_storage::durability::format::BranchSnapshotEntry {
+                    branch_id: *global_branch.as_bytes(),
+                    key: "dropped".to_string(),
+                    value: Vec::new(),
+                    version: 99,
+                    timestamp: 2_000,
+                    is_tombstone: true,
+                }]);
 
         let info = writer_for(dir.path())
             .create_snapshot(

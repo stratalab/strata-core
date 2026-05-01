@@ -1178,7 +1178,7 @@ fn test_resume_after_shutdown_returns_error_and_does_not_reopen() {
 #[test]
 #[serial(open_databases)]
 fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
-    concurrency_test_hooks::clear_apply_failure_injection();
+    durability_test_hooks::clear_apply_failure_injection();
 
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("durable_not_visible_db");
@@ -1188,7 +1188,7 @@ fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
     {
         let db = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
 
-        concurrency_test_hooks::inject_apply_failure_once(
+        durability_test_hooks::inject_apply_failure_once(
             "injected apply_writes failure after WAL commit",
         );
         let err = db
@@ -1220,7 +1220,7 @@ fn test_durable_but_not_visible_is_surfaced_and_recovers_on_reopen() {
         );
     }
 
-    concurrency_test_hooks::clear_apply_failure_injection();
+    durability_test_hooks::clear_apply_failure_injection();
     OPEN_DATABASES.lock().clear();
 
     let reopened = Database::open_with_durability(&db_path, DurabilityMode::Always).unwrap();
@@ -1717,10 +1717,10 @@ fn shutdown_fsyncs_manifest() {
 
     let manifest_path = db_path.join("MANIFEST");
     assert!(
-        strata_durability::ManifestManager::exists(&manifest_path),
+        strata_storage::durability::ManifestManager::exists(&manifest_path),
         "shutdown must leave the MANIFEST present on disk"
     );
-    strata_durability::ManifestManager::load(manifest_path)
+    strata_storage::durability::ManifestManager::load(manifest_path)
         .expect("persisted MANIFEST must parse after shutdown fsync");
 }
 

@@ -23,12 +23,16 @@ use serial_test::serial;
 use std::fs;
 use std::mem;
 use std::path::Path;
-use strata_concurrency::RecoveryCoordinator;
+use strata_core::id::TxnId;
 use strata_core::StrataError;
-use strata_durability::format::{MANIFEST_FORMAT_VERSION, MANIFEST_MAGIC};
-use strata_durability::layout::DatabaseLayout;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem};
+use strata_storage::durability::format::{MANIFEST_FORMAT_VERSION, MANIFEST_MAGIC};
+use strata_storage::durability::layout::DatabaseLayout;
+use strata_storage::durability::{
+    codec::IdentityCodec, snapshot_path, CoordinatorPlanError, CoordinatorRecoveryError,
+    ManifestError, ManifestManager, RecoveryCoordinator,
+};
 use tempfile::TempDir;
 
 /// Build MANIFEST bytes with optional per-field overrides. Returns
@@ -89,9 +93,63 @@ fn probe_three_legs(
     let coord_err = RecoveryCoordinator::new(layout, 0)
         .plan_recovery(expected_codec)
         .err()
+        .map(plan_error_to_strata_error)
         .unwrap_or_else(|| panic!("coordinator plan_recovery must fail on corrupt MANIFEST"));
 
     (primary_err, follower_err, coord_err)
+}
+
+fn plan_error_to_strata_error(err: CoordinatorPlanError) -> StrataError {
+    match err {
+        CoordinatorPlanError::Manifest(ManifestError::LegacyFormat {
+            detected_version,
+            supported_range,
+            remediation,
+        }) => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        CoordinatorPlanError::Manifest(inner) => {
+            StrataError::corruption(format!("failed to load MANIFEST: {inner}"))
+        }
+        CoordinatorPlanError::CodecMismatch { stored, expected } => {
+            StrataError::incompatible_reuse(format!(
+                "codec mismatch: database was created with '{stored}' but config specifies '{expected}'. \
+                 A database cannot be reopened with a different codec."
+            ))
+        }
+        _ => StrataError::internal("unknown coordinator plan error"),
+    }
+}
+
+#[test]
+#[serial(open_databases)]
+fn coordinator_recover_missing_snapshot_surfaces_typed_storage_error() {
+    let tmp = TempDir::new().unwrap();
+    let db_path = tmp.path().join("db");
+    fs::create_dir_all(&db_path).unwrap();
+
+    let layout = DatabaseLayout::from_root(&db_path);
+    let mut mgr = ManifestManager::create(
+        layout.manifest_path().to_path_buf(),
+        [7u8; 16],
+        "identity".to_string(),
+    )
+    .unwrap();
+    mgr.set_snapshot_watermark(9, TxnId(42)).unwrap();
+
+    let err = RecoveryCoordinator::new(layout.clone(), 0)
+        .with_codec(Box::new(IdentityCodec))
+        .recover(|_| Ok(()), |_| Ok(()))
+        .expect_err("missing snapshot must surface as a typed coordinator error");
+
+    match err {
+        CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path } => {
+            assert_eq!(snapshot_id, 9);
+            assert_eq!(path, snapshot_path(layout.snapshots_dir(), 9));
+        }
+        other => panic!("expected SnapshotMissing, got {other:?}"),
+    }
 }
 
 fn assert_same_variant(a: &StrataError, b: &StrataError, label: &str) {
@@ -150,7 +208,7 @@ fn parity_checksum_mismatch() {
 }
 
 // ────────────────────────────────────────────────────────────────────
-// Shape 3: codec id mismatch (requires fix landed in concurrency)
+// Shape 3: codec id mismatch
 // ────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -166,9 +224,8 @@ fn parity_codec_id_mismatch() {
     let bytes = valid_manifest_bytes("aes-gcm-256");
     write_raw_manifest(&db_path, &bytes);
 
-    // Pre-D3: coordinator plan_recovery returned Corruption while the
-    // engine paths returned IncompatibleReuse. D3's one-line fix in
-    // strata_concurrency makes all three agree on IncompatibleReuse.
+    // The storage-owned coordinator must keep the same public parity as the
+    // engine open paths: codec mismatch is IncompatibleReuse in all three legs.
     let (primary, follower, coord) = probe_three_legs(&db_path, "identity");
     assert!(
         matches!(primary, StrataError::IncompatibleReuse { .. }),

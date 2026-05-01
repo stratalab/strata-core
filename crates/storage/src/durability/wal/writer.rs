@@ -8,11 +8,11 @@ use serde::{Deserialize, Serialize};
 use strata_core::id::TxnId;
 
 use super::DurabilityMode;
-use crate::codec::StorageCodec;
-use crate::format::segment_meta::SegmentMeta;
-use crate::format::{WalRecord, WalSegment, SEGMENT_HEADER_SIZE_V2};
-use crate::wal::config::WalConfig;
-use crate::wal::reader::WalReader;
+use crate::durability::codec::StorageCodec;
+use crate::durability::format::segment_meta::SegmentMeta;
+use crate::durability::format::{WalRecord, WalSegment, SEGMENT_HEADER_SIZE_V2};
+use crate::durability::wal::config::WalConfig;
+use crate::durability::wal::reader::WalReader;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -831,7 +831,9 @@ impl WalWriter {
     /// Returns `Some((meta_clone, wal_dir))` if there is metadata to flush,
     /// `None` otherwise. The caller can then write the meta file without
     /// holding the WAL lock.
-    pub fn snapshot_active_meta(&self) -> Option<(crate::format::SegmentMeta, std::path::PathBuf)> {
+    pub fn snapshot_active_meta(
+        &self,
+    ) -> Option<(crate::durability::format::SegmentMeta, std::path::PathBuf)> {
         if let Some(ref meta) = self.current_segment_meta {
             if !meta.is_empty() {
                 return Some((meta.clone(), self.wal_dir.clone()));
@@ -870,7 +872,7 @@ impl WalWriter {
         wal_dir: &Path,
         segment_number: u64,
     ) -> Option<SegmentMeta> {
-        let reader = WalReader::new().with_codec(crate::codec::clone_codec(codec));
+        let reader = WalReader::new().with_codec(crate::durability::codec::clone_codec(codec));
         match reader.read_segment(wal_dir, segment_number) {
             Ok((records, _, _, _)) => {
                 let mut meta = SegmentMeta::new_empty(segment_number);
@@ -1015,7 +1017,7 @@ impl Drop for WalWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
+    use crate::durability::codec::IdentityCodec;
     use strata_core::id::TxnId;
     use tempfile::tempdir;
 
@@ -1196,7 +1198,7 @@ mod tests {
         }
 
         // Read all records — should see all 10 in order
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, (1..=10).collect::<Vec<_>>());
@@ -1222,7 +1224,7 @@ mod tests {
         writer_a.append_and_flush(&make_record(3)).unwrap();
 
         // All 3 records should be readable
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -1281,7 +1283,7 @@ mod tests {
             .unwrap();
 
         // All records should be readable
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert!(
             result.records.len() >= 6,
@@ -1311,7 +1313,7 @@ mod tests {
         writer_a.reopen_if_needed().unwrap();
         writer_a.append_and_flush(&make_record(3)).unwrap();
 
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -1367,7 +1369,7 @@ mod tests {
         writer.flush().unwrap();
 
         // Read back via WalReader
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 1);
         assert_eq!(result.records[0].txn_id, TxnId(42));
@@ -1398,7 +1400,7 @@ mod tests {
         writer2.flush().unwrap();
 
         // Read back both and compare
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result1 = reader.read_all(&wal_dir1).unwrap();
         let result2 = reader.read_all(&wal_dir2).unwrap();
 
@@ -1445,7 +1447,7 @@ mod tests {
 
         // All records should be readable
         writer.flush().unwrap();
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(result.records.len(), 10);
         for (i, rec) in result.records.iter().enumerate() {
@@ -1514,7 +1516,7 @@ mod tests {
 
         writer.flush().unwrap();
 
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         let ids: Vec<u64> = result.records.iter().map(|r| r.txn_id.as_u64()).collect();
         assert_eq!(ids, vec![1, 2, 3]);
@@ -1951,7 +1953,7 @@ mod tests {
         }
 
         // All records must be readable through the reader
-        let reader = crate::wal::WalReader::new();
+        let reader = crate::durability::wal::WalReader::new();
         let result = reader.read_all(&wal_dir).unwrap();
         assert_eq!(
             result.records.len(),

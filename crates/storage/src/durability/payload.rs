@@ -10,10 +10,10 @@
 //! The payload is serialized using MessagePack (`rmp-serde`) for compact
 //! binary encoding with schema evolution support.
 
+use crate::{Key, TransactionContext};
 use serde::{Deserialize, Serialize};
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
-use strata_storage::{Key, TransactionContext};
 
 /// Serializable payload for a committed transaction.
 ///
@@ -134,7 +134,7 @@ pub fn serialize_wal_record_into(
         .expect("TransactionPayloadRef serialization should not fail");
 
     // Build WAL record envelope around msgpack bytes
-    strata_durability::format::WalRecord::build_bytes_from_writeset_into(
+    crate::durability::format::WalRecord::build_bytes_from_writeset_into(
         record_buf,
         txn_id,
         branch_id,
@@ -155,11 +155,11 @@ pub enum PayloadError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Key, Namespace};
     use std::sync::Arc;
     use strata_core::id::{CommitVersion, TxnId};
     use strata_core::value::Value;
     use strata_core::BranchId;
-    use strata_storage::{Key, Namespace};
 
     fn test_ns() -> Arc<Namespace> {
         let branch_id = BranchId::new();
@@ -273,8 +273,8 @@ mod tests {
     /// `WalRecord::new().to_bytes()`.
     #[test]
     fn test_fused_serialization_byte_equality() {
-        use strata_durability::format::WalRecord;
-        use strata_storage::TransactionContext;
+        use crate::durability::format::WalRecord;
+        use crate::TransactionContext;
 
         let ns = test_ns();
         let branch_id = ns.branch_id;

@@ -13,15 +13,14 @@ workspace = true
 
 [features]
 default = []
-perf-trace = ["strata-concurrency/perf-trace"]  # Enable per-operation timing instrumentation
+perf-trace = ["strata-storage/perf-trace"]  # Enable per-operation timing instrumentation
 embed = []       # Marker feature: auto-embed runtime is available
 test-support = []  # Expose test helpers for downstream crates
 
 [dependencies]
 strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
-strata-storage = { path = "../storage" }
-strata-concurrency = { path = "../concurrency" }
-strata-durability = { path = "../durability", features = ["engine-internal"] }
+strata-storage = { path = "../storage", features = ["engine-internal"] }
+strata-durability = { path = "../durability" }
 strata-security = { path = "../security" }
 dashmap = { workspace = true }
 once_cell = { workspace = true }
@@ -45,7 +44,7 @@ chrono = { workspace = true }
 libc = { workspace = true }
 
 [dev-dependencies]
-strata-concurrency = { path = "../concurrency", features = ["fault-injection"] }
+strata-storage = { path = "../storage", features = ["engine-internal", "fault-injection"] }
 tempfile = { workspace = true }
 criterion = { workspace = true }
 serde_json = { workspace = true }

@@ -75,8 +75,8 @@ pub use semantics::vector::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
-pub use strata_durability::wal::DurabilityMode;
-pub use strata_durability::WalCounters;
+pub use strata_storage::durability::wal::DurabilityMode;
+pub use strata_storage::durability::WalCounters;
 pub use strata_storage::StorageIterator;
 pub use strata_storage::VersionedEntry;
 pub use strata_storage::{DegradationClass, RecoveryHealth, TransactionContext};

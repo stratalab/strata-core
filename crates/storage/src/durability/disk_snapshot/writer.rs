@@ -17,11 +17,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
-use crate::codec::StorageCodec;
-use crate::format::snapshot::{snapshot_path, SectionHeader, SnapshotHeader};
+use crate::durability::codec::StorageCodec;
+use crate::durability::format::snapshot::{snapshot_path, SectionHeader, SnapshotHeader};
 
 #[cfg(test)]
-use crate::format::snapshot::SNAPSHOT_FORMAT_VERSION;
+use crate::durability::format::snapshot::SNAPSHOT_FORMAT_VERSION;
 
 /// Snapshot writer with crash-safe semantics
 pub struct SnapshotWriter {
@@ -227,8 +227,8 @@ fn fsync_directory(dir_path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::IdentityCodec;
-    use crate::format::primitive_tags;
+    use crate::durability::codec::IdentityCodec;
+    use crate::durability::format::primitive_tags;
 
     fn test_uuid() -> [u8; 16] {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]

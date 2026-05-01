@@ -17,10 +17,13 @@ accidental leftovers later.
 
 It should be read together with:
 
+- [engine-crate-map.md](./engine-crate-map.md)
 - [engine-error-architecture.md](./engine-error-architecture.md)
 - [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
 - [../core/core-error-review.md](../core/core-error-review.md)
 - [../storage/storage-charter.md](../storage/storage-charter.md)
+- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
 
 ## Current State
 

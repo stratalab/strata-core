@@ -23,15 +23,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::StrataError;
-use strata_concurrency::{
-    apply_wal_record_to_memory_storage, CoordinatorRecoveryError, RecoveryCoordinator,
-    RecoveryResult, RecoveryStats,
-};
 use strata_core::id::CommitVersion;
-use strata_durability::codec::{clone_codec, StorageCodec};
-use strata_durability::layout::DatabaseLayout;
-use strata_durability::ManifestManager;
-use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore};
+use strata_storage::durability::codec::{clone_codec, StorageCodec};
+use strata_storage::durability::layout::DatabaseLayout;
+use strata_storage::durability::wal::WalReaderError;
+use strata_storage::durability::{
+    apply_wal_record_to_memory_storage, CoordinatorPlanError, CoordinatorRecoveryError,
+    ManifestError, ManifestManager, RecoveryCoordinator, RecoveryResult, RecoveryStats,
+    SnapshotReadError,
+};
+use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore, StorageError};
 use tracing::{info, warn};
 
 use super::config::StrataConfig;
@@ -136,9 +137,11 @@ impl Database {
         // 1. Configured-codec validation before any recovery-managed
         //    directory or MANIFEST creation — preserves the pre-D3
         //    first-open safety guard.
-        strata_durability::get_codec(&cfg.storage.codec).map_err(|e| RecoveryError::CodecInit {
-            codec_id: cfg.storage.codec.clone(),
-            detail: e.to_string(),
+        strata_storage::durability::get_codec(&cfg.storage.codec).map_err(|e| {
+            RecoveryError::CodecInit {
+                codec_id: cfg.storage.codec.clone(),
+                detail: e.to_string(),
+            }
         })?;
 
         // 2. MANIFEST load or create.
@@ -153,11 +156,12 @@ impl Database {
         let wal_codec_id = install_codec_for_snapshot
             .as_ref()
             .map_or(cfg.storage.codec.as_str(), |c| c.codec_id());
-        let wal_codec =
-            strata_durability::get_codec(wal_codec_id).map_err(|e| RecoveryError::CodecInit {
+        let wal_codec = strata_storage::durability::get_codec(wal_codec_id).map_err(|e| {
+            RecoveryError::CodecInit {
                 codec_id: wal_codec_id.to_owned(),
                 detail: e.to_string(),
-            })?;
+            }
+        })?;
 
         // 4. SegmentedStore at the segments directory.
         let mut storage = SegmentedStore::with_dir(
@@ -342,7 +346,7 @@ fn prepare_manifest(
                 role,
             });
         }
-        let codec = strata_durability::get_codec(&manifest.codec_id).map_err(|e| {
+        let codec = strata_storage::durability::get_codec(&manifest.codec_id).map_err(|e| {
             RecoveryError::CodecInit {
                 codec_id: manifest.codec_id.clone(),
                 detail: e.to_string(),
@@ -417,7 +421,8 @@ fn run_coordinator_recovery(
     recovery.recover_typed(
         |snapshot| {
             if let Some(codec) = install_codec {
-                let installed = install_snapshot(&snapshot, codec, storage)?;
+                let installed =
+                    install_snapshot(&snapshot, codec, storage).map_err(StorageError::from)?;
                 info!(
                     target: "strata::recovery",
                     snapshot_id = snapshot.snapshot_id(),
@@ -473,7 +478,7 @@ fn handle_wal_recovery_outcome(
         return Err(from_coordinator_error(mode.as_error_role(), err));
     }
 
-    let err = StrataError::from(err);
+    let err = coordinator_error_to_lossy_strata_error(err);
 
     // Sample progress BEFORE the wipe so the report reflects what was
     // discarded.
@@ -513,6 +518,74 @@ fn handle_wal_recovery_outcome(
     );
 
     Ok((RecoveryStats::default(), Some(report)))
+}
+
+fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> StrataError {
+    match err {
+        CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(
+            ManifestError::LegacyFormat {
+                detected_version,
+                supported_range,
+                remediation,
+            },
+        )) => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(inner)) => {
+            StrataError::corruption(format!("failed to load MANIFEST: {inner}"))
+        }
+        CoordinatorRecoveryError::Plan(CoordinatorPlanError::CodecMismatch { stored, expected }) => {
+            StrataError::incompatible_reuse(format!(
+                "codec mismatch: database was created with '{stored}' but config specifies '{expected}'. \
+                 A database cannot be reopened with a different codec."
+            ))
+        }
+        CoordinatorRecoveryError::SnapshotMissing { snapshot_id, path } => {
+            StrataError::corruption(format!(
+                "MANIFEST references snapshot {snapshot_id} but {} is missing",
+                path.display()
+            ))
+        }
+        CoordinatorRecoveryError::SnapshotRead {
+            snapshot_id: _,
+            path: _,
+            source:
+                SnapshotReadError::LegacyFormat {
+                    detected_version,
+                    supported_range,
+                    remediation,
+                },
+        } => StrataError::legacy_format(
+            detected_version,
+            format!("{supported_range}. {remediation}"),
+        ),
+        CoordinatorRecoveryError::SnapshotRead {
+            snapshot_id,
+            path,
+            source,
+        } => StrataError::corruption(format!(
+            "failed to load snapshot {snapshot_id} at {}: {source}",
+            path.display()
+        )),
+        CoordinatorRecoveryError::WalRead(WalReaderError::CodecDecode { detail, .. }) => {
+            StrataError::codec_decode(detail)
+        }
+        CoordinatorRecoveryError::WalRead(WalReaderError::LegacyFormat {
+            found_version,
+            hint,
+        }) => StrataError::legacy_format(found_version, hint),
+        CoordinatorRecoveryError::WalRead(inner) => {
+            StrataError::storage(format!("WAL read failed: {inner}"))
+        }
+        CoordinatorRecoveryError::PayloadDecode { txn_id, detail } => {
+            StrataError::storage(format!(
+                "Failed to decode transaction payload for txn {txn_id}: {detail}"
+            ))
+        }
+        CoordinatorRecoveryError::Callback(inner) => StrataError::from(inner),
+        _ => StrataError::internal("unknown coordinator recovery error"),
+    }
 }
 
 /// Load and validate the persisted follower blocked-state slot. On
@@ -580,7 +653,10 @@ mod tests {
 
         let result = handle_wal_recovery_outcome(
             Err(CoordinatorRecoveryError::Plan(
-                StrataError::incompatible_reuse("codec mismatch while re-reading MANIFEST"),
+                CoordinatorPlanError::CodecMismatch {
+                    stored: "identity".into(),
+                    expected: "aes-gcm-256".into(),
+                },
             )),
             &cfg,
             &layout,

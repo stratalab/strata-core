@@ -8,11 +8,12 @@
 //! - Lock-free reads via SkipMap
 //! - Per-BranchId sharding (no cross-branch contention)
 //!
-//! Persistence and durability are handled by the `strata-durability` crate.
+//! Persistence and durability are owned by the storage durability subtree.
 
 pub mod block_cache;
 pub mod bloom;
 pub mod compaction;
+pub mod durability;
 /// Storage-local error types used by publication barriers and manifest I/O.
 pub mod error;
 pub mod index;

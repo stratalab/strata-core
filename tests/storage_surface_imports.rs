@@ -18,6 +18,7 @@ const FORBIDDEN_DIRECT_PATTERNS: &[&str] = &[
     "strata_core::types::TypeTag",
     "strata_concurrency::lock_ordering",
     "strata_concurrency::TransactionManager",
+    "strata_durability::",
 ];
 
 const ROOT_MOVED_TOKENS: &[&str] = &[
@@ -35,6 +36,13 @@ const CONCURRENCY_ROOT_MOVED_TOKENS: &[&str] = &[
     "TransactionStatus",
     "CommitError",
     "TransactionManager",
+    "CoordinatorPlanError",
+    "CoordinatorRecoveryError",
+    "RecoveryCoordinator",
+    "RecoveryPlan",
+    "RecoveryResult",
+    "RecoveryStats",
+    "apply_wal_record_to_memory_storage",
 ];
 const CONCURRENCY_TRANSACTION_MOVED_TOKENS: &[&str] = &[
     "ApplyResult",
@@ -50,6 +58,15 @@ const CONCURRENCY_VALIDATION_MOVED_TOKENS: &[&str] = &[
     "validate_transaction",
     "ConflictType",
     "ValidationResult",
+];
+const CONCURRENCY_RECOVERY_MOVED_TOKENS: &[&str] = &[
+    "CoordinatorPlanError",
+    "CoordinatorRecoveryError",
+    "RecoveryCoordinator",
+    "RecoveryPlan",
+    "RecoveryResult",
+    "RecoveryStats",
+    "apply_wal_record_to_memory_storage",
 ];
 
 #[test]
@@ -78,6 +95,32 @@ fn storage_facing_types_are_not_imported_from_strata_core() {
     );
 }
 
+#[test]
+fn storage_surface_manifests_do_not_regress_to_deleted_or_transitional_crates() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut manifests = Vec::new();
+    manifests.push(repo_root.join("Cargo.toml"));
+    collect_manifest_files(&repo_root.join("crates"), &mut manifests);
+
+    let mut violations = Vec::new();
+    for manifest in manifests {
+        if should_skip_manifest(&manifest) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&manifest).expect("read manifest");
+        for violation in find_manifest_violations(&manifest, &contents) {
+            violations.push(violation);
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "workspace manifests must not regress to deleted or transitional crate edges outside designated seams:\n{}",
+        violations.join("\n")
+    );
+}
+
 fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     if !dir.exists() {
         return;
@@ -94,11 +137,38 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_manifest_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.exists() {
+        return;
+    }
+
+    for entry in fs::read_dir(dir).expect("read directory") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_manifest_files(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            out.push(path);
+        }
+    }
+}
+
 fn should_skip(path: &Path) -> bool {
     let rel = path.to_string_lossy();
     rel.contains("/target/")
         || rel.contains("/crates/core-legacy/")
+        || rel.contains("/crates/durability/")
+        || rel.ends_with("/crates/engine/src/bundle.rs")
+        || rel.ends_with("/tests/integration/branching_generation_migration.rs")
         || rel.ends_with("/tests/storage_surface_imports.rs")
+}
+
+fn should_skip_manifest(path: &Path) -> bool {
+    let rel = path.to_string_lossy();
+    rel.contains("/target/")
+        || rel.ends_with("/crates/engine/Cargo.toml")
+        || rel.ends_with("/crates/durability/Cargo.toml")
+        || rel.ends_with("/Cargo.toml")
 }
 
 fn find_violations(contents: &str) -> Vec<String> {
@@ -142,6 +212,11 @@ fn find_violations(contents: &str) -> Vec<String> {
         "strata_concurrency::validation::{",
         CONCURRENCY_VALIDATION_MOVED_TOKENS,
     ));
+    violations.extend(scan_import_blocks(
+        contents,
+        "strata_concurrency::recovery::{",
+        CONCURRENCY_RECOVERY_MOVED_TOKENS,
+    ));
     violations.extend(scan_alias_uses(
         contents,
         "strata_core",
@@ -184,6 +259,43 @@ fn find_violations(contents: &str) -> Vec<String> {
         CONCURRENCY_VALIDATION_MOVED_TOKENS,
         &[],
     ));
+    violations.extend(scan_alias_uses(
+        contents,
+        "strata_concurrency::recovery",
+        CONCURRENCY_RECOVERY_MOVED_TOKENS,
+        &[],
+    ));
+
+    violations
+}
+
+fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let rel = path.to_string_lossy();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.contains("strata-concurrency")
+            || line.contains("path = \"../concurrency\"")
+            || line.contains("path = \"crates/concurrency\"")
+        {
+            violations.push(format!(
+                "{}:{}: manifest references deleted `strata-concurrency` surface",
+                rel,
+                line_no + 1
+            ));
+        }
+
+        if line.contains("strata-durability")
+            || line.contains("path = \"../durability\"")
+            || line.contains("path = \"crates/durability\"")
+        {
+            violations.push(format!(
+                "{}:{}: manifest references transitional `strata-durability` outside designated seams",
+                rel,
+                line_no + 1
+            ));
+        }
+    }
 
     violations
 }

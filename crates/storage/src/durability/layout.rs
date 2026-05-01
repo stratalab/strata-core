@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 /// # Example
 ///
 /// ```
-/// use strata_durability::DatabaseLayout;
+/// use strata_storage::durability::DatabaseLayout;
 /// use std::path::Path;
 ///
 /// let layout = DatabaseLayout::from_root(Path::new("/data/mydb"));

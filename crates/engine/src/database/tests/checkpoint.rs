@@ -461,7 +461,7 @@ fn test_codec_mismatch_on_reopen_fails_even_with_lossy_flag() {
     // codec drift we can produce with the currently-shipping codec set.
     let manifest_path = db_path.join("MANIFEST");
     std::fs::remove_file(&manifest_path).unwrap();
-    strata_durability::ManifestManager::create(
+    strata_storage::durability::ManifestManager::create(
         manifest_path,
         database_uuid,
         "some-other-codec".to_string(),

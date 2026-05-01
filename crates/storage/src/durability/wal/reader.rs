@@ -2,10 +2,10 @@
 //!
 //! The reader handles reading WAL records from segments for recovery.
 
-use crate::codec::{clone_codec, StorageCodec};
-use crate::format::segment_meta::SegmentMeta;
-use crate::format::{WalRecord, WalRecordError, WalSegment};
-use crate::wal::writer::WAL_RECORD_ENVELOPE_OVERHEAD;
+use crate::durability::codec::{clone_codec, StorageCodec};
+use crate::durability::format::segment_meta::SegmentMeta;
+use crate::durability::format::{WalRecord, WalRecordError, WalSegment};
+use crate::durability::wal::writer::WAL_RECORD_ENVELOPE_OVERHEAD;
 use crc32fast::Hasher;
 use std::borrow::Cow;
 use std::io::Read;
@@ -1213,13 +1213,13 @@ pub enum WalReaderError {
     },
 }
 
-impl From<crate::format::WalSegmentError> for WalReaderError {
+impl From<crate::durability::format::WalSegmentError> for WalReaderError {
     /// Preserve the typed `LegacyFormat` diagnostic; render other
     /// header-level errors as `IoError`-wrapped strings. Genuine I/O
     /// errors (disk full, permission denied) go through `IoError`
     /// unchanged. T3-E12 §D8.
-    fn from(err: crate::format::WalSegmentError) -> Self {
-        use crate::format::{SegmentHeaderError, WalSegmentError};
+    fn from(err: crate::durability::format::WalSegmentError) -> Self {
+        use crate::durability::format::{SegmentHeaderError, WalSegmentError};
         match err {
             WalSegmentError::Io(io) => WalReaderError::IoError(io.to_string()),
             WalSegmentError::Header(SegmentHeaderError::LegacyFormat {
@@ -1237,10 +1237,10 @@ impl From<crate::format::WalSegmentError> for WalReaderError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::{IdentityCodec, StorageCodec};
-    use crate::wal::config::WalConfig;
-    use crate::wal::writer::WalWriter;
-    use crate::wal::DurabilityMode;
+    use crate::durability::codec::{IdentityCodec, StorageCodec};
+    use crate::durability::wal::config::WalConfig;
+    use crate::durability::wal::writer::WalWriter;
+    use crate::durability::wal::DurabilityMode;
     use strata_core::id::TxnId;
     use tempfile::tempdir;
 
@@ -1474,7 +1474,7 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         // Use tiny segment size to force rotation
-        let config = crate::wal::config::WalConfig::new()
+        let config = crate::durability::wal::config::WalConfig::new()
             .with_segment_size(100)
             .with_buffered_sync_bytes(50);
 
@@ -2582,8 +2582,8 @@ mod tests {
             data.to_vec()
         }
 
-        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::codec::CodecError> {
-            Err(crate::codec::CodecError::decode(
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::durability::codec::CodecError> {
+            Err(crate::durability::codec::CodecError::decode(
                 "test codec forcibly fails decode",
                 "always-fail-decode",
                 data.len(),
@@ -2612,13 +2612,13 @@ mod tests {
             data.to_vec()
         }
 
-        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::codec::CodecError> {
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, crate::durability::codec::CodecError> {
             let txn_id = data
                 .get(9..17)
                 .and_then(|bytes| bytes.try_into().ok())
                 .map(u64::from_le_bytes);
             if txn_id == Some(self.reject_txn_id) {
-                return Err(crate::codec::CodecError::decode(
+                return Err(crate::durability::codec::CodecError::decode(
                     format!("test codec rejects txn {}", self.reject_txn_id),
                     "reject-txn-decode",
                     data.len(),
@@ -2853,7 +2853,7 @@ mod tests {
     /// `io::ErrorKind::InvalidData` string.
     #[test]
     fn test_wal_segment_open_read_typed_propagation() {
-        use crate::format::{SegmentHeaderError, WalSegmentError};
+        use crate::durability::format::{SegmentHeaderError, WalSegmentError};
 
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");

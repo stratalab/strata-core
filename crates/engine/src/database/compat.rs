@@ -24,7 +24,7 @@
 
 use std::hash::{Hash, Hasher};
 
-use strata_durability::wal::DurabilityMode;
+use strata_storage::durability::wal::DurabilityMode;
 
 use super::spec::DatabaseMode;
 

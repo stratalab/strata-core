@@ -346,7 +346,7 @@ fn test_issue_1732_checkpoint_data_preserves_timestamps() {
 
     // Sleep so `now` would differ from the storage timestamp
     std::thread::sleep(Duration::from_millis(50));
-    let now_after_sleep = strata_durability::now_micros();
+    let now_after_sleep = strata_storage::durability::now_micros();
 
     let data = db.collect_checkpoint_data();
     let kv_entries = data.kv.expect("should have KV entries");
@@ -1226,7 +1226,7 @@ fn test_issue_1380_default_codec_is_identity() {
 
     // Verify MANIFEST stores "identity" codec
     let manifest_path = temp_dir.path().join("MANIFEST");
-    let m = strata_durability::ManifestManager::load(manifest_path).unwrap();
+    let m = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
     assert_eq!(m.manifest().codec_id, "identity");
 }
 

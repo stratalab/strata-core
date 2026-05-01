@@ -497,7 +497,7 @@ fn test_update_config_rejects_durability_string_changes() {
 #[test]
 #[serial(open_databases)]
 fn test_set_durability_mode_persists_and_updates_config_string() {
-    use strata_durability::wal::DurabilityMode;
+    use strata_storage::durability::wal::DurabilityMode;
 
     OPEN_DATABASES.lock().clear();
 

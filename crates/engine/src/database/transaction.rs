@@ -8,8 +8,8 @@ use std::sync::Arc;
 use strata_core::id::CommitVersion;
 use strata_core::types::BranchId;
 use strata_core::{EntityRef, Version};
-use strata_durability::wal::DurabilityMode;
-use strata_durability::{ManifestManager, WalOnlyCompactor};
+use strata_storage::durability::wal::DurabilityMode;
+use strata_storage::durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::{SegmentedStore, TransactionContext};
 
 use super::Database;
@@ -280,7 +280,7 @@ impl Database {
             let data_dir = self.data_dir.clone();
             let wal_dir = self.wal_dir.clone();
             let flush_flag = Arc::clone(&self.flush_in_flight);
-            let wal_codec = strata_durability::codec::clone_codec(self.wal_codec.as_ref());
+            let wal_codec = strata_storage::durability::codec::clone_codec(self.wal_codec.as_ref());
             let _ = self
                 .scheduler
                 .submit(crate::background::TaskPriority::High, move || {
@@ -491,7 +491,7 @@ impl Database {
         storage: &SegmentedStore,
         data_dir: &Path,
         wal_dir: &Path,
-        wal_codec: &dyn strata_durability::codec::StorageCodec,
+        wal_codec: &dyn strata_storage::durability::codec::StorageCodec,
     ) {
         // Compute global flush watermark: min of max_flushed_commit across all branches
         let branch_ids = storage.branch_ids();
@@ -545,7 +545,7 @@ impl Database {
         // Truncate WAL segments below watermark
         let manifest_arc = Arc::new(ParkingMutex::new(mgr));
         let compactor = WalOnlyCompactor::new(wal_dir.to_path_buf(), manifest_arc)
-            .with_codec(strata_durability::codec::clone_codec(wal_codec));
+            .with_codec(strata_storage::durability::codec::clone_codec(wal_codec));
         match compactor.compact() {
             Ok(info) => {
                 if info.wal_segments_removed > 0 {
