@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::value::Value;
+use strata_core::Value;
 use strata_storage::Key;
 
 // =============================================================================
@@ -1075,8 +1075,8 @@ pub trait RefreshHook: Send + Sync + 'static {
     fn post_merge_reload(
         &self,
         _db: &super::Database,
-        _target_branch: strata_core::types::BranchId,
-        _source_branch: Option<strata_core::types::BranchId>,
+        _target_branch: strata_core::BranchId,
+        _source_branch: Option<strata_core::BranchId>,
     ) -> StrataResult<()> {
         Ok(())
     }

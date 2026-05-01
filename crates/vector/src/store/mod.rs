@@ -37,9 +37,9 @@ use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::value::Value;
 use strata_core::BranchId;
 use strata_core::EntityRef;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::{Database, SearchSubsystem};
 use strata_storage::{Key, Namespace};
@@ -163,7 +163,7 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 /// ```text
 /// use strata_engine::{Database, OpenSpec};
 /// use strata_vector::{VectorConfig, VectorStore, VectorSubsystem};
-/// use strata_core::types::BranchId;
+/// use strata_core::BranchId;
 ///
 /// // Open via OpenSpec with VectorSubsystem so vector recovery
 /// // and drop-time freeze are installed. `Database::open` alone does
@@ -373,12 +373,12 @@ impl VectorStore {
                             id.branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &id.name,
-                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                             format!("{e}"),
                         )
                         .map(|entry| entry.to_error())
                         .unwrap_or_else(|| {
-                            strata_core::StrataError::serialization(format!(
+                            strata_engine::StrataError::serialization(format!(
                                 "corrupt vector record during reload: {e}"
                             ))
                         });
@@ -411,12 +411,12 @@ impl VectorStore {
                             id.branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &id.name,
-                            strata_core::PrimitiveDegradedReason::ConfigMismatch,
+                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
                             format!("{e}"),
                         )
                         .map(|entry| entry.to_error())
                         .unwrap_or_else(|| {
-                            strata_core::StrataError::serialization(format!(
+                            strata_engine::StrataError::serialization(format!(
                                 "failed to insert vector during reload: {e}"
                             ))
                         });
@@ -750,7 +750,7 @@ impl strata_engine::search::Searchable for VectorStore {
     fn search(
         &self,
         req: &strata_engine::SearchRequest,
-    ) -> strata_core::StrataResult<strata_engine::SearchResponse> {
+    ) -> strata_engine::StrataResult<strata_engine::SearchResponse> {
         use std::time::Instant;
         use strata_engine::search::{
             truncate_text, SearchHit, SearchMode, SearchResponse, SearchStats,

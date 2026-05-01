@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{
     validate_cas_set, validate_read_set, validate_transaction, CASOperation, ConflictType, Key,
     Namespace, SegmentedStore, Storage, TransactionContext, WriteMode,

@@ -23,7 +23,7 @@ struct ExportRow {
 
 fn collect_kv(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
@@ -41,7 +41,7 @@ fn collect_kv(
 
 fn collect_json(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     prefix: Option<&str>,
     limit: Option<u64>,
@@ -82,7 +82,7 @@ fn collect_json(
 
 fn collect_events(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     limit: Option<u64>,
 ) -> Result<Vec<ExportRow>> {
@@ -115,7 +115,7 @@ fn collect_events(
 
 fn collect_graph(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     graph: &str,
     prefix: Option<&str>,
@@ -499,7 +499,7 @@ pub(crate) fn db_export(
 #[allow(clippy::too_many_arguments)]
 fn arrow_export(
     p: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     primitive: ExportPrimitive,
     format: ExportFormat,

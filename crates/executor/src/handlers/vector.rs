@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use strata_core::primitives::VectorConfig;
-use strata_engine::TransactionContext;
+use strata_engine::{TransactionContext, VectorConfig};
 use strata_vector::ext::VectorStoreExt;
 
 use crate::bridge::{
@@ -18,7 +17,7 @@ use crate::{
 
 fn convert_vector_result<T>(
     result: std::result::Result<T, impl Into<strata_engine::StrataError>>,
-    _branch_id: strata_core::types::BranchId,
+    _branch_id: strata_core::BranchId,
 ) -> Result<T> {
     result.map_err(|error| Error::from(error.into()))
 }
@@ -562,7 +561,7 @@ pub(crate) fn sample(
 pub(crate) fn execute_in_txn(
     primitives: &Arc<Primitives>,
     ctx: &mut TransactionContext,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     command: crate::Command,
 ) -> Result<Output> {

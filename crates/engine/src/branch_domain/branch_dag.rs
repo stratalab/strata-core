@@ -1,12 +1,10 @@
 //! Branch DAG types and constants.
 //!
 //! These are the fundamental types for the branch lifecycle tracking system.
-//! The types live in core because they're used across multiple crates (engine,
-//! graph, executor) without creating circular dependencies.
 
-use crate::id::CommitVersion;
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use strata_core::CommitVersion;
 
 /// Reserved branch name for system-internal data.
 pub const SYSTEM_BRANCH: &str = "_system_";
@@ -37,6 +35,7 @@ impl DagBranchStatus {
     pub fn is_writable(&self) -> bool {
         matches!(self, DagBranchStatus::Active)
     }
+
     /// String representation of this status.
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -46,6 +45,7 @@ impl DagBranchStatus {
             DagBranchStatus::Deleted => "deleted",
         }
     }
+
     /// Parse a status string. Returns `None` for unknown values.
     pub fn parse_str(s: &str) -> Option<Self> {
         match s {
@@ -73,38 +73,47 @@ impl DagEventId {
     pub fn new_fork() -> Self {
         Self(format!("fork:{}", uuid::Uuid::new_v4()))
     }
+
     /// Create a new merge event ID.
     pub fn new_merge() -> Self {
         Self(format!("merge:{}", uuid::Uuid::new_v4()))
     }
+
     /// Create a new revert event ID.
     pub fn new_revert() -> Self {
         Self(format!("revert:{}", uuid::Uuid::new_v4()))
     }
+
     /// Create a new cherry-pick event ID.
     pub fn new_cherry_pick() -> Self {
         Self(format!("cherry_pick:{}", uuid::Uuid::new_v4()))
     }
+
     /// Create a `DagEventId` from an existing string (e.g. loaded from storage).
     pub fn from_string(s: String) -> Self {
         Self(s)
     }
+
     /// The string representation of this event ID.
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
     /// Returns `true` if this is a fork event.
     pub fn is_fork(&self) -> bool {
         self.0.starts_with("fork:")
     }
+
     /// Returns `true` if this is a merge event.
     pub fn is_merge(&self) -> bool {
         self.0.starts_with("merge:")
     }
+
     /// Returns `true` if this is a revert event.
     pub fn is_revert(&self) -> bool {
         self.0.starts_with("revert:")
     }
+
     /// Returns `true` if this is a cherry-pick event.
     pub fn is_cherry_pick(&self) -> bool {
         self.0.starts_with("cherry_pick:")

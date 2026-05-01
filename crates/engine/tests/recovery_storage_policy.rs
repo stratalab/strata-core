@@ -21,10 +21,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use serial_test::serial;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_core::StrataError;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
+use strata_engine::StrataError;
 use strata_engine::{
     Database, DegradationClass, KVStore, RecoveryHealth, SearchSubsystem, StrataConfig,
 };

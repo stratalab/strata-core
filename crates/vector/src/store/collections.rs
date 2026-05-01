@@ -7,7 +7,7 @@ impl VectorStore {
         &self,
         branch_id: BranchId,
         name: &str,
-        reason: strata_core::PrimitiveDegradedReason,
+        reason: strata_engine::PrimitiveDegradedReason,
         detail: impl Into<String>,
     ) -> VectorError {
         let detail = detail.into();
@@ -28,7 +28,7 @@ impl VectorStore {
                 name,
             )
         })
-        .unwrap_or_else(|| strata_core::StrataError::serialization(detail));
+        .unwrap_or_else(|| strata_engine::StrataError::serialization(detail));
         VectorError::Degraded(Box::new(err))
     }
 
@@ -348,7 +348,7 @@ impl VectorStore {
                     return Err(self.degrade_collection_read(
                         branch_id,
                         &name,
-                        strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                        strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
                         "Expected Bytes value for collection record",
                     ));
                 }
@@ -357,7 +357,7 @@ impl VectorStore {
                 self.degrade_collection_read(
                     branch_id,
                     &name,
-                    strata_core::PrimitiveDegradedReason::ConfigDecodeFailure,
+                    strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
                     format!("Failed to decode collection record during list: {e}"),
                 )
             })?;
@@ -365,7 +365,7 @@ impl VectorStore {
                 self.degrade_collection_read(
                     branch_id,
                     &name,
-                    strata_core::PrimitiveDegradedReason::ConfigShapeConversion,
+                    strata_engine::PrimitiveDegradedReason::ConfigShapeConversion,
                     format!("Failed to convert collection config during list: {e}"),
                 )
             })?;

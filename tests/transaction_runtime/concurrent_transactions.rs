@@ -9,8 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::thread;
 use strata_core::id::{CommitVersion, TxnId};
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{
     validate_transaction, Key, Namespace, SegmentedStore, Storage, TransactionContext,
     TransactionManager, WriteMode,

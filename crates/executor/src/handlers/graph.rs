@@ -434,7 +434,7 @@ fn prepare_space_write(primitives: &Arc<Primitives>, branch: &BranchId, space: &
 pub(crate) fn execute_in_txn(
     primitives: &Arc<Primitives>,
     ctx: &mut TransactionContext,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     command: crate::Command,
 ) -> Result<Output> {

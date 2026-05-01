@@ -6,8 +6,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
-use strata_core::types::BranchId;
-use strata_core::{StrataError, StrataResult};
+use strata_core::BranchId;
+use strata_engine::{StrataError, StrataResult};
 
 use super::adjacency::AdjacencyIndex;
 use super::types::*;

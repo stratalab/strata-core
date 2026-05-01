@@ -60,7 +60,10 @@ pub use database::{
     StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus,
     SystemMetrics, WalWriterHealth,
 };
-pub use error::{StrataError, StrataResult};
+pub use error::{
+    ConstraintReason, DetailValue, ErrorCode, ErrorDetails, PrimitiveDegradedReason, StrataError,
+    StrataResult,
+};
 pub use instrumentation::PerfTrace;
 pub use limits::{LimitError, Limits};
 pub use recovery::Subsystem;

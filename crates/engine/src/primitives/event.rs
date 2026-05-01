@@ -43,8 +43,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use strata_core::contract::{Timestamp, Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{Key, Namespace, TransactionContext};
 
 // Re-export event semantic types from the engine-owned surface.

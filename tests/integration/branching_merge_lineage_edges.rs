@@ -22,7 +22,7 @@
 #![cfg(not(miri))]
 
 use crate::common::*;
-use strata_core::value::Value;
+use strata_core::Value;
 use strata_engine::{MergeOptions, MergeStrategy};
 
 fn resolve(name: &str) -> BranchId {

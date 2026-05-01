@@ -38,7 +38,7 @@ use self::wal_log::BranchlogPayload as FormatBranchlogPayload;
 use self::writer::BranchBundleWriter as FormatBranchBundleWriter;
 pub use error::{BranchBundleError, BranchBundleResult};
 pub use reader::{BranchBundleReader, BundleContents as ReadBundleContents};
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_storage::{Key, TypeTag};
 use tracing::info;
 pub use types::{
@@ -214,7 +214,7 @@ fn scan_branch_data(
 
     // For each key, get the full version history and group entries by version.
     // BTreeMap keeps versions sorted ascending for deterministic replay order.
-    let mut version_groups: BTreeMap<u64, Vec<(Key, strata_core::value::Value)>> = BTreeMap::new();
+    let mut version_groups: BTreeMap<u64, Vec<(Key, strata_core::Value)>> = BTreeMap::new();
 
     for key in &all_keys {
         let history = db.get_history(key, None, None)?;
@@ -469,11 +469,11 @@ mod tests {
         db.transaction(core_branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, b"key1".to_vec()),
-                strata_core::value::Value::String("value1".to_string()),
+                strata_core::Value::String("value1".to_string()),
             )?;
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, b"key2".to_vec()),
-                strata_core::value::Value::Int(42),
+                strata_core::Value::Int(42),
             )?;
             Ok(())
         })
@@ -526,7 +526,7 @@ mod tests {
         db.transaction(core_branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, b"key1".to_vec()),
-                strata_core::value::Value::String("hello".to_string()),
+                strata_core::Value::String("hello".to_string()),
             )?;
             Ok(())
         })
@@ -703,11 +703,11 @@ mod tests {
         db.transaction(core_branch_id, |txn| {
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, b"k1".to_vec()),
-                strata_core::value::Value::String("v1".to_string()),
+                strata_core::Value::String("v1".to_string()),
             )?;
             txn.put(
                 Key::new(ns.clone(), TypeTag::KV, b"k2".to_vec()),
-                strata_core::value::Value::Int(42),
+                strata_core::Value::Int(42),
             )?;
             Ok(())
         })

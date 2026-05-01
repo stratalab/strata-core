@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
 use serde_json::Value as SerdeValue;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_core::{EntityRef, StrataError, StrataResult};
+use strata_core::BranchId;
+use strata_core::EntityRef;
+use strata_core::Value;
 pub use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 use strata_engine::{
     Database, EventLog, JsonPath, JsonStore, JsonValue, KVStore, SpaceIndex, TaskPriority,
     VectorConfig,
 };
+use strata_engine::{StrataError, StrataResult};
 use strata_vector::VectorStore;
 
 use super::{resolve_api_key_for_model, EmbedModelState};

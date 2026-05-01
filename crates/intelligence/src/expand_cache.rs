@@ -48,11 +48,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_core::StrataResult;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::system_space::system_kv_key;
 use strata_engine::Database;
+use strata_engine::StrataResult;
 use strata_search::expand::{ExpandedQuery, QueryType};
 
 const KEY_PREFIX: &str = "expand_cache:";

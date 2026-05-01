@@ -44,7 +44,7 @@ fn cross_primitive_rollback_leaves_no_trace() {
         txn.event_append("test_event", event_payload(Value::Int(2)))?;
 
         // Force abort
-        Err(strata_core::StrataError::invalid_input("forced abort"))
+        Err(strata_engine::StrataError::invalid_input("forced abort"))
     });
 
     assert!(result.is_err());
@@ -366,7 +366,7 @@ fn transaction_error_recovery() {
     for _ in 0..5 {
         let _result: Result<(), _> = test_db.db.transaction(branch_id, |txn| {
             txn.kv_put("key", Value::Int(999))?;
-            Err(strata_core::StrataError::invalid_input(
+            Err(strata_engine::StrataError::invalid_input(
                 "intentional failure",
             ))
         });

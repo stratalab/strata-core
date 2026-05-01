@@ -20,8 +20,8 @@
 use crate::common::branching::archive_branch_for_test;
 use crate::common::*;
 use std::sync::Arc;
-use strata_core::value::Value;
 use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::{BranchLifecycleStatus, ReclaimStatus, RetentionBlocker};
 use strata_storage::{Key, Namespace};
 

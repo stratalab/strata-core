@@ -4,7 +4,8 @@
 
 use crate::common::*;
 use crate::common::search::{substrate_search, verify_substrate_ranks_sequential, verify_substrate_scores_decreasing};
-use strata_core::search_types::{PrimitiveType, SearchRequest};
+use strata_core::PrimitiveType;
+use strata_engine::SearchRequest;
 use std::collections::HashSet;
 
 // ============================================================================

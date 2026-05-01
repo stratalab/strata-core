@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 use crate::StrataResult;
 use parking_lot::RwLock;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 use crate::database::Database;
 

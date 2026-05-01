@@ -15,7 +15,7 @@ use crate::common::*;
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestCaseError};
 use std::sync::Arc;
-use strata_core::value::Value;
+use strata_core::Value;
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)

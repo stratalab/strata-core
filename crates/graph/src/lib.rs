@@ -36,8 +36,9 @@ pub use strata_engine::{
 use std::sync::Arc;
 
 use adjacency::AdjacencyIndex;
-use strata_core::{BranchId, StrataError, StrataResult, Value};
+use strata_core::{BranchId, Value};
 use strata_engine::Database;
+use strata_engine::{StrataError, StrataResult};
 use strata_storage::Key;
 use types::*;
 

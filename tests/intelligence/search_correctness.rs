@@ -3,11 +3,9 @@
 //! Validates search determinism, exhaustiveness, and filter behavior.
 
 use crate::common::*;
-use strata_core::search_types::{PrimitiveType, SearchRequest};
-use strata_core::types::BranchId;
-use strata_core::value::Value;
-use strata_engine::KVStore;
 use crate::common::search::{substrate_search, verify_substrate_scores_decreasing};
+use strata_core::{BranchId, PrimitiveType, Value};
+use strata_engine::{KVStore, SearchRequest};
 
 // ============================================================================
 // Determinism Tests

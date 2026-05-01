@@ -59,7 +59,7 @@ use std::sync::Arc;
 
 use crate::BranchRef;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 
 use crate::branch_ops::{CherryPickInfo, MergeInfo, MergeStrategy, RevertInfo};
 

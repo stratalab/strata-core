@@ -1,11 +1,11 @@
 //! Metadata filtering for vector search
 //!
-//! Re-exports canonical types from strata-core.
+//! Re-exports canonical filter types from the engine-owned surface.
 //! Supports only equality filtering on top-level scalar fields.
 //! Complex filters (ranges, nested paths, arrays) are deferred to future versions.
 
-// Re-export canonical filter types from core
-pub use strata_core::primitives::{FilterCondition, FilterOp, JsonScalar, MetadataFilter};
+// Re-export canonical filter types from the engine-owned surface.
+pub use strata_engine::{FilterCondition, FilterOp, JsonScalar, MetadataFilter};
 
 #[cfg(test)]
 mod tests {

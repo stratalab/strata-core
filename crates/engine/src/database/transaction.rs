@@ -6,7 +6,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_core::{EntityRef, Version};
 use strata_storage::durability::wal::DurabilityMode;
 use strata_storage::durability::{ManifestManager, WalOnlyCompactor};

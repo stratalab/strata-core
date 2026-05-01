@@ -4,16 +4,27 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const LEGACY_CORE_COMPAT_ALIAS: &str = concat!("strata_core_legacy_", "compat");
+const LEGACY_CORE_PACKAGE: &str = concat!("strata-core-", "legacy");
+const LEGACY_CORE_PACKAGE_DECL: &str = concat!("package = \"", "strata-core-", "legacy", "\"");
+
 const FORBIDDEN_DIRECT_PATTERNS: &[&str] = &[
     "strata_core::branch::",
     "strata_core::branch_dag::",
     "strata_core::branch_types::",
     "strata_core::limits::",
+    "strata_core::StrataError",
+    "strata_core::StrataResult",
+    "strata_core::PrimitiveDegradedReason",
+    "strata_core::json::",
     "strata_core::primitives::json::",
     "strata_core::primitives::vector::",
     "strata_core::primitives::event::",
     "strata_core::extractable_text",
 ];
+
+const FORBIDDEN_FOUNDATION_COMPAT_PATTERNS: &[&str] =
+    &["strata_core::types::BranchId", "strata_core::value::Value"];
 
 const FORBIDDEN_ROOT_BRANCH_SYMBOLS: &[&str] = &[
     "BranchRef",
@@ -28,6 +39,8 @@ const FORBIDDEN_ROOT_BRANCH_SYMBOLS: &[&str] = &[
 
 const FORBIDDEN_ROOT_LIMIT_SYMBOLS: &[&str] = &["Limits", "LimitError"];
 const FORBIDDEN_ROOT_EVENT_SYMBOLS: &[&str] = &["Event", "ChainVerification"];
+const FORBIDDEN_ROOT_ERROR_SYMBOLS: &[&str] =
+    &["StrataError", "StrataResult", "PrimitiveDegradedReason"];
 const FORBIDDEN_ROOT_RUNTIME_HELPERS: &[&str] = &["extractable_text"];
 const FORBIDDEN_ROOT_JSON_SYMBOLS: &[&str] = &[
     "JsonPath",
@@ -69,6 +82,9 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
         let contents = fs::read_to_string(&file).expect("read source file");
         for pattern in FORBIDDEN_DIRECT_PATTERNS {
             for (line_no, line) in contents.lines().enumerate() {
+                if is_comment_line(line) {
+                    continue;
+                }
                 if line.contains(pattern) {
                     violations.push(format!(
                         "{}:{}: contains `{pattern}`",
@@ -103,6 +119,14 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
                 line,
                 FORBIDDEN_ROOT_EVENT_SYMBOLS,
                 "event",
+            );
+            check_line_for_root_symbols(
+                &mut violations,
+                &file,
+                line_no + 1,
+                line,
+                FORBIDDEN_ROOT_ERROR_SYMBOLS,
+                "parent error",
             );
             check_line_for_root_symbols(
                 &mut violations,
@@ -160,6 +184,14 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
                 &file,
                 start_line,
                 &block,
+                FORBIDDEN_ROOT_ERROR_SYMBOLS,
+                "parent error",
+            );
+            check_block_for_root_symbols(
+                &mut violations,
+                &file,
+                start_line,
+                &block,
                 FORBIDDEN_ROOT_RUNTIME_HELPERS,
                 "runtime helper",
             );
@@ -202,6 +234,12 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
             ),
             (
                 "strata_core",
+                FORBIDDEN_ROOT_ERROR_SYMBOLS,
+                &[][..],
+                "parent error",
+            ),
+            (
+                "strata_core",
                 FORBIDDEN_ROOT_RUNTIME_HELPERS,
                 &["extractable_text"][..],
                 "runtime helper",
@@ -209,7 +247,7 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
             (
                 "strata_core",
                 FORBIDDEN_ROOT_JSON_SYMBOLS,
-                &["primitives::json::"][..],
+                &["json::", "primitives::json::"][..],
                 "json",
             ),
             (
@@ -217,6 +255,12 @@ fn engine_facing_types_are_not_imported_from_strata_core() {
                 FORBIDDEN_ROOT_VECTOR_SYMBOLS,
                 &["primitives::vector::"][..],
                 "vector",
+            ),
+            (
+                "strata_core::json",
+                FORBIDDEN_ROOT_JSON_SYMBOLS,
+                &["primitives::json::"][..],
+                "json",
             ),
             (
                 "strata_core::primitives::json",
@@ -274,11 +318,7 @@ fn direct_core_primitive_imports_remain_limited_to_designated_modules() {
         }
 
         let rel = file.to_string_lossy();
-        let allowed = rel.contains("/crates/core-legacy/")
-            || rel.contains("/crates/concurrency/")
-            || rel.ends_with("/crates/engine/src/semantics/json.rs")
-            || rel.ends_with("/crates/engine/src/semantics/vector.rs")
-            || rel.ends_with("/tests/engine_surface_imports.rs");
+        let allowed = rel.ends_with("/tests/engine_surface_imports.rs");
 
         if !allowed {
             unexpected.push(rel.to_string());
@@ -289,6 +329,163 @@ fn direct_core_primitive_imports_remain_limited_to_designated_modules() {
         unexpected.is_empty(),
         "unexpected direct core primitive imports remain:\n{}",
         unexpected.join("\n")
+    );
+}
+
+#[test]
+fn legacy_core_manifest_edges_are_fully_removed() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut manifests = Vec::new();
+    manifests.push(repo_root.join("Cargo.toml"));
+    collect_manifest_files(&repo_root.join("crates"), &mut manifests);
+
+    let mut violations = Vec::new();
+    for manifest in manifests {
+        if should_skip_manifest(&manifest) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&manifest).expect("read manifest");
+        violations.extend(find_legacy_core_manifest_violations(&manifest, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "legacy core manifest edges must be fully removed:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn upper_runtime_foundation_imports_use_modern_core_root_paths() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut rust_files = Vec::new();
+    collect_rust_files(&repo_root.join("crates"), &mut rust_files);
+    collect_rust_files(&repo_root.join("tests"), &mut rust_files);
+
+    let mut violations = Vec::new();
+    for file in rust_files {
+        if should_skip_foundation_cutover(&file) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read source file");
+        for pattern in FORBIDDEN_FOUNDATION_COMPAT_PATTERNS {
+            for (line_no, line) in contents.lines().enumerate() {
+                if is_comment_line(line) {
+                    continue;
+                }
+                if line.contains(pattern) {
+                    violations.push(format!(
+                        "{}:{}: contains legacy foundational import path `{pattern}`",
+                        file.display(),
+                        line_no + 1
+                    ));
+                }
+            }
+        }
+
+        violations.extend(scan_use_blocks_for_symbols(
+            &contents,
+            &file,
+            "strata_core::types::{",
+            &["BranchId"],
+            "legacy foundational import path",
+        ));
+        violations.extend(scan_use_blocks_for_symbols(
+            &contents,
+            &file,
+            "strata_core::value::{",
+            &["Value"],
+            "legacy foundational import path",
+        ));
+        violations.extend(scan_alias_uses(
+            &contents,
+            &file,
+            "strata_core::types",
+            &["BranchId"],
+            &[][..],
+            "legacy foundational import path",
+        ));
+        violations.extend(scan_alias_uses(
+            &contents,
+            &file,
+            "strata_core::value",
+            &["Value"],
+            &[][..],
+            "legacy foundational import path",
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "upper-runtime code must use modern core root imports for foundational types:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_legacy_core_compat_use_is_fully_removed() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut rust_files = Vec::new();
+    collect_rust_files(&repo_root.join("crates/engine"), &mut rust_files);
+
+    let mut violations = Vec::new();
+    for file in rust_files {
+        let contents = fs::read_to_string(&file).expect("read source file");
+        for (line_no, line) in contents.lines().enumerate() {
+            if is_comment_line(line) {
+                continue;
+            }
+            if line.contains(LEGACY_CORE_COMPAT_ALIAS) {
+                violations.push(format!(
+                    "{}:{}: engine source references deleted legacy compat alias after ST7",
+                    file.display(),
+                    line_no + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "engine source must not retain legacy-compat seams after ST6E:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn legacy_core_compat_use_is_fully_removed_outside_core_legacy_shell() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut rust_files = Vec::new();
+    collect_rust_files(&repo_root.join("crates"), &mut rust_files);
+    collect_rust_files(&repo_root.join("tests"), &mut rust_files);
+
+    let mut violations = Vec::new();
+    for file in rust_files {
+        if should_skip_legacy_core_compat_quarantine(&file) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read source file");
+        for (line_no, line) in contents.lines().enumerate() {
+            if is_comment_line(line) {
+                continue;
+            }
+            if line.contains(LEGACY_CORE_COMPAT_ALIAS) {
+                violations.push(format!(
+                    "{}:{}: unexpected legacy compat alias reference after core-legacy deletion",
+                    file.display(),
+                    line_no + 1
+                ));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "legacy compat references must be fully removed after core-legacy deletion:\n{}",
+        violations.join("\n")
     );
 }
 
@@ -308,6 +505,22 @@ fn collect_rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+fn collect_manifest_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    if !dir.exists() {
+        return;
+    }
+
+    for entry in fs::read_dir(dir).expect("read directory") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_manifest_files(&path, out);
+        } else if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            out.push(path);
+        }
+    }
+}
+
 fn check_line_for_root_symbols(
     violations: &mut Vec<String>,
     file: &Path,
@@ -316,6 +529,9 @@ fn check_line_for_root_symbols(
     symbols: &[&str],
     family: &str,
 ) {
+    if is_comment_line(line) {
+        return;
+    }
     for symbol in symbols {
         if line.contains(&format!("strata_core::{symbol}")) {
             violations.push(format!(
@@ -394,17 +610,78 @@ fn brace_delta(line: &str) -> isize {
     opens - closes
 }
 
+fn is_comment_line(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("//")
+        || trimmed.starts_with("///")
+        || trimmed.starts_with("//!")
+        || trimmed.starts_with("/*")
+        || trimmed.starts_with('*')
+}
+
 fn should_skip(path: &Path) -> bool {
     let rel = path.to_string_lossy();
     rel.contains("/target/")
-        || rel.contains("/crates/core-legacy/")
-        || rel.contains("/crates/concurrency/")
-        || rel.ends_with("/crates/engine/src/branch_domain.rs")
-        || rel.ends_with("/crates/engine/src/limits.rs")
-        || rel.contains("/crates/engine/src/semantics/")
         || rel.ends_with("/crates/engine/tests/surface_regression.rs")
-        || rel.ends_with("/tests/event_runtime_surface.rs")
         || rel.ends_with("/tests/engine_surface_imports.rs")
+}
+
+fn should_skip_foundation_cutover(path: &Path) -> bool {
+    let rel = path.to_string_lossy();
+    rel.contains("/target/")
+        || rel.contains("/crates/core/")
+        || rel.contains("/crates/storage/")
+        || rel.ends_with("/tests/engine_surface_imports.rs")
+}
+
+fn should_skip_manifest(path: &Path) -> bool {
+    let rel = path.to_string_lossy();
+    rel.contains("/target/")
+}
+
+fn should_skip_legacy_core_compat_quarantine(path: &Path) -> bool {
+    let rel = path.to_string_lossy();
+    rel.contains("/target/") || rel.ends_with("/tests/engine_surface_imports.rs")
+}
+
+fn find_legacy_core_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
+    let rel = path.to_string_lossy();
+    let mut violations = Vec::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if !(line.contains(LEGACY_CORE_PACKAGE) || line.contains(LEGACY_CORE_PACKAGE_DECL)) {
+            continue;
+        }
+        violations.push(format!(
+            "{}:{}: manifest references deleted legacy-core package",
+            rel,
+            line_no + 1
+        ));
+    }
+
+    violations
+}
+
+fn scan_use_blocks_for_symbols(
+    contents: &str,
+    file: &Path,
+    marker: &str,
+    symbols: &[&str],
+    family: &str,
+) -> Vec<String> {
+    let mut violations = Vec::new();
+    for (start_line, block) in collect_multiline_use_blocks(contents, marker) {
+        for symbol in symbols {
+            if block.contains(symbol) {
+                violations.push(format!(
+                    "{}:{}: contains {family} symbol `{symbol}` in `{marker}` use block",
+                    file.display(),
+                    start_line
+                ));
+            }
+        }
+    }
+    violations
 }
 
 fn scan_alias_uses(

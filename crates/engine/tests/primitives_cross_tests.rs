@@ -4,8 +4,8 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::Database;
 use strata_engine::SearchSubsystem;
@@ -75,7 +75,7 @@ fn test_cross_primitive_rollback() {
     let (db, _temp, branch_id) = setup();
 
     // Attempt transaction that fails partway through
-    let result: Result<(), strata_core::StrataError> = db.transaction(branch_id, |txn| {
+    let result: Result<(), strata_engine::StrataError> = db.transaction(branch_id, |txn| {
         // KV put (should succeed alone)
         txn.kv_put("key_to_rollback", Value::Int(42))?;
 
@@ -83,7 +83,7 @@ fn test_cross_primitive_rollback() {
         txn.event_append("event_to_rollback", empty_payload())?;
 
         // Force a failure
-        Err(strata_core::StrataError::invalid_input("forced failure"))
+        Err(strata_engine::StrataError::invalid_input("forced failure"))
     });
 
     // Transaction should have failed

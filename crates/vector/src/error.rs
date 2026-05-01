@@ -1,6 +1,7 @@
 //! Error types for the Vector primitive
 
-use strata_core::{BranchId, EntityRef, StrataError};
+use strata_core::{BranchId, EntityRef};
+use strata_engine::StrataError;
 use thiserror::Error;
 
 /// Errors specific to the Vector primitive

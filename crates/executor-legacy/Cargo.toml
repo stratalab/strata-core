@@ -23,7 +23,7 @@ google = ["embed"]
 arrow = []
 
 [dependencies]
-strata-core = { package = "strata-core-legacy", path = "../core-legacy" }
+strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
 strata-vector = { path = "../vector" }

@@ -172,7 +172,7 @@ fn build_context_block(hits: &[SearchHit], max_answer_tokens: usize) -> Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_engine::search::SearchHit;
 
     fn kv_hit(key: &str, space: &str, snippet: &str, score: f32) -> SearchHit {

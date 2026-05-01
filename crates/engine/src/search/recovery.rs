@@ -27,7 +27,7 @@ use crate::StrataResult;
 use crate::SYSTEM_BRANCH;
 use std::collections::HashSet;
 use strata_core::id::CommitVersion;
-use strata_core::value::Value;
+use strata_core::Value;
 use strata_storage::{Key, TypeTag};
 use tracing::info;
 
@@ -111,7 +111,7 @@ struct GraphNodeData {
 
 fn visible_entries_by_type(
     db: &Database,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     type_tag: TypeTag,
 ) -> Vec<(Key, strata_core::VersionedValue)> {
     let snapshot_version = CommitVersion(db.storage().version());
@@ -131,7 +131,7 @@ fn visible_entries_by_type(
 
 fn visible_search_documents_for_branch(
     db: &Database,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
 ) -> Vec<(crate::search::EntityRef, String)> {
     let mut docs = Vec::new();
 
@@ -170,7 +170,7 @@ fn visible_search_documents_for_branch(
 
 fn is_reconciled_search_entity_ref(
     entity_ref: &crate::search::EntityRef,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
 ) -> bool {
     match entity_ref {
         crate::search::EntityRef::Kv {
@@ -192,7 +192,7 @@ fn is_reconciled_search_entity_ref(
 fn rebuild_search_entries_for_branch(
     db: &Database,
     index: &InvertedIndex,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
 ) -> u64 {
     let current_docs = visible_search_documents_for_branch(db, branch_id);
     for (entity_ref, text) in &current_docs {
@@ -204,7 +204,7 @@ fn rebuild_search_entries_for_branch(
 fn reconcile_search_entries_for_branch(
     db: &Database,
     index: &InvertedIndex,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
 ) -> u64 {
     let current_docs = visible_search_documents_for_branch(db, branch_id);
     let current_refs: HashSet<_> = current_docs
@@ -583,7 +583,7 @@ impl crate::recovery::Subsystem for SearchSubsystem {
     fn cleanup_deleted_branch(
         &self,
         db: &std::sync::Arc<crate::database::Database>,
-        branch_id: &strata_core::types::BranchId,
+        branch_id: &strata_core::BranchId,
         branch_name: &str,
     ) -> StrataResult<()> {
         let Ok(index) = db.extension::<InvertedIndex>() else {

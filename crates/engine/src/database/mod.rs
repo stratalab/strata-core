@@ -88,7 +88,7 @@ use std::sync::atomic::{AtomicU64, AtomicU8};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 use strata_core::VersionedValue;
 use strata_storage::durability::__internal::{BackgroundSyncError, WalWriterEngineExt};
 use strata_storage::durability::wal::{DurabilityMode, WalWriter};
@@ -508,7 +508,7 @@ fn scan_dir_size(dir: &Path) -> u64 {
 ///
 /// ```text
 /// use strata_engine::Database;
-/// use strata_core::types::BranchId;
+/// use strata_core::BranchId;
 ///
 /// let db = Database::open("/path/to/data")?;
 /// let branch_id = BranchId::new();
@@ -1073,7 +1073,7 @@ impl Database {
     pub fn active_branch_ref(&self, branch_id: BranchId) -> Option<crate::BranchRef> {
         use crate::branch_ops::branch_control_store::active_ptr_key;
         use strata_core::id::CommitVersion;
-        use strata_core::value::Value;
+        use strata_core::Value;
 
         let ap_key = active_ptr_key(branch_id);
         let versioned = self
@@ -1256,7 +1256,7 @@ impl Database {
     ///
     /// Skips Version enum and VersionedValue construction. Used by the
     /// KVStore::get() hot path where version metadata is not needed.
-    pub fn get_value_direct(&self, key: &Key) -> StrataResult<Option<strata_core::value::Value>> {
+    pub fn get_value_direct(&self, key: &Key) -> StrataResult<Option<strata_core::Value>> {
         self.storage.get_value_direct(key).map_err(Into::into)
     }
 

@@ -5,8 +5,9 @@
 
 use std::collections::HashMap;
 
-use strata_core::types::BranchId;
-use strata_core::{StrataError, StrataResult, Value};
+use strata_core::BranchId;
+use strata_core::Value;
+use strata_engine::{StrataError, StrataResult};
 
 use super::keys;
 use super::types::*;

@@ -509,7 +509,7 @@ fn dispatch_in_txn(
     executor: &Executor,
     txn: &mut Transaction,
     namespace: Arc<Namespace>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     command: Command,
     effects: &mut TxnSideEffects,
@@ -611,7 +611,7 @@ impl TxnSideEffects {
 
 fn apply_txn_side_effects(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     effects: TxnSideEffects,
 ) -> Result<()> {
     let index = primitives
@@ -635,7 +635,7 @@ fn apply_txn_side_effects(
 fn apply_kv_post_commit(
     primitives: &Arc<Primitives>,
     index: &strata_engine::search::InvertedIndex,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
 ) -> Result<()> {
@@ -694,7 +694,7 @@ fn apply_kv_post_commit(
 fn apply_json_post_commit(
     primitives: &Arc<Primitives>,
     index: &strata_engine::search::InvertedIndex,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
 ) -> Result<()> {
@@ -759,7 +759,7 @@ fn apply_json_post_commit(
 
 fn read_committed_json_root(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
 ) -> Result<Option<strata_engine::JsonValue>> {
@@ -772,7 +772,7 @@ fn read_committed_json_root(
 fn apply_event_post_commit(
     primitives: &Arc<Primitives>,
     index: &strata_engine::search::InvertedIndex,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     sequence: u64,
 ) -> Result<()> {

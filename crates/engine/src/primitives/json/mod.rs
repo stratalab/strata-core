@@ -43,8 +43,8 @@ use std::sync::Arc;
 use std::time::SystemTime;
 use strata_core::contract::{Version, Versioned};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_core::VersionedHistory;
 use strata_storage::{Key, Namespace, TransactionContext};
 
@@ -1460,7 +1460,7 @@ impl JsonStore {
                             *branch_id,
                             strata_core::contract::PrimitiveType::Json,
                             space,
-                            strata_core::PrimitiveDegradedReason::IndexMetadataCorrupt,
+                            crate::PrimitiveDegradedReason::IndexMetadataCorrupt,
                             format!("{e}"),
                         );
                         return Err(entry.map(|e| e.to_error()).unwrap_or_else(|| {

@@ -273,10 +273,8 @@ fn parse_graph_node_key(key: &Key) -> Result<Option<(String, String)>, String> {
     Ok(Some((parts[0].to_string(), parts[2].to_string())))
 }
 
-fn decode_graph_node_data(
-    value: &strata_core::value::Value,
-) -> Result<crate::types::NodeData, String> {
-    use strata_core::value::Value;
+fn decode_graph_node_data(value: &strata_core::Value) -> Result<crate::types::NodeData, String> {
+    use strata_core::Value;
 
     let Value::String(json) = value else {
         return Err("graph node payload stored as non-string value".to_string());
@@ -359,7 +357,7 @@ impl RefreshHook for GraphRefreshHook {
 
     fn apply_refresh(
         &self,
-        puts: &[(Key, strata_core::value::Value)],
+        puts: &[(Key, strata_core::Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
     ) -> Result<Box<dyn strata_engine::PreparedRefresh>, RefreshHookError> {
         let Some(db) = self.db.upgrade() else {
@@ -404,7 +402,7 @@ impl RefreshHook for GraphRefreshHook {
         Ok(Box::new(PendingGraphRefresh { graph_store, ops }))
     }
 
-    fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+    fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 }
@@ -452,7 +450,7 @@ mod tests {
 
         fn apply_refresh(
             &self,
-            puts: &[(Key, strata_core::value::Value)],
+            puts: &[(Key, strata_core::Value)],
             _pre_read_deletes: &[(Key, Vec<u8>)],
         ) -> Result<Box<dyn PreparedRefresh>, RefreshHookError> {
             if !puts.is_empty() && self.fail_once.swap(false, Ordering::SeqCst) {
@@ -464,7 +462,7 @@ mod tests {
             Ok(Box::new(NoopPreparedRefresh))
         }
 
-        fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+        fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
             Ok(())
         }
     }
@@ -474,11 +472,11 @@ mod tests {
             "graph-test-fail-once"
         }
 
-        fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
             Ok(())
         }
 
-        fn initialize(&self, db: &Arc<Database>) -> strata_core::StrataResult<()> {
+        fn initialize(&self, db: &Arc<Database>) -> strata_engine::StrataResult<()> {
             let hooks = db.extension::<RefreshHooks>()?;
             hooks.register(Arc::new(FailOnceRefreshHook {
                 fail_once: self.fail_once.clone(),

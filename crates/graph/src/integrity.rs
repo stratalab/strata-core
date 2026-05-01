@@ -3,8 +3,8 @@
 //! When an entity (KV key, JSON doc) is deleted, this module handles cleanup
 //! of any graph nodes bound to it via entity_ref.
 
-use strata_core::types::BranchId;
-use strata_core::StrataResult;
+use strata_core::BranchId;
+use strata_engine::StrataResult;
 
 use super::types::{CascadeError, CascadePolicy, CascadeResult};
 use super::GraphStore;

@@ -7,8 +7,8 @@
 use serial_test::serial;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_engine::database::OpenSpec;
 use strata_engine::search::Searchable;
 use strata_engine::{
@@ -94,7 +94,7 @@ impl RefreshHook for FailOnceRefreshHook {
         Ok(Box::new(NoopPreparedRefresh))
     }
 
-    fn freeze_to_disk(&self, _db: &Database) -> strata_core::StrataResult<()> {
+    fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 }
@@ -104,11 +104,11 @@ impl Subsystem for FailOnceRefreshSubsystem {
         "fail-once-refresh"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 
-    fn initialize(&self, db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn initialize(&self, db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         let hooks = db.extension::<RefreshHooks>()?;
         hooks.register(Arc::new(FailOnceRefreshHook {
             fail_once: self.fail_once.clone(),
@@ -1983,14 +1983,14 @@ impl Subsystem for FollowerFreezeCountingSubsystem {
         "follower-freeze-counter"
     }
 
-    fn recover(&self, _db: &Arc<Database>) -> strata_core::StrataResult<()> {
+    fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
         Ok(())
     }
 
-    fn freeze(&self, _db: &Database) -> strata_core::StrataResult<()> {
+    fn freeze(&self, _db: &Database) -> strata_engine::StrataResult<()> {
         self.freeze_calls.fetch_add(1, Ordering::SeqCst);
         if self.fail_first.swap(false, Ordering::SeqCst) {
-            Err(strata_core::StrataError::internal(
+            Err(strata_engine::StrataError::internal(
                 "injected follower freeze failure",
             ))
         } else {

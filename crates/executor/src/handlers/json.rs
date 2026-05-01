@@ -426,7 +426,7 @@ pub(crate) fn execute_in_txn(
             let path = convert_result(parse_path(&path))?;
             let result = txn.json_get(&key).map_err(crate::Error::from)?;
             Ok(Output::MaybeVersioned(match result {
-                Some(value) => match strata_core::get_at_path(&value.value, &path) {
+                Some(value) => match strata_engine::get_at_path(&value.value, &path) {
                     Some(selected) => Some(VersionedValue {
                         value: convert_result(json_to_value(selected.clone()))?,
                         version: extract_version(&value.version),
@@ -714,7 +714,7 @@ pub(crate) fn list(
 
 fn embed_doc_value(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
     json_value: strata_engine::JsonValue,
@@ -752,7 +752,7 @@ fn embed_doc_value(
 
 fn embed_full_doc(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     key: &str,
 ) {

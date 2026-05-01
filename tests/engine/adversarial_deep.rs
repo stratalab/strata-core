@@ -275,7 +275,7 @@ fn atomicity_on_operation_failure() {
         // This will fail - stale version
         // Note: We can't easily do CAS in transaction context, so we'll simulate
         // by just returning an error
-        Err(strata_core::StrataError::invalid_input(
+        Err(strata_engine::StrataError::invalid_input(
             "simulated CAS failure",
         ))
     });
@@ -417,7 +417,7 @@ fn rapid_transaction_cycling() {
             // Abort
             let _: Result<(), _> = test_db.db.transaction(branch_id, |txn| {
                 txn.kv_put(&format!("key_{}", i), Value::Int(i))?;
-                Err(strata_core::StrataError::invalid_input("abort"))
+                Err(strata_engine::StrataError::invalid_input("abort"))
             });
         }
     }
@@ -463,7 +463,7 @@ fn cross_primitive_atomic_failure() {
         txn.event_append("debit", event_payload(Value::Int(100)))?;
 
         // Credit to external system "fails"
-        Err(strata_core::StrataError::invalid_input(
+        Err(strata_engine::StrataError::invalid_input(
             "external system failure",
         ))
     });

@@ -141,7 +141,7 @@ pub(crate) fn load_manifest(path: &Path) -> io::Result<ManifestData> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
 
     fn sample_manifest() -> ManifestData {
         let branch_id = BranchId::new();

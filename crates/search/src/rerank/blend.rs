@@ -94,7 +94,7 @@ fn position_weights(position: usize, w: &BlendWeights) -> (f32, f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_engine::search::EntityRef;
 
     fn make_hit(score: f32, rank: u32) -> SearchHit {

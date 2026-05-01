@@ -61,8 +61,8 @@ use std::sync::Arc;
 
 use crate::{BranchControlRecord, BranchRef, StrataError, StrataResult};
 use strata_core::id::CommitVersion;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_core::VersionedValue;
 use strata_storage::{Key, Namespace};
 use tracing::{error, info, warn};
@@ -825,7 +825,7 @@ mod tests {
     use crate::Database;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use strata_core::id::CommitVersion;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use tempfile::TempDir;
 
     /// Test DAG hook that can be configured to fail.

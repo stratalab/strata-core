@@ -83,7 +83,7 @@ pub const WAL_RECORD_FORMAT_VERSION: u8 = 2;
 /// checks into a single call so callers see a typed variant rather than
 /// the `io::Error` / `Option<Self>` collapse the pre-T3-E12 code used.
 /// `LegacyFormat` in particular is the load-bearing diagnostic the
-/// engine's open path routes to [`strata_core::StrataError::LegacyFormat`]
+/// engine's open path routes to [`strata_engine::StrataError::LegacyFormat`]
 /// — see the T3-E12 tracking doc §D6 / §D8.
 #[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

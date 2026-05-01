@@ -6,8 +6,9 @@
 //! For each pattern in `LOCKED_PATTERNS`, the test walks production `*.rs`
 //! files under `crates/**/src/**` and `src/**` (skipping `tests/`,
 //! `benches/`, `target/`, `benchmarks/`, `.git/`, `.claude/`) and counts
-//! substring matches in code, not comments. The totals are compared against the
-//! snapshot at `tests/integration/data/branching_shape_inventory.json`.
+//! substring matches in code, not comments or `#[cfg(test)]` modules that
+//! live inside `src/` files. The totals are compared against the snapshot at
+//! `tests/integration/data/branching_shape_inventory.json`.
 //!
 //! Drift in either direction fails the test:
 //!
@@ -216,9 +217,76 @@ fn strip_comments_from_line<'a>(line: &'a str, in_block_comment: &mut bool) -> O
     }
 }
 
+fn brace_delta(line: &str) -> isize {
+    let opens = line.chars().filter(|c| *c == '{').count() as isize;
+    let closes = line.chars().filter(|c| *c == '}').count() as isize;
+    opens - closes
+}
+
+/// Count substring occurrences across a Rust source string while ignoring
+/// comment-only text and `#[cfg(test)] mod ...` blocks that live in `src/`.
+fn count_pattern_in_source(needle: &str, content: &str) -> u64 {
+    let mut total = 0u64;
+    let mut in_block_comment = false;
+    let mut pending_cfg_test_module = false;
+    let mut skipped_test_module_depth: Option<isize> = None;
+
+    for line in content.lines() {
+        let Some(code) = strip_comments_from_line(line, &mut in_block_comment) else {
+            continue;
+        };
+        let trimmed = code.trim_start();
+
+        if let Some(depth) = &mut skipped_test_module_depth {
+            *depth += brace_delta(code);
+            if *depth <= 0 {
+                skipped_test_module_depth = None;
+            }
+            continue;
+        }
+
+        if pending_cfg_test_module {
+            if trimmed.starts_with("#[") {
+                continue;
+            }
+            if looks_like_module_start(trimmed) {
+                let depth = brace_delta(code);
+                if depth > 0 {
+                    skipped_test_module_depth = Some(depth);
+                }
+                pending_cfg_test_module = false;
+                continue;
+            }
+            pending_cfg_test_module = false;
+        }
+
+        if trimmed.starts_with("#[cfg(test)]") {
+            pending_cfg_test_module = true;
+            continue;
+        }
+
+        // Multiple occurrences on one line still count multiply —
+        // this catches macro-expanded patterns that might reuse
+        // a needle several times in a single physical line.
+        let mut idx = 0;
+        while let Some(pos) = code[idx..].find(needle) {
+            total += 1;
+            idx += pos + needle.len();
+        }
+    }
+
+    total
+}
+
+fn looks_like_module_start(line: &str) -> bool {
+    (line.starts_with("mod ") || line.starts_with("pub ") || line.starts_with("pub(crate) "))
+        && line.contains("mod ")
+        && line.contains('{')
+}
+
 /// Count substring occurrences across production `.rs` files under the
-/// workspace root, ignoring comment-only text. Multiple occurrences on one
-/// code line still count multiply.
+/// workspace root, ignoring comment-only text and `#[cfg(test)]` modules that
+/// live in `src/`. Multiple occurrences on one code line still count multiply.
 fn measure_pattern(needle: &str) -> u64 {
     let root = workspace_root();
     let mut files = Vec::new();
@@ -228,20 +296,7 @@ fn measure_pattern(needle: &str) -> u64 {
         let Ok(content) = fs::read_to_string(&path) else {
             continue;
         };
-        let mut in_block_comment = false;
-        for line in content.lines() {
-            let Some(code) = strip_comments_from_line(line, &mut in_block_comment) else {
-                continue;
-            };
-            // Multiple occurrences on one line still count multiply —
-            // this catches macro-expanded patterns that might reuse
-            // a needle several times in a single physical line.
-            let mut idx = 0;
-            while let Some(pos) = code[idx..].find(needle) {
-                total += 1;
-                idx += pos + needle.len();
-            }
-        }
+        total += count_pattern_in_source(needle, &content);
     }
     total
 }
@@ -400,6 +455,43 @@ fn strip_comments_ignores_comment_only_occurrences() {
         Some("let y = merge_base_override;")
     );
     assert!(!in_block);
+}
+
+#[test]
+fn cfg_test_modules_do_not_contribute_to_pattern_counts() {
+    let content = r#"
+fn production_site() {
+    let _ = BranchId::new();
+}
+
+#[cfg(test)]
+mod tests {
+    fn helper() {
+        let _ = BranchId::new();
+    }
+}
+"#;
+
+    assert_eq!(count_pattern_in_source("BranchId::new()", content), 1);
+}
+
+#[test]
+fn cfg_test_modules_with_extra_attributes_are_skipped() {
+    let content = r#"
+fn production_site() {
+    let _ = BranchId::new();
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+mod tests {
+    fn helper() {
+        let _ = BranchId::new();
+    }
+}
+"#;
+
+    assert_eq!(count_pattern_in_source("BranchId::new()", content), 1);
 }
 
 // =============================================================================

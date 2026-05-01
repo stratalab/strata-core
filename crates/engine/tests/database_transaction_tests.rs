@@ -3,8 +3,9 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use strata_core::{BranchId, StrataError, Value};
+use strata_core::{BranchId, Value};
 use strata_engine::database::OpenSpec;
+use strata_engine::StrataError;
 use strata_engine::{Database, KVStore, SearchSubsystem};
 use strata_storage::{Key, Namespace};
 use tempfile::TempDir;

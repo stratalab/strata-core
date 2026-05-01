@@ -863,7 +863,7 @@ impl Database {
     ///
     /// ```text
     /// use strata_engine::Database;
-    /// use strata_core::types::BranchId;
+    /// use strata_core::BranchId;
     ///
     /// let db = Database::cache()?;
     /// let branch_id = BranchId::new();

@@ -155,9 +155,7 @@ fn collect_manifest_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 fn should_skip(path: &Path) -> bool {
     let rel = path.to_string_lossy();
-    rel.contains("/target/")
-        || rel.contains("/crates/core-legacy/")
-        || rel.ends_with("/tests/storage_surface_imports.rs")
+    rel.contains("/target/") || rel.ends_with("/tests/storage_surface_imports.rs")
 }
 
 fn should_skip_manifest(path: &Path) -> bool {

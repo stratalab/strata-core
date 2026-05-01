@@ -1002,7 +1002,7 @@ pub fn assert_vector_collection_healthy(
 }
 
 pub mod assert_helpers {
-    use strata_core::StrataError;
+    use strata_engine::StrataError;
 
     pub fn assert_conflict<T: std::fmt::Debug>(result: Result<T, StrataError>) {
         match result {

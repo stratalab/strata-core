@@ -59,9 +59,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use strata_core::contract::Timestamp;
-use strata_core::types::BranchId;
-use strata_core::{StrataError, StrataResult};
+use strata_core::BranchId;
 use strata_engine::BranchRef;
+use strata_engine::{StrataError, StrataResult};
 use tracing::warn;
 
 use crate::keys::{validate_node_id, GRAPH_SPACE};
@@ -1218,7 +1218,7 @@ impl strata_engine::Subsystem for GraphSubsystem {
     fn recover(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         // Read-only phase: hydrate branch status cache from existing DAG state.
         load_status_cache_readonly(db);
         Ok(())
@@ -1227,7 +1227,7 @@ impl strata_engine::Subsystem for GraphSubsystem {
     fn initialize(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         // Register graph semantic merge handler with the per-database registry.
         // This replaces the old global `register_graph_merge_plan()` pattern.
         db.merge_registry()
@@ -1262,7 +1262,7 @@ impl strata_engine::Subsystem for GraphSubsystem {
     fn bootstrap(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         bootstrap_system_branch(db)
     }
 
@@ -1296,9 +1296,9 @@ impl strata_engine::Subsystem for GraphSubsystem {
     fn cleanup_deleted_branch(
         &self,
         db: &std::sync::Arc<strata_engine::Database>,
-        _branch_id: &strata_core::types::BranchId,
+        _branch_id: &strata_core::BranchId,
         branch_name: &str,
-    ) -> strata_core::StrataResult<()> {
+    ) -> strata_engine::StrataResult<()> {
         if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
             cache.remove(branch_name);
         }
@@ -1468,7 +1468,7 @@ impl BranchOpObserver for AuditBranchOpObserver {
         }
 
         // Convert to core Value
-        let core_payload: strata_core::value::Value = serde_json::Value::Object(payload).into();
+        let core_payload: strata_core::Value = serde_json::Value::Object(payload).into();
 
         // Append to audit log (best-effort)
         if let Err(e) = event_log.append(&system_branch_id, "default", event_type, core_payload) {

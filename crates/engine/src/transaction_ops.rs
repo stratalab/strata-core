@@ -227,7 +227,7 @@ mod tests {
                     if path.is_root() {
                         Ok(Some(doc.clone()))
                     } else {
-                        Ok(strata_core::get_at_path(doc, path).cloned())
+                        Ok(crate::get_at_path(doc, path).cloned())
                     }
                 }
                 None => Ok(None),

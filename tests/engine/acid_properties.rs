@@ -67,7 +67,7 @@ fn atomicity_failure_none_visible() {
         txn.kv_put("atomic1", Value::Int(1))?;
         txn.kv_put("atomic2", Value::Int(2))?;
         // Force failure
-        Err(strata_core::StrataError::invalid_input("forced failure"))
+        Err(strata_engine::StrataError::invalid_input("forced failure"))
     });
 
     assert!(result.is_err());

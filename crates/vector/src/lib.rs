@@ -66,7 +66,7 @@ pub use types::{
 /// Space names are validated to `[a-z0-9_-]` so they are filesystem-safe.
 pub(crate) fn graph_dir(
     data_dir: &std::path::Path,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {

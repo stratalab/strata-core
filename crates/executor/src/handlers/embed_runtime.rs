@@ -16,7 +16,7 @@ pub(crate) const SHADOW_EVENT: &str = strata_engine::database::SHADOW_EVENT;
 
 pub(crate) fn maybe_embed_text(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     shadow_collection: &'static str,
     key: &str,
@@ -88,7 +88,7 @@ pub(crate) fn embed_status(primitives: &Arc<Primitives>) -> EmbedStatusInfo {
 
 pub(crate) fn maybe_remove_embedding(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     shadow_collection: &str,
     key: &str,
@@ -98,7 +98,7 @@ pub(crate) fn maybe_remove_embedding(
 
 pub(crate) fn delete_shadow_embeddings_for_space(
     primitives: &Arc<Primitives>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     target_space: &str,
 ) -> usize {
     delete_shadow_embeddings_for_space_impl(&primitives.db, branch_id, target_space)
@@ -107,7 +107,7 @@ pub(crate) fn delete_shadow_embeddings_for_space(
 #[cfg(feature = "embed")]
 fn maybe_remove_embedding_impl(
     db: &Arc<strata_engine::Database>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     shadow_collection: &str,
     key: &str,
@@ -124,7 +124,7 @@ fn maybe_remove_embedding_impl(
 #[cfg(not(feature = "embed"))]
 fn maybe_remove_embedding_impl(
     db: &Arc<strata_engine::Database>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     space: &str,
     shadow_collection: &str,
     key: &str,
@@ -141,7 +141,7 @@ fn maybe_remove_embedding_impl(
 #[cfg(feature = "embed")]
 fn delete_shadow_embeddings_for_space_impl(
     db: &Arc<strata_engine::Database>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     target_space: &str,
 ) -> usize {
     strata_intelligence::embed::runtime::delete_shadow_embeddings_for_space(
@@ -154,7 +154,7 @@ fn delete_shadow_embeddings_for_space_impl(
 #[cfg(not(feature = "embed"))]
 fn delete_shadow_embeddings_for_space_impl(
     db: &Arc<strata_engine::Database>,
-    branch_id: strata_core::types::BranchId,
+    branch_id: strata_core::BranchId,
     target_space: &str,
 ) -> usize {
     strata_intelligence::shadow::delete_shadow_embeddings_for_space(db, branch_id, target_space)

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use strata_core::types::BranchId;
+use strata_core::BranchId;
 pub use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 use strata_engine::Database;
 use strata_vector::VectorStore;

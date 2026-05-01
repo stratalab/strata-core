@@ -1089,7 +1089,7 @@ pub struct BulkGraphEdge {
 #[cfg(test)]
 mod entity_ref_output_tests {
     use super::EntityRefOutput;
-    use strata_core::types::BranchId;
+    use strata_core::BranchId;
     use strata_core::EntityRef;
 
     #[test]

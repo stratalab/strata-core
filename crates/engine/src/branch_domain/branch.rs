@@ -12,18 +12,22 @@
 //!
 //! ## What lives here
 //!
-//! - `BranchGeneration` — monotonic per-name lifecycle counter (type alias).
-//! - `BranchRef` — `(id, generation)` identity carried by lineage-bearing
+//! - `BranchGeneration` - monotonic per-name lifecycle counter (type alias).
+//! - `BranchRef` - `(id, generation)` identity carried by lineage-bearing
 //!   surfaces (events, hooks, DAG, control records).
-//! - `BranchLifecycleStatus` — three-state lifecycle
+//! - `BranchLifecycleStatus` - three-state lifecycle
 //!   (`Active`, `Archived`, `Deleted`).
-//! - `ForkAnchor` / `BranchControlRecord` — the control-record shape used by
+//! - `ForkAnchor` / `BranchControlRecord` - the control-record shape used by
 //!   the engine.
 
-use crate::id::CommitVersion;
-use crate::types::BranchId;
 use serde::{Deserialize, Serialize};
-pub use strata_core_foundation::branch::aliases_default_branch_sentinel;
+use strata_core::{BranchId, CommitVersion};
+
+/// Returns `true` when `name` resolves to the reserved nil-UUID branch
+/// sentinel without being the literal `"default"` branch name.
+pub fn aliases_default_branch_sentinel(name: &str) -> bool {
+    name != "default" && BranchId::from_user_name(name) == BranchId::from_bytes([0u8; 16])
+}
 
 // =============================================================================
 // Generation + lineage identity
@@ -35,21 +39,14 @@ pub use strata_core_foundation::branch::aliases_default_branch_sentinel;
 /// the same branch name share the same id. `BranchGeneration` distinguishes
 /// them: delete-and-recreate increments the generation so lineage surfaces
 /// can tell the old instance from the new one.
-///
 pub type BranchGeneration = u64;
 
 /// Generation-aware branch identifier.
 ///
-/// `BranchId` alone is the storage/locking identity — same name =
-/// same physical KV namespace, regardless of lifecycle instance. `BranchRef`
-/// adds the per-name `generation` counter so ancestry, hooks, events, and
-/// the branch control overlay can distinguish between lifecycle instances
-/// of the same name.
-///
-/// Used by every surface that carries branch lineage: events,
-/// hooks, merge-base queries, DAG keys, control records. `BranchId` alone
-/// remains valid for storage isolation and for API inputs that address
-/// "whatever generation is currently live for this name."
+/// `BranchId` alone is the storage/locking identity: same branch name means
+/// the same physical KV namespace, regardless of lifecycle instance.
+/// `BranchRef` adds the per-name generation counter so lineage-bearing
+/// surfaces can distinguish delete-and-recreate cycles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct BranchRef {
     /// Canonical id, derived via [`BranchId::from_user_name`].
@@ -74,9 +71,8 @@ impl BranchRef {
 ///
 /// This describes branch writability and visibility at the lifecycle level.
 ///
-/// The event-stream enum at `crates/core/src/branch_types.rs::BranchStatus`
-/// is distinct; it models event-stream durability lifecycle rather than
-/// branch lifecycle.
+/// The event-stream enum in [`super::branch_types::BranchStatus`] is distinct;
+/// it models event-stream durability lifecycle rather than branch lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum BranchLifecycleStatus {
@@ -140,10 +136,6 @@ pub struct BranchControlRecord {
     /// Fork anchor, if this branch was forked from another.
     pub fork: Option<ForkAnchor>,
 }
-
-// =============================================================================
-// Tests
-// =============================================================================
 
 #[cfg(test)]
 mod tests {

@@ -20,8 +20,8 @@
 use crate::database::Database;
 use crate::StrataResult;
 use std::sync::Arc;
-use strata_core::types::BranchId;
-use strata_core::value::Value;
+use strata_core::BranchId;
+use strata_core::Value;
 use strata_storage::{Key, Namespace, TypeTag};
 use tracing::info;
 

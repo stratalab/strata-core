@@ -84,7 +84,7 @@ fn cross_primitive_failure_rolls_back_all() {
         txn.event_append("rollback_event", event_payload(Value::Int(2)))?;
 
         // Force failure
-        Err(strata_core::StrataError::invalid_input("forced rollback"))
+        Err(strata_engine::StrataError::invalid_input("forced rollback"))
     });
 
     assert!(result.is_err());
@@ -117,7 +117,7 @@ fn partial_writes_not_visible() {
         txn.kv_put("existing", Value::Int(999))?; // Overwrite
 
         // Abort
-        Err(strata_core::StrataError::invalid_input("abort"))
+        Err(strata_engine::StrataError::invalid_input("abort"))
     });
 
     assert!(result.is_err());

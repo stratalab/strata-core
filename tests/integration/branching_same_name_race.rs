@@ -61,8 +61,8 @@ use crate::common::branching::CapturingBranchObserver;
 use crate::common::*;
 use std::sync::{Arc, Barrier};
 use std::thread;
-use strata_core::value::Value;
-use strata_core::StrataError;
+use strata_core::Value;
+use strata_engine::StrataError;
 use strata_engine::{BranchLifecycleStatus, BranchRef, Database};
 
 fn resolve(name: &str) -> BranchId {
