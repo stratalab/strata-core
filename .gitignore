@@ -44,3 +44,5 @@ stratadb.org/
 !/docs/engine/*.md
 !/docs/storage/
 !/docs/storage/*.md
+!/docs/replay/
+!/docs/replay/*.md
