@@ -177,14 +177,13 @@ pub(crate) fn reindex_embeddings(primitives: &Arc<Primitives>, branch: BranchId)
     #[cfg(feature = "embed")]
     {
         let branch_id = crate::bridge::to_core_branch_id(&branch)?;
-        let stats = strata_intelligence::embed::runtime::reindex_embeddings(&primitives.db, branch_id)
-            .map_err(|error| Error::Internal {
-                reason: error.to_string(),
-                hint: Some(
-                    "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues"
-                        .to_string(),
-                ),
-            })?;
+        let stats =
+            strata_intelligence::embed::runtime::reindex_embeddings(&primitives.db, branch_id)
+                .map_err(|error| Error::EmbedFailed {
+                    model: primitives.db.embed_model(),
+                    reason: error.to_string(),
+                    hint: Some("Check the configured embedding model and retry".to_string()),
+                })?;
         Ok(Output::ReindexResult {
             kv_queued: stats.kv_queued,
             json_queued: stats.json_queued,
@@ -196,12 +195,9 @@ pub(crate) fn reindex_embeddings(primitives: &Arc<Primitives>, branch: BranchId)
     #[cfg(not(feature = "embed"))]
     {
         let _ = (primitives, branch);
-        Err(Error::Internal {
-            reason: "The 'embed' feature is not enabled. Rebuild with --features embed".into(),
-            hint: Some(
-                "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues"
-                    .to_string(),
-            ),
+        Err(Error::NotImplemented {
+            feature: "ReindexEmbeddings".to_string(),
+            reason: "embedding commands require compiling with --features embed".to_string(),
         })
     }
 }

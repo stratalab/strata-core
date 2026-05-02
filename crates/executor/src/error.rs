@@ -311,6 +311,91 @@ pub enum Error {
         reason: String,
     },
 
+    // ==================== AI Runtime Errors ====================
+    /// Model load failed.
+    #[error("model load failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    ModelLoadFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Model pull/download failed.
+    #[error("model pull failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    ModelPullFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Text generation failed.
+    #[error("generation failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    GenerationFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Tokenization failed.
+    #[error("tokenization failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    TokenizationFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Detokenization failed.
+    #[error("detokenization failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    DetokenizationFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Embedding failed.
+    #[error("embedding failed: {model}: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    EmbedFailed {
+        /// Model name.
+        model: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
+    /// Recipe store operation failed.
+    #[error("recipe {operation} failed: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
+    RecipeOperationFailed {
+        /// Operation name.
+        operation: String,
+        /// Failure details.
+        reason: String,
+        /// Optional actionable hint.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        hint: Option<String>,
+    },
+
     /// Internal error (bug or invariant violation)
     #[error("internal error: {reason}{}", hint.as_deref().map(|h| format!(". {}", h)).unwrap_or_default())]
     Internal {
@@ -356,7 +441,15 @@ impl Error {
     /// Classify this error by severity.
     pub fn severity(&self) -> ErrorSeverity {
         match self {
-            Error::Io { .. } | Error::Serialization { .. } => ErrorSeverity::SystemFailure,
+            Error::Io { .. }
+            | Error::Serialization { .. }
+            | Error::ModelLoadFailed { .. }
+            | Error::ModelPullFailed { .. }
+            | Error::GenerationFailed { .. }
+            | Error::TokenizationFailed { .. }
+            | Error::DetokenizationFailed { .. }
+            | Error::EmbedFailed { .. }
+            | Error::RecipeOperationFailed { .. } => ErrorSeverity::SystemFailure,
             Error::Internal { .. } => ErrorSeverity::InternalBug,
             _ => ErrorSeverity::UserError,
         }

@@ -8,6 +8,27 @@ use std::sync::Arc;
 use crate::bridge::Primitives;
 use crate::{Error, Output, Result};
 
+#[cfg(feature = "embed")]
+const BUG_REPORT_HINT: &str =
+    "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues";
+
+#[cfg(feature = "embed")]
+fn internal_bug(reason: impl Into<String>) -> Error {
+    Error::Internal {
+        reason: reason.into(),
+        hint: Some(BUG_REPORT_HINT.to_string()),
+    }
+}
+
+#[cfg(feature = "embed")]
+fn embed_failed(model: &str, reason: impl Into<String>) -> Error {
+    Error::EmbedFailed {
+        model: model.to_string(),
+        reason: reason.into(),
+        hint: None,
+    }
+}
+
 /// Handle `Command::Embed { text }`.
 #[cfg(feature = "embed")]
 pub(crate) fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
@@ -18,23 +39,20 @@ pub(crate) fn embed(p: &Arc<Primitives>, text: String) -> Result<Output> {
     let api_key = strata_intelligence::embed::resolve_api_key_for_model(&p.db, &model_name);
     let state =
         p.db.extension::<EmbedModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get embed model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get embed model state: {}", e)))?;
 
     let shared = state
         .get_or_load(&model_dir, &model_name, api_key.as_deref())
-        .map_err(|e| Error::Internal {
-            reason: format!("Failed to load embedding model: {}", e),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        .map_err(|e| Error::ModelLoadFailed {
+            model: model_name.clone(),
+            reason: e.to_string(),
+            hint: Some("Check that the configured embedding model is available".to_string()),
         })?;
 
     let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
-    let embedding = engine.embed(&text).map_err(|e| Error::Internal {
-        reason: format!("Embedding failed: {}", e),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+    let embedding = engine
+        .embed(&text)
+        .map_err(|e| embed_failed(&model_name, e.to_string()))?;
 
     Ok(Output::Embedding(embedding))
 }
@@ -49,24 +67,21 @@ pub(crate) fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Out
     let api_key = strata_intelligence::embed::resolve_api_key_for_model(&p.db, &model_name);
     let state =
         p.db.extension::<EmbedModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get embed model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get embed model state: {}", e)))?;
 
     let shared = state
         .get_or_load(&model_dir, &model_name, api_key.as_deref())
-        .map_err(|e| Error::Internal {
-            reason: format!("Failed to load embedding model: {}", e),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        .map_err(|e| Error::ModelLoadFailed {
+            model: model_name.clone(),
+            reason: e.to_string(),
+            hint: Some("Check that the configured embedding model is available".to_string()),
         })?;
 
     let engine = shared.lock().unwrap_or_else(|e| e.into_inner());
     let refs: Vec<&str> = texts.iter().map(|s| s.as_str()).collect();
-    let embeddings = engine.embed_batch(&refs).map_err(|e| Error::Internal {
-        reason: format!("Batch embedding failed: {}", e),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-    })?;
+    let embeddings = engine
+        .embed_batch(&refs)
+        .map_err(|e| embed_failed(&model_name, e.to_string()))?;
 
     Ok(Output::Embeddings(embeddings))
 }

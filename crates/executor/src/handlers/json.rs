@@ -18,9 +18,8 @@ use crate::{
 };
 
 fn serialize_json<T: serde::Serialize>(value: &T, what: &str) -> Result<Output> {
-    let json = serde_json::to_string(value).map_err(|error| crate::Error::Internal {
+    let json = serde_json::to_string(value).map_err(|error| crate::Error::Serialization {
         reason: format!("Failed to serialize {what}: {error}"),
-        hint: None,
     })?;
     Ok(Output::Maybe(Some(Value::String(json))))
 }
