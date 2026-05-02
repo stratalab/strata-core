@@ -33,9 +33,10 @@ pub(crate) fn models_list(_p: &Arc<Primitives>) -> Result<Output> {
 #[cfg(feature = "embed")]
 pub(crate) fn models_pull(_p: &Arc<Primitives>, name: String) -> Result<Output> {
     let registry = strata_intelligence::ModelRegistry::new();
-    let path = registry.pull(&name).map_err(|e| Error::Internal {
-        reason: format!("Failed to pull model '{}': {}", name, e),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    let path = registry.pull(&name).map_err(|e| Error::ModelPullFailed {
+        model: name.clone(),
+        reason: e.to_string(),
+        hint: Some("Check the model name and network access, then retry".to_string()),
     })?;
 
     Ok(Output::ModelsPulled {

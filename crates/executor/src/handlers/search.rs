@@ -34,7 +34,8 @@ pub(crate) fn search(
             // String → look up named recipe (user branch → _system_ fallback)
             let name = v.as_str().unwrap();
             strata_engine::recipe_store::get_recipe(&p.db, core_branch_id, name)
-                .map_err(|e| Error::Internal {
+                .map_err(|e| Error::RecipeOperationFailed {
+                    operation: "get".to_string(),
                     reason: format!("Failed to look up recipe '{name}': {e}"),
                     hint: None,
                 })?
@@ -66,8 +67,9 @@ pub(crate) fn search(
         None => {
             // Absent → use "default" recipe
             strata_engine::recipe_store::get_default_recipe(&p.db, core_branch_id).map_err(|e| {
-                Error::Internal {
-                    reason: format!("Failed to get default recipe: {e}"),
+                Error::RecipeOperationFailed {
+                    operation: "get default".to_string(),
+                    reason: e.to_string(),
                     hint: None,
                 }
             })?

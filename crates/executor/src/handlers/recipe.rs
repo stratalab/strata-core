@@ -9,6 +9,14 @@ use crate::{Error, Output, Result, Value};
 use strata_engine::recipe_store;
 use strata_engine::search::recipe::Recipe;
 
+fn recipe_failed(operation: &str, error: impl ToString) -> Error {
+    Error::RecipeOperationFailed {
+        operation: operation.to_string(),
+        reason: error.to_string(),
+        hint: None,
+    }
+}
+
 /// Set a named recipe on a branch.
 pub(crate) fn recipe_set(
     p: &Arc<Primitives>,
@@ -28,10 +36,7 @@ pub(crate) fn recipe_set(
                 hint: Some("Built-in recipes on _system_ branch are read-only".into()),
             }
         } else {
-            Error::Internal {
-                reason: e.to_string(),
-                hint: None,
-            }
+            recipe_failed("set", e)
         }
     })?;
     Ok(Output::Unit)
@@ -41,15 +46,11 @@ pub(crate) fn recipe_set(
 pub(crate) fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
     let recipe =
-        recipe_store::get_recipe(&p.db, branch_id, &name).map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
+        recipe_store::get_recipe(&p.db, branch_id, &name).map_err(|e| recipe_failed("get", e))?;
     match recipe {
         Some(r) => {
-            let json = serde_json::to_string(&r).map_err(|e| Error::Internal {
-                reason: e.to_string(),
-                hint: None,
+            let json = serde_json::to_string(&r).map_err(|e| Error::Serialization {
+                reason: format!("Failed to serialize recipe: {e}"),
             })?;
             Ok(Output::Maybe(Some(Value::String(json))))
         }
@@ -60,14 +61,10 @@ pub(crate) fn recipe_get(p: &Arc<Primitives>, branch: BranchId, name: String) ->
 /// Get the default recipe, auto-creating with built-in defaults if absent.
 pub(crate) fn recipe_get_default(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
-    let recipe =
-        recipe_store::get_default_recipe(&p.db, branch_id).map_err(|e| Error::Internal {
-            reason: e.to_string(),
-            hint: None,
-        })?;
-    let json = serde_json::to_string(&recipe).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
+    let recipe = recipe_store::get_default_recipe(&p.db, branch_id)
+        .map_err(|e| recipe_failed("get default", e))?;
+    let json = serde_json::to_string(&recipe).map_err(|e| Error::Serialization {
+        reason: format!("Failed to serialize recipe: {e}"),
     })?;
     Ok(Output::Maybe(Some(Value::String(json))))
 }
@@ -83,10 +80,7 @@ pub(crate) fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String)
                 hint: Some("Built-in recipes on _system_ branch are read-only".into()),
             }
         } else {
-            Error::Internal {
-                reason: e.to_string(),
-                hint: None,
-            }
+            recipe_failed("delete", e)
         }
     })?;
     Ok(Output::Unit)
@@ -95,10 +89,8 @@ pub(crate) fn recipe_delete(p: &Arc<Primitives>, branch: BranchId, name: String)
 /// List all recipe names on a branch.
 pub(crate) fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Output> {
     let branch_id = to_core_branch_id(&branch)?;
-    let names = recipe_store::list_recipes(&p.db, branch_id).map_err(|e| Error::Internal {
-        reason: e.to_string(),
-        hint: None,
-    })?;
+    let names =
+        recipe_store::list_recipes(&p.db, branch_id).map_err(|e| recipe_failed("list", e))?;
     Ok(Output::Keys(names))
 }
 
@@ -106,9 +98,6 @@ pub(crate) fn recipe_list(p: &Arc<Primitives>, branch: BranchId) -> Result<Outpu
 ///
 /// Idempotent: safe to call multiple times.
 pub(crate) fn recipe_seed(p: &Arc<Primitives>) -> Result<Output> {
-    recipe_store::seed_builtin_recipes(&p.db).map_err(|e| Error::Internal {
-        reason: format!("Failed to seed built-in recipes: {}", e),
-        hint: None,
-    })?;
+    recipe_store::seed_builtin_recipes(&p.db).map_err(|e| recipe_failed("seed", e))?;
     Ok(Output::Unit)
 }

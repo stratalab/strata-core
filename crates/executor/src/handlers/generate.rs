@@ -5,6 +5,27 @@ use std::sync::Arc;
 use crate::bridge::Primitives;
 use crate::{Error, Output, Result};
 
+#[cfg(feature = "embed")]
+const BUG_REPORT_HINT: &str =
+    "This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues";
+
+#[cfg(feature = "embed")]
+fn internal_bug(reason: impl Into<String>) -> Error {
+    Error::Internal {
+        reason: reason.into(),
+        hint: Some(BUG_REPORT_HINT.to_string()),
+    }
+}
+
+#[cfg(feature = "embed")]
+fn model_load_failed(model: impl Into<String>, reason: impl Into<String>) -> Error {
+    Error::ModelLoadFailed {
+        model: model.into(),
+        reason: reason.into(),
+        hint: Some("Check that the model name is correct and available locally or through the configured provider".to_string()),
+    }
+}
+
 /// Handle `Command::Generate { model, prompt, ... }`.
 #[cfg(feature = "embed")]
 #[allow(clippy::too_many_arguments)]
@@ -32,10 +53,7 @@ pub(crate) fn generate(
 
     let state =
         p.db.extension::<GenerateModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get generate model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get generate model state: {}", e)))?;
 
     // Read provider config from the database
     let cfg = p.db.config();
@@ -45,7 +63,7 @@ pub(crate) fn generate(
         // Local inference: load from the model registry
         state
             .get_or_load(&model)
-            .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
+            .map_err(|e| model_load_failed(&model, e))?
     } else {
         // Cloud provider: parse provider kind, look up API key, dispatch
         let provider_kind: strata_intelligence::ProviderKind =
@@ -98,7 +116,7 @@ pub(crate) fn generate(
             api_key.into_inner(),
             &resolved_model,
         )
-        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
+        .map_err(|e| model_load_failed(&resolved_model, e))?
     };
 
     let request = strata_intelligence::GenerateRequest {
@@ -130,10 +148,11 @@ pub(crate) fn generate(
                 response.completion_tokens,
             ))
         })
-        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
-        .map_err(|e| Error::Internal {
-            reason: format!("Generation failed: {}", e),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        .map_err(|e| model_load_failed(&output_model, e))?
+        .map_err(|e| Error::GenerationFailed {
+            model: output_model.clone(),
+            reason: e.to_string(),
+            hint: None,
         })?;
 
     Ok(Output::Generated(GenerationResult {
@@ -158,24 +177,22 @@ pub(crate) fn tokenize(
 
     let state =
         p.db.extension::<GenerateModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get generate model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get generate model state: {}", e)))?;
 
     let entry = state
         .get_or_load(&model)
-        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?;
+        .map_err(|e| model_load_failed(&model, e))?;
 
     let add_special = add_special_tokens.unwrap_or(true);
 
     let ids = strata_intelligence::generate::with_engine(&entry, |engine| {
         engine.encode(&text, add_special)
     })
-    .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
-    .map_err(|e| Error::Internal {
-        reason: format!("Tokenization failed: {}", e),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    .map_err(|e| model_load_failed(&model, e))?
+    .map_err(|e| Error::TokenizationFailed {
+        model: model.clone(),
+        reason: e.to_string(),
+        hint: None,
     })?;
 
     let count = ids.len();
@@ -189,20 +206,18 @@ pub(crate) fn detokenize(p: &Arc<Primitives>, model: String, ids: Vec<u32>) -> R
 
     let state =
         p.db.extension::<GenerateModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get generate model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get generate model state: {}", e)))?;
 
     let entry = state
         .get_or_load(&model)
-        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?;
+        .map_err(|e| model_load_failed(&model, e))?;
 
     let text = strata_intelligence::generate::with_engine(&entry, |engine| engine.decode(&ids))
-        .map_err(|e| Error::Internal { reason: e, hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()) })?
-        .map_err(|e| Error::Internal {
-            reason: format!("Detokenization failed: {}", e),
-            hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+        .map_err(|e| model_load_failed(&model, e))?
+        .map_err(|e| Error::DetokenizationFailed {
+            model: model.clone(),
+            reason: e.to_string(),
+            hint: None,
         })?;
 
     Ok(Output::Text(text))
@@ -215,10 +230,7 @@ pub(crate) fn generate_unload(p: &Arc<Primitives>, model: String) -> Result<Outp
 
     let state =
         p.db.extension::<GenerateModelState>()
-            .map_err(|e| Error::Internal {
-                reason: format!("Failed to get generate model state: {}", e),
-                hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
-            })?;
+            .map_err(|e| internal_bug(format!("Failed to get generate model state: {}", e)))?;
 
     let was_loaded = state.unload(&model);
     Ok(Output::Bool(was_loaded))
