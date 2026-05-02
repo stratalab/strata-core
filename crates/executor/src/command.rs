@@ -62,12 +62,13 @@ use crate::types::*;
 ///     value: Value::Int(42),
 /// };
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum Command {
     // ==================== KV (4) ====================
     /// Put a key-value pair.
-    /// Returns: `Output::Version`
+    /// Returns: `Output::WriteResult`
     KvPut {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -82,7 +83,7 @@ pub enum Command {
     },
 
     /// Get a value by key.
-    /// Returns: `Output::MaybeValue`
+    /// Returns: `Output::MaybeVersioned` for current reads, `Output::Maybe` for `as_of` reads.
     KvGet {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,7 +99,7 @@ pub enum Command {
     },
 
     /// Delete a key.
-    /// Returns: `Output::Bool` (true if key existed)
+    /// Returns: `Output::DeleteResult`
     KvDelete {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -202,6 +203,19 @@ pub enum Command {
         keys: Vec<String>,
     },
 
+    /// Check whether a key exists.
+    /// Returns: `Output::Bool`
+    KvExists {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Key to check.
+        key: String,
+    },
+
     /// Get full version history for a key.
     /// Returns: `Output::VersionHistory`
     ///
@@ -221,7 +235,7 @@ pub enum Command {
 
     // ==================== JSON (4 MVP) ====================
     /// Set a value at a path in a JSON document.
-    /// Returns: `Output::Version`
+    /// Returns: `Output::WriteResult`
     JsonSet {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -238,7 +252,7 @@ pub enum Command {
     },
 
     /// Get a value at a path from a JSON document.
-    /// Returns: `Output::MaybeVersioned`
+    /// Returns: `Output::MaybeVersioned` for current reads, `Output::Maybe` for `as_of` reads.
     JsonGet {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -256,7 +270,7 @@ pub enum Command {
     },
 
     /// Delete a value at a path from a JSON document.
-    /// Returns: `Output::Uint` (count of elements removed)
+    /// Returns: `Output::DeleteResult`
     JsonDelete {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -277,6 +291,19 @@ pub enum Command {
     /// variant. Callers that want a point-in-time read should use
     /// `JsonGet { as_of: Some(ts) }` instead.
     JsonGetv {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Document key.
+        key: String,
+    },
+
+    /// Check whether a JSON document exists.
+    /// Returns: `Output::Bool`
+    JsonExists {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
@@ -362,7 +389,7 @@ pub enum Command {
     },
 
     /// Append an event to the log.
-    /// Returns: `Output::Version`
+    /// Returns: `Output::EventAppendResult`
     EventAppend {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -390,6 +417,19 @@ pub enum Command {
         /// Optional timestamp for time-travel reads (microseconds since epoch).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
+    },
+
+    /// Check whether an event sequence exists.
+    /// Returns: `Output::Bool`
+    EventExists {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Event sequence number.
+        sequence: u64,
     },
 
     /// Read all events of a specific type.
@@ -520,7 +560,7 @@ pub enum Command {
     // ==================== Vector (7 MVP) ====================
     // MVP: upsert, get, delete, search, create_collection, delete_collection, list_collections
     /// Insert or update a vector.
-    /// Returns: `Output::Version`
+    /// Returns: `Output::VectorWriteResult`
     VectorUpsert {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -539,7 +579,7 @@ pub enum Command {
     },
 
     /// Get a vector by key.
-    /// Returns: `Output::MaybeVectorData`
+    /// Returns: `Output::VectorData`
     VectorGet {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,7 +597,7 @@ pub enum Command {
     },
 
     /// Delete a vector.
-    /// Returns: `Output::Bool`
+    /// Returns: `Output::VectorDeleteResult`
     VectorDelete {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -574,6 +614,21 @@ pub enum Command {
     /// Get the full version history for a vector key.
     /// Returns: `Output::VectorVersionHistory`
     VectorGetv {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+        /// Vector key.
+        key: String,
+    },
+
+    /// Check whether a vector key exists.
+    /// Returns: `Output::Bool`
+    VectorExists {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
@@ -654,6 +709,19 @@ pub enum Command {
     /// Get detailed statistics for a single collection.
     /// Returns: `Output::VectorCollectionList` (with single entry)
     VectorCollectionStats {
+        /// Target branch (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<BranchId>,
+        /// Target space (defaults to "default").
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
+        /// Collection name.
+        collection: String,
+    },
+
+    /// Count vectors in a collection.
+    /// Returns: `Output::Uint`
+    VectorCount {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
         branch: Option<BranchId>,
@@ -944,15 +1012,15 @@ pub enum Command {
     },
 
     /// Commit the current transaction.
-    /// Returns: `Output::Version`
+    /// Returns: `Output::TxnCommitted`
     TxnCommit,
 
     /// Rollback the current transaction.
-    /// Returns: `Output::Unit`
+    /// Returns: `Output::TxnAborted`
     TxnRollback,
 
     /// Get current transaction info.
-    /// Returns: `Output::MaybeTxnInfo`
+    /// Returns: `Output::TxnInfo`
     TxnInfo,
 
     /// Check if a transaction is active.
@@ -963,7 +1031,7 @@ pub enum Command {
     // Note: Branch-level retention is handled via BranchSetRetention/BranchGetRetention
     // These are database-wide retention operations
     /// Apply retention policy (trigger garbage collection).
-    /// Returns: `Output::RetentionResult`
+    /// Returns: `Output::Unit`
     RetentionApply {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -971,7 +1039,7 @@ pub enum Command {
     },
 
     /// Get retention statistics.
-    /// Returns: `Output::RetentionStats`
+    /// Returns: `Error::NotImplemented`
     RetentionStats {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -979,7 +1047,7 @@ pub enum Command {
     },
 
     /// Preview what would be deleted by retention policy.
-    /// Returns: `Output::RetentionPreview`
+    /// Returns: `Error::NotImplemented`
     RetentionPreview {
         /// Target branch (defaults to "default").
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1197,7 +1265,7 @@ pub enum Command {
     },
 
     /// Create a secondary index on a JSON document field.
-    /// Returns: `Output::IndexDef`
+    /// Returns: `Output::Maybe` containing the serialized index definition.
     JsonCreateIndex {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1227,7 +1295,7 @@ pub enum Command {
     },
 
     /// List all secondary indexes on a space.
-    /// Returns: `Output::IndexList`
+    /// Returns: `Output::Maybe` containing the serialized index list.
     JsonListIndexes {
         /// Target branch.
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1443,6 +1511,10 @@ pub enum Command {
     },
 
     /// Get the default recipe, auto-creating with built-in defaults if absent.
+    ///
+    /// This is intentionally separate from `RecipeGet { name: "default" }`
+    /// because the default search recipe has bootstrap ergonomics: callers can
+    /// ask for it without first seeding recipe state.
     /// Returns: `Output::Maybe`
     RecipeGetDefault {
         /// Target branch (defaults to "default").
@@ -2137,6 +2209,7 @@ impl Command {
             Command::KvBatchGet { .. } => "KvBatchGet",
             Command::KvBatchDelete { .. } => "KvBatchDelete",
             Command::KvBatchExists { .. } => "KvBatchExists",
+            Command::KvExists { .. } => "KvExists",
             Command::KvGet { .. } => "KvGet",
             Command::KvDelete { .. } => "KvDelete",
             Command::KvList { .. } => "KvList",
@@ -2147,12 +2220,14 @@ impl Command {
             Command::JsonBatchGet { .. } => "JsonBatchGet",
             Command::JsonBatchDelete { .. } => "JsonBatchDelete",
             Command::JsonGet { .. } => "JsonGet",
+            Command::JsonExists { .. } => "JsonExists",
             Command::JsonDelete { .. } => "JsonDelete",
             Command::JsonGetv { .. } => "JsonGetv",
             Command::JsonList { .. } => "JsonList",
             Command::EventAppend { .. } => "EventAppend",
             Command::EventBatchAppend { .. } => "EventBatchAppend",
             Command::EventGet { .. } => "EventGet",
+            Command::EventExists { .. } => "EventExists",
             Command::EventGetByType { .. } => "EventGetByType",
             Command::EventLen { .. } => "EventLen",
             Command::EventRange { .. } => "EventRange",
@@ -2162,12 +2237,14 @@ impl Command {
             Command::VectorUpsert { .. } => "VectorUpsert",
             Command::VectorGet { .. } => "VectorGet",
             Command::VectorGetv { .. } => "VectorGetv",
+            Command::VectorExists { .. } => "VectorExists",
             Command::VectorDelete { .. } => "VectorDelete",
             Command::VectorQuery { .. } => "VectorQuery",
             Command::VectorCreateCollection { .. } => "VectorCreateCollection",
             Command::VectorDeleteCollection { .. } => "VectorDeleteCollection",
             Command::VectorListCollections { .. } => "VectorListCollections",
             Command::VectorCollectionStats { .. } => "VectorCollectionStats",
+            Command::VectorCount { .. } => "VectorCount",
             Command::VectorBatchUpsert { .. } => "VectorBatchUpsert",
             Command::VectorBatchGet { .. } => "VectorBatchGet",
             Command::VectorBatchDelete { .. } => "VectorBatchDelete",
@@ -2310,6 +2387,7 @@ impl Command {
             | Command::KvBatchGet { branch, space, .. }
             | Command::KvBatchDelete { branch, space, .. }
             | Command::KvBatchExists { branch, space, .. }
+            | Command::KvExists { branch, space, .. }
             | Command::KvGet { branch, space, .. }
             | Command::KvDelete { branch, space, .. }
             | Command::KvList { branch, space, .. }
@@ -2321,6 +2399,7 @@ impl Command {
             | Command::JsonBatchGet { branch, space, .. }
             | Command::JsonBatchDelete { branch, space, .. }
             | Command::JsonGet { branch, space, .. }
+            | Command::JsonExists { branch, space, .. }
             | Command::JsonGetv { branch, space, .. }
             | Command::JsonDelete { branch, space, .. }
             | Command::JsonList { branch, space, .. }
@@ -2328,6 +2407,7 @@ impl Command {
             | Command::EventAppend { branch, space, .. }
             | Command::EventBatchAppend { branch, space, .. }
             | Command::EventGet { branch, space, .. }
+            | Command::EventExists { branch, space, .. }
             | Command::EventGetByType { branch, space, .. }
             | Command::EventLen { branch, space, .. }
             | Command::EventRange { branch, space, .. }
@@ -2338,12 +2418,14 @@ impl Command {
             | Command::VectorUpsert { branch, space, .. }
             | Command::VectorGet { branch, space, .. }
             | Command::VectorGetv { branch, space, .. }
+            | Command::VectorExists { branch, space, .. }
             | Command::VectorDelete { branch, space, .. }
             | Command::VectorQuery { branch, space, .. }
             | Command::VectorCreateCollection { branch, space, .. }
             | Command::VectorDeleteCollection { branch, space, .. }
             | Command::VectorListCollections { branch, space, .. }
             | Command::VectorCollectionStats { branch, space, .. }
+            | Command::VectorCount { branch, space, .. }
             | Command::VectorBatchUpsert { branch, space, .. }
             | Command::VectorBatchGet { branch, space, .. }
             | Command::VectorBatchDelete { branch, space, .. }
@@ -2501,6 +2583,7 @@ impl Command {
             | Command::KvBatchGet { space, .. }
             | Command::KvBatchDelete { space, .. }
             | Command::KvBatchExists { space, .. }
+            | Command::KvExists { space, .. }
             | Command::KvGet { space, .. }
             | Command::KvDelete { space, .. }
             | Command::KvList { space, .. }
@@ -2511,12 +2594,14 @@ impl Command {
             | Command::JsonBatchGet { space, .. }
             | Command::JsonBatchDelete { space, .. }
             | Command::JsonGet { space, .. }
+            | Command::JsonExists { space, .. }
             | Command::JsonGetv { space, .. }
             | Command::JsonDelete { space, .. }
             | Command::JsonList { space, .. }
             | Command::EventAppend { space, .. }
             | Command::EventBatchAppend { space, .. }
             | Command::EventGet { space, .. }
+            | Command::EventExists { space, .. }
             | Command::EventGetByType { space, .. }
             | Command::EventLen { space, .. }
             | Command::EventRange { space, .. }
@@ -2526,12 +2611,14 @@ impl Command {
             | Command::VectorUpsert { space, .. }
             | Command::VectorGet { space, .. }
             | Command::VectorGetv { space, .. }
+            | Command::VectorExists { space, .. }
             | Command::VectorDelete { space, .. }
             | Command::VectorQuery { space, .. }
             | Command::VectorCreateCollection { space, .. }
             | Command::VectorDeleteCollection { space, .. }
             | Command::VectorListCollections { space, .. }
             | Command::VectorCollectionStats { space, .. }
+            | Command::VectorCount { space, .. }
             | Command::VectorBatchUpsert { space, .. }
             | Command::VectorBatchGet { space, .. }
             | Command::VectorBatchDelete { space, .. }
@@ -2580,6 +2667,7 @@ impl Command {
             | Command::KvBatchGet { branch, .. }
             | Command::KvBatchDelete { branch, .. }
             | Command::KvBatchExists { branch, .. }
+            | Command::KvExists { branch, .. }
             | Command::KvGet { branch, .. }
             | Command::KvDelete { branch, .. }
             | Command::KvList { branch, .. }
@@ -2590,12 +2678,14 @@ impl Command {
             | Command::JsonBatchGet { branch, .. }
             | Command::JsonBatchDelete { branch, .. }
             | Command::JsonGet { branch, .. }
+            | Command::JsonExists { branch, .. }
             | Command::JsonGetv { branch, .. }
             | Command::JsonDelete { branch, .. }
             | Command::JsonList { branch, .. }
             | Command::EventAppend { branch, .. }
             | Command::EventBatchAppend { branch, .. }
             | Command::EventGet { branch, .. }
+            | Command::EventExists { branch, .. }
             | Command::EventGetByType { branch, .. }
             | Command::EventLen { branch, .. }
             | Command::EventRange { branch, .. }
@@ -2605,12 +2695,14 @@ impl Command {
             | Command::VectorUpsert { branch, .. }
             | Command::VectorGet { branch, .. }
             | Command::VectorGetv { branch, .. }
+            | Command::VectorExists { branch, .. }
             | Command::VectorDelete { branch, .. }
             | Command::VectorQuery { branch, .. }
             | Command::VectorCreateCollection { branch, .. }
             | Command::VectorDeleteCollection { branch, .. }
             | Command::VectorListCollections { branch, .. }
             | Command::VectorCollectionStats { branch, .. }
+            | Command::VectorCount { branch, .. }
             | Command::VectorBatchUpsert { branch, .. }
             | Command::VectorBatchGet { branch, .. }
             | Command::VectorBatchDelete { branch, .. }

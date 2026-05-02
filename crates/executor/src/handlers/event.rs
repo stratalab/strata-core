@@ -132,6 +132,11 @@ pub(crate) fn execute_in_txn(
                 ))
             })))
         }
+        crate::Command::EventExists { sequence, .. } => {
+            let mut txn = ScopedTransaction::new(ctx, namespace);
+            let result = txn.event_get(sequence).map_err(crate::Error::from)?;
+            Ok(Output::Bool(result.is_some()))
+        }
         crate::Command::EventGetByType {
             event_type,
             limit,
@@ -330,6 +335,17 @@ pub(crate) fn get(
         version: extract_version(&event.version),
         timestamp: event.value.timestamp.into(),
     })))
+}
+
+pub(crate) fn exists(
+    primitives: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    sequence: u64,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    let exists = convert_result(primitives.event.get(&branch_id, &space, sequence))?.is_some();
+    Ok(Output::Bool(exists))
 }
 
 pub(crate) fn get_by_type(

@@ -74,17 +74,17 @@ pub(crate) fn embed_batch(p: &Arc<Primitives>, texts: Vec<String>) -> Result<Out
 /// No-op when the embed feature is not compiled in.
 #[cfg(not(feature = "embed"))]
 pub(crate) fn embed(_p: &Arc<Primitives>, _text: String) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Embedding not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "Embed".to_string(),
+        reason: "embedding commands require compiling with --features embed".to_string(),
     })
 }
 
 /// No-op when the embed feature is not compiled in.
 #[cfg(not(feature = "embed"))]
 pub(crate) fn embed_batch(_p: &Arc<Primitives>, _texts: Vec<String>) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Embedding not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "EmbedBatch".to_string(),
+        reason: "embedding commands require compiling with --features embed".to_string(),
     })
 }

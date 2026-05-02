@@ -32,6 +32,7 @@ use crate::types::*;
 ///     _ => unreachable!("KvGet always returns Maybe"),
 /// }
 /// ```
+#[non_exhaustive]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Output {
     // ==================== Primitive Results ====================
@@ -57,10 +58,11 @@ pub enum Output {
     Uint(u64),
 
     // ==================== Collections ====================
-    /// List of versioned values (history operations)
+    /// Heterogeneous list of versioned values, used by event queries that can return
+    /// values from multiple event sequences.
     VersionedValues(Vec<VersionedValue>),
 
-    /// Version history result (getv/readv operations).
+    /// Version timeline for a single key/cell/document (getv/readv operations).
     /// None if the key/cell/document doesn't exist.
     VersionHistory(Option<Vec<VersionedValue>>),
 

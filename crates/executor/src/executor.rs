@@ -314,6 +314,12 @@ impl Executor {
                 space.unwrap_or_else(|| "default".to_string()),
                 keys,
             ),
+            Command::KvExists { branch, space, key } => kv::exists(
+                &self.primitives,
+                branch.unwrap_or_else(|| self.default_branch.clone()),
+                space.unwrap_or_else(|| "default".to_string()),
+                key,
+            ),
             Command::KvGetv { branch, space, key } => kv::getv(
                 &self.primitives,
                 branch.unwrap_or_else(|| self.default_branch.clone()),
@@ -383,6 +389,12 @@ impl Executor {
                 path,
             ),
             Command::JsonGetv { branch, space, key } => json::getv(
+                &self.primitives,
+                branch.unwrap_or_else(|| self.default_branch.clone()),
+                space.unwrap_or_else(|| "default".to_string()),
+                key,
+            ),
+            Command::JsonExists { branch, space, key } => json::exists(
                 &self.primitives,
                 branch.unwrap_or_else(|| self.default_branch.clone()),
                 space.unwrap_or_else(|| "default".to_string()),
@@ -518,6 +530,16 @@ impl Executor {
                 space.unwrap_or_else(|| "default".to_string()),
                 sequence,
                 as_of,
+            ),
+            Command::EventExists {
+                branch,
+                space,
+                sequence,
+            } => event::exists(
+                &self.primitives,
+                branch.unwrap_or_else(|| self.default_branch.clone()),
+                space.unwrap_or_else(|| "default".to_string()),
+                sequence,
             ),
             Command::EventGetByType {
                 branch,
@@ -659,6 +681,18 @@ impl Executor {
                 collection,
                 key,
             ),
+            Command::VectorExists {
+                branch,
+                space,
+                collection,
+                key,
+            } => vector::exists(
+                &self.primitives,
+                branch.unwrap_or_else(|| self.default_branch.clone()),
+                space.unwrap_or_else(|| "default".to_string()),
+                collection,
+                key,
+            ),
             Command::VectorQuery {
                 branch,
                 space,
@@ -713,6 +747,16 @@ impl Executor {
                 space,
                 collection,
             } => vector::collection_stats(
+                &self.primitives,
+                branch.unwrap_or_else(|| self.default_branch.clone()),
+                space.unwrap_or_else(|| "default".to_string()),
+                collection,
+            ),
+            Command::VectorCount {
+                branch,
+                space,
+                collection,
+            } => vector::count(
                 &self.primitives,
                 branch.unwrap_or_else(|| self.default_branch.clone()),
                 space.unwrap_or_else(|| "default".to_string()),
@@ -1368,7 +1412,7 @@ mod tests {
 
     use strata_security::AccessMode;
 
-    use crate::{BranchId, Command, Error, Executor, Output, Strata};
+    use crate::{BranchId, Command, DistanceMetric, Error, Executor, Output, Strata};
 
     fn test_db() -> Arc<strata_engine::Database> {
         Strata::cache()
@@ -1479,5 +1523,161 @@ mod tests {
             .expect("auto-embed compatible write path should succeed");
 
         assert!(matches!(output, Output::WriteResult { .. }));
+    }
+
+    #[test]
+    fn single_key_exists_and_vector_count_commands_execute() {
+        let executor = Executor::new(test_db());
+        let suffix = uuid::Uuid::new_v4();
+        let kv_key = format!("exists-kv-{suffix}");
+        let json_key = format!("exists-json-{suffix}");
+        let vector_collection = format!("exists-vector-{suffix}");
+        let vector_key = "vector-key".to_string();
+
+        assert_eq!(
+            executor
+                .execute(Command::KvExists {
+                    branch: None,
+                    space: None,
+                    key: kv_key.clone(),
+                })
+                .expect("kv exists should execute"),
+            Output::Bool(false)
+        );
+        executor
+            .execute(Command::KvPut {
+                branch: None,
+                space: None,
+                key: kv_key.clone(),
+                value: strata_core::Value::String("value".into()),
+            })
+            .expect("kv put should execute");
+        assert_eq!(
+            executor
+                .execute(Command::KvExists {
+                    branch: None,
+                    space: None,
+                    key: kv_key,
+                })
+                .expect("kv exists should execute"),
+            Output::Bool(true)
+        );
+
+        assert_eq!(
+            executor
+                .execute(Command::JsonExists {
+                    branch: None,
+                    space: None,
+                    key: json_key.clone(),
+                })
+                .expect("json exists should execute"),
+            Output::Bool(false)
+        );
+        executor
+            .execute(Command::JsonSet {
+                branch: None,
+                space: None,
+                key: json_key.clone(),
+                path: "$".into(),
+                value: strata_core::Value::Bool(true),
+            })
+            .expect("json set should execute");
+        assert_eq!(
+            executor
+                .execute(Command::JsonExists {
+                    branch: None,
+                    space: None,
+                    key: json_key,
+                })
+                .expect("json exists should execute"),
+            Output::Bool(true)
+        );
+
+        let mut payload = std::collections::HashMap::new();
+        payload.insert("ok".to_string(), strata_core::Value::Bool(true));
+        let event_output = executor
+            .execute(Command::EventAppend {
+                branch: None,
+                space: None,
+                event_type: "exists.test".into(),
+                payload: strata_core::Value::Object(Box::new(payload)),
+            })
+            .expect("event append should execute");
+        let sequence = match event_output {
+            Output::EventAppendResult { sequence, .. } => sequence,
+            other => panic!("unexpected event append output: {other:?}"),
+        };
+        assert_eq!(
+            executor
+                .execute(Command::EventExists {
+                    branch: None,
+                    space: None,
+                    sequence,
+                })
+                .expect("event exists should execute"),
+            Output::Bool(true)
+        );
+
+        executor
+            .execute(Command::VectorCreateCollection {
+                branch: None,
+                space: None,
+                collection: vector_collection.clone(),
+                dimension: 3,
+                metric: DistanceMetric::Cosine,
+            })
+            .expect("vector collection create should execute");
+        assert_eq!(
+            executor
+                .execute(Command::VectorCount {
+                    branch: None,
+                    space: None,
+                    collection: vector_collection.clone(),
+                })
+                .expect("vector count should execute"),
+            Output::Uint(0)
+        );
+        assert_eq!(
+            executor
+                .execute(Command::VectorExists {
+                    branch: None,
+                    space: None,
+                    collection: vector_collection.clone(),
+                    key: vector_key.clone(),
+                })
+                .expect("vector exists should execute"),
+            Output::Bool(false)
+        );
+        executor
+            .execute(Command::VectorUpsert {
+                branch: None,
+                space: None,
+                collection: vector_collection.clone(),
+                key: vector_key.clone(),
+                vector: vec![1.0, 0.0, 0.0],
+                metadata: None,
+            })
+            .expect("vector upsert should execute");
+        assert_eq!(
+            executor
+                .execute(Command::VectorExists {
+                    branch: None,
+                    space: None,
+                    collection: vector_collection.clone(),
+                    key: vector_key,
+                })
+                .expect("vector exists should execute"),
+            Output::Bool(true)
+        );
+        assert_eq!(
+            executor
+                .execute(Command::VectorCount {
+                    branch: None,
+                    space: None,
+                    collection: vector_collection,
+                })
+                .expect("vector count should execute"),
+            Output::Uint(1)
+        );
     }
 }
