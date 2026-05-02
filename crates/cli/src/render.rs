@@ -40,12 +40,9 @@ fn render_raw(output: &Output) -> String {
         }
         Output::Uint(value) | Output::Version(value) => value.to_string(),
         Output::Text(text) => text.clone(),
-        Output::Maybe(None) | Output::MaybeVersioned(None) | Output::MaybeVersion(None) => {
-            String::new()
-        }
+        Output::Maybe(None) | Output::MaybeVersioned(None) => String::new(),
         Output::Maybe(Some(value)) => render_raw_value(value),
         Output::MaybeVersioned(Some(versioned)) => render_raw_value(&versioned.value),
-        Output::MaybeVersion(Some(version)) => version.to_string(),
         Output::Keys(keys) | Output::SpaceList(keys) => keys.join("\n"),
         Output::VectorMatches(matches) => matches
             .iter()
@@ -76,12 +73,9 @@ fn render_human(output: &Output) -> String {
         }
         Output::Uint(value) | Output::Version(value) => value.to_string(),
         Output::Text(text) => text.clone(),
-        Output::Maybe(None) | Output::MaybeVersioned(None) | Output::MaybeVersion(None) => {
-            "(nil)".to_string()
-        }
+        Output::Maybe(None) | Output::MaybeVersioned(None) => "(nil)".to_string(),
         Output::Maybe(Some(value)) => render_human_value(value),
         Output::MaybeVersioned(Some(versioned)) => render_human_value(&versioned.value),
-        Output::MaybeVersion(Some(version)) => version.to_string(),
         Output::Keys(keys) | Output::SpaceList(keys) => keys.join("\n"),
         Output::TxnBegun => "OK".to_string(),
         Output::TxnCommitted { version } => format!("committed v{version}"),
