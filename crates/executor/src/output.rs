@@ -45,9 +45,6 @@ pub enum Output {
     /// Optional versioned value (most common for get operations)
     MaybeVersioned(Option<VersionedValue>),
 
-    /// Optional version number (for CAS operations)
-    MaybeVersion(Option<u64>),
-
     /// Version number
     Version(u64),
 
