@@ -224,6 +224,24 @@ pub(crate) fn getv(
     Ok(Output::VectorVersionHistory(mapped))
 }
 
+pub(crate) fn exists(
+    primitives: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+    key: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_key(&key))?;
+    convert_result(validate_not_internal_collection(&collection))?;
+    let exists = convert_vector_result(
+        primitives.vector.get(branch_id, &space, &collection, &key),
+        branch_id,
+    )?
+    .is_some();
+    Ok(Output::Bool(exists))
+}
+
 pub(crate) fn query(
     primitives: &Arc<Primitives>,
     branch: BranchId,
@@ -401,6 +419,31 @@ pub(crate) fn collection_stats(
         index_type,
         memory_bytes,
     }]))
+}
+
+pub(crate) fn count(
+    primitives: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    collection: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_not_internal_collection(&collection))?;
+
+    let collections = convert_vector_result(
+        primitives.vector.list_collections(branch_id, &space),
+        branch_id,
+    )?;
+    let names: Vec<String> = collections.iter().map(|info| info.name.clone()).collect();
+    let info = collections
+        .into_iter()
+        .find(|info| info.name == collection)
+        .ok_or_else(|| Error::CollectionNotFound {
+            collection: collection.clone(),
+            hint: crate::suggest::format_hint("collections", &names, &collection, 2),
+        })?;
+
+    Ok(Output::Uint(info.count as u64))
 }
 
 pub(crate) fn batch_upsert(
@@ -656,6 +699,16 @@ pub(crate) fn execute_in_txn(
                 }
                 None => Ok(Output::VectorData(None)),
             }
+        }
+        crate::Command::VectorExists {
+            collection, key, ..
+        } => {
+            convert_result(validate_not_internal_collection(&collection))?;
+            convert_result(validate_key(&key))?;
+            let record = ctx
+                .vector_get(branch_id, space, &collection, &key)
+                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
+            Ok(Output::Bool(record.is_some()))
         }
         other => Err(Error::Internal {
             reason: format!("unexpected vector transaction command: {}", other.name()),

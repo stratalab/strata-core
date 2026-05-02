@@ -401,6 +401,18 @@ pub(crate) fn batch_exists(
     Ok(Output::BoolList(results))
 }
 
+pub(crate) fn exists(
+    primitives: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    key: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_key(&key))?;
+    let results = convert_result(primitives.kv.batch_exists(&branch_id, &space, &[key]))?;
+    Ok(Output::Bool(results.into_iter().next().unwrap_or(false)))
+}
+
 pub(crate) fn getv(
     primitives: &Arc<Primitives>,
     branch: BranchId,
@@ -626,6 +638,13 @@ pub(crate) fn execute_in_txn(
                 values.push(ctx.exists(&full_key).map_err(crate::Error::from)?);
             }
             Ok(Output::BoolList(values))
+        }
+        crate::Command::KvExists { key, .. } => {
+            convert_result(validate_key(&key))?;
+            let full_key = Key::new_kv(namespace, &key);
+            Ok(Output::Bool(
+                ctx.exists(&full_key).map_err(crate::Error::from)?,
+            ))
         }
         other => Err(crate::Error::Internal {
             reason: format!("unexpected KV transaction command: {}", other.name()),

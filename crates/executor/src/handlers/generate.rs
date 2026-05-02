@@ -242,9 +242,9 @@ pub(crate) fn generate(
     _stop_tokens: Option<Vec<u32>>,
     _stop_sequences: Option<Vec<String>>,
 ) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Generation not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "Generate".to_string(),
+        reason: "generation commands require compiling with --features embed".to_string(),
     })
 }
 
@@ -255,24 +255,24 @@ pub(crate) fn tokenize(
     _text: String,
     _add_special_tokens: Option<bool>,
 ) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Generation not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "Tokenize".to_string(),
+        reason: "tokenization commands require compiling with --features embed".to_string(),
     })
 }
 
 #[cfg(not(feature = "embed"))]
 pub(crate) fn detokenize(_p: &Arc<Primitives>, _model: String, _ids: Vec<u32>) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Generation not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "Detokenize".to_string(),
+        reason: "detokenization commands require compiling with --features embed".to_string(),
     })
 }
 
 #[cfg(not(feature = "embed"))]
 pub(crate) fn generate_unload(_p: &Arc<Primitives>, _model: String) -> Result<Output> {
-    Err(Error::Internal {
-        reason: "Generation not available: compile with --features embed".to_string(),
-        hint: Some("This is likely a bug. Please report it at https://github.com/stratalab/strata-core/issues".to_string()),
+    Err(Error::NotImplemented {
+        feature: "GenerateUnload".to_string(),
+        reason: "generation commands require compiling with --features embed".to_string(),
     })
 }

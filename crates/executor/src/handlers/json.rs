@@ -171,6 +171,18 @@ pub(crate) fn getv(
     Ok(Output::VersionHistory(mapped))
 }
 
+pub(crate) fn exists(
+    primitives: &Arc<Primitives>,
+    branch: BranchId,
+    space: String,
+    key: String,
+) -> Result<Output> {
+    let branch_id = to_core_branch_id(&branch)?;
+    convert_result(validate_key(&key))?;
+    let exists = convert_result(primitives.json.exists(&branch_id, &space, &key))?;
+    Ok(Output::Bool(exists))
+}
+
 pub(crate) fn batch_set(
     primitives: &Arc<Primitives>,
     branch: BranchId,
@@ -436,6 +448,13 @@ pub(crate) fn execute_in_txn(
                 },
                 None => None,
             }))
+        }
+        crate::Command::JsonExists { key, .. } => {
+            convert_result(validate_key(&key))?;
+            let mut txn = ctx.scoped(namespace);
+            Ok(Output::Bool(
+                txn.json_get(&key).map_err(crate::Error::from)?.is_some(),
+            ))
         }
         crate::Command::JsonSet {
             key, path, value, ..

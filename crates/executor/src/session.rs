@@ -437,8 +437,10 @@ fn command_space(command: &Command) -> String {
         | Command::KvBatchGet { space, .. }
         | Command::KvBatchDelete { space, .. }
         | Command::KvBatchExists { space, .. }
+        | Command::KvExists { space, .. }
         | Command::JsonSet { space, .. }
         | Command::JsonGet { space, .. }
+        | Command::JsonExists { space, .. }
         | Command::JsonGetv { space, .. }
         | Command::JsonDelete { space, .. }
         | Command::JsonBatchSet { space, .. }
@@ -448,6 +450,7 @@ fn command_space(command: &Command) -> String {
         | Command::EventAppend { space, .. }
         | Command::EventBatchAppend { space, .. }
         | Command::EventGet { space, .. }
+        | Command::EventExists { space, .. }
         | Command::EventGetByType { space, .. }
         | Command::EventLen { space, .. }
         | Command::EventRange { space, .. }
@@ -489,12 +492,14 @@ fn command_space(command: &Command) -> String {
         | Command::VectorUpsert { space, .. }
         | Command::VectorGet { space, .. }
         | Command::VectorGetv { space, .. }
+        | Command::VectorExists { space, .. }
         | Command::VectorDelete { space, .. }
         | Command::VectorQuery { space, .. }
         | Command::VectorCreateCollection { space, .. }
         | Command::VectorDeleteCollection { space, .. }
         | Command::VectorListCollections { space, .. }
         | Command::VectorCollectionStats { space, .. }
+        | Command::VectorCount { space, .. }
         | Command::VectorBatchUpsert { space, .. }
         | Command::VectorBatchGet { space, .. }
         | Command::VectorBatchDelete { space, .. }
@@ -535,7 +540,8 @@ fn dispatch_in_txn(
         | other @ Command::KvBatchPut { .. }
         | other @ Command::KvBatchGet { .. }
         | other @ Command::KvBatchDelete { .. }
-        | other @ Command::KvBatchExists { .. } => {
+        | other @ Command::KvBatchExists { .. }
+        | other @ Command::KvExists { .. } => {
             let ctx = txn
                 .context_mut()
                 .expect("transaction context should be available until commit or rollback");
@@ -545,6 +551,7 @@ fn dispatch_in_txn(
         | other @ Command::JsonSet { .. }
         | other @ Command::JsonDelete { .. }
         | other @ Command::JsonList { .. }
+        | other @ Command::JsonExists { .. }
         | other @ Command::JsonBatchSet { .. }
         | other @ Command::JsonBatchGet { .. }
         | other @ Command::JsonBatchDelete { .. } => {
@@ -552,6 +559,7 @@ fn dispatch_in_txn(
         }
         other @ Command::EventAppend { .. }
         | other @ Command::EventGet { .. }
+        | other @ Command::EventExists { .. }
         | other @ Command::EventGetByType { .. }
         | other @ Command::EventLen { .. }
         | other @ Command::EventBatchAppend { .. } => {
@@ -577,7 +585,8 @@ fn dispatch_in_txn(
         }
         other @ Command::VectorUpsert { .. }
         | other @ Command::VectorDelete { .. }
-        | other @ Command::VectorGet { .. } => {
+        | other @ Command::VectorGet { .. }
+        | other @ Command::VectorExists { .. } => {
             let ctx = txn
                 .context_mut()
                 .expect("transaction context should be available until commit or rollback");
