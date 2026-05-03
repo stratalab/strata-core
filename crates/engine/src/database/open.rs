@@ -19,10 +19,9 @@ use tracing::{info, warn};
 
 /// Apply all storage configuration settings to a SegmentedStore.
 ///
-/// Centralizes the 7 storage-config setters so every open path
-/// (primary, follower, cache) applies the same set of knobs. Visible to
-/// `super::recovery` so the unified `run_recovery` entry point can apply
-/// the same knobs after it finishes MANIFEST + WAL + segment recovery.
+/// Centralizes storage-config setters for engine-owned store construction.
+/// Disk recovery applies the same knobs through storage's recovery runtime
+/// config before segment recovery runs.
 pub(crate) fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
     storage.set_max_branches(cfg.max_branches);
     storage.set_max_versions_per_key(cfg.max_versions_per_key);
@@ -721,8 +720,8 @@ impl Database {
         let wal_dir = layout.wal_dir().to_path_buf();
 
         // Defensive: tighten segments-dir permissions on reopen. On
-        // first-open `run_recovery` already restricted it via
-        // `prepare_manifest`; on reopen we don't know the historical
+        // first-open `run_recovery` already restricted it via storage
+        // MANIFEST preparation; on reopen we don't know the historical
         // perms of an existing dir.
         if matches!(layout.segments_dir().try_exists(), Ok(true)) {
             restrict_dir(layout.segments_dir());

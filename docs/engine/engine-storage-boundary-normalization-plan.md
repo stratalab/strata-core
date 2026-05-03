@@ -128,7 +128,7 @@ While this plan is in progress:
 - do not add new engine modules that deepen lower-runtime ownership
 - do not move product policy into storage as a convenience
 
-## Current Starting Point
+## Starting Point
 
 The workspace is already past the older storage consolidation milestones:
 
@@ -140,10 +140,10 @@ The workspace is already past the older storage consolidation milestones:
   in transitional locations
 - storage depends only on foundational lower crates and must stay below engine
 
-The remaining problem is not a temporary peer crate. It is lower-runtime code
-still physically hosted inside engine.
+The remaining problem at the start of this plan was not a temporary peer
+crate. It was lower-runtime code still physically hosted inside engine.
 
-The strongest current candidates are:
+The strongest original candidates were:
 
 - [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
   - checkpoint creation
@@ -439,7 +439,7 @@ Keep in engine:
 Move lower storage recovery bootstrap and replay orchestration from engine
 into storage, while keeping database-level recovery policy in engine.
 
-Potential detailed execution plan:
+Detailed execution plan:
 
 - `docs/engine/es4-recovery-bootstrap-mechanics-plan.md`
 
@@ -506,6 +506,23 @@ Keep in engine:
 - recovery tests pass from storage and engine layers
 - normal, degraded, and lossy recovery outcomes have characterization before
   refactoring
+
+### Implementation Status
+
+ES4 now routes `Database::run_recovery()` through
+`strata_storage::durability::run_storage_recovery`. Storage owns MANIFEST and
+codec preparation, `RecoveryCoordinator` replay, generic WAL record
+application, mechanical lossy WAL replay fallback, storage runtime config
+application before segment recovery, and `SegmentedStore::recover_segments()`.
+
+Engine still owns the primitive snapshot-install callback, public
+`RecoveryError` conversion, degraded-storage open policy,
+`LossyRecoveryReport`, `TransactionCoordinator` bootstrap, follower-state
+restore, and watermark construction.
+
+The one intentional correctness tightening found during ES4 is documented in
+the ES4 behavior-change ledger: primitive snapshot install callback failures
+now bypass lossy WAL replay instead of allowing an empty lossy open.
 
 ### Non-Goals
 
@@ -704,7 +721,8 @@ This plan is not complete until all of the following are true at once:
 2. `strata-engine` owns database orchestration, public APIs, primitive
    semantics, branch semantics, search/runtime behavior, and product policy.
 3. Engine database modules no longer host low-level storage recovery,
-   snapshot install, or checkpoint/WAL compaction implementations.
+   generic decoded-row snapshot install, or checkpoint/WAL compaction
+   implementations.
 4. Storage APIs used by engine expose raw substrate facts and storage-local
    errors, not engine reports or product vocabulary.
 5. Engine converts storage facts into `StrataError`, health reports,

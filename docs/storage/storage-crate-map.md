@@ -46,6 +46,8 @@ Major subtrees:
 
 - `segmented/` — the real storage engine surface, including recovery,
   compaction, ref tracking, and quarantine protocol
+- `durability/` — WAL, snapshot/checkpoint, MANIFEST, decoded-row install,
+  and recovery-bootstrap mechanics
 
 The crate is already substantial. The heaviest ownership points are:
 
@@ -76,6 +78,11 @@ Today `strata-storage` re-exports:
   - `SegmentedStore`
   - `VersionedValue`
   - `StoredValue`
+- durability runtime types:
+  - WAL reader/writer, codec, layout, and format types
+  - checkpoint, compaction, snapshot-prune, and MANIFEST-sync helpers
+  - decoded snapshot-row install helpers
+  - storage recovery bootstrap input/outcome/error types
 - compaction and quarantine support:
   - compaction helpers
   - quarantine helpers
@@ -98,12 +105,13 @@ That is the clean shape we wanted from the earlier storage boundary cleanup.
 
 The internal incoming graph today is:
 
-- `strata-core-legacy`
 - `strata-engine`
 - `strata-executor`
 - `strata-graph`
 - `strata-search`
 - `strata-vector`
+
+The root `stratadb` package also depends on storage in dev/test paths.
 
 This confirms that storage is already the effective substrate node of the
 workspace.
@@ -152,6 +160,18 @@ In [error.rs](../../crates/storage/src/error.rs), storage owns:
 - `StorageResult`
 - storage corruption and IO classification
 
+### 5. Durability Runtime
+
+In [durability/](../../crates/storage/src/durability), storage owns:
+
+- WAL read/write, codec, and payload mechanics
+- snapshot/checkpoint file mechanics
+- generic MANIFEST load/create/update mechanics
+- checkpoint, WAL compaction, snapshot pruning, and MANIFEST sync helpers
+- generic decoded-row snapshot install into `SegmentedStore`
+- recovery bootstrap mechanics through
+  [recovery_bootstrap.rs](../../crates/storage/src/durability/recovery_bootstrap.rs)
+
 ## What Storage Now Owns
 
 Storage now owns the full lower runtime substrate.
@@ -163,7 +183,9 @@ The major substrate responsibilities now physically owned here are:
 - commit coordination
 - WAL runtime
 - snapshot runtime
-- recovery coordination
+- checkpoint and WAL compaction runtime
+- generic decoded-row snapshot install runtime
+- recovery bootstrap and replay coordination
 
 ## Current Architectural Role
 
@@ -172,6 +194,7 @@ If you describe the crate honestly as it exists today, `strata-storage` is:
 - the physical keyspace owner
 - the MVCC persistence engine
 - the storage error owner
+- the durability runtime owner
 - the substrate API boundary for the rest of the stack
 
 It is not merely a bag of data structures. It is the real lower-runtime owner
@@ -186,5 +209,4 @@ is already visible.
 The remaining work is above the substrate now:
 
 - keep primitive semantics out of the lower layer
-- sever the final `core-legacy` dependencies
 - let `engine` converge on its own clean domain/runtime boundary

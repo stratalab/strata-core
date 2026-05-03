@@ -19,6 +19,7 @@ pub mod format;
 pub mod layout;
 pub mod payload;
 pub mod recovery;
+mod recovery_bootstrap;
 pub mod wal;
 
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -87,6 +88,13 @@ pub use payload::{serialize_wal_record_into, PayloadError, TransactionPayload};
 pub use recovery::{
     apply_wal_record_to_memory_storage, CoordinatorPlanError, CoordinatorRecoveryError,
     RecoveryCoordinator, RecoveryPlan, RecoveryResult, RecoveryStats,
+};
+
+// Recovery bootstrap
+pub use recovery_bootstrap::{
+    run_storage_recovery, RecoverySnapshotInstallCallback, StorageLossyWalReplayFacts,
+    StorageRecoveryError, StorageRecoveryInput, StorageRecoveryMode, StorageRecoveryOutcome,
+    StorageRuntimeConfig,
 };
 
 // WAL

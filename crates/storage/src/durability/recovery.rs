@@ -92,12 +92,12 @@ impl RecoveryPlan {
 /// 1. `plan_recovery` validates MANIFEST codec identity before any WAL read.
 /// 2. `recover(on_snapshot, on_record)` streams snapshot install and WAL
 ///    replay through caller-supplied closures. The coordinator owns the
-///    directory layout and record streaming; the engine owns storage
+///    directory layout and record streaming; the caller owns storage
 ///    construction and application.
 ///
 /// A `recover_into_memory_storage` convenience wrapper is kept for
 /// in-crate tests and snapshot-less tooling paths that construct the
-/// coordinator directly; `Database::open_runtime` uses the direct
+/// coordinator directly; storage recovery bootstrap uses the direct
 /// callback API with a codec wired in.
 pub struct RecoveryCoordinator {
     /// Canonical database layout.
@@ -109,8 +109,8 @@ pub struct RecoveryCoordinator {
     /// Storage codec used to decode snapshot payloads. When unset, the
     /// coordinator skips snapshot loading and falls back to full WAL
     /// replay. The `recover_into_memory_storage` wrapper does not
-    /// install a codec; engine opens drive `recover` directly and
-    /// install the codec via `with_codec`.
+    /// install a codec; storage recovery bootstrap drives `recover`
+    /// with a codec installed via `with_codec`.
     codec: Option<Box<dyn StorageCodec>>,
 }
 
@@ -195,13 +195,18 @@ impl CoordinatorRecoveryError {
         )
     }
 
-    /// Returns `true` when the engine must bypass its lossy WAL fallback.
+    /// Returns `true` when callers must bypass the lossy WAL fallback.
     ///
-    /// Coordinator `Plan(...)` failures come from the MANIFEST /
-    /// snapshot-planning step rather than WAL bytes, so recreating the
-    /// in-memory store cannot heal them.
+    /// Coordinator `Plan(...)` and snapshot load failures come from the
+    /// MANIFEST / snapshot-planning step rather than WAL bytes, so recreating
+    /// the in-memory store cannot heal them.
     pub fn should_bypass_lossy(&self) -> bool {
-        matches!(self, CoordinatorRecoveryError::Plan(_)) || self.is_legacy_format()
+        matches!(
+            self,
+            CoordinatorRecoveryError::Plan(_)
+                | CoordinatorRecoveryError::SnapshotMissing { .. }
+                | CoordinatorRecoveryError::SnapshotRead { .. }
+        ) || self.is_legacy_format()
     }
 }
 
@@ -375,7 +380,7 @@ impl RecoveryCoordinator {
 
     /// Drive recovery through caller-supplied callbacks.
     ///
-    /// The engine owns storage construction; the coordinator only:
+    /// The caller owns storage construction; the coordinator only:
     ///
     /// 1. Loads the snapshot declared in the MANIFEST (when a codec is
     ///    installed via `with_codec`) and invokes `on_snapshot` with the
@@ -625,10 +630,10 @@ impl RecoveryCoordinator {
     /// it, returning the fully-materialized `RecoveryResult`.
     ///
     /// Used by in-crate tests and snapshot-less tooling paths that
-    /// construct the coordinator directly. `Database::open_runtime`
-    /// drives `recover` directly with its own snapshot and WAL apply
-    /// closures, so the shipped open path does not go through this
-    /// wrapper. Snapshot loading is not performed here — this entry
+    /// construct the coordinator directly. Database open drives
+    /// storage recovery through `recovery_bootstrap`, so the shipped
+    /// open path does not go through this wrapper. Snapshot loading is
+    /// not performed here — this entry
     /// point intentionally drops any installed codec and uses full WAL
     /// replay only, keeping the convenience API deterministic for
     /// snapshot-less tests and tooling fixtures.
@@ -660,9 +665,8 @@ impl RecoveryCoordinator {
 /// (`#1619` / `#1740`).
 ///
 /// This is the default apply used by
-/// [`RecoveryCoordinator::recover_into_memory_storage`] and is exposed so
-/// engine open paths that drive the callback-driven [`RecoveryCoordinator::recover`]
-/// directly can reuse the exact same apply semantics in their `on_record`
+/// [`RecoveryCoordinator::recover_into_memory_storage`] and the storage
+/// recovery bootstrap's callback-driven [`RecoveryCoordinator::recover`] path.
 pub fn apply_wal_record_to_memory_storage(
     storage: &SegmentedStore,
     record: &WalRecord,

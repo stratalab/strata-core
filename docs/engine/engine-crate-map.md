@@ -21,8 +21,8 @@ crate. It is currently:
 - the subsystem composition host
 - the search/runtime behavior host
 - the branch-bundle import/export host
-- and still, in some places, a host for lower storage-runtime mechanics that
-  should eventually sink into `storage`
+- and, in a smaller set of remaining places, the adapter layer that turns raw
+  storage facts into engine policy and public database behavior
 
 ## High-Level Shape
 
@@ -116,7 +116,7 @@ This means engine is currently both:
 1. the semantic/domain owner
 2. the database runtime owner
 3. the search/runtime owner
-4. the host of some lower storage-runtime mechanics
+4. the host of storage-boundary adapters and public database policy
 
 Those are related, but they are not identical roles.
 
@@ -139,6 +139,7 @@ dependency graph at all.
 The internal incoming graph today is:
 
 - `strata-executor`
+- `strata-executor-legacy`
 - `strata-graph`
 - `strata-search`
 - `strata-vector`
@@ -206,31 +207,39 @@ In [bundle/mod.rs](../../crates/engine/src/bundle/mod.rs) and
 These are engine-level workflows built on top of lower persistence/runtime
 machinery.
 
-## Where Engine Still Owns Lower-Runtime Mechanics
+## Storage-Boundary Adapters Engine Still Owns
 
-The current engine crate also contains code that looks much closer to
-`storage` than to engine semantics.
+The ES2-ES4 cleanup moved the generic checkpoint, decoded-row snapshot
+install, and recovery bootstrap mechanics into `strata-storage`. Engine still
+contains adapter modules at those boundaries because the public APIs,
+primitive decode, lifecycle policy, and public error taxonomy remain
+engine-owned.
 
-The strongest examples are:
+The remaining storage-boundary modules are:
 
 - [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
-  - checkpoint creation
-  - WAL compaction
-  - snapshot pruning
-  - MANIFEST watermark updates
+  - public `Database::checkpoint()` / `Database::compact()` orchestration
+  - conversion of storage checkpoint and retention facts into engine reports
+  - lifecycle-aware shutdown and retention policy around storage mechanics
 - [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
-  - snapshot decoding and install into `SegmentedStore`
+  - primitive snapshot section decode
+  - primitive-shaped install telemetry
+  - construction of a generic decoded-row install plan for storage
 - [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
-  - MANIFEST preparation
-  - WAL codec resolution
-  - storage recovery orchestration
-  - replay bootstrap
+  - `Database::run_recovery()` orchestration
+  - engine snapshot-install callback around primitive decode
+  - mapping `StorageRecoveryError` into `RecoveryError`
+  - degraded-storage policy and lossy recovery reporting
+  - `TransactionCoordinator`, follower-state, and watermark bootstrap
 - parts of [database/open.rs](../../crates/engine/src/database/open.rs)
-  - storage configuration application
+  - public open/lifecycle sequencing
   - WAL-writer wiring
 
-That code may need an engine-owned public API, but the underlying mechanics
-look like substrate/runtime concerns rather than semantic/domain concerns.
+The lower storage mechanics behind these adapters now live in storage-owned
+modules such as `durability/checkpoint_runtime.rs`,
+`durability/decoded_snapshot_install.rs`, and
+`durability/recovery_bootstrap.rs`. ES5 is expected to narrow the remaining
+storage-configuration and WAL-writer runtime seams.
 
 ## Current Architectural Role
 
@@ -240,8 +249,8 @@ If you describe the crate honestly as it exists today, `strata-engine` is:
 - the branch and primitive semantics owner
 - the search/runtime host
 - the branch bundle workflow host
-- plus a partial host for lower storage-runtime mechanics that have not yet
-  sunk into `storage`
+- the layer that converts raw storage recovery/checkpoint facts into public
+  database behavior
 
 ## Main Takeaway
 
@@ -253,5 +262,6 @@ whether code in the crate is:
 - semantic/domain behavior that should stay in `engine`, or
 - generic persistence/runtime machinery that should move to `storage`
 
-Right now the answer is mixed. The semantic side of engine is real, but some
-of the storage-runtime implementation is still living there.
+After ES2-ES4, the semantic side of engine is real and the most critical
+durability mechanics have sunk into storage. The remaining cleanup is to keep
+the adapter code explicit while ES5 finishes the storage-configuration split.

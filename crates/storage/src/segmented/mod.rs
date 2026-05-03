@@ -1113,6 +1113,39 @@ impl SegmentedStore {
         self.bloom_bits_per_key.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
+    pub(crate) fn max_branches_for_test(&self) -> usize {
+        self.max_branches.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_versions_per_key_for_test(&self) -> usize {
+        self.max_versions_per_key.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn max_immutable_memtables_for_test(&self) -> usize {
+        self.max_immutable_memtables.load(Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_rate_limit_for_test(&self) -> u64 {
+        self.compaction_rate_limiter
+            .load_full()
+            .map_or(0, |limiter| limiter.rate_bytes_per_sec())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn branch_level_target_for_test(
+        &self,
+        branch_id: &BranchId,
+        level: usize,
+    ) -> Option<u64> {
+        self.branches
+            .get(branch_id)
+            .and_then(|branch| branch.level_targets.max_bytes.get(level).copied())
+    }
+
     /// Create a `SegmentBuilder` pre-configured with this store's
     /// `data_block_size` and `bloom_bits_per_key`.
     fn make_segment_builder(&self) -> SegmentBuilder {
