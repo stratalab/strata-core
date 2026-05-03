@@ -110,14 +110,12 @@ use strata_storage::{RecoveryHealth, SegmentedStore, StorageIterator, StorageRes
 /// | PersistenceMode | DurabilityMode | Behavior |
 /// |-----------------|----------------|----------|
 /// | Ephemeral | (ignored) | No files, data lost on drop |
-/// | Disk | Cache | Files created, no fsync |
 /// | Disk | Standard | Files created, periodic fsync |
 /// | Disk | Always | Files created, immediate fsync |
 ///
 /// # Use Cases
 ///
 /// - **Ephemeral**: Unit tests, caching, temporary computations
-/// - **Disk + Cache**: Integration tests (fast, isolated, but files exist)
 /// - **Disk + Standard**: Production workloads
 /// - **Disk + Always**: Audit logs, critical data
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

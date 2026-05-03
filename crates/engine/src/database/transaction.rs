@@ -1,7 +1,6 @@
 //! Transaction API and write backpressure.
 
 use crate::{StrataError, StrataResult};
-use parking_lot::Mutex as ParkingMutex;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -9,7 +8,6 @@ use strata_core::id::CommitVersion;
 use strata_core::BranchId;
 use strata_core::{EntityRef, Version};
 use strata_storage::durability::wal::DurabilityMode;
-use strata_storage::durability::{ManifestManager, WalOnlyCompactor};
 use strata_storage::{SegmentedStore, TransactionContext};
 
 use super::Database;
@@ -225,7 +223,6 @@ impl Database {
                         Self::update_flush_watermark(
                             &self.storage,
                             &self.data_dir,
-                            &self.wal_dir,
                             self.wal_codec.as_ref(),
                         );
                     }
@@ -278,7 +275,6 @@ impl Database {
         {
             let storage = Arc::clone(&self.storage);
             let data_dir = self.data_dir.clone();
-            let wal_dir = self.wal_dir.clone();
             let flush_flag = Arc::clone(&self.flush_in_flight);
             let wal_codec = strata_storage::durability::codec::clone_codec(self.wal_codec.as_ref());
             let _ = self
@@ -301,7 +297,6 @@ impl Database {
                                         Self::update_flush_watermark(
                                             &storage,
                                             &data_dir,
-                                            &wal_dir,
                                             wal_codec.as_ref(),
                                         );
                                     }
@@ -490,79 +485,64 @@ impl Database {
     fn update_flush_watermark(
         storage: &SegmentedStore,
         data_dir: &Path,
-        wal_dir: &Path,
         wal_codec: &dyn strata_storage::durability::codec::StorageCodec,
     ) {
-        // Compute global flush watermark: min of max_flushed_commit across all branches
-        let branch_ids = storage.branch_ids();
-        if branch_ids.is_empty() {
-            return;
-        }
-
-        // Compute watermark: min of max_flushed_commit across branches
-        // that participate in the flush pipeline (have segments).
-        // Branches with no segments (e.g. _system_) are excluded — their
-        // data is small and replayed from WAL on recovery.
-        let mut watermark = CommitVersion::MAX;
-        let mut has_any_segments = false;
-        for bid in &branch_ids {
-            if let Some(commit) = storage.max_flushed_commit(bid) {
-                if commit > CommitVersion::ZERO {
-                    watermark = watermark.min(commit);
-                    has_any_segments = true;
-                }
-            }
-            // Branches with no segments are intentionally excluded
-        }
-        if !has_any_segments || watermark == CommitVersion::MAX {
-            return;
-        }
-
-        // Update MANIFEST
-        let manifest_path = data_dir.join("MANIFEST");
-        let mut mgr = match ManifestManager::load(manifest_path) {
-            Ok(mgr) => mgr,
-            Err(e) => {
-                tracing::debug!(
-                    target: "strata::flush",
-                    error = %e,
-                    "No MANIFEST found, skipping WAL truncation"
-                );
-                return;
-            }
-        };
-
-        if let Err(e) = mgr.set_flush_watermark(watermark) {
-            tracing::warn!(
-                target: "strata::flush",
-                error = %e,
-                watermark = watermark.as_u64(),
-                "Failed to update flush watermark in MANIFEST"
-            );
-            return; // Don't truncate WAL if watermark wasn't persisted
-        }
-
-        // Truncate WAL segments below watermark
-        let manifest_arc = Arc::new(ParkingMutex::new(mgr));
-        let compactor = WalOnlyCompactor::new(wal_dir.to_path_buf(), manifest_arc)
-            .with_codec(strata_storage::durability::codec::clone_codec(wal_codec));
-        match compactor.compact() {
-            Ok(info) => {
-                if info.wal_segments_removed > 0 {
+        let layout = strata_storage::durability::DatabaseLayout::from_root(data_dir);
+        match strata_storage::durability::truncate_storage_wal_after_flush(
+            strata_storage::durability::StorageFlushWalTruncationInput {
+                layout,
+                storage,
+                wal_codec: strata_storage::durability::clone_codec(wal_codec),
+            },
+        ) {
+            Ok(Some(outcome)) => {
+                if outcome.wal_segments_removed > 0 {
                     tracing::debug!(
                         target: "strata::wal",
-                        segments_removed = info.wal_segments_removed,
-                        bytes_reclaimed = info.reclaimed_bytes,
-                        watermark = watermark.as_u64(),
+                        segments_removed = outcome.wal_segments_removed,
+                        bytes_reclaimed = outcome.reclaimed_bytes,
+                        watermark = outcome.flush_watermark.as_u64(),
                         "WAL segments truncated after flush"
                     );
                 }
             }
-            Err(e) => {
+            Ok(None) => {}
+            Err(strata_storage::durability::StorageFlushWalTruncationError::LoadManifest {
+                source,
+            }) => {
+                tracing::debug!(
+                    target: "strata::flush",
+                    error = %source,
+                    "No MANIFEST found, skipping WAL truncation"
+                );
+            }
+            Err(
+                strata_storage::durability::StorageFlushWalTruncationError::SetFlushWatermark {
+                    watermark,
+                    source,
+                },
+            ) => {
+                tracing::warn!(
+                    target: "strata::flush",
+                    error = %source,
+                    watermark = watermark.as_u64(),
+                    "Failed to update flush watermark in MANIFEST"
+                );
+            }
+            Err(strata_storage::durability::StorageFlushWalTruncationError::Compaction {
+                source,
+            }) => {
                 tracing::warn!(
                     target: "strata::wal",
-                    error = %e,
+                    error = %source,
                     "WAL compaction failed after flush"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    target: "strata::wal",
+                    error = %error,
+                    "Storage WAL truncation failed after flush"
                 );
             }
         }

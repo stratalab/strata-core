@@ -9,6 +9,7 @@
 //! - database disk layout
 //! - WAL-oriented compaction
 
+mod checkpoint_runtime;
 pub mod codec;
 mod commit_adapter;
 pub mod compaction;
@@ -32,6 +33,16 @@ pub fn now_micros() -> u64 {
 }
 
 pub use wal::DurabilityMode;
+
+// Checkpoint runtime
+pub use checkpoint_runtime::{
+    compact_storage_wal, prune_storage_snapshots, run_storage_checkpoint, sync_storage_manifest,
+    truncate_storage_wal_after_flush, StorageCheckpointError, StorageCheckpointInput,
+    StorageCheckpointOutcome, StorageFlushWalTruncationError, StorageFlushWalTruncationInput,
+    StorageFlushWalTruncationOutcome, StorageManifestRuntimeError, StorageManifestSyncInput,
+    StorageSnapshotPruneError, StorageSnapshotRetention, StorageWalCompactionError,
+    StorageWalCompactionInput, StorageWalCompactionOutcome,
+};
 
 // Codec
 pub use codec::{clone_codec, get_codec, CodecError, IdentityCodec, StorageCodec};

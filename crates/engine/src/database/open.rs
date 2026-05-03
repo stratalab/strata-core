@@ -1317,12 +1317,15 @@ impl Database {
             default_branch,
         } = spec;
 
+        let validation_cfg = sanitize_config(config.as_ref().cloned().unwrap_or_default());
+        validation_cfg.durability_mode()?;
+
         // Create ephemeral database with spec.config if provided.
         // Cache databases are not in the registry, so no reuse check needed.
         let db = Self::create_ephemeral_bare(config.as_ref())?;
 
         let resolved_cfg = db.config();
-        let durability_mode = resolved_cfg.durability_mode()?;
+        let durability_mode = DurabilityMode::Cache;
         let codec_name = resolved_cfg.storage.codec.clone();
         let background_threads = resolved_cfg.storage.background_threads;
         let allow_lossy_recovery = resolved_cfg.allow_lossy_recovery;

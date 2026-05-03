@@ -306,9 +306,10 @@ impl Default for SnapshotRetentionPolicy {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrataConfig {
     /// Durability mode: `"standard"` or `"always"` (switchable at runtime).
-    /// `"cache"` is valid in strata.toml for backward compat but cannot be set at runtime.
+    /// Cache behavior is selected by opening a cache database, not by this
+    /// disk-backed durability setting.
     ///
-    /// Class: live-safe (Standard ↔ Always); `"cache"` is open-time-only.
+    /// Class: live-safe (Standard ↔ Always).
     /// See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default = "default_durability_str")]
     pub durability: String,
@@ -459,14 +460,13 @@ impl StrataConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if the string is not `"standard"`, `"always"`, or `"cache"`.
+    /// Returns an error if the string is not `"standard"` or `"always"`.
     pub fn durability_mode(&self) -> StrataResult<DurabilityMode> {
         match self.durability.as_str() {
             "standard" => Ok(DurabilityMode::standard_default()),
             "always" => Ok(DurabilityMode::Always),
-            "cache" => Ok(DurabilityMode::Cache),
             other => Err(StrataError::invalid_input(format!(
-                "Invalid durability mode '{}' in strata.toml. Expected \"standard\", \"always\", or \"cache\".",
+                "Invalid durability mode '{}' in strata.toml. Expected \"standard\" or \"always\". Cache mode is selected via Database::cache() or OpenSpec::cache().",
                 other
             ))),
         }
@@ -1052,17 +1052,18 @@ auto_embed = true
     }
 
     // -----------------------------------------------------------------------
-    // Cache durability mode
+    // Cache is an open mode, not a disk durability setting
     // -----------------------------------------------------------------------
 
     #[test]
-    fn parse_cache_durability() {
+    fn parse_cache_durability_is_rejected() {
         let config: StrataConfig = toml::from_str("durability = \"cache\"").unwrap();
-        assert_eq!(config.durability_mode().unwrap(), DurabilityMode::Cache);
+        let error = config.durability_mode().unwrap_err();
+        assert!(error.to_string().contains("Database::cache()"));
     }
 
     #[test]
-    fn cache_durability_round_trip() {
+    fn cache_durability_round_trip_still_rejects_runtime_mode() {
         let config = StrataConfig {
             durability: "cache".to_string(),
             ..StrataConfig::default()
@@ -1070,7 +1071,7 @@ auto_embed = true
         let toml_str = toml::to_string_pretty(&config).unwrap();
         let parsed: StrataConfig = toml::from_str(&toml_str).unwrap();
         assert_eq!(parsed.durability, "cache");
-        assert_eq!(parsed.durability_mode().unwrap(), DurabilityMode::Cache);
+        assert!(parsed.durability_mode().is_err());
     }
 
     // -----------------------------------------------------------------------

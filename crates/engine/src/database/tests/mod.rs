@@ -58,7 +58,11 @@ impl Database {
     ) -> StrataResult<Arc<Self>> {
         let dur_str = match durability_mode {
             DurabilityMode::Always => "always",
-            DurabilityMode::Cache => "cache",
+            DurabilityMode::Cache => {
+                return Err(StrataError::invalid_input(
+                    "DurabilityMode::Cache is only valid for Database::cache()".to_string(),
+                ));
+            }
             _ => "standard",
         };
         let cfg = StrataConfig {

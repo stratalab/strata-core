@@ -171,8 +171,8 @@ fn reopen_drops_stale_inventory_entries_without_degrade() {
 
 /// The in-session retention/report path must treat the same stale inventory
 /// shape as benign. Recovery reconciliation rewrites these entries away on
-/// reopen, but callers must not get `RetentionReportUnavailable` simply
-/// because publish happened and rename never did.
+/// reopen, but callers must not get an unavailable-report error simply because
+/// publish happened and rename never did.
 #[test]
 fn retention_snapshot_ignores_stale_missing_quarantine_inventory_entries() {
     let dir = tempfile::tempdir().unwrap();

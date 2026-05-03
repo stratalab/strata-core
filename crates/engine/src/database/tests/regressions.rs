@@ -419,6 +419,50 @@ fn test_issue_1732_checkpoint_data_preserves_branch_names() {
 }
 
 #[test]
+fn test_checkpoint_data_skips_branch_secondary_index_keys() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([0x31; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "branch_index".to_string()));
+    let value = Value::String("branch-payload".to_string());
+
+    db.storage
+        .put_recovery_entry(
+            Key::new_branch_with_id(namespace.clone(), "branch-record"),
+            value.clone(),
+            CommitVersion(41),
+            41_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_branch_index(namespace, "name", "feature", "branch-record"),
+            Value::String("derived-index".to_string()),
+            CommitVersion(42),
+            42_000,
+            0,
+        )
+        .unwrap();
+
+    let branch_entries = db.collect_checkpoint_data().branches.unwrap_or_default();
+    let matching_entries: Vec<_> = branch_entries
+        .iter()
+        .filter(|entry| entry.branch_id == *branch_id.as_bytes())
+        .collect();
+
+    assert_eq!(
+        matching_entries.len(),
+        1,
+        "checkpoint should include only source branch metadata, not derived __idx_ rows: {matching_entries:?}"
+    );
+    let entry = matching_entries[0];
+    assert_eq!(entry.key, "branch-record");
+    assert_eq!(entry.value, serde_json::to_vec(&value).unwrap());
+    assert_eq!(entry.version, 41);
+    assert_eq!(entry.timestamp, 41_000);
+}
+
+#[test]
 fn test_checkpoint_data_preserves_branch_space_and_type_for_kv_entries() {
     let db = Database::cache().unwrap();
     let branch_a = BranchId::from_bytes([1; 16]);
@@ -559,6 +603,60 @@ fn test_checkpoint_data_preserves_event_space_metadata() {
             && entry.version == version.as_u64()
             && entry.timestamp == timestamp_micros
     }));
+}
+
+#[test]
+fn test_checkpoint_data_skips_event_metadata_and_type_index_keys() {
+    let db = Database::cache().unwrap();
+    let branch_id = BranchId::from_bytes([0x32; 16]);
+    let namespace = Arc::new(Namespace::new(branch_id, "tenant_events".to_string()));
+    let event_value = Value::String("event-payload".to_string());
+
+    db.storage
+        .put_recovery_entry(
+            Key::new_event(namespace.clone(), 11),
+            event_value.clone(),
+            CommitVersion(51),
+            51_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_event_meta(namespace.clone()),
+            Value::String("derived-meta".to_string()),
+            CommitVersion(52),
+            52_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_event_type_idx(namespace, "user.created", 11),
+            Value::String("derived-type-index".to_string()),
+            CommitVersion(53),
+            53_000,
+            0,
+        )
+        .unwrap();
+
+    let event_entries = db.collect_checkpoint_data().events.unwrap_or_default();
+    let matching_entries: Vec<_> = event_entries
+        .iter()
+        .filter(|entry| entry.branch_id == *branch_id.as_bytes())
+        .collect();
+
+    assert_eq!(
+        matching_entries.len(),
+        1,
+        "checkpoint should include only append event rows, not __meta__ or __tidx__ rows: {matching_entries:?}"
+    );
+    let entry = matching_entries[0];
+    assert_eq!(entry.space, "tenant_events");
+    assert_eq!(entry.sequence, 11);
+    assert_eq!(entry.payload, serde_json::to_vec(&event_value).unwrap());
+    assert_eq!(entry.version, 51);
+    assert_eq!(entry.timestamp, 51_000);
 }
 
 #[test]
@@ -1122,7 +1220,7 @@ fn test_issue_1924_write_stall_timeout_surfaced_to_caller() {
     // stop trigger of 1 (any L0 segment triggers stall), and 1ms timeout
     // so the stall expires before compaction can drain L0.
     let cfg = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             write_buffer_size: 128,        // tiny: forces memtable rotation
             l0_stop_writes_trigger: 1,     // stall when ANY L0 segment exists
@@ -1179,7 +1277,7 @@ fn test_issue_1924_write_stall_timeout_manual_commit() {
     let ns = Arc::new(Namespace::new(branch_id, "default".to_string()));
 
     let cfg = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             write_buffer_size: 128,
             l0_stop_writes_trigger: 1,
@@ -1248,15 +1346,15 @@ static ENV_VAR_TEST_LOCK: once_cell::sync::Lazy<std::sync::Mutex<()>> =
 #[serial(open_databases)]
 fn test_issue_1380_codec_mismatch_rejected() {
     // A database created with "identity" must reject reopen with a different codec.
-    // Use Cache mode to bypass the WAL-not-supported guard (encryption works in
-    // Cache mode, WAL codec support is pending).
+    // WAL codec support is available, so this exercises the disk-backed
+    // primary path directly.
     let _env_guard = ENV_VAR_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let temp_dir = TempDir::new().unwrap();
 
-    // First open with Cache mode: creates MANIFEST with "identity"
+    // First open creates MANIFEST with "identity".
     {
         let cfg = StrataConfig {
-            durability: "cache".to_string(),
+            durability: "standard".to_string(),
             ..StrataConfig::default()
         };
         let spec = super::spec::OpenSpec::primary(temp_dir.path())
@@ -1266,7 +1364,7 @@ fn test_issue_1380_codec_mismatch_rejected() {
         drop(db);
     }
 
-    // Second open with mismatched codec in Cache mode: must fail with codec mismatch
+    // Second open with mismatched codec must fail with codec mismatch
     // (We need the env var set so get_codec validation passes before hitting the
     // MANIFEST mismatch check)
     std::env::set_var(
@@ -1274,7 +1372,7 @@ fn test_issue_1380_codec_mismatch_rejected() {
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
     let cfg = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             codec: "aes-gcm-256".to_string(),
             ..StorageConfig::default()

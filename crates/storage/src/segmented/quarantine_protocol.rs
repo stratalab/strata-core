@@ -40,14 +40,12 @@
 //! and blocks reclaim until a full rebuild-equivalent reconciliation
 //! completes (KD10).
 //!
-//! Engine-facing attribution (`retention_report()` at the engine layer)
-//! consumes the storage-layer snapshot produced by
-//! [`SegmentedStore::retention_snapshot`] below, joins it with
-//! `BranchControlStore` for generation-aware `BranchRef` attribution,
-//! and returns `Err(StrataError::RetentionReportUnavailable)` when
-//! recovery health cannot sustain trustworthy attribution (contract
-//! §"Canonical blocker attribution", convergence doc §"retention
-//! report contract" hard-fail rule).
+//! Engine-facing attribution consumes the storage-layer snapshot produced by
+//! [`SegmentedStore::retention_snapshot`] below, joins it with branch-control
+//! metadata for generation-aware attribution, and returns an unavailable
+//! result when recovery health cannot sustain trustworthy attribution
+//! (contract §"Canonical blocker attribution", convergence doc hard-fail
+//! rule).
 
 use std::collections::{HashMap, HashSet};
 use std::io;

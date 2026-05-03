@@ -1,11 +1,11 @@
 //! GC, maintenance, follower refresh, and shutdown.
 
 use crate::{StrataError, StrataResult};
+use std::num::NonZeroU64;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_core::BranchId;
-use strata_storage::durability::{ManifestError, ManifestManager};
 use strata_storage::Key;
 use tracing::{info, warn};
 
@@ -124,17 +124,18 @@ impl Database {
     ///   - the `retain_count` newest snapshots, and
     ///   - the snapshot referenced by the live MANIFEST (recovery-critical).
     ///
-    /// Best-effort: per-file delete failures are logged but do not abort the
-    /// loop. The snapshots directory is fsynced once at the end if any file
-    /// was actually removed. Returns the number of files deleted.
+    /// Per-file delete failures are logged but do not abort the loop. The
+    /// snapshots directory is fsynced once at the end if any file was actually
+    /// removed. Returns the number of files deleted. Directory open/fsync
+    /// failures are returned to the caller; post-checkpoint callers treat them
+    /// as nonfatal to checkpoint success.
     ///
     /// Skipped (returns `Ok(0)`) for ephemeral mode, follower mode, and
     /// while shutdown is in progress.
     ///
-    /// Called from `Database::checkpoint` after the new snapshot is durable.
-    /// A future executor / CLI surface will expose this as an admin entry
-    /// point — see `docs/design/durability/durability-storage-closure-epics.md`
-    /// "What Comes After" section.
+    /// Kept as the engine config/lifecycle adapter for `Database::checkpoint`,
+    /// direct admin pruning tests, and a future executor / CLI surface.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn prune_snapshots_once(&self) -> StrataResult<usize> {
         if self.check_not_shutting_down().is_err() {
             return Ok(0);
@@ -143,87 +144,16 @@ impl Database {
             return Ok(0);
         }
 
-        let snapshots_dir = self.data_dir.join("snapshots");
-        if !snapshots_dir.exists() {
-            return Ok(0);
-        }
-
-        let retain_count = self.config.read().snapshot_retention.retain_count.max(1);
-
-        let manifest_path = self.data_dir.join("MANIFEST");
-        let live_snapshot_id = if ManifestManager::exists(&manifest_path) {
-            ManifestManager::load(manifest_path)
-                .map_err(|e: ManifestError| {
-                    StrataError::internal(format!(
-                        "prune_snapshots: failed to load MANIFEST: {}",
-                        e
-                    ))
-                })?
-                .manifest()
-                .snapshot_id
-        } else {
-            None
+        let layout = strata_storage::durability::DatabaseLayout::from_root(&self.data_dir);
+        let retention = {
+            let cfg = self.config.read();
+            strata_storage::durability::StorageSnapshotRetention::new(
+                cfg.snapshot_retention.retain_count,
+            )
         };
 
-        let snapshots =
-            strata_storage::durability::list_snapshots(&snapshots_dir).map_err(|e| {
-                StrataError::internal(format!(
-                    "prune_snapshots: failed to list snapshots in {}: {}",
-                    snapshots_dir.display(),
-                    e
-                ))
-            })?;
-
-        if snapshots.len() <= retain_count {
-            return Ok(0);
-        }
-
-        let keep_from = snapshots.len().saturating_sub(retain_count);
-        let mut deleted = 0usize;
-
-        for (i, (id, path)) in snapshots.iter().enumerate() {
-            if i >= keep_from {
-                break;
-            }
-            if Some(*id) == live_snapshot_id {
-                continue;
-            }
-            match std::fs::remove_file(path) {
-                Ok(_) => deleted += 1,
-                Err(e) => {
-                    warn!(
-                        target: "strata::durability",
-                        snapshot_id = id,
-                        path = ?path,
-                        error = %e,
-                        "Failed to delete pruned snapshot file"
-                    );
-                }
-            }
-        }
-
-        if deleted > 0 {
-            let dir_fd = std::fs::File::open(&snapshots_dir).map_err(|e| {
-                StrataError::internal(format!(
-                    "prune_snapshots: failed to open snapshots dir for fsync: {}",
-                    e
-                ))
-            })?;
-            dir_fd.sync_all().map_err(|e| {
-                StrataError::internal(format!(
-                    "prune_snapshots: failed to fsync snapshots dir: {}",
-                    e
-                ))
-            })?;
-            info!(
-                target: "strata::durability",
-                deleted,
-                retained = retain_count,
-                "Snapshot pruning complete"
-            );
-        }
-
-        Ok(deleted)
+        strata_storage::durability::prune_storage_snapshots(&layout, retention)
+            .map_err(|e| StrataError::internal(e.to_string()))
     }
 
     /// Remove the per-branch commit lock after a branch is deleted.
@@ -911,15 +841,33 @@ impl Database {
 
     /// Atomically persist the MANIFEST so it is durable before freeze hooks run.
     ///
-    /// `ManifestManager::persist()` performs tmp-write → `sync_all` → rename →
+    /// Storage manifest persistence performs tmp-write → `sync_all` → rename →
     /// parent-dir fsync. Skipped for ephemeral databases (no data_dir).
     fn fsync_manifest(&self) -> StrataResult<()> {
         if self.data_dir.as_os_str().is_empty() {
             return Ok(());
         }
-        let mut mgr = self.load_or_create_manifest()?;
-        mgr.persist()
-            .map_err(|e| StrataError::internal(format!("manifest fsync on shutdown failed: {}", e)))
+
+        let active_wal_segment = self
+            .wal_writer
+            .as_ref()
+            .map(|wal| {
+                let current_segment = wal.lock().current_segment();
+                NonZeroU64::new(current_segment)
+                    .ok_or_else(|| StrataError::internal("WAL writer reported active segment 0"))
+            })
+            .transpose()?;
+        let layout = strata_storage::durability::DatabaseLayout::from_root(&self.data_dir);
+
+        strata_storage::durability::sync_storage_manifest(
+            strata_storage::durability::StorageManifestSyncInput {
+                layout,
+                database_uuid: self.database_uuid,
+                manifest_create_codec_id: "identity".to_string(),
+                active_wal_segment,
+            },
+        )
+        .map_err(map_storage_manifest_sync_error)
     }
 
     /// Release this database's entry from the global `OPEN_DATABASES` registry.
@@ -932,5 +880,28 @@ impl Database {
         if self.persistence_mode == PersistenceMode::Disk {
             registry::unregister(&self.data_dir);
         }
+    }
+}
+
+fn map_storage_manifest_sync_error(
+    error: strata_storage::durability::StorageManifestRuntimeError,
+) -> StrataError {
+    match error {
+        strata_storage::durability::StorageManifestRuntimeError::Load { source } => {
+            StrataError::internal(format!("failed to load MANIFEST: {}", source))
+        }
+        strata_storage::durability::StorageManifestRuntimeError::Create { source } => {
+            StrataError::internal(format!("failed to create MANIFEST: {}", source))
+        }
+        strata_storage::durability::StorageManifestRuntimeError::PersistActiveSegment {
+            source,
+        } => StrataError::internal(format!("failed to persist MANIFEST: {}", source)),
+        strata_storage::durability::StorageManifestRuntimeError::SetSnapshotWatermark {
+            source,
+        } => StrataError::internal(format!("manifest update failed: {}", source)),
+        strata_storage::durability::StorageManifestRuntimeError::Persist { source } => {
+            StrataError::internal(format!("manifest fsync on shutdown failed: {}", source))
+        }
+        other => StrataError::internal(format!("manifest fsync on shutdown failed: {}", other)),
     }
 }

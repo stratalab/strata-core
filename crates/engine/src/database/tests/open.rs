@@ -199,13 +199,77 @@ fn test_open_with_different_durability_modes() {
         assert!(!db.is_cache());
     }
 
-    // Cache mode
-    {
-        let db =
-            Database::open_with_durability(temp_dir.path().join("none"), DurabilityMode::Cache)
-                .unwrap();
-        assert!(!db.is_cache());
-    }
+    // Ephemeral cache is an open mode, not a disk-backed durability.
+    let cache = Database::cache().unwrap();
+    assert!(cache.is_cache());
+}
+
+#[test]
+fn test_primary_open_rejects_cache_durability_string() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("cache_is_not_disk_durability");
+
+    let result = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(crate::search::SearchSubsystem),
+    );
+
+    let error = match result {
+        Ok(_) => panic!("primary open must reject durability = cache"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("Database::cache()"),
+        "error must point callers at cache open mode, got: {error}"
+    );
+}
+
+#[test]
+fn test_cache_open_rejects_invalid_durability_string() {
+    let result = Database::open_runtime(
+        super::spec::OpenSpec::cache()
+            .with_config(StrataConfig {
+                durability: "turbo".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(crate::search::SearchSubsystem),
+    );
+
+    let error = match result {
+        Ok(_) => panic!("cache open must still validate durability config strings"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("Invalid durability mode 'turbo'"),
+        "cache open must reject invalid durability strings, got: {error}"
+    );
+}
+
+#[test]
+fn test_cache_open_rejects_cache_durability_string() {
+    let result = Database::open_runtime(
+        super::spec::OpenSpec::cache()
+            .with_config(StrataConfig {
+                durability: "cache".to_string(),
+                ..StrataConfig::default()
+            })
+            .with_subsystem(crate::search::SearchSubsystem),
+    );
+
+    let error = match result {
+        Ok(_) => panic!("cache open mode must not accept durability = cache"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("Database::cache()"),
+        "error should explain cache is selected by open mode, got: {error}"
+    );
 }
 
 #[test]

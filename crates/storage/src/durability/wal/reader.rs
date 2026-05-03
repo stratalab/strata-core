@@ -1194,9 +1194,9 @@ pub enum WalReaderError {
     ///
     /// Produced when a segment's `SEGMENT_FORMAT_VERSION` is older than
     /// this build supports. Surfaces unconditionally (strict and lossy
-    /// alike); the engine's open path re-raises as
-    /// [`strata_engine::StrataError::LegacyFormat`] and the operator
-    /// must delete the `wal/` subdirectory manually before reopening.
+    /// alike); the engine-facing recovery layer re-raises it as the public
+    /// legacy-format error and the operator must delete the `wal/`
+    /// subdirectory manually before reopening.
     /// Lossy recovery does not bypass format incompatibility (T3-E12 §D6).
     ///
     /// The `hint` carries the full operator-facing message including

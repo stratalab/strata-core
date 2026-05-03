@@ -301,7 +301,7 @@ fn first_open_rejects_invalid_codec_without_touching_disk() {
 
     let mut cfg = strata_engine::database::config::StrataConfig::default();
     cfg.storage.codec = "does-not-exist".to_string();
-    cfg.durability = "cache".to_string();
+    cfg.durability = "standard".to_string();
 
     strata_engine::database::OPEN_DATABASES.lock().clear();
     let Err(err) = Database::open_runtime(

@@ -26,28 +26,35 @@ const TEST_AES_KEY: &str = "000102030405060708090a0b0c0d0e0f10111213141516171819
 /// RAII guard that sets an env var on construction and removes it on drop.
 /// Ensures the encryption-key env var does not leak to sibling tests even
 /// if an assertion panics mid-body.
-struct EnvVarGuard(&'static str);
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
 
 impl EnvVarGuard {
     fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
         std::env::set_var(name, value);
-        Self(name)
+        Self { name, previous }
     }
 }
 
 impl Drop for EnvVarGuard {
     fn drop(&mut self) {
-        std::env::remove_var(self.0);
+        if let Some(value) = self.previous.take() {
+            std::env::set_var(self.name, value);
+        } else {
+            std::env::remove_var(self.name);
+        }
     }
 }
 
 /// Registry-reuse path: an already-open database rejects a second opener
 /// that asks for a different codec, with [`StrataError::IncompatibleReuse`].
 ///
-/// Uses cache durability so neither opener hits the WAL-codec block at
-/// `open.rs:842`. The first handle is held alive for the duration of the
-/// second call so the reuse path is actually exercised (not the cold-reopen
-/// path that goes through the MANIFEST check).
+/// The first handle is held alive for the duration of the second call so the
+/// reuse path is actually exercised (not the cold-reopen path that goes
+/// through the MANIFEST check).
 #[test]
 #[serial(open_databases)]
 fn test_registry_reuse_rejects_different_codec() {
@@ -58,7 +65,7 @@ fn test_registry_reuse_rejects_different_codec() {
     let db_path = temp_dir.path().join("db");
 
     let cfg_aes = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             codec: "aes-gcm-256".to_string(),
             ..StorageConfig::default()
@@ -74,7 +81,7 @@ fn test_registry_reuse_rejects_different_codec() {
 
     // Second opener, same path, same durability, DIFFERENT codec.
     let cfg_identity = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             codec: "identity".to_string(),
             ..StorageConfig::default()
@@ -128,13 +135,12 @@ fn test_follower_rejects_codec_mismatch_with_manifest() {
     }
     OPEN_DATABASES.lock().clear();
 
-    // Attempt to open a follower that claims a different codec.
-    // Use cache durability on the follower so the earlier
-    // non-identity + WAL rejection (which would fire on Standard/Always)
-    // does not mask the MANIFEST drift check we're exercising here.
+    // Attempt to open a follower that claims a different codec. Non-identity
+    // WAL replay is codec-aware now, so the MANIFEST drift check is the
+    // expected failure.
     let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
     let cfg_follower = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             codec: "aes-gcm-256".to_string(),
             ..StorageConfig::default()
@@ -181,7 +187,7 @@ fn test_follower_rejects_unknown_codec_without_manifest() {
     std::fs::create_dir_all(&db_path).unwrap();
 
     let cfg = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         storage: StorageConfig {
             codec: "lz4-does-not-exist".to_string(),
             ..StorageConfig::default()
@@ -250,7 +256,7 @@ fn test_registry_reuse_rejects_different_background_threads() {
     let db_path = temp_dir.path().join("db");
 
     let mut cfg_a = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         ..StrataConfig::default()
     };
     cfg_a.storage.background_threads = 2;
@@ -263,7 +269,7 @@ fn test_registry_reuse_rejects_different_background_threads() {
     .expect("first opener with background_threads=2 must succeed");
 
     let mut cfg_b = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         ..StrataConfig::default()
     };
     cfg_b.storage.background_threads = 8;
@@ -330,7 +336,7 @@ fn test_profiled_defaults_are_not_persisted_to_strata_toml() {
     let db = Database::open_runtime(
         super::spec::OpenSpec::primary(&db_path)
             .with_config(StrataConfig {
-                durability: "cache".to_string(),
+                durability: "standard".to_string(),
                 ..StrataConfig::default()
             })
             .with_subsystem(SearchSubsystem),
@@ -367,7 +373,7 @@ fn test_profiled_defaults_are_not_persisted_to_strata_toml() {
     let db2 = Database::open_runtime(
         super::spec::OpenSpec::primary(&db_path)
             .with_config(StrataConfig {
-                durability: "cache".to_string(),
+                durability: "standard".to_string(),
                 ..StrataConfig::default()
             })
             .with_subsystem(SearchSubsystem),
@@ -404,7 +410,7 @@ fn test_profile_applies_before_signature_so_reuse_with_explicit_value_succeeds()
     let db1 = Database::open_runtime(
         super::spec::OpenSpec::primary(&db_path)
             .with_config(StrataConfig {
-                durability: "cache".to_string(),
+                durability: "standard".to_string(),
                 ..StrataConfig::default()
             })
             .with_subsystem(SearchSubsystem),
@@ -417,7 +423,7 @@ fn test_profile_applies_before_signature_so_reuse_with_explicit_value_succeeds()
         .background_threads;
 
     let mut cfg_explicit = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         ..StrataConfig::default()
     };
     cfg_explicit.storage.background_threads = effective_threads;
@@ -553,7 +559,7 @@ fn test_update_config_rejects_open_time_only_field_changes() {
     let db = Database::open_runtime(
         super::spec::OpenSpec::primary(&db_path)
             .with_config(StrataConfig {
-                durability: "cache".to_string(),
+                durability: "standard".to_string(),
                 ..StrataConfig::default()
             })
             .with_subsystem(SearchSubsystem),
@@ -633,7 +639,7 @@ fn test_registry_reuse_rejects_different_allow_lossy_recovery() {
     let db_path = temp_dir.path().join("db");
 
     let cfg_strict = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         allow_lossy_recovery: false,
         ..StrataConfig::default()
     };
@@ -645,7 +651,7 @@ fn test_registry_reuse_rejects_different_allow_lossy_recovery() {
     .expect("first opener with allow_lossy_recovery=false must succeed");
 
     let cfg_lossy = StrataConfig {
-        durability: "cache".to_string(),
+        durability: "standard".to_string(),
         allow_lossy_recovery: true,
         ..StrataConfig::default()
     };
