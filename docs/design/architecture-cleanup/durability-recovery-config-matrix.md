@@ -98,7 +98,10 @@ The classification is load-bearing in three places:
 ## Durability/recovery coverage
 
 **Open-time-only:** `codec`, `background_threads`, `allow_lossy_recovery`,
-`allow_missing_manifest`, `durability = "cache"` (discriminant).
+`allow_missing_manifest`.
+
+Cache is selected by open mode (`Database::cache()` / `OpenSpec::cache()`),
+not by the `durability` config string.
 
 **Live-safe (durability/recovery domain):** `durability` (Standard↔Always
 switch). All other `StorageConfig` entries are live-safe but LSM-tuning, not

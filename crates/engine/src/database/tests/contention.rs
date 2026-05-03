@@ -4,9 +4,11 @@ use super::*;
 fn test_put_direct_contention_scaling() {
     const OPS_PER_THREAD: usize = 10_000;
     let temp_dir = TempDir::new().unwrap();
-    let db =
-        Database::open_with_durability(temp_dir.path().join("contention"), DurabilityMode::Cache)
-            .unwrap();
+    let db = Database::open_with_durability(
+        temp_dir.path().join("contention"),
+        DurabilityMode::standard_default(),
+    )
+    .unwrap();
 
     // Phase 1: Concurrent writes — measure throughput scaling
     let thread_counts = [1, 4, 8, 16];

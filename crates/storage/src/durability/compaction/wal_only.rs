@@ -1,12 +1,14 @@
 //! WAL-only compaction
 //!
-//! Removes WAL segments that are fully covered by a snapshot watermark.
+//! Removes WAL segments that are fully covered by the effective retention
+//! watermark.
 //! This is the safest compaction mode - it only removes data that is
 //! guaranteed to be recoverable from the snapshot.
 //!
 //! # Algorithm
 //!
-//! 1. Get snapshot watermark (transaction ID) from MANIFEST
+//! 1. Get the effective watermark from MANIFEST: max of the snapshot and
+//!    flush watermarks
 //! 2. List all WAL segments
 //! 3. For each segment (except the active segment):
 //!    - Read all records and find the highest txn_id
@@ -17,8 +19,8 @@
 //! # Safety
 //!
 //! - Never removes the active segment
-//! - Only removes segments fully covered by snapshot
-//! - Requires a valid snapshot to exist
+//! - Only removes segments fully covered by snapshot or flushed segment state
+//! - Requires a snapshot or flush watermark to exist
 
 use crate::durability::codec::{clone_codec, StorageCodec};
 use crate::durability::format::segment_meta::SegmentMeta;
@@ -33,7 +35,7 @@ use super::{CompactInfo, CompactMode, CompactionError};
 
 /// WAL-only compactor
 ///
-/// Removes WAL segments covered by snapshot watermark.
+/// Removes WAL segments covered by the effective retention watermark.
 pub struct WalOnlyCompactor {
     wal_dir: PathBuf,
     manifest: Arc<Mutex<ManifestManager>>,

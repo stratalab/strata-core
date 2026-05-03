@@ -286,11 +286,10 @@ pub enum SnapshotReadError {
     ///
     /// Produced when the snapshot's `format_version` is older than
     /// [`crate::durability::format::snapshot::MIN_SUPPORTED_SNAPSHOT_FORMAT_VERSION`].
-    /// Surfaces unconditionally (strict and lossy open alike); the engine's
-    /// open path re-raises as
-    /// [`strata_engine::StrataError::LegacyFormat`] and the operator must
-    /// delete the file manually before reopening. Mirrors the WAL
-    /// `SegmentHeaderError::LegacyFormat` contract.
+    /// Surfaces unconditionally (strict and lossy open alike); the
+    /// engine-facing recovery layer re-raises it as the public legacy-format
+    /// error and the operator must delete the file manually before reopening.
+    /// Mirrors the WAL `SegmentHeaderError::LegacyFormat` contract.
     #[error(
         "legacy snapshot format: found version {detected_version}. {supported_range}. {remediation}"
     )]

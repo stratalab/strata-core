@@ -1,13 +1,14 @@
 //! Flush, checkpoint, and compaction.
 
 use crate::{StrataError, StrataResult};
-use std::sync::Arc;
+use std::num::NonZeroU64;
 use strata_core::id::{CommitVersion, TxnId};
 use strata_storage::durability::__internal::WalWriterEngineExt;
 use strata_storage::durability::{
-    BranchSnapshotEntry, CheckpointCoordinator, CheckpointData, CheckpointError, CompactionError,
-    EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry, ManifestError, ManifestManager,
-    VectorCollectionSnapshotEntry, VectorSnapshotEntry, WalOnlyCompactor,
+    BranchSnapshotEntry, CheckpointData, EventSnapshotEntry, JsonSnapshotEntry, KvSnapshotEntry,
+    StorageCheckpointError, StorageCheckpointInput, StorageManifestRuntimeError,
+    StorageWalCompactionError, StorageWalCompactionInput, VectorCollectionSnapshotEntry,
+    VectorSnapshotEntry,
 };
 use strata_storage::{Key, TypeTag};
 use tracing::info;
@@ -106,69 +107,43 @@ impl Database {
         // Collect data from storage
         let data = self.collect_checkpoint_data();
 
-        // Create snapshots directory
-        let snapshots_dir = self.data_dir.join("snapshots");
-        std::fs::create_dir_all(&snapshots_dir).map_err(StrataError::from)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ =
-                std::fs::set_permissions(&snapshots_dir, std::fs::Permissions::from_mode(0o700));
-        }
-
-        // Load or create MANIFEST
-        let mut manifest = self.load_or_create_manifest()?;
-
-        // Build watermark state from existing MANIFEST if present
-        let existing_watermark = {
-            let m = manifest.manifest();
-            match (m.snapshot_id, m.snapshot_watermark) {
-                (Some(sid), Some(wtxn)) => Some(
-                    strata_storage::durability::SnapshotWatermark::with_values(sid, TxnId(wtxn), 0),
-                ),
-                _ => None,
-            }
-        };
-
-        // Create CheckpointCoordinator with the configured codec and database UUID
-        let db_uuid = self.database_uuid;
         let codec_id = self.config.read().storage.codec.clone();
         let codec = strata_storage::durability::get_codec(&codec_id)
             .map_err(|e| StrataError::internal(format!("checkpoint codec: {}", e)))?;
-        let mut coordinator = if let Some(wm) = existing_watermark {
-            CheckpointCoordinator::with_watermark(snapshots_dir, codec, db_uuid, wm)
-                .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
-        } else {
-            CheckpointCoordinator::new(snapshots_dir, codec, db_uuid)
-                .map_err(|e| StrataError::internal(format!("checkpoint coordinator: {}", e)))?
-        };
+        let current_segment = self
+            .wal_writer
+            .as_ref()
+            .expect("non-ephemeral non-follower must have wal_writer")
+            .lock()
+            .current_segment();
+        let active_wal_segment = NonZeroU64::new(current_segment)
+            .ok_or_else(|| StrataError::internal("WAL writer reported active segment 0"))?;
+        let layout = strata_storage::durability::DatabaseLayout::from_root(&self.data_dir);
 
-        // Create the checkpoint
-        let info =
-            coordinator
-                .checkpoint(TxnId(watermark_txn), data)
-                .map_err(|e: CheckpointError| {
-                    StrataError::internal(format!("checkpoint failed: {}", e))
-                })?;
-
-        // Update MANIFEST with snapshot watermark
-        manifest
-            .set_snapshot_watermark(info.snapshot_id, info.watermark_txn)
-            .map_err(|e: ManifestError| {
-                StrataError::internal(format!("manifest update failed: {}", e))
-            })?;
+        let outcome = strata_storage::durability::run_storage_checkpoint(StorageCheckpointInput {
+            layout,
+            database_uuid: self.database_uuid,
+            checkpoint_codec: codec,
+            // Preserve the current checkpoint/compact path behavior for
+            // databases missing a MANIFEST.
+            manifest_create_codec_id: "identity".to_string(),
+            checkpoint_data: data,
+            watermark_txn: TxnId(watermark_txn),
+            active_wal_segment,
+        })
+        .map_err(map_storage_checkpoint_error)?;
 
         info!(
             target: "strata::db",
-            snapshot_id = info.snapshot_id,
-            watermark_txn = info.watermark_txn.as_u64(),
+            snapshot_id = outcome.snapshot_id,
+            watermark_txn = outcome.watermark_txn.as_u64(),
             "Checkpoint created"
         );
 
-        if let Err(e) = self.prune_snapshots_once() {
+        if let Err(error) = self.prune_snapshots_once() {
             tracing::warn!(
                 target: "strata::durability",
-                error = %e,
+                error = %error,
                 "Snapshot pruning failed after checkpoint (non-fatal)"
             );
         }
@@ -179,10 +154,12 @@ impl Database {
     /// Compact WAL segments that are no longer needed for recovery.
     ///
     /// Removes closed WAL segments whose max transaction ID is at or below the
-    /// latest snapshot watermark. The active segment is never removed.
+    /// effective retention watermark from MANIFEST. The effective watermark is
+    /// the max of the snapshot watermark and flush watermark. The active
+    /// segment is never removed.
     ///
-    /// A checkpoint must exist before compaction can run. For ephemeral (cache)
-    /// databases, this is a no-op.
+    /// A checkpoint or flush watermark must exist before compaction can run.
+    /// For ephemeral (cache) databases, this is a no-op.
     ///
     /// See: `docs/architecture/STORAGE_DURABILITY_ARCHITECTURE.md` Section 5.6
     pub fn compact(&self) -> StrataResult<()> {
@@ -191,40 +168,33 @@ impl Database {
             return Ok(());
         }
 
-        let wal_dir = self.data_dir.join("wal");
-
-        // Load or create MANIFEST
-        let manifest = self.load_or_create_manifest()?;
-        let manifest_arc = Arc::new(parking_lot::Mutex::new(manifest));
-
         // Get the writer's in-memory segment number (may be ahead of MANIFEST)
-        let writer_active = self
+        let active_wal_segment = self
             .wal_writer
             .as_ref()
-            .map(|w| w.lock().current_segment())
-            .unwrap_or(0);
+            .map(|w| {
+                let current_segment = w.lock().current_segment();
+                NonZeroU64::new(current_segment)
+                    .ok_or_else(|| StrataError::internal("WAL writer reported active segment 0"))
+            })
+            .transpose()?;
+        let layout = strata_storage::durability::DatabaseLayout::from_root(&self.data_dir);
 
-        // Create compactor and run with the writer's active segment override.
-        // D2 / DG-001: thread the cached `wal_codec` so the `.meta`-miss
-        // fallback parses records through the codec-aware reader rather
-        // than the raw-byte path that bypasses both the v3 envelope and
-        // the installed codec.
-        let compactor = WalOnlyCompactor::new(wal_dir, manifest_arc).with_codec(
-            strata_storage::durability::codec::clone_codec(self.wal_codec.as_ref()),
-        );
-        let compact_info = compactor
-            .compact_with_active_override(writer_active)
-            .map_err(|e: CompactionError| match e {
-                CompactionError::NoSnapshot => StrataError::invalid_input(
-                    "No checkpoint exists yet. Run checkpoint() before compact().".to_string(),
-                ),
-                other => StrataError::internal(format!("compaction failed: {}", other)),
-            })?;
+        let outcome = strata_storage::durability::compact_storage_wal(StorageWalCompactionInput {
+            layout,
+            database_uuid: self.database_uuid,
+            wal_codec: strata_storage::durability::clone_codec(self.wal_codec.as_ref()),
+            // Preserve the current checkpoint/compact path behavior for
+            // databases missing a MANIFEST.
+            manifest_create_codec_id: "identity".to_string(),
+            active_wal_segment,
+        })
+        .map_err(map_storage_wal_compaction_error)?;
 
         info!(
             target: "strata::db",
-            segments_removed = compact_info.wal_segments_removed,
-            bytes_reclaimed = compact_info.reclaimed_bytes,
+            segments_removed = outcome.wal_segments_removed,
+            bytes_reclaimed = outcome.reclaimed_bytes,
             "WAL compaction completed"
         );
 
@@ -526,34 +496,52 @@ impl Database {
         }
         data
     }
+}
 
-    /// Load an existing MANIFEST or create a new one.
-    ///
-    /// Also updates the active WAL segment from the current WAL writer.
-    pub(super) fn load_or_create_manifest(&self) -> StrataResult<ManifestManager> {
-        let manifest_path = self.data_dir.join("MANIFEST");
-
-        let mut manifest = if ManifestManager::exists(&manifest_path) {
-            ManifestManager::load(manifest_path).map_err(|e: ManifestError| {
-                StrataError::internal(format!("failed to load MANIFEST: {}", e))
-            })?
-        } else {
-            ManifestManager::create(manifest_path, self.database_uuid, "identity".to_string())
-                .map_err(|e: ManifestError| {
-                    StrataError::internal(format!("failed to create MANIFEST: {}", e))
-                })?
-        };
-
-        // Update active WAL segment from the writer
-        if let Some(ref wal) = self.wal_writer {
-            let wal = wal.lock();
-            let current_seg = wal.current_segment();
-            manifest.manifest_mut().active_wal_segment = current_seg;
-            manifest.persist().map_err(|e: ManifestError| {
-                StrataError::internal(format!("failed to persist MANIFEST: {}", e))
-            })?;
+fn map_storage_checkpoint_error(error: StorageCheckpointError) -> StrataError {
+    match error {
+        StorageCheckpointError::CreateSnapshotsDir { source, .. } => StrataError::from(source),
+        StorageCheckpointError::Manifest(error) => map_storage_manifest_error(error),
+        StorageCheckpointError::CheckpointCoordinator(source) => {
+            StrataError::internal(format!("checkpoint coordinator: {}", source))
         }
+        StorageCheckpointError::Checkpoint(source) => {
+            StrataError::internal(format!("checkpoint failed: {}", source))
+        }
+        other => StrataError::internal(format!("storage checkpoint failed: {}", other)),
+    }
+}
 
-        Ok(manifest)
+fn map_storage_wal_compaction_error(error: StorageWalCompactionError) -> StrataError {
+    match error {
+        StorageWalCompactionError::Manifest(error) => map_storage_manifest_error(error),
+        StorageWalCompactionError::NoSnapshot => StrataError::invalid_input(
+            "No checkpoint exists yet. Run checkpoint() before compact().".to_string(),
+        ),
+        StorageWalCompactionError::Compaction(source) => {
+            StrataError::internal(format!("compaction failed: {}", source))
+        }
+        other => StrataError::internal(format!("storage WAL compaction failed: {}", other)),
+    }
+}
+
+fn map_storage_manifest_error(error: StorageManifestRuntimeError) -> StrataError {
+    match error {
+        StorageManifestRuntimeError::Load { source } => {
+            StrataError::internal(format!("failed to load MANIFEST: {}", source))
+        }
+        StorageManifestRuntimeError::Create { source } => {
+            StrataError::internal(format!("failed to create MANIFEST: {}", source))
+        }
+        StorageManifestRuntimeError::PersistActiveSegment { source } => {
+            StrataError::internal(format!("failed to persist MANIFEST: {}", source))
+        }
+        StorageManifestRuntimeError::SetSnapshotWatermark { source } => {
+            StrataError::internal(format!("manifest update failed: {}", source))
+        }
+        StorageManifestRuntimeError::Persist { source } => {
+            StrataError::internal(format!("failed to persist MANIFEST: {}", source))
+        }
+        other => StrataError::internal(format!("storage MANIFEST operation failed: {}", other)),
     }
 }

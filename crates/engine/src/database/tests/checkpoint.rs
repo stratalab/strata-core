@@ -1,5 +1,59 @@
 use super::*;
 
+const TEST_AES_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
+
+struct EnvVarGuard {
+    name: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(name: &'static str, value: &str) -> Self {
+        let previous = std::env::var_os(name);
+        std::env::set_var(name, value);
+        Self { name, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.take() {
+            std::env::set_var(self.name, value);
+        } else {
+            std::env::remove_var(self.name);
+        }
+    }
+}
+
+fn aes_gcm_standard_config() -> StrataConfig {
+    StrataConfig {
+        durability: "standard".to_string(),
+        storage: StorageConfig {
+            codec: "aes-gcm-256".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    }
+}
+
+fn latest_snapshot_sections(db_path: &std::path::Path) -> Vec<(u8, Vec<u8>)> {
+    let snapshots_dir = db_path.join("snapshots");
+    let snapshots = strata_storage::durability::list_snapshots(&snapshots_dir).unwrap();
+    let (_, snapshot_path) = snapshots
+        .last()
+        .expect("checkpoint should create at least one snapshot");
+    let snapshot = strata_storage::durability::SnapshotReader::new(Box::new(IdentityCodec))
+        .load(snapshot_path)
+        .unwrap();
+
+    let sections: Vec<(u8, Vec<u8>)> = snapshot
+        .sections
+        .into_iter()
+        .map(|section| (section.primitive_type, section.data))
+        .collect();
+    sections
+}
+
 #[test]
 fn test_checkpoint_ephemeral_noop() {
     let db = Database::cache().unwrap();
@@ -21,7 +75,15 @@ fn test_compact_without_checkpoint_fails() {
 
     // Compact before any checkpoint should fail (no snapshot watermark)
     let result = db.compact();
-    assert!(result.is_err());
+    match result {
+        Err(StrataError::InvalidInput { message }) => {
+            assert_eq!(
+                message,
+                "No checkpoint exists yet. Run checkpoint() before compact()."
+            );
+        }
+        other => panic!("expected InvalidInput for compact without checkpoint, got {other:?}"),
+    }
 }
 
 #[test]
@@ -35,11 +97,12 @@ fn test_checkpoint_creates_snapshot() {
     let key = Key::new_kv(ns, "checkpoint_test");
 
     // Write some data
-    db.transaction(branch_id, |txn| {
-        txn.put(key.clone(), Value::String("hello".to_string()))?;
-        Ok(())
-    })
-    .unwrap();
+    let ((), commit_version) = db
+        .transaction_with_version(branch_id, |txn| {
+            txn.put(key.clone(), Value::String("hello".to_string()))?;
+            Ok(())
+        })
+        .unwrap();
 
     // Checkpoint should succeed
     assert!(db.checkpoint().is_ok());
@@ -47,10 +110,218 @@ fn test_checkpoint_creates_snapshot() {
     // Snapshots directory should exist with files
     let snapshots_dir = db_path.canonicalize().unwrap().join("snapshots");
     assert!(snapshots_dir.exists());
+    let snapshots = strata_storage::durability::list_snapshots(&snapshots_dir).unwrap();
+    assert_eq!(
+        snapshots.len(),
+        1,
+        "first checkpoint should create one snapshot file"
+    );
 
-    // MANIFEST should exist
+    // MANIFEST should exist and point at the snapshot watermark.
     let manifest_path = db_path.canonicalize().unwrap().join("MANIFEST");
     assert!(manifest_path.exists());
+    let manifest = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
+    let manifest_snapshot_id = manifest
+        .manifest()
+        .snapshot_id
+        .expect("checkpoint should persist a snapshot id");
+    assert_eq!(
+        manifest.manifest().snapshot_watermark,
+        Some(commit_version),
+        "checkpoint MANIFEST watermark should match the quiesced commit version"
+    );
+    assert!(
+        strata_storage::durability::snapshot_path(&snapshots_dir, manifest_snapshot_id).exists(),
+        "MANIFEST snapshot id should reference an existing snapshot file"
+    );
+}
+
+#[test]
+fn test_checkpoint_is_deterministic_without_intervening_writes() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let db = Database::open(&db_path).unwrap();
+
+    let branch_id = BranchId::from_bytes([0x22; 16]);
+    let ns = Arc::new(Namespace::new(branch_id, "stable".to_string()));
+    let key_a = Key::new_kv(ns.clone(), "a");
+    let key_b = Key::new_graph(ns.clone(), "b");
+
+    let ((), commit_version) = db
+        .transaction_with_version(branch_id, |txn| {
+            txn.put(key_a.clone(), Value::String("alpha".to_string()))?;
+            txn.put(key_b.clone(), Value::String("beta".to_string()))?;
+            Ok(())
+        })
+        .unwrap();
+    let recovery_version = CommitVersion(commit_version);
+    db.storage
+        .put_recovery_entry(
+            Key::new_event(ns.clone(), 1),
+            Value::String("event".to_string()),
+            recovery_version,
+            11_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_branch_with_id(ns.clone(), "branch-record"),
+            Value::String("branch".to_string()),
+            recovery_version,
+            12_000,
+            0,
+        )
+        .unwrap();
+    db.storage
+        .put_recovery_entry(
+            Key::new_json(ns, "doc-1"),
+            Value::String("{\"stable\":true}".to_string()),
+            recovery_version,
+            13_000,
+            0,
+        )
+        .unwrap();
+
+    db.checkpoint().unwrap();
+    let first_sections = latest_snapshot_sections(&db_path);
+    let first_tags: Vec<u8> = first_sections.iter().map(|(tag, _)| *tag).collect();
+    assert_eq!(
+        first_tags,
+        vec![
+            strata_storage::durability::primitive_tags::KV,
+            strata_storage::durability::primitive_tags::EVENT,
+            strata_storage::durability::primitive_tags::BRANCH,
+            strata_storage::durability::primitive_tags::JSON,
+        ],
+        "checkpoint sections should retain the storage snapshot writer order"
+    );
+
+    db.checkpoint().unwrap();
+    let second_sections = latest_snapshot_sections(&db_path);
+
+    assert_eq!(
+        first_sections, second_sections,
+        "snapshot primitive sections should be byte-identical when storage state is unchanged"
+    );
+}
+
+#[test]
+#[serial(open_databases)]
+fn test_checkpoint_recreates_missing_manifest_with_identity_codec_even_when_configured_aes() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(crate::SearchSubsystem),
+    )
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    db.transaction(branch_id, |txn| {
+        txn.put(Key::new_kv(ns.clone(), "manifest_recreate"), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::remove_file(&manifest_path).unwrap();
+
+    db.checkpoint().unwrap();
+
+    let snapshots_dir = db_path.join("snapshots");
+    let snapshots = strata_storage::durability::list_snapshots(&snapshots_dir).unwrap();
+    let (_, snapshot_path) = snapshots
+        .last()
+        .expect("checkpoint should create an AES snapshot");
+    let snapshot = strata_storage::durability::SnapshotReader::new(
+        strata_storage::durability::get_codec("aes-gcm-256").unwrap(),
+    )
+    .load(snapshot_path)
+    .unwrap();
+    assert_eq!(
+        snapshot.codec_id, "aes-gcm-256",
+        "snapshot writer should still use the configured AES codec"
+    );
+
+    let manifest = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
+    assert_eq!(
+        manifest.manifest().codec_id,
+        "identity",
+        "missing MANIFEST recreation currently pins identity even when the DB is configured for AES"
+    );
+    assert!(
+        manifest.manifest().snapshot_id.is_some(),
+        "recreated MANIFEST should still receive checkpoint snapshot metadata"
+    );
+
+    drop(db);
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+#[serial(open_databases)]
+fn test_compact_missing_manifest_loses_snapshot_metadata_even_when_configured_aes() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let db = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(crate::SearchSubsystem),
+    )
+    .unwrap();
+
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+    db.transaction(branch_id, |txn| {
+        txn.put(Key::new_kv(ns.clone(), "manifest_recreate"), Value::Int(1))?;
+        Ok(())
+    })
+    .unwrap();
+    db.checkpoint().unwrap();
+
+    let manifest_path = db_path.join("MANIFEST");
+    std::fs::remove_file(&manifest_path).unwrap();
+
+    match db.compact() {
+        Err(StrataError::InvalidInput { message }) => {
+            assert_eq!(
+                message,
+                "No checkpoint exists yet. Run checkpoint() before compact()."
+            );
+        }
+        other => {
+            panic!("expected InvalidInput after compact recreates missing MANIFEST, got {other:?}")
+        }
+    }
+
+    let manifest = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
+    assert_eq!(
+        manifest.manifest().codec_id,
+        "identity",
+        "missing MANIFEST recreation during compact currently pins identity even under AES config"
+    );
+    assert_eq!(
+        manifest.manifest().snapshot_id,
+        None,
+        "compact-created MANIFEST should not infer prior snapshot metadata"
+    );
+    assert_eq!(
+        manifest.manifest().snapshot_watermark,
+        None,
+        "compact-created MANIFEST should not infer prior snapshot watermark"
+    );
+
+    drop(db);
+    OPEN_DATABASES.lock().clear();
 }
 
 #[test]

@@ -33,10 +33,11 @@ pub use wal_only::WalOnlyCompactor;
 /// Determines how aggressively compaction reclaims disk space.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompactMode {
-    /// Remove WAL segments covered by snapshot
+    /// Remove WAL segments covered by a snapshot or flush watermark
     ///
-    /// Only removes WAL segments whose transactions
-    /// are fully captured in a snapshot. All version history preserved.
+    /// Only removes WAL segments whose transactions are fully reconstructible
+    /// from a checkpoint snapshot or flushed segment state. All version
+    /// history is preserved.
     WALOnly,
 }
 

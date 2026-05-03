@@ -143,10 +143,9 @@ pub struct EventSnapshotEntry {
 ///
 /// The explicit `branch_id` field was added in the T3-E5 follow-up so
 /// install can dispatch entries to the correct branch on reopen. In today's
-/// engine all branch metadata lives under the global nil-UUID sentinel
-/// (see `strata_engine::primitives::branch::index::global_branch_id`),
-/// but the DTO carries the id explicitly so future per-branch metadata
-/// scoping works without another format break.
+/// engine all branch metadata lives under the global nil-UUID sentinel, but
+/// the DTO carries the id explicitly so future per-branch metadata scoping
+/// works without another format break.
 ///
 /// `is_tombstone` is explicit (matching the KV/JSON/Vector pattern) so
 /// `branches.delete(name)` round-trips losslessly through checkpoint +
