@@ -1,8 +1,9 @@
 //! Storage codec abstraction.
 //!
-//! The codec seam provides a hook point for encryption-at-rest and
-//! compression. All bytes passing through the storage layer go through the
-//! codec for encode/decode operations.
+//! The codec seam provides a hook point for durability artifacts that encode
+//! payload bytes, such as WAL records. Snapshot containers only record and
+//! validate the configured codec id; their section payloads own separate
+//! wire-format encoding.
 //!
 //! # Available Codecs
 //!

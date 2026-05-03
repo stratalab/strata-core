@@ -13,6 +13,7 @@ mod checkpoint_runtime;
 pub mod codec;
 mod commit_adapter;
 pub mod compaction;
+mod decoded_snapshot_install;
 pub mod disk_snapshot;
 pub mod format;
 pub mod layout;
@@ -42,6 +43,13 @@ pub use checkpoint_runtime::{
     StorageFlushWalTruncationOutcome, StorageManifestRuntimeError, StorageManifestSyncInput,
     StorageSnapshotPruneError, StorageSnapshotRetention, StorageWalCompactionError,
     StorageWalCompactionInput, StorageWalCompactionOutcome,
+};
+
+// Decoded snapshot install runtime
+pub use decoded_snapshot_install::{
+    install_decoded_snapshot_rows, StorageDecodedSnapshotInstallError,
+    StorageDecodedSnapshotInstallGroup, StorageDecodedSnapshotInstallInput,
+    StorageDecodedSnapshotInstallPlan, StorageDecodedSnapshotInstallStats,
 };
 
 // Codec

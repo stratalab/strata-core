@@ -325,6 +325,98 @@ fn test_compact_missing_manifest_loses_snapshot_metadata_even_when_configured_ae
 }
 
 #[test]
+#[serial(open_databases)]
+fn test_aes_checkpoint_compact_reopen_installs_snapshot() {
+    OPEN_DATABASES.lock().clear();
+    let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let branch_id = BranchId::new();
+    let ns = create_test_namespace(branch_id);
+
+    {
+        let db = Database::open_runtime(
+            super::spec::OpenSpec::primary(&db_path)
+                .with_config(aes_gcm_standard_config())
+                .with_subsystem(crate::SearchSubsystem),
+        )
+        .unwrap();
+
+        for i in 0..3 {
+            let key = Key::new_kv(ns.clone(), format!("aes-snapshot-{}", i));
+            db.transaction(branch_id, |txn| {
+                txn.put(key, Value::String(format!("value-{}", i)))?;
+                Ok(())
+            })
+            .unwrap();
+        }
+
+        db.checkpoint().unwrap();
+        db.compact()
+            .expect("AES checkpoint must be compactable after snapshot install support");
+        db.shutdown().unwrap();
+    }
+    OPEN_DATABASES.lock().clear();
+
+    let snapshots_dir = db_path.join("snapshots");
+    let snapshots = strata_storage::durability::list_snapshots(&snapshots_dir).unwrap();
+    let (_, snapshot_path) = snapshots
+        .last()
+        .expect("checkpoint should create an AES snapshot");
+    let snapshot = strata_storage::durability::SnapshotReader::new(
+        strata_storage::durability::get_codec("aes-gcm-256").unwrap(),
+    )
+    .load(snapshot_path)
+    .unwrap();
+    assert_eq!(
+        snapshot.codec_id, "aes-gcm-256",
+        "test must exercise a non-identity snapshot header codec id"
+    );
+    let kv_section = snapshot
+        .sections
+        .iter()
+        .find(|section| section.primitive_type == strata_storage::durability::primitive_tags::KV)
+        .expect("AES snapshot must contain a KV primitive section");
+    let kv_rows = strata_storage::durability::SnapshotSerializer::canonical_primitive_section()
+        .deserialize_kv(&kv_section.data)
+        .expect("primitive section bytes must decode with the canonical section codec");
+    assert_eq!(
+        kv_rows.len(),
+        3,
+        "canonical section decode should expose all checkpointed KV rows"
+    );
+
+    let wal_dir = db_path.join("wal");
+    for entry in std::fs::read_dir(&wal_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            std::fs::remove_file(path).unwrap();
+        }
+    }
+
+    let reopened = Database::open_runtime(
+        super::spec::OpenSpec::primary(&db_path)
+            .with_config(aes_gcm_standard_config())
+            .with_subsystem(crate::SearchSubsystem),
+    )
+    .unwrap();
+
+    for i in 0..3 {
+        let key = Key::new_kv(ns.clone(), format!("aes-snapshot-{}", i));
+        let observed = reopened
+            .storage()
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .unwrap_or_else(|| panic!("aes-snapshot-{} must recover from snapshot", i));
+        assert_eq!(observed.value, Value::String(format!("value-{}", i)));
+    }
+
+    drop(reopened);
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
 fn test_checkpoint_then_compact_without_flush_succeeds() {
     // Inverted in the T3-E5 follow-up (retention-complete DTOs + install).
     //

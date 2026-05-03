@@ -2,6 +2,11 @@
 //!
 //! Uses write-fsync-rename pattern for atomic snapshot creation.
 //!
+//! The configured storage codec is recorded in the snapshot header as a
+//! database compatibility marker and is validated by `SnapshotReader`. The
+//! snapshot container writes section bytes exactly as provided by the caller;
+//! section payload formats are responsible for their own encoding.
+//!
 //! # Crash Safety
 //!
 //! The snapshot creation follows this pattern:
@@ -23,7 +28,10 @@ use crate::durability::format::snapshot::{snapshot_path, SectionHeader, Snapshot
 #[cfg(test)]
 use crate::durability::format::snapshot::SNAPSHOT_FORMAT_VERSION;
 
-/// Snapshot writer with crash-safe semantics
+/// Snapshot writer with crash-safe semantics.
+///
+/// The `codec` is used for the header codec id only. It does not encode section
+/// bytes; callers must pass already-encoded section payloads.
 pub struct SnapshotWriter {
     snapshots_dir: PathBuf,
     codec: Box<dyn StorageCodec>,

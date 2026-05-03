@@ -770,7 +770,7 @@ mod tests {
         assert_eq!(snapshot.sections.len(), 1);
         assert_eq!(snapshot.sections[0].primitive_type, primitive_tags::KV);
 
-        let serializer = SnapshotSerializer::new(Box::new(IdentityCodec));
+        let serializer = SnapshotSerializer::canonical_primitive_section();
         let kv = serializer
             .deserialize_kv(&snapshot.sections[0].data)
             .unwrap();
