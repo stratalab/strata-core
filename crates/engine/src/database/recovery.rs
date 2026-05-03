@@ -163,7 +163,6 @@ impl Database {
         let seg_outcome = storage_outcome.segment_recovery;
         let lossy_report = storage_outcome
             .lossy_wal_replay
-            .as_ref()
             .map(|facts| storage_lossy_wal_replay_facts_to_report(facts, mode));
 
         info!(
@@ -366,17 +365,20 @@ fn log_recovery_snapshot_install(snapshot: &LoadedSnapshot, installed: &InstallS
 }
 
 fn storage_lossy_wal_replay_facts_to_report(
-    facts: &StorageLossyWalReplayFacts,
+    facts: StorageLossyWalReplayFacts,
     mode: RecoveryMode,
 ) -> LossyRecoveryReport {
-    let err = coordinator_error_to_lossy_strata_error(&facts.source);
+    let records_applied_before_failure = facts.records_applied_before_failure;
+    let version_reached_before_failure = facts.version_reached_before_failure;
+    let discarded_on_wipe = facts.discarded_on_wipe;
+    let err = coordinator_error_to_lossy_strata_error(facts.source);
     let error_kind = LossyErrorKind::from_strata_error(&err);
     let report = LossyRecoveryReport {
         error: err.to_string(),
         error_kind,
-        records_applied_before_failure: facts.records_applied_before_failure,
-        version_reached_before_failure: facts.version_reached_before_failure,
-        discarded_on_wipe: facts.discarded_on_wipe,
+        records_applied_before_failure,
+        version_reached_before_failure,
+        discarded_on_wipe,
     };
     let follower_flag = matches!(mode, RecoveryMode::Follower);
     warn!(
@@ -399,7 +401,7 @@ fn storage_lossy_wal_replay_facts_to_report(
     report
 }
 
-fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> StrataError {
+fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> StrataError {
     match err {
         CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(
             ManifestError::LegacyFormat {
@@ -408,7 +410,7 @@ fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> St
                 remediation,
             },
         )) => StrataError::legacy_format(
-            *detected_version,
+            detected_version,
             format!("{supported_range}. {remediation}"),
         ),
         CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(inner)) => {
@@ -436,7 +438,7 @@ fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> St
                     remediation,
                 },
         } => StrataError::legacy_format(
-            *detected_version,
+            detected_version,
             format!("{supported_range}. {remediation}"),
         ),
         CoordinatorRecoveryError::SnapshotRead {
@@ -448,12 +450,12 @@ fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> St
             path.display()
         )),
         CoordinatorRecoveryError::WalRead(WalReaderError::CodecDecode { detail, .. }) => {
-            StrataError::codec_decode(detail.clone())
+            StrataError::codec_decode(detail)
         }
         CoordinatorRecoveryError::WalRead(WalReaderError::LegacyFormat {
             found_version,
             hint,
-        }) => StrataError::legacy_format(*found_version, hint.clone()),
+        }) => StrataError::legacy_format(found_version, hint),
         CoordinatorRecoveryError::WalRead(inner) => {
             StrataError::storage(format!("WAL read failed: {inner}"))
         }
@@ -462,15 +464,8 @@ fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> St
                 "Failed to decode transaction payload for txn {txn_id}: {detail}"
             ))
         }
-        CoordinatorRecoveryError::Callback(inner) => storage_error_to_lossy_strata_error(inner),
+        CoordinatorRecoveryError::Callback(inner) => StrataError::from(inner),
         _ => StrataError::internal("unknown coordinator recovery error"),
-    }
-}
-
-fn storage_error_to_lossy_strata_error(err: &StorageError) -> StrataError {
-    match err {
-        StorageError::Corruption { message } => StrataError::corruption(message.clone()),
-        _ => StrataError::storage(err.to_string()),
     }
 }
 
