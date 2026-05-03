@@ -24,6 +24,7 @@ Read this together with:
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
 - [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
 - [es2-checkpoint-wal-compaction-mechanics-plan.md](./es2-checkpoint-wal-compaction-mechanics-plan.md)
+- [es4-recovery-bootstrap-mechanics-plan.md](./es4-recovery-bootstrap-mechanics-plan.md)
 
 ## Boundary Decision
 
@@ -298,14 +299,22 @@ StorageRecoveryInput {
     configured_codec_id: String,
     write_buffer_size: usize,
     runtime_config: StorageRuntimeConfig,
-    lossy_wal_replay: bool,
-    on_loaded_snapshot: RecoverySnapshotCallback,
+    allow_lossy_wal_replay: bool,
+    snapshot_install: RecoverySnapshotInstallCallback,
 }
 
-RecoverySnapshotCallback {
-    on_snapshot(snapshot: &LoadedSnapshot, storage: &SegmentedStore) -> Result<(), StorageError>,
+RecoverySnapshotInstallCallback {
+    install_snapshot(
+        snapshot: &LoadedSnapshot,
+        install_codec: &dyn StorageCodec,
+        storage: &SegmentedStore,
+    ) -> Result<(), StorageError>,
 }
 ```
+
+The ES4 implementation plan refines this callback to pass the resolved
+snapshot install codec as well. That keeps MANIFEST/codec resolution in
+storage while letting engine continue to own primitive snapshot decode.
 
 Candidate mode:
 
@@ -338,9 +347,9 @@ StorageRecoveryOutcome {
 ```
 
 `StorageRecoveryOutcome` intentionally does not contain primitive snapshot
-install stats. Storage invokes the engine-supplied `on_loaded_snapshot`
-callback when recovery loads a snapshot, but storage does not inspect or own
-the callback's primitive decode counters. If engine needs install telemetry, it
+install stats. Storage invokes the engine-supplied `snapshot_install` callback
+when recovery loads a snapshot, but storage does not inspect or own the
+callback's primitive decode counters. If engine needs install telemetry, it
 captures `InstallStats` in the engine wrapper that supplies the callback.
 
 Candidate lossy facts:
@@ -356,15 +365,20 @@ StorageLossyWalReplayFacts {
 
 Engine decides whether to request lossy WAL replay from config. Storage may
 perform the mechanical wipe only after engine opts in via
-`lossy_wal_replay: true`. Engine still owns `LossyRecoveryReport` wording and
-public error classification.
+`allow_lossy_wal_replay: true`. The ES4F implementation keeps that opt-in
+inside the opaque storage replay object so engine cannot pass a mismatched
+policy flag, replay result, or pre-failure applied-record count into the lossy
+outcome helper. Engine still owns `LossyRecoveryReport` wording and public
+error classification.
 
 Lossy replay must preserve the current hard-fail bypass rules. Even when
-`lossy_wal_replay` is true, storage must not wipe and continue for recovery
-planning failures, MANIFEST failures, snapshot plan failures, or legacy-format
-failures where `CoordinatorRecoveryError::should_bypass_lossy()` returns
-`true`. Those errors remain hard failures and engine maps them into
-`RecoveryError`.
+`allow_lossy_wal_replay` is true, storage must not wipe and continue for
+recovery planning failures, MANIFEST failures, snapshot plan failures, or
+legacy-format failures where `CoordinatorRecoveryError::should_bypass_lossy()`
+returns `true`. Storage must also bypass lossy replay for snapshot install
+callback failures because those are primitive snapshot decode/install failures,
+not WAL replay failures. Those errors remain hard failures and engine maps them
+into `RecoveryError`.
 
 Engine also keeps degraded-storage policy. Storage returns
 `RecoveredState.health`; engine decides whether `DataLoss`,
@@ -403,10 +417,9 @@ After ES4, `Database::run_recovery()` should remain the engine entry point.
 It should do roughly:
 
 ```text
-validate configured codec for public error behavior
 build StorageRecoveryInput from StrataConfig and RecoveryMode
 outcome = storage::durability::run_storage_recovery(input)
-map raw storage errors into RecoveryError
+map raw storage errors, including codec-init failures, into RecoveryError
 apply engine degraded/lossy policy and reports
 result = RecoveryResult { storage: outcome.storage, stats: outcome.wal_replay }
 coordinator = TransactionCoordinator::from_recovery_with_limits(&result, ...)
@@ -454,9 +467,12 @@ StorageRecoveryError
 StorageSnapshotPruneError
 ```
 
-Public storage-local error enums should be `#[non_exhaustive]`, and engine
-adapters should include catch-all mappings. Storage can add more precise phases
-later without forcing every engine release to exhaustively enumerate them.
+Public storage-local errors, enums, and data structs should be
+`#[non_exhaustive]`, and engine adapters should include catch-all mappings.
+Storage can add more precise phases or facts later without forcing every engine
+release to exhaustively enumerate them. Public data structs should also expose
+constructors or defaults so callers do not need to depend on struct literal
+exhaustiveness.
 
 Existing lower errors may be reused if they are already precise enough:
 

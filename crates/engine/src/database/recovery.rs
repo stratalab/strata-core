@@ -8,8 +8,8 @@
 //! # Scope
 //!
 //! This module owns orchestration and typed taxonomy. Recovery policy still
-//! branches on `RecoveryHealth::Degraded` inside the storage step, and the
-//! WAL-replay lossy fallback preserves the existing runtime behavior.
+//! branches on `RecoveryHealth::Degraded` after storage recovery returns, and
+//! WAL-replay lossy reports remain engine-owned.
 //!
 //! # First-open ordering
 //!
@@ -19,24 +19,22 @@
 //! open could not repair.
 
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::StrataError;
 use strata_core::id::CommitVersion;
-use strata_storage::durability::codec::{clone_codec, StorageCodec};
+use strata_storage::durability::codec::StorageCodec;
 use strata_storage::durability::layout::DatabaseLayout;
 use strata_storage::durability::wal::WalReaderError;
 use strata_storage::durability::{
-    apply_wal_record_to_memory_storage, CoordinatorPlanError, CoordinatorRecoveryError,
-    LoadedSnapshot, ManifestError, ManifestManager, RecoveryCoordinator, RecoveryResult,
-    RecoveryStats, SnapshotReadError,
+    run_storage_recovery, CoordinatorPlanError, CoordinatorRecoveryError, LoadedSnapshot,
+    ManifestError, RecoveryResult, SnapshotReadError, StorageLossyWalReplayFacts,
+    StorageRecoveryError, StorageRecoveryInput, StorageRecoveryMode, StorageRuntimeConfig,
 };
 use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore, StorageError};
 use tracing::{info, warn};
 
-use super::config::StrataConfig;
-use super::open::{apply_storage_config, restrict_dir};
+use super::config::{StorageConfig, StrataConfig};
 use super::recovery_error::{
     classify_manifest_load_error, from_coordinator_error, ErrorRole, RecoveryError,
 };
@@ -74,6 +72,13 @@ impl RecoveryMode {
             RecoveryMode::Follower => ErrorRole::Follower,
         }
     }
+
+    fn as_storage_mode(self) -> StorageRecoveryMode {
+        match self {
+            RecoveryMode::Primary => StorageRecoveryMode::PrimaryCreateManifestIfMissing,
+            RecoveryMode::Follower => StorageRecoveryMode::FollowerNeverCreateManifest,
+        }
+    }
 }
 
 /// Output of [`Database::run_recovery`].
@@ -81,7 +86,7 @@ impl RecoveryMode {
 /// Carries the owned resources the caller needs to finish constructing
 /// `Arc<Database>`. All public fields are `pub(crate)` because
 /// `RecoveryOutcome` is an implementation detail of `open.rs`; it is
-/// not part of the D4 public surface.
+/// not part of the ES4 public surface.
 pub(crate) struct RecoveryOutcome {
     /// MANIFEST-recorded database UUID (or `[0u8; 16]` for follower
     /// without a MANIFEST).
@@ -117,16 +122,12 @@ impl Database {
     /// 3. WAL codec resolution (stored id on reopen, configured id on
     ///    first-open or follower-without-MANIFEST).
     /// 4. `SegmentedStore` construction at the segments directory.
-    /// 5. `RecoveryCoordinator::recover` — snapshot install + WAL
-    ///    replay via caller-supplied closures.
-    /// 6. WAL-replay lossy fallback.
-    /// 7. Snapshot-version fold.
-    /// 8. `TransactionCoordinator::from_recovery_with_limits` +
-    ///    `apply_storage_config`.
-    /// 9. `SegmentedStore::recover_segments` → classified outcome →
+    /// 5. Storage-owned durability recovery via an engine primitive snapshot
+    ///    install callback.
+    /// 6. `TransactionCoordinator::from_recovery_with_limits` +
     ///    `coordinator.apply_storage_recovery`.
-    /// 10. Follower-state restore (follower mode only).
-    /// 11. Watermark construction.
+    /// 7. Follower-state restore (follower mode only).
+    /// 8. Watermark construction.
     #[allow(clippy::too_many_lines)] // orchestrator: splitting further would scatter sequential state.
     pub(crate) fn run_recovery(
         canonical_path: &Path,
@@ -134,64 +135,36 @@ impl Database {
         cfg: &StrataConfig,
         mode: RecoveryMode,
     ) -> Result<RecoveryOutcome, RecoveryError> {
-        // 1. Configured-codec validation before any recovery-managed
-        //    directory or MANIFEST creation — preserves the pre-D3
-        //    first-open safety guard.
-        strata_storage::durability::get_codec(&cfg.storage.codec).map_err(|e| {
-            RecoveryError::CodecInit {
-                codec_id: cfg.storage.codec.clone(),
-                detail: e.to_string(),
-            }
-        })?;
-
-        // 2. MANIFEST load or create.
-        let ManifestPreparation {
-            database_uuid,
-            install_codec_for_snapshot,
-        } = prepare_manifest(canonical_path, layout, cfg, mode)?;
-
-        // 3. WAL codec resolution. On reopen we fetch by stored id;
-        //    on first-open / follower-without-MANIFEST we fetch by
-        //    config id (already validated in step 1).
-        let wal_codec_id = install_codec_for_snapshot
-            .as_ref()
-            .map_or(cfg.storage.codec.as_str(), |c| c.codec_id());
-        let wal_codec = strata_storage::durability::get_codec(wal_codec_id).map_err(|e| {
-            RecoveryError::CodecInit {
-                codec_id: wal_codec_id.to_owned(),
-                detail: e.to_string(),
-            }
-        })?;
-
-        // 4. SegmentedStore at the segments directory.
-        let mut storage = SegmentedStore::with_dir(
-            layout.segments_dir().to_path_buf(),
+        // 1-5. Storage-owned durability recovery. Storage owns MANIFEST/codec
+        //      prep, generic WAL replay, the mechanical lossy fallback,
+        //      runtime config application, and segment recovery. Engine keeps
+        //      primitive snapshot decode and install telemetry in this
+        //      callback.
+        let snapshot_install = |snapshot: &LoadedSnapshot,
+                                install_codec: &dyn StorageCodec,
+                                storage: &SegmentedStore|
+         -> Result<(), StorageError> {
+            install_recovery_snapshot(snapshot, install_codec, storage)?;
+            Ok(())
+        };
+        let storage_outcome = run_storage_recovery(StorageRecoveryInput::new(
+            layout.clone(),
+            mode.as_storage_mode(),
+            cfg.storage.codec.clone(),
             cfg.storage.effective_write_buffer_size(),
-        );
-
-        // 5. RecoveryCoordinator::recover via callbacks.
-        let records_applied_before_failure = Arc::new(AtomicU64::new(0));
-        let recover_result = run_coordinator_recovery(
-            layout,
-            cfg,
-            wal_codec.as_ref(),
-            install_codec_for_snapshot.as_deref(),
-            &storage,
-            &records_applied_before_failure,
-        );
-
-        // 6. Lossy fallback on WAL-replay error.
-        let (mut stats, lossy_report) = handle_wal_recovery_outcome(
-            recover_result,
-            cfg,
-            layout,
-            &mut storage,
-            records_applied_before_failure.load(Ordering::SeqCst),
-            mode,
-        )?;
-
-        // 7. Snapshot-version fold.
-        stats.final_version = stats.final_version.max(CommitVersion(storage.version()));
+            storage_runtime_config_from(&cfg.storage),
+            cfg.allow_lossy_recovery,
+            &snapshot_install,
+        ))
+        .map_err(|err| map_storage_recovery_error(canonical_path, mode, err))?;
+        let database_uuid = storage_outcome.database_uuid;
+        let wal_codec = storage_outcome.wal_codec;
+        let stats = storage_outcome.wal_replay;
+        let seg_outcome = storage_outcome.segment_recovery;
+        let lossy_report = storage_outcome
+            .lossy_wal_replay
+            .as_ref()
+            .map(|facts| storage_lossy_wal_replay_facts_to_report(facts, mode));
 
         info!(
             target: "strata::db",
@@ -207,18 +180,17 @@ impl Database {
             "Recovery complete"
         );
 
-        // 8. Coordinator bootstrap + storage config.
-        let result = RecoveryResult { storage, stats };
+        // 6. Coordinator bootstrap + storage recovery policy.
+        let result = RecoveryResult {
+            storage: storage_outcome.storage,
+            stats,
+        };
         let coordinator = TransactionCoordinator::from_recovery_with_limits(
             &result,
             cfg.storage.max_write_buffer_entries,
         );
         let storage = Arc::new(result.storage);
-        apply_storage_config(&storage, &cfg.storage);
 
-        // 9. Storage recovery (SE2 outcome). D3 plumbs only; D4 adds
-        //    the health-policy branch between these two lines.
-        let seg_outcome = storage.recover_segments().map_err(RecoveryError::from)?;
         if seg_outcome.segments_loaded > 0 {
             info!(
                 target: "strata::db",
@@ -235,22 +207,24 @@ impl Database {
                 "storage recovered with degraded state"
             );
         }
-        // D4 health-policy branch. Strict mode refuses authoritative
+        // ES4 health-policy branch. Strict mode refuses authoritative
         // loss; the no-manifest legacy fallback is opt-in; rebuildable
         // caches are always accepted. Lossy recovery (`allow_lossy_recovery`)
         // is the blanket escape hatch and permits every class — it leaves
         // `LossyRecoveryReport` untouched because no WAL wipe occurred;
         // operators read the classification via `Database::recovery_health()`.
         if let RecoveryHealth::Degraded { class, .. } = &seg_outcome.health {
-            let permitted =
-                cfg.allow_lossy_recovery || !policy_refuses(*class, cfg.allow_missing_manifest);
-            if !permitted {
+            if !degraded_recovery_permitted(
+                *class,
+                cfg.allow_missing_manifest,
+                cfg.allow_lossy_recovery,
+            ) {
                 return Err(RecoveryError::StorageDegraded(seg_outcome.health.clone()));
             }
         }
         coordinator.apply_storage_recovery(&seg_outcome);
 
-        // 10. Follower state restore.
+        // 7. Follower state restore.
         let persisted_follower_state = match mode {
             RecoveryMode::Primary => None,
             RecoveryMode::Follower => restore_follower_state(
@@ -260,7 +234,7 @@ impl Database {
             ),
         };
 
-        // 11. Watermark.
+        // 8. Watermark.
         let watermark = match persisted_follower_state.as_ref() {
             Some(follower_state) => ContiguousWatermark::from_state(
                 follower_state.received_watermark,
@@ -282,7 +256,7 @@ impl Database {
     }
 }
 
-/// D4 strict-mode policy. `true` = refuse to open on this class; `false`
+/// ES4 strict-mode policy. `true` = refuse to open on this class; `false`
 /// = accept. The caller combines this with `allow_lossy_recovery` so
 /// that lossy mode is a blanket override regardless of class.
 ///
@@ -307,147 +281,68 @@ fn policy_refuses(class: DegradationClass, allow_missing_manifest: bool) -> bool
     }
 }
 
-/// Output of [`prepare_manifest`].
-struct ManifestPreparation {
-    database_uuid: [u8; 16],
-    /// `Some(clone)` when an on-disk MANIFEST exists and its codec is
-    /// available; `None` for a primary first-open (no MANIFEST yet)
-    /// and for follower-without-MANIFEST where the coordinator falls
-    /// back to WAL-only recovery. Those `None` cases do not have a
-    /// manifest-recorded snapshot, so the snapshot callback must not fire.
-    /// If it does fire without a codec, recovery hard-fails instead of
-    /// silently skipping snapshot install.
-    install_codec_for_snapshot: Option<Box<dyn StorageCodec>>,
+fn degraded_recovery_permitted(
+    class: DegradationClass,
+    allow_missing_manifest: bool,
+    allow_lossy_recovery: bool,
+) -> bool {
+    allow_lossy_recovery || !policy_refuses(class, allow_missing_manifest)
 }
 
-/// MANIFEST load or create. Primary mode creates on absent; follower
-/// mode defers (mirrors `open.rs:479-491` pre-D3 behaviour).
-///
-/// Error mapping preserves the pre-D3 variants: codec mismatch →
-/// `IncompatibleReuse`, parse failure → `Corruption`, create failure
-/// → `Internal`, codec-init failure → `Internal`.
-fn prepare_manifest(
-    canonical_path: &Path,
-    layout: &DatabaseLayout,
-    cfg: &StrataConfig,
-    mode: RecoveryMode,
-) -> Result<ManifestPreparation, RecoveryError> {
-    let manifest_path = layout.manifest_path().to_path_buf();
-    let manifest_exists = ManifestManager::exists(&manifest_path);
-    let role = mode.as_error_role();
-
-    if manifest_exists {
-        let mgr = ManifestManager::load(manifest_path.clone())
-            .map_err(|e| classify_manifest_load_error(manifest_path.clone(), role, e))?;
-        let manifest = mgr.manifest();
-        if manifest.codec_id != cfg.storage.codec {
-            return Err(RecoveryError::ManifestCodecMismatch {
-                stored: manifest.codec_id.clone(),
-                configured: cfg.storage.codec.clone(),
-                db_path: canonical_path.to_path_buf(),
-                role,
-            });
-        }
-        let codec = strata_storage::durability::get_codec(&manifest.codec_id).map_err(|e| {
-            RecoveryError::CodecInit {
-                codec_id: manifest.codec_id.clone(),
-                detail: e.to_string(),
-            }
-        })?;
-        return Ok(ManifestPreparation {
-            database_uuid: manifest.database_uuid,
-            install_codec_for_snapshot: Some(codec),
-        });
-    }
-
-    match mode {
-        RecoveryMode::Primary => {
-            // First-open: create segments dir + MANIFEST. Codec was
-            // already validated in `run_recovery` step 1.
-            layout.create_segments_dir().map_err(RecoveryError::Io)?;
-            restrict_dir(layout.segments_dir());
-            let uuid = *uuid::Uuid::new_v4().as_bytes();
-            ManifestManager::create(
-                layout.manifest_path().to_path_buf(),
-                uuid,
-                cfg.storage.codec.clone(),
-            )
-            .map_err(RecoveryError::ManifestCreate)?;
-            Ok(ManifestPreparation {
-                database_uuid: uuid,
-                install_codec_for_snapshot: None,
-            })
-        }
-        RecoveryMode::Follower => {
-            // Follower-without-MANIFEST falls back to WAL-only
-            // recovery. We still ensure the segments dir exists so
-            // `SegmentedStore::with_dir` has something to read.
-            if !layout
-                .segments_dir()
-                .try_exists()
-                .map_err(RecoveryError::Io)?
-            {
-                layout.create_segments_dir().map_err(RecoveryError::Io)?;
-                restrict_dir(layout.segments_dir());
-            }
-            Ok(ManifestPreparation {
-                database_uuid: [0u8; 16],
-                install_codec_for_snapshot: None,
-            })
-        }
-    }
-}
-
-/// Drive the coordinator's callback-based recovery (`plan_recovery`,
-/// snapshot install, WAL replay) and return its typed coordinator error.
-///
-/// Error classification into `RecoveryError` is deferred to
-/// [`handle_wal_recovery_outcome`] so the lossy-fallback arm can run
-/// `LossyErrorKind::from_strata_error(&e)` on the original
-/// `StrataError` before the engine maps the failure into a typed
-/// `RecoveryError`.
-fn run_coordinator_recovery(
-    layout: &DatabaseLayout,
-    cfg: &StrataConfig,
-    wal_codec: &dyn StorageCodec,
-    install_codec: Option<&dyn StorageCodec>,
-    storage: &SegmentedStore,
-    records_counter: &Arc<AtomicU64>,
-) -> Result<RecoveryStats, CoordinatorRecoveryError> {
-    let recovery =
-        RecoveryCoordinator::new(layout.clone(), cfg.storage.effective_write_buffer_size())
-            .with_lossy_recovery(cfg.allow_lossy_recovery)
-            .with_codec(clone_codec(wal_codec));
-
-    let counter = Arc::clone(records_counter);
-    recovery.recover_typed(
-        |snapshot| {
-            install_recovery_snapshot(&snapshot, install_codec, storage)?;
-            Ok(())
-        },
-        |record| {
-            let result = apply_wal_record_to_memory_storage(storage, record);
-            if result.is_ok() {
-                counter.fetch_add(1, Ordering::SeqCst);
-            }
-            result
-        },
+fn storage_runtime_config_from(config: &StorageConfig) -> StorageRuntimeConfig {
+    StorageRuntimeConfig::new(
+        config.max_branches,
+        config.max_versions_per_key,
+        config.effective_max_immutable_memtables(),
+        config.target_file_size,
+        config.level_base_bytes,
+        config.data_block_size,
+        config.bloom_bits_per_key,
+        config.compaction_rate_limit,
     )
 }
 
+fn map_storage_recovery_error(
+    canonical_path: &Path,
+    mode: RecoveryMode,
+    err: StorageRecoveryError,
+) -> RecoveryError {
+    let role = mode.as_error_role();
+    match err {
+        StorageRecoveryError::CodecInit { codec_id, detail } => {
+            RecoveryError::CodecInit { codec_id, detail }
+        }
+        StorageRecoveryError::ManifestLoad { path, source } => {
+            classify_manifest_load_error(path, role, source)
+        }
+        StorageRecoveryError::ManifestCreate { source } => RecoveryError::ManifestCreate(source),
+        StorageRecoveryError::ManifestCodecMismatch { stored, configured } => {
+            RecoveryError::ManifestCodecMismatch {
+                stored,
+                configured,
+                db_path: canonical_path.to_path_buf(),
+                role,
+            }
+        }
+        StorageRecoveryError::Io { source } => RecoveryError::Io(source),
+        StorageRecoveryError::Coordinator { source } => from_coordinator_error(role, source),
+        StorageRecoveryError::SegmentRecovery { source } => RecoveryError::Storage(source),
+        _ => RecoveryError::WalRecoveryFailed {
+            role,
+            inner: StrataError::internal(format!("unknown storage recovery error: {err}")),
+        },
+    }
+}
+
+/// Install one loaded recovery snapshot through the engine-owned primitive
+/// decode path.
 fn install_recovery_snapshot(
     snapshot: &LoadedSnapshot,
-    install_codec: Option<&dyn StorageCodec>,
+    install_codec: &dyn StorageCodec,
     storage: &SegmentedStore,
 ) -> Result<InstallStats, StorageError> {
-    let Some(codec) = install_codec else {
-        return Err(StorageError::corruption(format!(
-            "snapshot {} reached recovery install callback without an install codec",
-            snapshot.snapshot_id()
-        )));
-    };
-
-    let installed = install_snapshot(snapshot, codec, storage).map_err(StorageError::from)?;
+    let installed =
+        install_snapshot(snapshot, install_codec, storage).map_err(StorageError::from)?;
     log_recovery_snapshot_install(snapshot, &installed);
     Ok(installed)
 }
@@ -470,53 +365,18 @@ fn log_recovery_snapshot_install(snapshot: &LoadedSnapshot, installed: &InstallS
     );
 }
 
-/// Classify the outcome of `RecoveryCoordinator::recover` and apply
-/// the WAL-replay lossy fallback when configured.
-///
-/// - `Ok(stats)` → `(stats, None)`.
-/// - `Err(CoordinatorRecoveryError)` from the coordinator's planning step or
-///   carrying a legacy-format source is a hard-fail regardless of
-///   `allow_lossy_recovery`. The lossy wipe only recreates in-memory
-///   `SegmentedStore` state; it cannot heal a MANIFEST/snapshot plan failure
-///   and would re-observe legacy on-disk artifacts on the next open.
-/// - `Err(e)` with `cfg.allow_lossy_recovery=false` →
-///   typed `RecoveryError` via `from_coordinator_error`.
-/// - `Err(e)` with lossy enabled → build `LossyRecoveryReport`,
-///   replace `storage` with a fresh `SegmentedStore::with_dir`,
-///   return `(RecoveryStats::default(), Some(report))`.
-fn handle_wal_recovery_outcome(
-    recover_result: Result<RecoveryStats, CoordinatorRecoveryError>,
-    cfg: &StrataConfig,
-    layout: &DatabaseLayout,
-    storage: &mut SegmentedStore,
-    records_applied_before_failure: u64,
+fn storage_lossy_wal_replay_facts_to_report(
+    facts: &StorageLossyWalReplayFacts,
     mode: RecoveryMode,
-) -> Result<(RecoveryStats, Option<LossyRecoveryReport>), RecoveryError> {
-    let err = match recover_result {
-        Ok(stats) => return Ok((stats, None)),
-        Err(e) => e,
-    };
-
-    if err.should_bypass_lossy() {
-        return Err(from_coordinator_error(mode.as_error_role(), err));
-    }
-
-    if !cfg.allow_lossy_recovery {
-        return Err(from_coordinator_error(mode.as_error_role(), err));
-    }
-
-    let err = coordinator_error_to_lossy_strata_error(err);
-
-    // Sample progress BEFORE the wipe so the report reflects what was
-    // discarded.
-    let version_reached_before_failure = CommitVersion(storage.version());
+) -> LossyRecoveryReport {
+    let err = coordinator_error_to_lossy_strata_error(&facts.source);
     let error_kind = LossyErrorKind::from_strata_error(&err);
     let report = LossyRecoveryReport {
         error: err.to_string(),
         error_kind,
-        records_applied_before_failure,
-        version_reached_before_failure,
-        discarded_on_wipe: true,
+        records_applied_before_failure: facts.records_applied_before_failure,
+        version_reached_before_failure: facts.version_reached_before_failure,
+        discarded_on_wipe: facts.discarded_on_wipe,
     };
     let follower_flag = matches!(mode, RecoveryMode::Follower);
     warn!(
@@ -536,18 +396,10 @@ fn handle_wal_recovery_outcome(
     };
     warn!(target: "strata::db", error = %err, "{}", db_target_message);
 
-    // Discard any partial writes accumulated before the failure so
-    // lossy-mode semantics match the pre-Epic-5 `RecoveryResult::empty()`
-    // fallback: no user data surfaces from a failed recovery pass.
-    *storage = SegmentedStore::with_dir(
-        layout.segments_dir().to_path_buf(),
-        cfg.storage.effective_write_buffer_size(),
-    );
-
-    Ok((RecoveryStats::default(), Some(report)))
+    report
 }
 
-fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> StrataError {
+fn coordinator_error_to_lossy_strata_error(err: &CoordinatorRecoveryError) -> StrataError {
     match err {
         CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(
             ManifestError::LegacyFormat {
@@ -556,7 +408,7 @@ fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> Str
                 remediation,
             },
         )) => StrataError::legacy_format(
-            detected_version,
+            *detected_version,
             format!("{supported_range}. {remediation}"),
         ),
         CoordinatorRecoveryError::Plan(CoordinatorPlanError::Manifest(inner)) => {
@@ -584,7 +436,7 @@ fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> Str
                     remediation,
                 },
         } => StrataError::legacy_format(
-            detected_version,
+            *detected_version,
             format!("{supported_range}. {remediation}"),
         ),
         CoordinatorRecoveryError::SnapshotRead {
@@ -596,12 +448,12 @@ fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> Str
             path.display()
         )),
         CoordinatorRecoveryError::WalRead(WalReaderError::CodecDecode { detail, .. }) => {
-            StrataError::codec_decode(detail)
+            StrataError::codec_decode(detail.clone())
         }
         CoordinatorRecoveryError::WalRead(WalReaderError::LegacyFormat {
             found_version,
             hint,
-        }) => StrataError::legacy_format(found_version, hint),
+        }) => StrataError::legacy_format(*found_version, hint.clone()),
         CoordinatorRecoveryError::WalRead(inner) => {
             StrataError::storage(format!("WAL read failed: {inner}"))
         }
@@ -610,8 +462,15 @@ fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> Str
                 "Failed to decode transaction payload for txn {txn_id}: {detail}"
             ))
         }
-        CoordinatorRecoveryError::Callback(inner) => StrataError::from(inner),
+        CoordinatorRecoveryError::Callback(inner) => storage_error_to_lossy_strata_error(inner),
         _ => StrataError::internal("unknown coordinator recovery error"),
+    }
+}
+
+fn storage_error_to_lossy_strata_error(err: &StorageError) -> StrataError {
+    match err {
+        StorageError::Corruption { message } => StrataError::corruption(message.clone()),
+        _ => StrataError::storage(err.to_string()),
     }
 }
 
@@ -619,7 +478,7 @@ fn coordinator_error_to_lossy_strata_error(err: CoordinatorRecoveryError) -> Str
 /// validation failure the slot is cleared so a restart does not
 /// re-observe the inconsistent state.
 ///
-/// Mirrors the pre-D3 block at `open.rs:634-672` verbatim.
+/// Mirrors the previous follower-state restoration block from `open.rs`.
 fn restore_follower_state(
     canonical_path: &Path,
     recovered_max_txn: strata_core::id::TxnId,
@@ -665,73 +524,419 @@ fn restore_follower_state(
 
 #[cfg(test)]
 mod tests {
+    use super::super::config::StorageConfig;
+    use super::super::refresh::{persist_follower_state, BlockReason, BlockedTxn, BlockedTxnState};
     use super::*;
+    use serial_test::serial;
     use strata_core::id::TxnId;
     use strata_core::{BranchId, Value};
     use strata_storage::durability::codec::IdentityCodec;
+    use strata_storage::durability::format::{Manifest, WalRecord};
+    use strata_storage::durability::wal::{DurabilityMode, WalConfig, WalWriter};
     use strata_storage::durability::{
         primitive_tags, KvSnapshotEntry, LoadedSection, SnapshotHeader, SnapshotSection,
-        SnapshotSerializer, SnapshotWriter,
+        SnapshotSerializer, SnapshotWriter, TransactionPayload,
     };
     use strata_storage::{Key, Namespace, TypeTag};
     use tempfile::TempDir;
 
-    #[test]
-    fn coordinator_plan_failure_bypasses_lossy_fallback() {
-        let temp_dir = TempDir::new().unwrap();
-        let layout = DatabaseLayout::from_root(temp_dir.path());
-        let mut storage = SegmentedStore::new();
-        let cfg = StrataConfig {
-            allow_lossy_recovery: true,
-            ..StrataConfig::default()
-        };
+    const TEST_AES_KEY: &str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
 
-        let result = handle_wal_recovery_outcome(
-            Err(CoordinatorRecoveryError::Plan(
-                CoordinatorPlanError::CodecMismatch {
-                    stored: "identity".into(),
-                    expected: "aes-gcm-256".into(),
-                },
-            )),
-            &cfg,
-            &layout,
-            &mut storage,
-            0,
-            RecoveryMode::Primary,
-        );
+    struct EnvVarGuard {
+        name: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
 
-        match result {
-            Err(RecoveryError::CoordinatorPlan(inner)) => {
-                assert!(matches!(inner, StrataError::IncompatibleReuse { .. }));
+    impl EnvVarGuard {
+        fn set(name: &'static str, value: &str) -> Self {
+            let previous = std::env::var_os(name);
+            std::env::set_var(name, value);
+            Self { name, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(value) = self.previous.take() {
+                std::env::set_var(self.name, value);
+            } else {
+                std::env::remove_var(self.name);
             }
-            other => panic!("plan failure must hard-fail without lossy wipe, got: {other:?}"),
         }
     }
 
     #[test]
-    fn recovery_snapshot_install_rejects_when_install_codec_absent() {
-        let branch_id = BranchId::new();
-        let snapshot = loaded_snapshot(
-            "identity",
-            vec![kv_section(branch_id, "skipped", Value::Int(7), 11)],
-        );
-        let storage = SegmentedStore::new();
+    fn snapshot_plan_failure_bypasses_lossy_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        layout.create_segments_dir().unwrap();
+        write_db_manifest_with_snapshot(&layout, [0x11; 16], "identity", 404, TxnId(99));
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let result = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
 
-        let err = install_recovery_snapshot(&snapshot, None, &storage)
-            .expect_err("loaded snapshot without install codec should violate recovery invariant");
-
-        match err {
-            StorageError::Corruption { message } => {
-                assert!(message.contains(
-                    "snapshot 7 reached recovery install callback without an install codec"
-                ));
+        match result {
+            Err(RecoveryError::SnapshotMissing {
+                role: ErrorRole::Primary,
+                snapshot_id: 404,
+                ..
+            }) => {}
+            Err(other) => {
+                panic!("snapshot plan failure mapped to the wrong error: {other:?}");
             }
-            other => panic!("expected corruption storage error, got {other:?}"),
+            Ok(_) => {
+                panic!("snapshot plan failure must hard-fail without lossy wipe");
+            }
         }
-        assert!(storage
-            .get_versioned(&kv_key(branch_id, "skipped"), CommitVersion::MAX)
+    }
+
+    #[test]
+    #[serial(open_databases)]
+    fn primary_first_open_creates_manifest_with_configured_codec() {
+        let _key_guard = EnvVarGuard::set("STRATA_ENCRYPTION_KEY", TEST_AES_KEY);
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let cfg = StrataConfig {
+            storage: StorageConfig {
+                codec: "aes-gcm-256".to_string(),
+                ..StorageConfig::default()
+            },
+            ..StrataConfig::default()
+        };
+
+        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+            .expect("primary first-open recovery should succeed");
+
+        assert!(
+            layout.manifest_path().exists(),
+            "primary first-open must create MANIFEST"
+        );
+        assert!(
+            layout.segments_dir().exists(),
+            "primary first-open must create the storage segments dir"
+        );
+        let manifest = read_db_manifest(&layout);
+        assert_eq!(
+            manifest.codec_id, cfg.storage.codec,
+            "first-open MANIFEST must record the configured storage codec"
+        );
+        assert_eq!(outcome.database_uuid, manifest.database_uuid);
+        assert_ne!(
+            outcome.database_uuid, [0u8; 16],
+            "primary first-open must allocate a real database UUID"
+        );
+        assert_eq!(outcome.wal_codec.codec_id(), cfg.storage.codec);
+        assert!(outcome.lossy_report.is_none());
+        assert!(outcome.persisted_follower_state.is_none());
+    }
+
+    #[test]
+    fn recovery_applies_storage_runtime_config() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let cfg = StrataConfig {
+            storage: StorageConfig {
+                target_file_size: 3 * 1024 * 1024,
+                data_block_size: 8 * 1024,
+                bloom_bits_per_key: 13,
+                ..StorageConfig::default()
+            },
+            ..StrataConfig::default()
+        };
+
+        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+            .expect("recovery should succeed with non-default storage config");
+
+        assert_eq!(
+            outcome.storage.target_file_size(),
+            cfg.storage.target_file_size
+        );
+        assert_eq!(
+            outcome.storage.data_block_size(),
+            cfg.storage.data_block_size
+        );
+        assert_eq!(
+            outcome.storage.bloom_bits_per_key(),
+            cfg.storage.bloom_bits_per_key
+        );
+    }
+
+    #[test]
+    fn follower_without_manifest_does_not_create_manifest() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let cfg = StrataConfig::default();
+
+        let outcome =
+            Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
+                .expect("follower without MANIFEST should fall back to WAL-only recovery");
+
+        assert!(
+            !layout.manifest_path().exists(),
+            "follower recovery must not create a missing MANIFEST"
+        );
+        assert!(
+            layout.segments_dir().exists(),
+            "follower recovery may create the storage segments dir"
+        );
+        assert_eq!(
+            outcome.database_uuid, [0u8; 16],
+            "follower without MANIFEST preserves the sentinel UUID"
+        );
+        assert_eq!(
+            outcome.wal_codec.codec_id(),
+            cfg.storage.codec,
+            "follower without MANIFEST uses the configured WAL codec"
+        );
+        assert!(outcome.lossy_report.is_none());
+        assert!(outcome.persisted_follower_state.is_none());
+    }
+
+    #[test]
+    fn follower_recovery_clears_invalid_persisted_state_after_replay() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let cfg = StrataConfig::default();
+        let stale_state = PersistedFollowerState {
+            received_watermark: TxnId(50),
+            applied_watermark: TxnId(10),
+            visible_version: CommitVersion(10),
+            blocked: BlockedTxnState {
+                blocked: BlockedTxn {
+                    txn_id: TxnId(11),
+                    reason: BlockReason::Decode {
+                        message: "stale blocked record".to_string(),
+                    },
+                },
+                visibility_version: None,
+                skip_allowed: true,
+            },
+        };
+        persist_follower_state(temp_dir.path(), &stale_state)
+            .expect("test should persist follower state");
+        assert!(load_persisted_follower_state(temp_dir.path())
+            .unwrap()
+            .is_some());
+
+        let outcome =
+            Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
+                .expect("follower recovery should ignore invalid persisted state");
+
+        assert!(outcome.persisted_follower_state.is_none());
+        assert!(load_persisted_follower_state(temp_dir.path())
             .unwrap()
             .is_none());
+        assert_eq!(outcome.watermark.applied(), TxnId(0));
+    }
+
+    #[test]
+    fn snapshot_versions_fold_into_coordinator_before_bootstrap() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let database_uuid = [0x44; 16];
+        let branch_id = BranchId::new();
+        let key = kv_key(branch_id, "snapshot-version-fold");
+        let cfg = StrataConfig::default();
+
+        layout.create_segments_dir().unwrap();
+        let writer = SnapshotWriter::new(
+            layout.snapshots_dir().to_path_buf(),
+            Box::new(IdentityCodec),
+            database_uuid,
+        )
+        .unwrap();
+        writer
+            .create_snapshot(
+                11,
+                9,
+                vec![kv_snapshot_section(
+                    branch_id,
+                    "snapshot-version-fold",
+                    Value::String("from-snapshot".into()),
+                    73,
+                )],
+            )
+            .unwrap();
+        write_db_manifest_with_snapshot(&layout, database_uuid, "identity", 11, TxnId(9));
+
+        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+            .expect("snapshot-only recovery should succeed");
+
+        assert_eq!(
+            outcome.storage.current_version(),
+            CommitVersion(73),
+            "snapshot install should advance storage current_version"
+        );
+        assert_eq!(
+            outcome.coordinator.current_version(),
+            CommitVersion(73),
+            "coordinator bootstrap must see the snapshot-version fold"
+        );
+        assert_eq!(
+            outcome.coordinator.visible_version(),
+            CommitVersion(73),
+            "visible version should start at the folded snapshot version"
+        );
+        let recovered = outcome
+            .storage
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .expect("snapshot row should be visible after recovery");
+        assert_eq!(recovered.value, Value::String("from-snapshot".into()));
+    }
+
+    #[test]
+    fn wal_replay_success_bootstraps_storage_and_coordinator() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let branch_id = BranchId::new();
+        let key = kv_key(branch_id, "wal-success-bootstrap");
+        let cfg = StrataConfig::default();
+        write_wal_txn(
+            layout.wal_dir(),
+            TxnId(17),
+            branch_id,
+            vec![(key.clone(), Value::String("from-wal".to_string()))],
+            Vec::new(),
+            23,
+        );
+
+        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+            .expect("WAL-only recovery should succeed");
+
+        assert_eq!(outcome.storage.current_version(), CommitVersion(23));
+        assert_eq!(outcome.coordinator.current_version(), CommitVersion(23));
+        assert_eq!(outcome.watermark.applied(), TxnId(17));
+        assert!(outcome.lossy_report.is_none());
+        let recovered = outcome
+            .storage
+            .get_versioned(&key, CommitVersion::MAX)
+            .unwrap()
+            .expect("WAL row should be visible after recovery");
+        assert_eq!(recovered.value, Value::String("from-wal".to_string()));
+    }
+
+    #[test]
+    fn wal_legacy_failure_bypasses_lossy_fallback() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        std::fs::create_dir_all(layout.wal_dir()).unwrap();
+        std::fs::write(
+            layout.wal_dir().join("wal-000001.seg"),
+            legacy_wal_segment_header(1),
+        )
+        .unwrap();
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let result = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
+
+        match result {
+            Err(RecoveryError::WalLegacyFormat {
+                found_version,
+                hint,
+            }) => {
+                assert_eq!(found_version, 1);
+                assert!(hint.contains("wal/"));
+            }
+            Err(other) => panic!("legacy WAL mapped to the wrong error: {other:?}"),
+            Ok(_) => panic!("legacy WAL must hard-fail without lossy wipe"),
+        }
+    }
+
+    #[test]
+    fn lossy_replay_discards_partial_storage_and_reports_progress() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let branch_id = BranchId::new();
+        let key = kv_key(branch_id, "discarded-before-corruption");
+        write_wal_txn(
+            layout.wal_dir(),
+            TxnId(23),
+            branch_id,
+            vec![(key.clone(), Value::String("partial".into()))],
+            Vec::new(),
+            19,
+        );
+        std::fs::write(
+            layout.wal_dir().join("wal-000099.seg"),
+            b"GARBAGE_NOT_A_VALID_SEGMENT_HEADER",
+        )
+        .unwrap();
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+            .expect("lossy recovery should convert replay failure into an empty recovered store");
+
+        let report = outcome
+            .lossy_report
+            .expect("lossy fallback must report discarded progress");
+        assert_eq!(report.records_applied_before_failure, 1);
+        assert_eq!(report.version_reached_before_failure, CommitVersion(19));
+        assert!(report.discarded_on_wipe);
+        assert!(
+            report.error.contains("WAL read failed"),
+            "report should render the coordinator failure, got: {}",
+            report.error
+        );
+        assert!(
+            outcome
+                .storage
+                .get_versioned(&key, CommitVersion::MAX)
+                .unwrap()
+                .is_none(),
+            "lossy fallback must replace partial storage with an empty store"
+        );
+        assert_eq!(outcome.storage.current_version(), CommitVersion::ZERO);
+    }
+
+    #[test]
+    fn degraded_storage_policy_matrix_is_engine_owned() {
+        assert!(
+            policy_refuses(DegradationClass::DataLoss, false),
+            "strict recovery refuses authoritative data loss"
+        );
+        assert!(
+            policy_refuses(DegradationClass::DataLoss, true),
+            "allow_missing_manifest does not permit data loss"
+        );
+        assert!(
+            policy_refuses(DegradationClass::PolicyDowngrade, false),
+            "policy downgrade is refused unless explicitly allowed"
+        );
+        assert!(
+            !policy_refuses(DegradationClass::PolicyDowngrade, true),
+            "allow_missing_manifest permits the legacy no-MANIFEST fallback"
+        );
+        assert!(
+            !policy_refuses(DegradationClass::Telemetry, false),
+            "telemetry degradation is accepted in strict mode"
+        );
+        assert!(
+            !policy_refuses(DegradationClass::Telemetry, true),
+            "telemetry degradation is independent of missing-MANIFEST policy"
+        );
+        assert!(
+            degraded_recovery_permitted(DegradationClass::DataLoss, false, true),
+            "lossy recovery permits authoritative data-loss degradation"
+        );
+        assert!(
+            degraded_recovery_permitted(DegradationClass::PolicyDowngrade, false, true),
+            "lossy recovery overrides the missing-MANIFEST policy gate"
+        );
+        assert!(
+            degraded_recovery_permitted(DegradationClass::PolicyDowngrade, true, false),
+            "allow_missing_manifest permits only the policy downgrade class"
+        );
+        assert!(
+            !degraded_recovery_permitted(DegradationClass::DataLoss, true, false),
+            "allow_missing_manifest does not permit authoritative data loss"
+        );
     }
 
     #[test]
@@ -740,7 +945,7 @@ mod tests {
         let storage = SegmentedStore::new();
         let codec = IdentityCodec;
 
-        let err = install_recovery_snapshot(&snapshot, Some(&codec), &storage)
+        let err = install_recovery_snapshot(&snapshot, &codec, &storage)
             .expect_err("codec mismatch should surface as callback storage error");
 
         match err {
@@ -761,7 +966,7 @@ mod tests {
         let storage = SegmentedStore::new();
         let codec = IdentityCodec;
 
-        let installed = install_recovery_snapshot(&snapshot, Some(&codec), &storage)
+        let installed = install_recovery_snapshot(&snapshot, &codec, &storage)
             .expect("snapshot install should succeed");
 
         assert_eq!(installed.kv, 1);
@@ -780,8 +985,6 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let layout = DatabaseLayout::from_root(temp_dir.path());
         let database_uuid = [0x55; 16];
-        let codec = IdentityCodec;
-
         let writer = SnapshotWriter::new(
             layout.snapshots_dir().to_path_buf(),
             Box::new(IdentityCodec),
@@ -795,38 +998,54 @@ mod tests {
                 vec![SnapshotSection::new(primitive_tags::KV, vec![1, 0, 0, 0])],
             )
             .unwrap();
-        let mut manifest = ManifestManager::create(
-            layout.manifest_path().to_path_buf(),
-            database_uuid,
-            "identity".to_string(),
-        )
-        .unwrap();
-        manifest.set_snapshot_watermark(3, TxnId(9)).unwrap();
+        write_db_manifest_with_snapshot(&layout, database_uuid, "identity", 3, TxnId(9));
 
         let cfg = StrataConfig::default();
-        let storage = SegmentedStore::new();
-        let counter = Arc::new(AtomicU64::new(0));
-        let recover_result =
-            run_coordinator_recovery(&layout, &cfg, &codec, Some(&codec), &storage, &counter);
-
-        let err = recover_result.expect_err("corrupt snapshot install should fail recovery");
-        match &err {
-            CoordinatorRecoveryError::Callback(StorageError::Corruption { message }) => {
+        let mapped =
+            match Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
+                Err(err) => err,
+                Ok(_) => panic!("callback error should map to public recovery error"),
+            };
+        match mapped {
+            RecoveryError::WalRecoveryFailed {
+                role: ErrorRole::Primary,
+                inner: StrataError::Corruption { message },
+            } => {
                 assert!(message.contains("KV section decode failed"));
             }
-            other => panic!("expected callback corruption from snapshot install, got {other:?}"),
+            other => panic!("expected primary WalRecoveryFailed corruption, got {other:?}"),
         }
+    }
 
-        let mut mapped_storage = storage;
-        let mapped = handle_wal_recovery_outcome(
-            Err(err),
-            &cfg,
-            &layout,
-            &mut mapped_storage,
-            0,
-            RecoveryMode::Primary,
+    #[test]
+    fn recovery_snapshot_install_failure_bypasses_lossy_fallback_when_enabled() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let database_uuid = [0x56; 16];
+        let writer = SnapshotWriter::new(
+            layout.snapshots_dir().to_path_buf(),
+            Box::new(IdentityCodec),
+            database_uuid,
         )
-        .expect_err("callback error should map to public recovery error");
+        .unwrap();
+        writer
+            .create_snapshot(
+                4,
+                10,
+                vec![SnapshotSection::new(primitive_tags::KV, vec![1, 0, 0, 0])],
+            )
+            .unwrap();
+        write_db_manifest_with_snapshot(&layout, database_uuid, "identity", 4, TxnId(10));
+
+        let cfg = StrataConfig {
+            allow_lossy_recovery: true,
+            ..StrataConfig::default()
+        };
+        let mapped =
+            match Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
+                Err(err) => err,
+                Ok(_) => panic!("snapshot install failure must not lossy-open as empty storage"),
+            };
         match mapped {
             RecoveryError::WalRecoveryFailed {
                 role: ErrorRole::Primary,
@@ -848,6 +1067,19 @@ mod tests {
     }
 
     fn kv_section(branch_id: BranchId, key: &str, value: Value, version: u64) -> LoadedSection {
+        let section = kv_snapshot_section(branch_id, key, value, version);
+        LoadedSection {
+            primitive_type: section.primitive_type,
+            data: section.data,
+        }
+    }
+
+    fn kv_snapshot_section(
+        branch_id: BranchId,
+        key: &str,
+        value: Value,
+        version: u64,
+    ) -> SnapshotSection {
         let serializer = SnapshotSerializer::canonical_primitive_section();
         let entries = [KvSnapshotEntry {
             branch_id: *branch_id.as_bytes(),
@@ -860,13 +1092,68 @@ mod tests {
             ttl_ms: 0,
             is_tombstone: false,
         }];
-        LoadedSection {
-            primitive_type: primitive_tags::KV,
-            data: serializer.serialize_kv(&entries),
-        }
+        SnapshotSection::new(primitive_tags::KV, serializer.serialize_kv(&entries))
     }
 
     fn kv_key(branch_id: BranchId, key: &str) -> Key {
         Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), key)
+    }
+
+    fn write_db_manifest_with_snapshot(
+        layout: &DatabaseLayout,
+        database_uuid: [u8; 16],
+        codec_id: &str,
+        snapshot_id: u64,
+        watermark_txn: TxnId,
+    ) {
+        let mut manifest = Manifest::new(database_uuid, codec_id.to_string());
+        manifest.snapshot_id = Some(snapshot_id);
+        manifest.snapshot_watermark = Some(watermark_txn.as_u64());
+        std::fs::write(layout.manifest_path(), manifest.to_bytes())
+            .expect("test should write database MANIFEST");
+    }
+
+    fn read_db_manifest(layout: &DatabaseLayout) -> Manifest {
+        let bytes = std::fs::read(layout.manifest_path()).expect("test MANIFEST should exist");
+        Manifest::from_bytes(&bytes).expect("test MANIFEST should parse")
+    }
+
+    fn write_wal_txn(
+        wal_dir: &Path,
+        txn_id: TxnId,
+        branch_id: BranchId,
+        puts: Vec<(Key, Value)>,
+        deletes: Vec<Key>,
+        version: u64,
+    ) {
+        let mut wal = WalWriter::new(
+            wal_dir.to_path_buf(),
+            [0u8; 16],
+            DurabilityMode::Always,
+            WalConfig::for_testing(),
+            Box::new(IdentityCodec),
+        )
+        .unwrap();
+
+        let payload = TransactionPayload {
+            version,
+            puts,
+            deletes,
+            put_ttls: vec![],
+        };
+        let record = WalRecord::new(txn_id, *branch_id.as_bytes(), 1_000, payload.to_bytes());
+        wal.append(&record).unwrap();
+        wal.flush().unwrap();
+    }
+
+    fn legacy_wal_segment_header(segment_number: u64) -> [u8; 36] {
+        let mut header = [0u8; 36];
+        header[0..4].copy_from_slice(b"STRA");
+        header[4..8].copy_from_slice(&1u32.to_le_bytes());
+        header[8..16].copy_from_slice(&segment_number.to_le_bytes());
+        header[16..32].copy_from_slice(&[0xAA; 16]);
+        let header_crc = crc32fast::hash(&header[0..32]);
+        header[32..36].copy_from_slice(&header_crc.to_le_bytes());
+        header
     }
 }

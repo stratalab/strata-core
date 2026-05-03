@@ -5,10 +5,10 @@
 //! each section via [`SnapshotSerializer`], stages generic decoded row groups,
 //! and hands those groups to storage's decoded-row install helper.
 //!
-//! Recovery calls this from the `on_snapshot` callback passed to
-//! `RecoveryCoordinator::recover` so checkpoint-only restart (no WAL covering
-//! some pre-snapshot range) produces the same observable state as the
-//! original commits. The T3-E5 follow-up made snapshot install
+//! Recovery calls this from the snapshot callback passed through storage's
+//! recovery replay driver so checkpoint-only restart (no WAL covering some
+//! pre-snapshot range) produces the same observable state as the original
+//! commits. The T3-E5 follow-up made snapshot install
 //! retention-complete: tombstones are installed as `DecodedSnapshotValue::
 //! Tombstone` so deletes survive checkpoint+compact+reopen; KV TTL carries
 //! through; and the Branch section is dispatched via the new `branch_id`
