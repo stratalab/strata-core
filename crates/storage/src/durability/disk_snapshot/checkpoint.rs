@@ -32,10 +32,8 @@ impl CheckpointCoordinator {
         codec: Box<dyn StorageCodec>,
         database_uuid: [u8; 16],
     ) -> std::io::Result<Self> {
-        let serializer_codec: Box<dyn StorageCodec> =
-            Box::new(crate::durability::codec::IdentityCodec);
         let snapshot_writer = SnapshotWriter::new(snapshots_dir, codec, database_uuid)?;
-        let serializer = SnapshotSerializer::new(serializer_codec);
+        let serializer = SnapshotSerializer::canonical_primitive_section();
 
         Ok(CheckpointCoordinator {
             snapshot_writer,
@@ -51,10 +49,8 @@ impl CheckpointCoordinator {
         database_uuid: [u8; 16],
         watermark: SnapshotWatermark,
     ) -> std::io::Result<Self> {
-        let serializer_codec: Box<dyn StorageCodec> =
-            Box::new(crate::durability::codec::IdentityCodec);
         let snapshot_writer = SnapshotWriter::new(snapshots_dir, codec, database_uuid)?;
-        let serializer = SnapshotSerializer::new(serializer_codec);
+        let serializer = SnapshotSerializer::canonical_primitive_section();
 
         Ok(CheckpointCoordinator {
             snapshot_writer,
@@ -236,11 +232,39 @@ pub enum CheckpointError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::durability::codec::IdentityCodec;
+    use crate::durability::codec::{CodecError, IdentityCodec};
+    use crate::durability::disk_snapshot::SnapshotReader;
     use crate::durability::format::primitives::{EventSnapshotEntry, KvSnapshotEntry};
 
     fn test_uuid() -> [u8; 16] {
         [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct PrefixingFileCodec;
+
+    impl StorageCodec for PrefixingFileCodec {
+        fn encode(&self, data: &[u8]) -> Vec<u8> {
+            let mut encoded = b"file-codec:".to_vec();
+            encoded.extend_from_slice(data);
+            encoded
+        }
+
+        fn decode(&self, data: &[u8]) -> Result<Vec<u8>, CodecError> {
+            data.strip_prefix(b"file-codec:")
+                .map(<[u8]>::to_vec)
+                .ok_or_else(|| {
+                    CodecError::decode("missing test prefix", self.codec_id(), data.len())
+                })
+        }
+
+        fn codec_id(&self) -> &str {
+            "prefixing-file-codec"
+        }
+
+        fn clone_box(&self) -> Box<dyn StorageCodec> {
+            Box::new(*self)
+        }
     }
 
     #[test]
@@ -307,6 +331,54 @@ mod tests {
 
         assert_eq!(info.snapshot_id, 1);
         assert_eq!(info.watermark_txn, TxnId(50));
+    }
+
+    #[test]
+    fn checkpoint_primitive_sections_use_canonical_codec_not_snapshot_file_codec() {
+        let temp_dir = tempfile::tempdir().unwrap();
+
+        let mut coordinator = CheckpointCoordinator::new(
+            temp_dir.path().to_path_buf(),
+            Box::new(PrefixingFileCodec),
+            test_uuid(),
+        )
+        .unwrap();
+
+        let data = CheckpointData::new().with_kv(vec![KvSnapshotEntry {
+            branch_id: test_uuid(),
+            space: "default".to_string(),
+            type_tag: 0x01,
+            user_key: b"key".to_vec(),
+            value: b"value".to_vec(),
+            version: 7,
+            timestamp: 1_000,
+            ttl_ms: 0,
+            is_tombstone: false,
+        }]);
+        let info = coordinator.checkpoint(TxnId(50), data).unwrap();
+
+        let snapshot = SnapshotReader::new(Box::new(PrefixingFileCodec))
+            .load(&crate::durability::snapshot_path(
+                temp_dir.path(),
+                info.snapshot_id,
+            ))
+            .unwrap();
+        assert_eq!(snapshot.codec_id, "prefixing-file-codec");
+
+        let kv_section = snapshot
+            .sections
+            .iter()
+            .find(|section| section.primitive_type == primitive_tags::KV)
+            .expect("checkpoint must write a KV primitive section");
+        let rows = SnapshotSerializer::canonical_primitive_section()
+            .deserialize_kv(&kv_section.data)
+            .expect("KV section must decode with the canonical primitive-section codec");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value, b"value");
+        assert!(
+            !rows[0].value.starts_with(b"file-codec:"),
+            "primitive section values must not be encoded with the snapshot header codec"
+        );
     }
 
     #[test]

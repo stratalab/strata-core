@@ -1,6 +1,11 @@
 //! Snapshot reader for recovery
 //!
 //! Loads and validates snapshot files for database recovery.
+//!
+//! The reader validates the snapshot header codec id against the configured
+//! storage codec. It does not decode section payloads through that codec;
+//! section payload formats are decoded by their owning layer after the
+//! container has been loaded.
 
 use std::fs::File;
 use std::io::{BufReader, Read};
@@ -24,10 +29,10 @@ impl SnapshotReader {
         SnapshotReader { codec }
     }
 
-    /// Load a snapshot from file
+    /// Load a snapshot from file.
     ///
-    /// Validates magic bytes, format version, and codec ID.
-    /// Returns the loaded snapshot data with all sections.
+    /// Validates magic bytes, format version, codec ID, CRC, and section
+    /// framing. Returns the loaded snapshot data with raw section bytes.
     pub fn load(&self, path: &Path) -> Result<LoadedSnapshot, SnapshotReadError> {
         let file = File::open(path)?;
         let metadata = file.metadata()?;
@@ -143,8 +148,9 @@ impl SnapshotReader {
         while cursor < data.len() {
             // Check if we have enough bytes for section header
             if cursor + SectionHeader::SIZE > data.len() {
-                // Might be at the end with no more sections
-                break;
+                return Err(SnapshotReadError::TrailingSectionBytes {
+                    remaining: data.len() - cursor,
+                });
             }
 
             let section_header_bytes: [u8; SectionHeader::SIZE] = data
@@ -335,6 +341,12 @@ pub enum SnapshotReadError {
         expected: usize,
         /// Available data length
         available: usize,
+    },
+    /// Bytes remained after the last complete section.
+    #[error("Trailing snapshot section bytes after complete sections: {remaining} bytes")]
+    TrailingSectionBytes {
+        /// Number of unparsed trailing bytes.
+        remaining: usize,
     },
     /// IO error
     #[error("IO error: {0}")]
@@ -576,6 +588,31 @@ mod tests {
         assert!(matches!(
             result,
             Err(SnapshotReadError::FileTooSmall { .. })
+        ));
+    }
+
+    #[test]
+    fn test_trailing_container_bytes_rejected_after_crc_validation() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let path = temp_dir.path().join("snap-000001.chk");
+        let codec_id = "identity";
+        let header = SnapshotHeader::new(1, 100, 1_700_000, test_uuid(), codec_id.len() as u8);
+
+        let mut bytes = header.to_bytes().to_vec();
+        bytes.extend_from_slice(codec_id.as_bytes());
+        bytes.extend_from_slice(&[0xAA, 0xBB]);
+
+        let mut hasher = crc32fast::Hasher::new();
+        hasher.update(&bytes);
+        bytes.extend_from_slice(&hasher.finalize().to_le_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+
+        let reader = SnapshotReader::new(Box::new(IdentityCodec));
+        let result = reader.load(&path);
+
+        assert!(matches!(
+            result,
+            Err(SnapshotReadError::TrailingSectionBytes { remaining: 2 })
         ));
     }
 

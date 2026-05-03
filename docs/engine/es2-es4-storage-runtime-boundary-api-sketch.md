@@ -230,48 +230,56 @@ No checkpoint exists yet. Run checkpoint() before compact().
 Candidate module:
 
 ```text
-crates/storage/src/durability/snapshot_install.rs
+crates/storage/src/durability/decoded_snapshot_install.rs
 ```
 
-Candidate input:
+Storage candidate input:
 
 ```text
-StorageSnapshotInstallInput<'a> {
-    snapshot: &'a LoadedSnapshot,
-    codec: &'a dyn StorageCodec,
+StorageDecodedSnapshotInstallInput<'a> {
     storage: &'a SegmentedStore,
+    plan: &'a StorageDecodedSnapshotInstallPlan,
+}
+
+StorageDecodedSnapshotInstallPlan {
+    groups: Vec<StorageDecodedSnapshotInstallGroup>,
+}
+
+StorageDecodedSnapshotInstallGroup {
+    branch_id: BranchId,
+    type_tag: TypeTag,
+    entries: Vec<DecodedSnapshotEntry>,
 }
 ```
 
-Candidate output:
+Storage candidate output:
 
 ```text
-StorageSnapshotInstallStats {
-    kv_rows: usize,
-    graph_rows: usize,
-    event_rows: usize,
-    json_rows: usize,
-    vector_config_rows: usize,
-    vector_rows: usize,
-    branch_rows: usize,
-    sections_skipped: usize,
+StorageDecodedSnapshotInstallStats {
+    groups_installed: usize,
+    rows_installed: usize,
 }
 ```
 
-These names are physical snapshot/storage counters, not engine semantic
-reports. Storage may know snapshot section tags, `TypeTag`, raw key
-reconstruction, tombstones, TTLs, versions, and timestamps.
+The storage API starts after primitive snapshot decode. It may know
+`SegmentedStore`, `TypeTag` as an opaque storage-family router,
+`DecodedSnapshotEntry`, tombstones, TTLs, versions, and timestamps.
 
 Storage must not learn:
 
+- `LoadedSnapshot` install policy
+- `SnapshotSerializer`
+- primitive snapshot DTOs such as `KvSnapshotEntry`
+- primitive section tags such as `primitive_tags::KV`
 - JSON path or patch semantics
 - event-chain verification
 - vector metric/model policy
 - branch workflow policy
 - graph query semantics
 
-The ES3 install API should become the function ES4 recovery calls when the
-`RecoveryCoordinator` supplies a loaded snapshot.
+Engine remains responsible for converting a loaded snapshot into this generic
+storage-row plan. The ES3 engine wrapper should become the function ES4
+recovery calls when the `RecoveryCoordinator` supplies a loaded snapshot.
 
 ## ES4 Recovery Boundary
 
@@ -291,6 +299,11 @@ StorageRecoveryInput {
     write_buffer_size: usize,
     runtime_config: StorageRuntimeConfig,
     lossy_wal_replay: bool,
+    on_loaded_snapshot: RecoverySnapshotCallback,
+}
+
+RecoverySnapshotCallback {
+    on_snapshot(snapshot: &LoadedSnapshot, storage: &SegmentedStore) -> Result<(), StorageError>,
 }
 ```
 
@@ -319,11 +332,16 @@ StorageRecoveryOutcome {
     wal_codec: Box<dyn StorageCodec>,
     storage: SegmentedStore,
     wal_replay: RecoveryStats,
-    snapshot_install: Option<StorageSnapshotInstallStats>,
     segment_recovery: RecoveredState,
     lossy_wal_replay: Option<StorageLossyWalReplayFacts>,
 }
 ```
+
+`StorageRecoveryOutcome` intentionally does not contain primitive snapshot
+install stats. Storage invokes the engine-supplied `on_loaded_snapshot`
+callback when recovery loads a snapshot, but storage does not inspect or own
+the callback's primitive decode counters. If engine needs install telemetry, it
+captures `InstallStats` in the engine wrapper that supplies the callback.
 
 Candidate lossy facts:
 
@@ -367,7 +385,7 @@ Storage recovery must also preserve the current ordering around storage
 configuration:
 
 ```text
-snapshot install / WAL replay
+engine snapshot callback / WAL replay
 snapshot-version fold
 apply StorageRuntimeConfig to SegmentedStore
 recover_segments()
@@ -410,13 +428,15 @@ StorageCheckpointOutcome
     -> WAL compaction consumes MANIFEST watermark to delete covered WAL
     -> recovery uses MANIFEST snapshot_id/watermark to install snapshot and skip WAL
 
-StorageSnapshotInstallStats
-    -> returned by standalone snapshot install in ES3
-    -> embedded in StorageRecoveryOutcome in ES4 when recovery installs a snapshot
+StorageDecodedSnapshotInstallStats
+    -> returned by storage decoded-row install in ES3
+    -> may be observed inside the engine snapshot callback
+    -> is not embedded in StorageRecoveryOutcome because storage recovery does
+       not own primitive decode or primitive install telemetry
 
 StorageRecoveryOutcome
-    -> returns raw WAL replay stats, optional snapshot install stats,
-       segmented-store recovery health, and optional lossy replay facts
+    -> returns raw WAL replay stats, segmented-store recovery health, and
+       optional lossy replay facts
     -> engine builds coordinator, reports, and public open result
 ```
 
@@ -429,7 +449,7 @@ StorageCheckpointError
 StorageWalCompactionError
 StorageManifestRuntimeError
 StorageFlushWalTruncationError
-StorageSnapshotInstallError
+StorageDecodedSnapshotInstallError
 StorageRecoveryError
 StorageSnapshotPruneError
 ```

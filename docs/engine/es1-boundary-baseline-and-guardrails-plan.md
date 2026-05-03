@@ -146,44 +146,52 @@ checkpoint runtime around that materialized data.
 
 ## Inventory: `database/snapshot_install.rs`
 
-This module is mostly storage-shaped replay/install machinery, with some
-primitive-section caution.
+This module looked storage-shaped during ES1 because it installs rows into
+`SegmentedStore`, but the ES3 deep pass corrected the boundary: primitive
+section dispatch and DTO decode are engine concerns. Storage owns only the
+generic decoded-row install helper that starts after engine has produced
+storage rows.
 
 | Surface | Current role | Classification | Target epic |
 |---|---|---|---|
-| `InstallStats` | Raw counts of installed entries by snapshot section. | Move Storage | ES3 |
-| `InstallStats::total_installed` | Raw aggregate count. | Move Storage | ES3 |
-| `install_snapshot` | Iterates loaded snapshot sections, routes by primitive tag, installs into `SegmentedStore`. | Move Storage, with semantic review | ES3 |
-| `install_kv_section` | Decodes KV section, preserves tombstones/TTL, dispatches by `TypeTag`. | Move Storage | ES3 |
-| `install_event_section` | Decodes Event section and reconstructs event user keys from sequence numbers. | Move Storage, Watch | ES3 |
-| `install_json_section` | Decodes JSON section and installs doc IDs as user keys. | Move Storage, Watch | ES3 |
-| `install_branch_section` | Decodes branch snapshot section and installs branch metadata rows. | Move Storage, Watch | ES3 |
-| `install_vector_section` | Decodes vector collection/config rows and reinstalls raw vector record bytes. | Move Storage, Watch | ES3 |
-| `decode_value_json` | Decodes persisted `Value` bytes from snapshot sections. | Move Storage | ES3 |
+| `InstallStats` | Primitive-specific counts of entries installed by decoded snapshot section. | Stay Engine | ES3 |
+| `InstallStats::total_installed` | Engine invariant over primitive-specific counters. | Stay Engine | ES3 |
+| `install_snapshot` | Engine wrapper: validates codec policy, decodes primitive sections, builds generic storage-row plan, calls storage install helper. | Stay Engine, Split | ES3 |
+| `decode_kv_section` | Decodes KV section, preserves tombstones/TTL, dispatches by `TypeTag`. | Stay Engine | ES3 |
+| `decode_event_section` | Decodes Event section and reconstructs event user keys from sequence numbers. | Stay Engine | ES3 |
+| `decode_json_section` | Decodes JSON section and installs doc IDs as user keys. | Stay Engine | ES3 |
+| `decode_branch_section` | Decodes branch snapshot section and installs branch metadata rows. | Stay Engine | ES3 |
+| `decode_vector_section` | Decodes vector collection/config rows and reinstalls raw vector record bytes. | Stay Engine | ES3 |
+| `decode_value_json` | Decodes persisted `Value` bytes from primitive snapshot sections. | Stay Engine | ES3 |
+| `install_decoded_snapshot_rows` | Validates and installs already-decoded generic storage rows. | Move Storage | ES3 |
 
 ### ES3 split decision
 
-The install path is a stronger storage candidate than the checkpoint collector
-because it mostly performs inverse persistence mechanics:
+The original ES1 instinct was to move most of the install path downward because
+it performs inverse persistence mechanics:
 
 - decode snapshot section DTOs
 - reconstruct storage keys
 - preserve tombstones, TTL, versions, and timestamps
 - call `SegmentedStore::install_snapshot_entries`
 
-The caution is that section names correspond to engine primitives. This is
-acceptable only if storage treats them as persistence section tags and storage
-type tags, not as semantic behavior.
+ES3 tightened that caution into the actual ownership rule. The primitive DTO
+decode remains engine-owned because `KV`, `Event`, `Json`, `Vector`, `Branch`,
+and Graph-as-KV routing are engine primitive persistence semantics, not generic
+storage mechanics. Storage receives only generic decoded row groups.
 
 Storage may know:
 
-- primitive section byte tags
-- snapshot DTO schemas
-- `TypeTag`
-- raw key reconstruction needed to restore bytes
+- `TypeTag` as an opaque storage-family router
+- `DecodedSnapshotEntry`
+- tombstones, TTLs, versions, timestamps, spaces, and user keys
+- generic preflight validation and row installation
 
 Storage must not learn:
 
+- primitive section byte tags
+- primitive snapshot DTO schemas
+- `SnapshotSerializer`
 - JSON path behavior
 - event-chain verification
 - vector metric/model policy
@@ -412,24 +420,39 @@ Engine responsibilities remain:
 
 ### ES3 snapshot install
 
-Candidate module:
+Settled modules:
 
 ```text
-crates/storage/src/durability/snapshot_install.rs
+crates/engine/src/database/snapshot_install.rs
+crates/storage/src/durability/decoded_snapshot_install.rs
 ```
 
-Candidate surfaces:
+Settled surfaces:
 
 ```text
-SnapshotInstallStats
-install_loaded_snapshot(snapshot, codec, storage) -> StorageResult<SnapshotInstallStats>
+engine::database::install_snapshot(snapshot, codec, storage) -> StrataResult<InstallStats>
+storage::durability::install_decoded_snapshot_rows(input)
+    -> Result<StorageDecodedSnapshotInstallStats, StorageDecodedSnapshotInstallError>
 ```
 
-Engine responsibilities remain:
+Engine responsibilities:
 
+- iterate `LoadedSnapshot.sections`
+- dispatch by primitive section tags
+- decode primitive snapshot DTOs with `SnapshotSerializer`
+- reconstruct primitive-owned storage row keys
+- retain primitive-specific `InstallStats`
 - decide when install runs
 - log recovery outcome
 - classify install failure in recovery policy
+
+Storage responsibilities:
+
+- validate generic decoded row groups before mutation
+- install already-decoded rows into `SegmentedStore`
+- return generic row/group stats and storage-local errors
+- avoid `LoadedSnapshot`, `SnapshotSerializer`, primitive tags, and primitive
+  snapshot DTOs in runtime install modules
 
 ### ES4 recovery bootstrap
 
@@ -545,7 +568,9 @@ Expected behavior:
 - ES1: matches are expected and form the baseline
 - ES2: checkpoint/compaction matches should disappear or remain only in
   engine wrappers
-- ES3: snapshot install matches should disappear from engine mechanics
+- ES3: `SnapshotSerializer` and `install_snapshot` remain only as intentional
+  engine-owned primitive decode and recovery policy residue; storage install
+  modules must not import primitive snapshot DTOs or tags
 - ES4: recovery coordinator and manifest-prep mechanics should move down or
   become storage API calls
 - ES5: `apply_storage_config` should disappear from engine

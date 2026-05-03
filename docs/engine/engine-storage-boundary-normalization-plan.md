@@ -367,8 +367,10 @@ Keep in engine:
 
 ### Goal
 
-Move generic snapshot decode, section iteration, and install/replay mechanics
-from engine into storage.
+Normalize the snapshot install boundary without moving primitive semantics into
+storage. Engine keeps `LoadedSnapshot` section dispatch and primitive snapshot
+DTO decode. Storage owns only the generic mechanics for installing already
+decoded storage rows into `SegmentedStore`.
 
 Potential detailed execution plan:
 
@@ -378,15 +380,18 @@ Potential detailed execution plan:
 
 Move downward into storage where generic:
 
-- snapshot section reading
-- snapshot record decoding
-- installation into `SegmentedStore`
-- replay-safe batch application
-- storage-local snapshot install errors
-- raw install statistics
+- validation of decoded storage row groups before mutation
+- installation of decoded rows into `SegmentedStore`
+- generic row/group install statistics
+- storage-local errors for invalid generic row input and lower storage install
+  failure
 
 Keep in engine:
 
+- `LoadedSnapshot` section iteration
+- primitive tag dispatch
+- `SnapshotSerializer` primitive DTO decode
+- primitive-specific snapshot install statistics
 - decisions about when a snapshot should be installed
 - recovery policy around degraded or lossy outcomes
 - public error/report conversion
@@ -394,10 +399,14 @@ Keep in engine:
 
 ### Deliverables
 
-1. Storage-owned snapshot install/replay module or API.
-2. Engine recovery/open code calling storage for raw install mechanics.
-3. Tests proving existing snapshots still install and recover identically.
-4. Compatibility coverage for existing snapshot sections.
+1. Storage-owned decoded-row install API.
+2. Engine snapshot install code that builds a complete decoded storage-row plan
+   before any storage mutation.
+3. Engine recovery/open code calling storage only for generic row install
+   mechanics.
+4. Tests proving existing snapshots still install and recover identically.
+5. Guardrails proving storage install code does not import primitive snapshot
+   DTOs, primitive tags, or `SnapshotSerializer`.
 
 ### Constraints
 
@@ -408,10 +417,12 @@ Keep in engine:
 
 ### Acceptance
 
-- `database/snapshot_install.rs` is deleted or reduced to engine policy
-  glue
-- storage owns the generic snapshot install machinery
-- engine still owns recovery decisions and public reporting
+- `database/snapshot_install.rs` is reduced to intentional engine-owned
+  primitive decode, install policy, and public error mapping glue
+- storage owns the generic decoded-row install machinery
+- engine still owns primitive decode, recovery decisions, and public reporting
+- storage install modules do not import primitive snapshot DTOs, primitive
+  tags, or `SnapshotSerializer`
 - snapshot install round-trip characterization exists before
   behavior-preserving refactors land
 

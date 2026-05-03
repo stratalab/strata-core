@@ -29,8 +29,8 @@ use strata_storage::durability::layout::DatabaseLayout;
 use strata_storage::durability::wal::WalReaderError;
 use strata_storage::durability::{
     apply_wal_record_to_memory_storage, CoordinatorPlanError, CoordinatorRecoveryError,
-    ManifestError, ManifestManager, RecoveryCoordinator, RecoveryResult, RecoveryStats,
-    SnapshotReadError,
+    LoadedSnapshot, ManifestError, ManifestManager, RecoveryCoordinator, RecoveryResult,
+    RecoveryStats, SnapshotReadError,
 };
 use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore, StorageError};
 use tracing::{info, warn};
@@ -44,7 +44,7 @@ use super::refresh::{
     clear_persisted_follower_state, load_persisted_follower_state, validate_blocked_state,
     ContiguousWatermark, PersistedFollowerState,
 };
-use super::snapshot_install::install_snapshot;
+use super::snapshot_install::{install_snapshot, InstallStats};
 use super::{Database, LossyErrorKind, LossyRecoveryReport};
 use crate::coordinator::TransactionCoordinator;
 
@@ -313,8 +313,10 @@ struct ManifestPreparation {
     /// `Some(clone)` when an on-disk MANIFEST exists and its codec is
     /// available; `None` for a primary first-open (no MANIFEST yet)
     /// and for follower-without-MANIFEST where the coordinator falls
-    /// back to WAL-only recovery. Used to gate the snapshot-install
-    /// callback in `run_coordinator_recovery`.
+    /// back to WAL-only recovery. Those `None` cases do not have a
+    /// manifest-recorded snapshot, so the snapshot callback must not fire.
+    /// If it does fire without a codec, recovery hard-fails instead of
+    /// silently skipping snapshot install.
     install_codec_for_snapshot: Option<Box<dyn StorageCodec>>,
 }
 
@@ -420,17 +422,7 @@ fn run_coordinator_recovery(
     let counter = Arc::clone(records_counter);
     recovery.recover_typed(
         |snapshot| {
-            if let Some(codec) = install_codec {
-                let installed =
-                    install_snapshot(&snapshot, codec, storage).map_err(StorageError::from)?;
-                info!(
-                    target: "strata::recovery",
-                    snapshot_id = snapshot.snapshot_id(),
-                    watermark = snapshot.watermark_txn(),
-                    entries = installed.total_installed(),
-                    "Installed snapshot into SegmentedStore"
-                );
-            }
+            install_recovery_snapshot(&snapshot, install_codec, storage)?;
             Ok(())
         },
         |record| {
@@ -441,6 +433,41 @@ fn run_coordinator_recovery(
             result
         },
     )
+}
+
+fn install_recovery_snapshot(
+    snapshot: &LoadedSnapshot,
+    install_codec: Option<&dyn StorageCodec>,
+    storage: &SegmentedStore,
+) -> Result<InstallStats, StorageError> {
+    let Some(codec) = install_codec else {
+        return Err(StorageError::corruption(format!(
+            "snapshot {} reached recovery install callback without an install codec",
+            snapshot.snapshot_id()
+        )));
+    };
+
+    let installed = install_snapshot(snapshot, codec, storage).map_err(StorageError::from)?;
+    log_recovery_snapshot_install(snapshot, &installed);
+    Ok(installed)
+}
+
+fn log_recovery_snapshot_install(snapshot: &LoadedSnapshot, installed: &InstallStats) {
+    info!(
+        target: "strata::recovery",
+        snapshot_id = snapshot.snapshot_id(),
+        watermark = snapshot.watermark_txn(),
+        entries = installed.total_installed(),
+        kv = installed.kv,
+        graph = installed.graph,
+        events = installed.events,
+        json = installed.json,
+        vector_configs = installed.vector_configs,
+        vectors = installed.vectors,
+        branches = installed.branches,
+        sections_skipped = installed.sections_skipped,
+        "Installed snapshot into SegmentedStore"
+    );
 }
 
 /// Classify the outcome of `RecoveryCoordinator::recover` and apply
@@ -639,6 +666,14 @@ fn restore_follower_state(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use strata_core::id::TxnId;
+    use strata_core::{BranchId, Value};
+    use strata_storage::durability::codec::IdentityCodec;
+    use strata_storage::durability::{
+        primitive_tags, KvSnapshotEntry, LoadedSection, SnapshotHeader, SnapshotSection,
+        SnapshotSerializer, SnapshotWriter,
+    };
+    use strata_storage::{Key, Namespace, TypeTag};
     use tempfile::TempDir;
 
     #[test]
@@ -671,5 +706,167 @@ mod tests {
             }
             other => panic!("plan failure must hard-fail without lossy wipe, got: {other:?}"),
         }
+    }
+
+    #[test]
+    fn recovery_snapshot_install_rejects_when_install_codec_absent() {
+        let branch_id = BranchId::new();
+        let snapshot = loaded_snapshot(
+            "identity",
+            vec![kv_section(branch_id, "skipped", Value::Int(7), 11)],
+        );
+        let storage = SegmentedStore::new();
+
+        let err = install_recovery_snapshot(&snapshot, None, &storage)
+            .expect_err("loaded snapshot without install codec should violate recovery invariant");
+
+        match err {
+            StorageError::Corruption { message } => {
+                assert!(message.contains(
+                    "snapshot 7 reached recovery install callback without an install codec"
+                ));
+            }
+            other => panic!("expected corruption storage error, got {other:?}"),
+        }
+        assert!(storage
+            .get_versioned(&kv_key(branch_id, "skipped"), CommitVersion::MAX)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn recovery_snapshot_install_maps_engine_errors_into_storage_callback_errors() {
+        let snapshot = loaded_snapshot("other-codec", Vec::new());
+        let storage = SegmentedStore::new();
+        let codec = IdentityCodec;
+
+        let err = install_recovery_snapshot(&snapshot, Some(&codec), &storage)
+            .expect_err("codec mismatch should surface as callback storage error");
+
+        match err {
+            StorageError::Corruption { message } => {
+                assert!(message.contains("Snapshot codec mismatch during install"));
+            }
+            other => panic!("expected corruption storage error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn recovery_snapshot_install_returns_primitive_stats_after_storage_install() {
+        let branch_id = BranchId::new();
+        let snapshot = loaded_snapshot(
+            "identity",
+            vec![kv_section(branch_id, "installed", Value::Int(42), 13)],
+        );
+        let storage = SegmentedStore::new();
+        let codec = IdentityCodec;
+
+        let installed = install_recovery_snapshot(&snapshot, Some(&codec), &storage)
+            .expect("snapshot install should succeed");
+
+        assert_eq!(installed.kv, 1);
+        assert_eq!(installed.graph, 0);
+        assert_eq!(installed.total_installed(), 1);
+
+        let value = storage
+            .get_versioned(&kv_key(branch_id, "installed"), CommitVersion::MAX)
+            .unwrap()
+            .expect("snapshot row should be installed");
+        assert_eq!(value.value, Value::Int(42));
+    }
+
+    #[test]
+    fn recovery_snapshot_install_failure_maps_through_callback_public_error_path() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = DatabaseLayout::from_root(temp_dir.path());
+        let database_uuid = [0x55; 16];
+        let codec = IdentityCodec;
+
+        let writer = SnapshotWriter::new(
+            layout.snapshots_dir().to_path_buf(),
+            Box::new(IdentityCodec),
+            database_uuid,
+        )
+        .unwrap();
+        writer
+            .create_snapshot(
+                3,
+                9,
+                vec![SnapshotSection::new(primitive_tags::KV, vec![1, 0, 0, 0])],
+            )
+            .unwrap();
+        let mut manifest = ManifestManager::create(
+            layout.manifest_path().to_path_buf(),
+            database_uuid,
+            "identity".to_string(),
+        )
+        .unwrap();
+        manifest.set_snapshot_watermark(3, TxnId(9)).unwrap();
+
+        let cfg = StrataConfig::default();
+        let storage = SegmentedStore::new();
+        let counter = Arc::new(AtomicU64::new(0));
+        let recover_result =
+            run_coordinator_recovery(&layout, &cfg, &codec, Some(&codec), &storage, &counter);
+
+        let err = recover_result.expect_err("corrupt snapshot install should fail recovery");
+        match &err {
+            CoordinatorRecoveryError::Callback(StorageError::Corruption { message }) => {
+                assert!(message.contains("KV section decode failed"));
+            }
+            other => panic!("expected callback corruption from snapshot install, got {other:?}"),
+        }
+
+        let mut mapped_storage = storage;
+        let mapped = handle_wal_recovery_outcome(
+            Err(err),
+            &cfg,
+            &layout,
+            &mut mapped_storage,
+            0,
+            RecoveryMode::Primary,
+        )
+        .expect_err("callback error should map to public recovery error");
+        match mapped {
+            RecoveryError::WalRecoveryFailed {
+                role: ErrorRole::Primary,
+                inner: StrataError::Corruption { message },
+            } => {
+                assert!(message.contains("KV section decode failed"));
+            }
+            other => panic!("expected primary WalRecoveryFailed corruption, got {other:?}"),
+        }
+    }
+
+    fn loaded_snapshot(codec_id: &str, sections: Vec<LoadedSection>) -> LoadedSnapshot {
+        LoadedSnapshot {
+            header: SnapshotHeader::new(7, 7, 1, [0x77; 16], codec_id.len() as u8),
+            codec_id: codec_id.to_string(),
+            sections,
+            crc: 0,
+        }
+    }
+
+    fn kv_section(branch_id: BranchId, key: &str, value: Value, version: u64) -> LoadedSection {
+        let serializer = SnapshotSerializer::canonical_primitive_section();
+        let entries = [KvSnapshotEntry {
+            branch_id: *branch_id.as_bytes(),
+            space: "default".to_string(),
+            type_tag: TypeTag::KV.as_byte(),
+            user_key: key.as_bytes().to_vec(),
+            value: serde_json::to_vec(&value).expect("test value should serialize"),
+            version,
+            timestamp: 1_000,
+            ttl_ms: 0,
+            is_tombstone: false,
+        }];
+        LoadedSection {
+            primitive_type: primitive_tags::KV,
+            data: serializer.serialize_kv(&entries),
+        }
+    }
+
+    fn kv_key(branch_id: BranchId, key: &str) -> Key {
+        Key::new_kv(Arc::new(Namespace::for_branch(branch_id)), key)
     }
 }

@@ -2,8 +2,14 @@
 
 /// Storage codec trait.
 ///
-/// All bytes passing through the storage layer go through the codec.
-/// This provides a seam for future encryption-at-rest and compression.
+/// Durability artifacts that opt into storage codec protection pass their
+/// payload bytes through this codec. WAL records use it for record payloads.
+///
+/// Snapshot files are different: their header records and validates the
+/// database storage codec id, but the snapshot container does not wrap section
+/// bytes in this codec. Each snapshot section owns its own wire-format
+/// encoding; primitive checkpoint sections currently use the canonical
+/// primitive-section codec.
 ///
 /// # Thread Safety
 ///

@@ -9,7 +9,13 @@
 //! Strings are length-prefixed (4-byte length + bytes).
 //! All integers are little-endian.
 
-use crate::durability::codec::StorageCodec;
+use crate::durability::codec::{IdentityCodec, StorageCodec};
+
+/// Codec id used for primitive snapshot section payloads.
+///
+/// This is part of the primitive-section wire format and is intentionally
+/// independent from the storage codec id recorded in the snapshot header.
+pub const CANONICAL_PRIMITIVE_SECTION_CODEC_ID: &str = "identity";
 
 /// Cursor-based reader for length-prefixed binary snapshot data.
 ///
@@ -78,6 +84,17 @@ impl<'a> CursorReader<'a> {
     fn read_blob(&mut self) -> Result<&'a [u8], PrimitiveSerializeError> {
         let len = self.read_u32()? as usize;
         self.read_exact(len)
+    }
+
+    /// Require that the section bytes were consumed exactly.
+    fn finish(&self) -> Result<(), PrimitiveSerializeError> {
+        if self.pos == self.data.len() {
+            Ok(())
+        } else {
+            Err(PrimitiveSerializeError::TrailingData {
+                remaining: self.data.len() - self.pos,
+            })
+        }
     }
 }
 
@@ -257,9 +274,29 @@ pub struct SnapshotSerializer {
 }
 
 impl SnapshotSerializer {
-    /// Create a new serializer with the given codec
+    /// Create a serializer with an explicit primitive-section codec.
+    ///
+    /// This constructor is for tests and explicit custom section formats.
+    /// Checkpoint construction and snapshot install must use
+    /// [`SnapshotSerializer::canonical_primitive_section`] so primitive
+    /// section payloads stay independent from the snapshot header codec id.
     pub fn new(codec: Box<dyn StorageCodec>) -> Self {
         SnapshotSerializer { codec }
+    }
+
+    /// Create the serializer used for checkpoint primitive sections.
+    ///
+    /// Snapshot files may record a non-identity storage codec id in their
+    /// headers. Primitive section payloads remain encoded with this canonical
+    /// serializer so checkpoint construction and snapshot install agree on the
+    /// section payload format.
+    pub fn canonical_primitive_section() -> Self {
+        SnapshotSerializer::new(Box::new(IdentityCodec))
+    }
+
+    /// Return the codec id used by this serializer.
+    pub fn codec_id(&self) -> &str {
+        self.codec.codec_id()
     }
 
     /// Serialize KV entries to bytes (v2 format).
@@ -305,7 +342,7 @@ impl SnapshotSerializer {
     ) -> Result<Vec<KvSnapshotEntry>, PrimitiveSerializeError> {
         let mut r = CursorReader::new(data);
         let count = r.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::new();
         for _ in 0..count {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let space = r.read_string()?;
@@ -328,6 +365,7 @@ impl SnapshotSerializer {
                 is_tombstone,
             });
         }
+        r.finish()?;
         Ok(entries)
     }
 
@@ -364,7 +402,7 @@ impl SnapshotSerializer {
     ) -> Result<Vec<EventSnapshotEntry>, PrimitiveSerializeError> {
         let mut r = CursorReader::new(data);
         let count = r.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::new();
         for _ in 0..count {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let space = r.read_string()?;
@@ -381,6 +419,7 @@ impl SnapshotSerializer {
                 timestamp,
             });
         }
+        r.finish()?;
         Ok(entries)
     }
 
@@ -419,7 +458,7 @@ impl SnapshotSerializer {
     ) -> Result<Vec<BranchSnapshotEntry>, PrimitiveSerializeError> {
         let mut r = CursorReader::new(data);
         let count = r.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::new();
         for _ in 0..count {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let key = r.read_string()?;
@@ -436,6 +475,7 @@ impl SnapshotSerializer {
                 is_tombstone,
             });
         }
+        r.finish()?;
         Ok(entries)
     }
 
@@ -477,7 +517,7 @@ impl SnapshotSerializer {
     ) -> Result<Vec<JsonSnapshotEntry>, PrimitiveSerializeError> {
         let mut r = CursorReader::new(data);
         let count = r.read_u32()? as usize;
-        let mut entries = Vec::with_capacity(count);
+        let mut entries = Vec::new();
         for _ in 0..count {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
             let space = r.read_string()?;
@@ -496,6 +536,7 @@ impl SnapshotSerializer {
                 is_tombstone,
             });
         }
+        r.finish()?;
         Ok(entries)
     }
 
@@ -565,7 +606,7 @@ impl SnapshotSerializer {
     ) -> Result<Vec<VectorCollectionSnapshotEntry>, PrimitiveSerializeError> {
         let mut r = CursorReader::new(data);
         let collections_count = r.read_u32()? as usize;
-        let mut collections = Vec::with_capacity(collections_count);
+        let mut collections = Vec::new();
 
         for _ in 0..collections_count {
             let branch_id: [u8; 16] = r.read_exact(16)?.try_into().unwrap();
@@ -576,12 +617,12 @@ impl SnapshotSerializer {
             let config_timestamp = r.read_u64()?;
             let vectors_count = r.read_u32()? as usize;
 
-            let mut vectors = Vec::with_capacity(vectors_count);
+            let mut vectors = Vec::new();
             for _ in 0..vectors_count {
                 let key = r.read_string()?;
                 let vector_id = r.read_u64()?;
                 let dims = r.read_u32()? as usize;
-                let mut embedding = Vec::with_capacity(dims);
+                let mut embedding = Vec::new();
                 for _ in 0..dims {
                     embedding.push(r.read_f32()?);
                 }
@@ -613,6 +654,7 @@ impl SnapshotSerializer {
             });
         }
 
+        r.finish()?;
         Ok(collections)
     }
 }
@@ -630,19 +672,30 @@ pub enum PrimitiveSerializeError {
     /// Codec error
     #[error("Codec error: {0}")]
     Codec(#[from] crate::durability::codec::CodecError),
+    /// Section had extra bytes after the declared entries.
+    #[error("Trailing data after snapshot section: {remaining} bytes")]
+    TrailingData {
+        /// Number of unconsumed bytes.
+        remaining: usize,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::durability::codec::IdentityCodec;
 
     fn test_serializer() -> SnapshotSerializer {
-        SnapshotSerializer::new(Box::new(IdentityCodec))
+        SnapshotSerializer::canonical_primitive_section()
     }
 
     fn test_branch(bytes: u8) -> [u8; 16] {
         [bytes; 16]
+    }
+
+    #[test]
+    fn canonical_primitive_section_serializer_uses_identity_codec() {
+        let serializer = SnapshotSerializer::canonical_primitive_section();
+        assert_eq!(serializer.codec_id(), CANONICAL_PRIMITIVE_SECTION_CODEC_ID);
     }
 
     #[test]
@@ -913,6 +966,61 @@ mod tests {
         let result = serializer.deserialize_kv(&[0, 0]);
         assert!(matches!(
             result,
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        ));
+    }
+
+    #[test]
+    fn test_deserialize_rejects_trailing_data() {
+        let serializer = test_serializer();
+        let mut data = 0u32.to_le_bytes().to_vec();
+        data.push(0xff);
+
+        assert!(matches!(
+            serializer.deserialize_kv(&data),
+            Err(PrimitiveSerializeError::TrailingData { remaining: 1 })
+        ));
+        assert!(matches!(
+            serializer.deserialize_events(&data),
+            Err(PrimitiveSerializeError::TrailingData { remaining: 1 })
+        ));
+        assert!(matches!(
+            serializer.deserialize_branches(&data),
+            Err(PrimitiveSerializeError::TrailingData { remaining: 1 })
+        ));
+        assert!(matches!(
+            serializer.deserialize_json(&data),
+            Err(PrimitiveSerializeError::TrailingData { remaining: 1 })
+        ));
+        assert!(matches!(
+            serializer.deserialize_vectors(&data),
+            Err(PrimitiveSerializeError::TrailingData { remaining: 1 })
+        ));
+    }
+
+    #[test]
+    fn test_deserialize_huge_counts_do_not_preallocate() {
+        let serializer = test_serializer();
+        let data = u32::MAX.to_le_bytes();
+
+        assert!(matches!(
+            serializer.deserialize_kv(&data),
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            serializer.deserialize_events(&data),
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            serializer.deserialize_branches(&data),
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            serializer.deserialize_json(&data),
+            Err(PrimitiveSerializeError::UnexpectedEof)
+        ));
+        assert!(matches!(
+            serializer.deserialize_vectors(&data),
             Err(PrimitiveSerializeError::UnexpectedEof)
         ));
     }
