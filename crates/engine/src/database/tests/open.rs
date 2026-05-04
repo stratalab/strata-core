@@ -500,8 +500,10 @@ fn es5g_cache_open_rejects_invalid_codec_before_global_cache_mutation() {
 
     strata_storage::block_cache::set_global_capacity(1);
 
-    let error = Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg))
-        .expect_err("cache open should reject an unknown storage codec");
+    let error = match Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg)) {
+        Ok(_) => panic!("cache open should reject an unknown storage codec"),
+        Err(error) => error,
+    };
 
     assert!(
         error
