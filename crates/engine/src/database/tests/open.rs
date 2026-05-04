@@ -272,6 +272,280 @@ fn test_cache_open_rejects_cache_durability_string() {
     );
 }
 
+fn es5a_observable_storage_config() -> StorageConfig {
+    StorageConfig {
+        max_branches: 17,
+        max_versions_per_key: 3,
+        write_buffer_size: 256 * 1024,
+        max_immutable_memtables: 2,
+        target_file_size: 3 * 1024 * 1024,
+        level_base_bytes: 11 * 1024 * 1024,
+        data_block_size: 8 * 1024,
+        bloom_bits_per_key: 13,
+        compaction_rate_limit: 7 * 1024 * 1024,
+        ..StorageConfig::default()
+    }
+}
+
+struct BlockCacheCapacityGuard {
+    previous_capacity: usize,
+}
+
+impl BlockCacheCapacityGuard {
+    fn capture() -> Self {
+        Self {
+            previous_capacity: strata_storage::block_cache::global_capacity(),
+        }
+    }
+}
+
+impl Drop for BlockCacheCapacityGuard {
+    fn drop(&mut self) {
+        strata_storage::block_cache::set_global_capacity(self.previous_capacity);
+    }
+}
+
+fn assert_es5a_observable_storage_config(
+    db: &Database,
+    cfg: &StorageConfig,
+    expected_write_buffer_size: usize,
+) {
+    let storage = db.storage();
+    assert_eq!(
+        storage.write_buffer_size_for_test(),
+        expected_write_buffer_size
+    );
+    assert_eq!(storage.max_branches_for_test(), cfg.max_branches);
+    assert_eq!(
+        storage.max_versions_per_key_for_test(),
+        cfg.max_versions_per_key
+    );
+    assert_eq!(
+        storage.max_immutable_memtables_for_test(),
+        cfg.effective_max_immutable_memtables()
+    );
+    assert_eq!(storage.target_file_size(), cfg.target_file_size);
+    assert_eq!(storage.level_base_bytes(), cfg.level_base_bytes);
+    assert_eq!(storage.data_block_size(), cfg.data_block_size);
+    assert_eq!(storage.bloom_bits_per_key(), cfg.bloom_bits_per_key);
+    assert_eq!(
+        storage.compaction_rate_limit_for_test(),
+        cfg.compaction_rate_limit
+    );
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5a_persistent_open_applies_observable_storage_runtime_knobs() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("es5a_persistent_runtime_config");
+    let storage = es5a_observable_storage_config();
+    let cfg = StrataConfig {
+        storage: storage.clone(),
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_runtime(super::spec::OpenSpec::primary(&db_path).with_config(cfg))
+        .expect("primary open should apply storage runtime config");
+
+    assert!(!db.is_cache());
+    assert_es5a_observable_storage_config(&db, &storage, storage.effective_write_buffer_size());
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5a_cache_open_applies_observable_storage_runtime_knobs() {
+    let storage = es5a_observable_storage_config();
+    let cfg = StrataConfig {
+        storage: storage.clone(),
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg))
+        .expect("cache open should apply storage runtime config");
+
+    assert!(db.is_cache());
+    assert_es5a_observable_storage_config(&db, &storage, storage.effective_write_buffer_size());
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5a_update_config_reapplies_observable_storage_runtime_knobs() {
+    let initial_storage = es5a_observable_storage_config();
+    let initial_cfg = StrataConfig {
+        storage: initial_storage.clone(),
+        ..StrataConfig::default()
+    };
+    let db = Database::open_runtime(super::spec::OpenSpec::cache().with_config(initial_cfg))
+        .expect("cache open should succeed");
+    assert_es5a_observable_storage_config(
+        &db,
+        &initial_storage,
+        initial_storage.effective_write_buffer_size(),
+    );
+
+    let updated_storage = StorageConfig {
+        write_buffer_size: 384 * 1024,
+        max_branches: 23,
+        max_versions_per_key: 5,
+        max_immutable_memtables: 4,
+        target_file_size: 5 * 1024 * 1024,
+        level_base_bytes: 19 * 1024 * 1024,
+        data_block_size: 16 * 1024,
+        bloom_bits_per_key: 15,
+        compaction_rate_limit: 3 * 1024 * 1024,
+        ..initial_storage
+    };
+
+    db.update_config(|cfg| {
+        cfg.storage = updated_storage.clone();
+    })
+    .expect("storage runtime config update should succeed");
+
+    assert_es5a_observable_storage_config(
+        &db,
+        &updated_storage,
+        updated_storage.effective_write_buffer_size(),
+    );
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5a_persistent_open_applies_memory_budget_runtime_derivations() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("es5a_persistent_memory_budget");
+    let storage = StorageConfig {
+        memory_budget: 32 << 20,
+        write_buffer_size: 512 * 1024,
+        max_immutable_memtables: 7,
+        ..es5a_observable_storage_config()
+    };
+    let cfg = StrataConfig {
+        storage: storage.clone(),
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_runtime(super::spec::OpenSpec::primary(&db_path).with_config(cfg))
+        .expect("primary open should apply memory-budget-derived storage config");
+
+    assert_es5a_observable_storage_config(&db, &storage, 8 << 20);
+
+    db.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5c_cache_open_applies_memory_budget_runtime_derivations() {
+    let storage = StorageConfig {
+        memory_budget: 32 << 20,
+        write_buffer_size: 512 * 1024,
+        max_immutable_memtables: 7,
+        ..es5a_observable_storage_config()
+    };
+    let cfg = StrataConfig {
+        storage: storage.clone(),
+        ..StrataConfig::default()
+    };
+
+    let db = Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg))
+        .expect("cache open should apply memory-budget-derived storage config");
+
+    assert_es5a_observable_storage_config(&db, &storage, 8 << 20);
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5e_cache_open_applies_default_block_cache_runtime_config() {
+    let _capacity_guard = BlockCacheCapacityGuard::capture();
+    let mut cfg = StrataConfig::default();
+    crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
+    let runtime_config = crate::database::config::storage_runtime_config_from(&cfg.storage);
+
+    strata_storage::block_cache::set_global_capacity(1);
+
+    let db =
+        Database::open_runtime(super::spec::OpenSpec::cache().with_config(StrataConfig::default()))
+            .expect("cache open should apply default block-cache runtime config");
+
+    assert!(db.is_cache());
+    let applied_capacity = strata_storage::block_cache::global_capacity();
+    match runtime_config.block_cache {
+        strata_storage::runtime_config::StorageBlockCacheConfig::Bytes(bytes) => {
+            assert_eq!(applied_capacity, bytes);
+        }
+        strata_storage::runtime_config::StorageBlockCacheConfig::Auto => {
+            assert_ne!(applied_capacity, 1);
+            assert!(applied_capacity > 0);
+        }
+        _ => unreachable!("unknown storage block-cache config variant"),
+    }
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5g_cache_open_rejects_invalid_codec_before_global_cache_mutation() {
+    let _capacity_guard = BlockCacheCapacityGuard::capture();
+    let cfg = StrataConfig {
+        storage: StorageConfig {
+            block_cache_size: 7 << 20,
+            codec: "missing-codec".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    strata_storage::block_cache::set_global_capacity(1);
+
+    let error = match Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg)) {
+        Ok(_) => panic!("cache open should reject an unknown storage codec"),
+        Err(error) => error,
+    };
+
+    assert!(
+        error
+            .to_string()
+            .contains("cache database could not initialize codec 'missing-codec'"),
+        "error should name the rejected cache codec, got: {error}"
+    );
+    assert_eq!(strata_storage::block_cache::global_capacity(), 1);
+}
+
+#[test]
+#[serial(open_databases)]
+fn es5c_follower_open_applies_block_cache_runtime_config() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("es5c_follower_block_cache");
+    let _capacity_guard = BlockCacheCapacityGuard::capture();
+    let storage = StorageConfig {
+        block_cache_size: 7 << 20,
+        ..StorageConfig::default()
+    };
+    let cfg = StrataConfig {
+        storage,
+        ..StrataConfig::default()
+    };
+
+    let primary =
+        Database::open_runtime(super::spec::OpenSpec::primary(&db_path).with_config(cfg.clone()))
+            .expect("primary open should create recoverable database state");
+    primary.shutdown().unwrap();
+    OPEN_DATABASES.lock().clear();
+
+    strata_storage::block_cache::set_global_capacity(1);
+
+    let follower =
+        Database::open_runtime(super::spec::OpenSpec::follower(&db_path).with_config(cfg))
+            .expect("follower open should apply storage runtime config");
+
+    assert_eq!(strata_storage::block_cache::global_capacity(), 7 << 20);
+
+    follower.shutdown().unwrap();
+}
+
 #[test]
 fn test_flush() {
     let temp_dir = TempDir::new().unwrap();
@@ -510,7 +784,7 @@ fn run_primary_recovery(
     Database::run_recovery(
         db_path,
         &layout,
-        &cfg,
+        crate::database::recovery::RecoveryRuntimeConfig::from_strata_config(&cfg),
         crate::database::recovery::RecoveryMode::Primary,
     )
 }

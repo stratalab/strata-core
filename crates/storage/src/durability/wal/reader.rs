@@ -1473,10 +1473,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use tiny segment size to force rotation
+        // Use the smallest valid segment size to force rotation.
         let config = crate::durability::wal::config::WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.to_path_buf(),
@@ -1489,13 +1489,13 @@ mod tests {
 
         // Write enough records to force at least one rotation
         writer
-            .append(&WalRecord::new(TxnId(1), [1u8; 16], 1000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(1), [1u8; 16], 1000, vec![0; 500]))
             .unwrap();
         writer
-            .append(&WalRecord::new(TxnId(2), [1u8; 16], 2000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(2), [1u8; 16], 2000, vec![0; 500]))
             .unwrap();
         writer
-            .append(&WalRecord::new(TxnId(3), [1u8; 16], 3000, vec![0; 50]))
+            .append(&WalRecord::new(TxnId(3), [1u8; 16], 3000, vec![0; 500]))
             .unwrap();
 
         writer.close().unwrap();
@@ -1980,15 +1980,15 @@ mod tests {
 
     #[test]
     fn test_read_after_watermark_with_writer_rotation() {
-        // End-to-end test using WalWriter with forced rotation (tiny segment size).
+        // End-to-end test using WalWriter with forced rotation.
         // Verifies the optimization works correctly with real WalWriter-produced
         // segments and .meta files.
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.to_path_buf(),
@@ -2002,7 +2002,7 @@ mod tests {
         // Write enough records to force multiple rotations
         for i in 1..=6 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 500]))
                 .unwrap();
         }
         // close() writes .meta for the final segment too
@@ -2085,10 +2085,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use tiny segment size to force rotation across multiple segments
+        // Use the smallest valid segment size to force rotation across multiple segments.
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.to_path_buf(),
@@ -2101,7 +2101,7 @@ mod tests {
 
         for i in 1..=6u64 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 500]))
                 .unwrap();
         }
         writer.close().unwrap();
@@ -2229,7 +2229,7 @@ mod tests {
 
     /// Issue #1556: Multi-segment WAL corruption recovery.
     ///
-    /// Write records across multiple segments (via tiny segment size), corrupt
+    /// Write records across multiple segments, corrupt
     /// a record payload in the middle segment (preserving the length field so
     /// it triggers CRC mismatch, not InsufficientData), and verify:
     /// - Strict reader returns an error
@@ -2239,10 +2239,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use tiny segments to force rotation
+        // Use the smallest valid segment size to force rotation.
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.to_path_buf(),
@@ -2253,14 +2253,14 @@ mod tests {
         )
         .unwrap();
 
-        // Write 10 records with large enough payloads to spread across segments
+        // Write 10 records with large enough payloads to spread across segments.
         for i in 1..=10u64 {
             writer
                 .append(&WalRecord::new(
                     TxnId(i),
                     [1u8; 16],
                     i * 1000,
-                    vec![0xAA; 40],
+                    vec![0xAA; 500],
                 ))
                 .unwrap();
         }
@@ -2320,8 +2320,8 @@ mod tests {
             "Lossy reader should recover some records"
         );
 
-        // With tiny segments (1 record each), corrupting the only record
-        // in a segment means there's no next record to scan to, so
+        // With forced-rotation segments (1 record each), corrupting the only
+        // record in a segment means there's no next record to scan to, so
         // skipped_corrupted may be 0. The key guarantee is that records
         // from OTHER segments are still recovered.
 

@@ -537,7 +537,7 @@ now bypass lossy WAL replay instead of allowing an empty lossy open.
 Split public database configuration from storage-only runtime configuration
 application.
 
-Potential detailed execution plan:
+Detailed execution plan:
 
 - `docs/engine/es5-storage-config-application-plan.md`
 

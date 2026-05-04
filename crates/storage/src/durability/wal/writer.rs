@@ -236,6 +236,10 @@ impl WalWriter {
             });
         }
 
+        config
+            .validate_writer_runtime()
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+
         // Ensure WAL directory exists
         std::fs::create_dir_all(&wal_dir)?;
 
@@ -713,9 +717,9 @@ impl WalWriter {
 
     /// Refresh the Standard-mode inline-sync deadline without clearing dirty state.
     ///
-    /// The engine uses this after unrelated durable control-artifact writes
-    /// (`strata.toml`, MANIFEST-like metadata) so their fsync cost does not
-    /// make `maybe_sync` treat the background WAL thread as overdue.
+    /// Higher layers use this after unrelated durable control-artifact writes
+    /// so their fsync cost does not make `maybe_sync` treat the background WAL
+    /// thread as overdue.
     ///
     /// This intentionally does NOT move `last_sync_time`: the background
     /// flush thread and `sync_if_overdue()` must still observe the real WAL
@@ -1068,6 +1072,73 @@ mod tests {
     }
 
     #[test]
+    fn invalid_wal_segment_size_is_rejected_before_creating_wal_dir() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let invalid_config = WalConfig::new().with_segment_size(512);
+
+        let result = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            invalid_config,
+            Box::new(IdentityCodec),
+        );
+
+        match result {
+            Err(err) => assert_eq!(err.kind(), io::ErrorKind::InvalidInput),
+            Ok(_) => panic!("invalid WAL config should be rejected"),
+        }
+        assert!(
+            !wal_dir.exists(),
+            "invalid WAL config must fail before creating the WAL directory"
+        );
+    }
+
+    #[test]
+    fn buffered_sync_threshold_above_segment_size_does_not_reject_writer() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let config = WalConfig::new()
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(4096);
+
+        let writer = WalWriter::new(
+            wal_dir.clone(),
+            [1u8; 16],
+            DurabilityMode::Always,
+            config,
+            Box::new(IdentityCodec),
+        )
+        .expect("writer should not reject an inert buffered_sync_bytes value");
+
+        assert!(
+            wal_dir.exists(),
+            "valid writer-runtime config should create the WAL directory"
+        );
+        drop(writer);
+    }
+
+    #[test]
+    fn cache_mode_skips_wal_config_validation_and_files() {
+        let dir = tempdir().unwrap();
+        let wal_dir = dir.path().join("wal");
+        let invalid_config = WalConfig::new().with_segment_size(512);
+
+        let mut writer = WalWriter::new(
+            wal_dir,
+            [1u8; 16],
+            DurabilityMode::Cache,
+            invalid_config,
+            Box::new(IdentityCodec),
+        )
+        .expect("cache mode should not validate unused WAL config");
+
+        writer.append(&make_record(1)).unwrap();
+        assert!(std::fs::read_dir(dir.path()).unwrap().next().is_none());
+    }
+
+    #[test]
     fn test_strict_mode_creates_segment() {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
@@ -1084,10 +1155,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use very small segment size to force rotation
+        // Use the smallest valid segment size to force rotation.
         let config = WalConfig::new()
-            .with_segment_size(100) // Very small
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.clone(),
@@ -1101,7 +1172,7 @@ mod tests {
         // Write enough records to trigger rotation
         for i in 0..10 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 500]))
                 .unwrap();
         }
 
@@ -1235,10 +1306,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use small segments to force rotation
+        // Use the smallest valid segment size to force rotation.
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer_a = WalWriter::new(
             wal_dir.clone(),
@@ -1267,7 +1338,7 @@ mod tests {
             .unwrap();
             for i in 2..=5 {
                 writer_b
-                    .append_and_flush(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
+                    .append_and_flush(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 500]))
                     .unwrap();
             }
             assert!(
@@ -1416,8 +1487,8 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let config = WalConfig::new()
-            .with_segment_size(100) // Very small to force rotation
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.clone(),
@@ -1430,7 +1501,7 @@ mod tests {
 
         // Write enough records via pre_serialized to trigger rotation
         for i in 0..10u64 {
-            let record = WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]);
+            let record = WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 500]);
             let record_bytes = record.to_bytes();
             writer
                 .append_pre_serialized(&record_bytes, TxnId(i), i * 1000)
@@ -1856,8 +1927,8 @@ mod tests {
         let wal_dir = dir.path().join("wal");
 
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.clone(),
@@ -1874,7 +1945,7 @@ mod tests {
         // Write enough to force rotation
         for i in 0..10 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], 0, vec![0; 500]))
                 .unwrap();
         }
 
@@ -1914,10 +1985,10 @@ mod tests {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
 
-        // Use very small segment size to force many rotations
+        // Use the smallest valid segment size to force many rotations.
         let config = WalConfig::new()
-            .with_segment_size(100)
-            .with_buffered_sync_bytes(50);
+            .with_segment_size(1024)
+            .with_buffered_sync_bytes(512);
 
         let mut writer = WalWriter::new(
             wal_dir.clone(),
@@ -1931,7 +2002,7 @@ mod tests {
         // Write enough records to force several rotations
         for i in 1..=20 {
             writer
-                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 50]))
+                .append(&WalRecord::new(TxnId(i), [1u8; 16], i * 1000, vec![0; 500]))
                 .unwrap();
         }
 
@@ -2176,10 +2247,12 @@ mod tests {
     fn test_append_during_inflight_sync_does_not_rotate_away_from_synced_segment() {
         let dir = tempdir().unwrap();
         let wal_dir = dir.path().join("wal");
-        let record = make_record_with_payload(1, 32);
-        let record_len = record.to_bytes().len() as u64;
+        let record = make_record_with_payload(1, 1000);
+        let total_record_bytes = record.to_bytes().len() + WAL_RECORD_ENVELOPE_OVERHEAD;
+        let segment_size = SEGMENT_HEADER_SIZE_V2 as u64 + total_record_bytes as u64 + 1;
         let config = WalConfig::for_testing()
-            .with_segment_size(SEGMENT_HEADER_SIZE_V2 as u64 + record_len + 1);
+            .with_segment_size(segment_size)
+            .with_buffered_sync_bytes(segment_size);
         let mut writer = make_writer_with_config(
             &wal_dir,
             DurabilityMode::Standard {
@@ -2197,7 +2270,7 @@ mod tests {
             .unwrap()
             .expect("expected a sync handle");
 
-        writer.append(&make_record_with_payload(2, 32)).unwrap();
+        writer.append(&make_record_with_payload(2, 1000)).unwrap();
 
         assert_eq!(
             writer.current_segment(),

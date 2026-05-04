@@ -17,6 +17,7 @@ use crate::durability::{
     apply_wal_record_to_memory_storage, CoordinatorRecoveryError, LoadedSnapshot, ManifestError,
     ManifestManager, RecoveryCoordinator, RecoveryStats,
 };
+use crate::runtime_config::StorageRuntimeConfig;
 use crate::{RecoveredState, SegmentedStore, StorageError};
 
 /// Install a loaded snapshot into storage during recovery.
@@ -60,9 +61,12 @@ pub struct StorageRecoveryInput<'a> {
     pub mode: StorageRecoveryMode,
     /// Codec id supplied by the caller's runtime configuration.
     pub configured_codec_id: String,
-    /// Memtable write buffer size for the recovered store.
-    pub write_buffer_size: usize,
-    /// Runtime knobs applied before segment recovery.
+    /// Runtime knobs used to construct and configure recovered storage.
+    ///
+    /// Recovery has no separate constructor write-buffer argument; it uses
+    /// `runtime_config.write_buffer_size` to create the recovered
+    /// `SegmentedStore`, then applies the remaining runtime knobs through
+    /// `StorageRuntimeConfig::apply_to_store`.
     pub runtime_config: StorageRuntimeConfig,
     /// Whether storage may perform the mechanical lossy WAL replay fallback.
     pub allow_lossy_wal_replay: bool,
@@ -77,7 +81,6 @@ impl<'a> StorageRecoveryInput<'a> {
         layout: DatabaseLayout,
         mode: StorageRecoveryMode,
         configured_codec_id: impl Into<String>,
-        write_buffer_size: usize,
         runtime_config: StorageRuntimeConfig,
         allow_lossy_wal_replay: bool,
         snapshot_install: &'a dyn RecoverySnapshotInstallCallback,
@@ -86,7 +89,6 @@ impl<'a> StorageRecoveryInput<'a> {
             layout,
             mode,
             configured_codec_id: configured_codec_id.into(),
-            write_buffer_size,
             runtime_config,
             allow_lossy_wal_replay,
             snapshot_install,
@@ -100,7 +102,6 @@ impl fmt::Debug for StorageRecoveryInput<'_> {
             .field("layout", &self.layout)
             .field("mode", &self.mode)
             .field("configured_codec_id", &self.configured_codec_id)
-            .field("write_buffer_size", &self.write_buffer_size)
             .field("runtime_config", &self.runtime_config)
             .field("allow_lossy_wal_replay", &self.allow_lossy_wal_replay)
             .field("snapshot_install", &"<callback>")
@@ -124,11 +125,11 @@ pub fn run_storage_recovery(
         layout,
         mode,
         configured_codec_id,
-        write_buffer_size,
         runtime_config,
         allow_lossy_wal_replay,
         snapshot_install,
     } = input;
+    let write_buffer_size = runtime_config.write_buffer_size;
 
     let StorageManifestRecoveryPreparation {
         database_uuid,
@@ -168,82 +169,6 @@ pub enum StorageRecoveryMode {
     PrimaryCreateManifestIfMissing,
     /// Follower-style storage recovery never creates a missing MANIFEST.
     FollowerNeverCreateManifest,
-}
-
-/// Runtime storage knobs needed before `SegmentedStore::recover_segments()`.
-///
-/// This mirrors the storage setter types rather than higher-layer product
-/// defaults. Higher layers remain responsible for building this from their
-/// configuration until the public configuration split is complete.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub struct StorageRuntimeConfig {
-    /// Maximum branches allowed by the store; `0` means unlimited.
-    pub max_branches: usize,
-    /// Maximum retained versions per key; `0` means unlimited.
-    pub max_versions_per_key: usize,
-    /// Maximum frozen memtables per branch before rotation is skipped.
-    pub max_immutable_memtables: usize,
-    /// Target size for a single segment file in bytes.
-    pub target_file_size: u64,
-    /// Target total size for L1 in bytes.
-    pub level_base_bytes: u64,
-    /// Data block size for newly built segment files.
-    pub data_block_size: usize,
-    /// Bloom filter bits per key for newly built segment files.
-    pub bloom_bits_per_key: usize,
-    /// Compaction I/O rate limit in bytes per second; `0` means unlimited.
-    pub compaction_rate_limit: u64,
-}
-
-impl StorageRuntimeConfig {
-    /// Default target size for a single segment file in bytes.
-    pub const DEFAULT_TARGET_FILE_SIZE: u64 = 64 << 20;
-    /// Default target total size for L1 in bytes.
-    pub const DEFAULT_LEVEL_BASE_BYTES: u64 = 256 << 20;
-    /// Default segment data block size in bytes.
-    pub const DEFAULT_DATA_BLOCK_SIZE: usize = 4096;
-    /// Default bloom filter bits per key.
-    pub const DEFAULT_BLOOM_BITS_PER_KEY: usize = 10;
-
-    /// Build a storage runtime config from explicit storage-layer knobs.
-    #[allow(clippy::too_many_arguments)]
-    pub const fn new(
-        max_branches: usize,
-        max_versions_per_key: usize,
-        max_immutable_memtables: usize,
-        target_file_size: u64,
-        level_base_bytes: u64,
-        data_block_size: usize,
-        bloom_bits_per_key: usize,
-        compaction_rate_limit: u64,
-    ) -> Self {
-        Self {
-            max_branches,
-            max_versions_per_key,
-            max_immutable_memtables,
-            target_file_size,
-            level_base_bytes,
-            data_block_size,
-            bloom_bits_per_key,
-            compaction_rate_limit,
-        }
-    }
-}
-
-impl Default for StorageRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            max_branches: 0,
-            max_versions_per_key: 0,
-            max_immutable_memtables: 0,
-            target_file_size: Self::DEFAULT_TARGET_FILE_SIZE,
-            level_base_bytes: Self::DEFAULT_LEVEL_BASE_BYTES,
-            data_block_size: Self::DEFAULT_DATA_BLOCK_SIZE,
-            bloom_bits_per_key: Self::DEFAULT_BLOOM_BITS_PER_KEY,
-            compaction_rate_limit: 0,
-        }
-    }
 }
 
 /// Storage-local MANIFEST and codec preparation result for recovery.
@@ -455,7 +380,7 @@ fn complete_storage_recovery_after_replay(
     lossy_wal_replay: Option<StorageLossyWalReplayFacts>,
 ) -> Result<StorageRecoveryOutcome, StorageRecoveryError> {
     wal_replay.final_version = wal_replay.final_version.max(storage.current_version());
-    apply_storage_runtime_config(&storage, runtime_config);
+    runtime_config.apply_to_store(&storage);
     let segment_recovery = storage
         .recover_segments()
         .map_err(|source| StorageRecoveryError::SegmentRecovery { source })?;
@@ -505,17 +430,6 @@ fn handle_storage_wal_replay_outcome(
     *storage = SegmentedStore::with_dir(layout.segments_dir().to_path_buf(), write_buffer_size);
 
     Ok((RecoveryStats::default(), Some(facts)))
-}
-
-fn apply_storage_runtime_config(storage: &SegmentedStore, config: StorageRuntimeConfig) {
-    storage.set_max_branches(config.max_branches);
-    storage.set_max_versions_per_key(config.max_versions_per_key);
-    storage.set_max_immutable_memtables(config.max_immutable_memtables);
-    storage.set_target_file_size(config.target_file_size);
-    storage.set_level_base_bytes(config.level_base_bytes);
-    storage.set_data_block_size(config.data_block_size);
-    storage.set_bloom_bits_per_key(config.bloom_bits_per_key);
-    storage.set_compaction_rate_limit(config.compaction_rate_limit);
 }
 
 fn install_recovery_snapshot(
@@ -740,8 +654,16 @@ mod tests {
             DatabaseLayout::from_root("/tmp/strata-es4b"),
             StorageRecoveryMode::PrimaryCreateManifestIfMissing,
             "identity",
-            4096,
-            StorageRuntimeConfig::new(128, 16, 2, 1 << 20, 4 << 20, 4096, 10, 0),
+            StorageRuntimeConfig::builder()
+                .write_buffer_size(4096)
+                .max_branches(128)
+                .max_versions_per_key(16)
+                .max_immutable_memtables(2)
+                .target_file_size(1 << 20)
+                .level_base_bytes(4 << 20)
+                .data_block_size(4096)
+                .bloom_bits_per_key(10)
+                .build(),
             true,
             &callback,
         );
@@ -752,21 +674,6 @@ mod tests {
         );
         assert_eq!(input.runtime_config.target_file_size, 1 << 20);
         assert!(format!("{input:?}").contains("<callback>"));
-    }
-
-    #[test]
-    fn runtime_config_default_matches_segmented_store_defaults() {
-        let cfg = StorageRuntimeConfig::default();
-        let store = SegmentedStore::new();
-
-        assert_eq!(cfg.max_branches, 0);
-        assert_eq!(cfg.max_versions_per_key, 0);
-        assert_eq!(cfg.max_immutable_memtables, 0);
-        assert_eq!(cfg.target_file_size, store.target_file_size());
-        assert_eq!(cfg.level_base_bytes, store.level_base_bytes());
-        assert_eq!(cfg.data_block_size, store.data_block_size());
-        assert_eq!(cfg.bloom_bits_per_key, store.bloom_bits_per_key());
-        assert_eq!(cfg.compaction_rate_limit, 0);
     }
 
     #[test]
@@ -932,8 +839,9 @@ mod tests {
             layout.clone(),
             StorageRecoveryMode::PrimaryCreateManifestIfMissing,
             "identity",
-            4096,
-            StorageRuntimeConfig::default(),
+            StorageRuntimeConfig::builder()
+                .write_buffer_size(4096)
+                .build(),
             false,
             &snapshot_install,
         ))
@@ -983,8 +891,9 @@ mod tests {
             layout,
             StorageRecoveryMode::PrimaryCreateManifestIfMissing,
             "identity",
-            4096,
-            StorageRuntimeConfig::default(),
+            StorageRuntimeConfig::builder()
+                .write_buffer_size(4096)
+                .build(),
             true,
             &snapshot_install,
         ))
@@ -1525,8 +1434,17 @@ mod tests {
             final_version: CommitVersion(5),
             ..RecoveryStats::default()
         };
-        let runtime_config =
-            StorageRuntimeConfig::new(128, 16, 2, 2 << 20, 5 << 20, 8 << 10, 12, 1_234_567);
+        let runtime_config = StorageRuntimeConfig::builder()
+            .write_buffer_size(4096)
+            .max_branches(128)
+            .max_versions_per_key(16)
+            .max_immutable_memtables(2)
+            .target_file_size(2 << 20)
+            .level_base_bytes(5 << 20)
+            .data_block_size(8 << 10)
+            .bloom_bits_per_key(12)
+            .compaction_rate_limit(1_234_567)
+            .build();
 
         let outcome = complete_storage_recovery_after_replay(
             [0x77; 16],
@@ -1590,7 +1508,9 @@ mod tests {
             Box::new(IdentityCodec),
             storage,
             RecoveryStats::default(),
-            StorageRuntimeConfig::default(),
+            StorageRuntimeConfig::builder()
+                .write_buffer_size(4096)
+                .build(),
             Some(lossy),
         )
         .expect("post-replay storage recovery should carry lossy facts");

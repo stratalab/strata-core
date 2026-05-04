@@ -84,6 +84,42 @@ fn prune_preserves_live_manifest_snapshot_in_steady_state() {
 }
 
 #[test]
+fn retain_count_zero_is_treated_as_one_by_engine_pruning() {
+    let temp_dir = TempDir::new().unwrap();
+    let db_path = temp_dir.path().join("db");
+    let db = Database::open(&db_path).unwrap();
+
+    {
+        let mut cfg = db.config.write();
+        cfg.snapshot_retention.retain_count = 0;
+    }
+
+    let branch_id = BranchId::new();
+    for i in 0..5 {
+        write_one(&db, branch_id, &format!("zero-retain-{i}"));
+        db.checkpoint().unwrap();
+    }
+
+    let canonical = db_path.canonicalize().unwrap();
+    let snapshots_dir = canonical.join("snapshots");
+    let kept_ids: Vec<u64> = list_snapshots(&snapshots_dir)
+        .unwrap()
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+
+    assert_eq!(
+        kept_ids.len(),
+        1,
+        "public retain_count=0 should be accepted and pruned as retain_count=1"
+    );
+
+    let manifest_path = canonical.join("MANIFEST");
+    let manifest = strata_storage::durability::ManifestManager::load(manifest_path).unwrap();
+    assert_eq!(kept_ids[0], manifest.manifest().snapshot_id.unwrap());
+}
+
+#[test]
 fn prune_preserves_live_manifest_snapshot_when_outside_retain_window() {
     // Corner case: MANIFEST.snapshot_id points to an OLD snapshot that
     // would otherwise fall outside `retain_count`. This can happen in
