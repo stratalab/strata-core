@@ -15,6 +15,7 @@ workspace = true
 default = []
 engine-internal = []
 fault-injection = []
+test-utils = []
 perf-trace = []
 
 [dependencies]

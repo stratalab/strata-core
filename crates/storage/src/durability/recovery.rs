@@ -397,7 +397,7 @@ impl RecoveryCoordinator {
     /// callers that need the decoded payload perform their own decode
     /// inside `on_record` to preserve the inline-decode invariant.
     ///
-    /// Typed recovery driver used by the engine's recovery orchestration.
+    /// Typed recovery driver used by upper-layer recovery orchestration.
     ///
     /// [`recover`](Self::recover) is the canonical storage-owned callback API
     /// and forwards directly to this method.

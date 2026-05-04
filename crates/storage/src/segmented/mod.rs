@@ -1115,35 +1115,35 @@ impl SegmentedStore {
     }
 
     /// Return the configured write buffer size for cross-crate characterization tests.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn write_buffer_size_for_test(&self) -> usize {
         self.write_buffer_size.load(Ordering::Relaxed) as usize
     }
 
     /// Return the configured branch limit for cross-crate characterization tests.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn max_branches_for_test(&self) -> usize {
         self.max_branches.load(Ordering::Relaxed)
     }
 
     /// Return the configured per-key version limit for characterization tests.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn max_versions_per_key_for_test(&self) -> usize {
         self.max_versions_per_key.load(Ordering::Relaxed)
     }
 
     /// Return the configured immutable-memtable limit for characterization tests.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn max_immutable_memtables_for_test(&self) -> usize {
         self.max_immutable_memtables.load(Ordering::Relaxed)
     }
 
     /// Return the configured compaction rate limit for characterization tests.
-    #[cfg(any(test, feature = "fault-injection"))]
+    #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn compaction_rate_limit_for_test(&self) -> u64 {
         self.compaction_rate_limiter
@@ -2719,7 +2719,8 @@ impl SegmentedStore {
     ///
     /// This provides per-key read consistency without the overhead of
     /// transaction allocation, coordinator mutex, or read-set tracking.
-    /// For multi-key snapshot isolation, use `Database::transaction()`.
+    /// For multi-key snapshot isolation, use a transaction-level API with a
+    /// bounded snapshot.
     pub fn get_versioned_direct(&self, key: &Key) -> StorageResult<Option<VersionedValue>> {
         let snapshot = match self.snapshot_branch(&key.namespace.branch_id) {
             Some(s) => s,
@@ -3692,10 +3693,9 @@ impl SegmentedStore {
     /// the same `SegmentedStore` instance would duplicate recovered state, so
     /// repeated invocations return [`StorageError::RecoveryAlreadyApplied`].
     ///
-    /// Callers should pass the returned outcome to
-    /// `TransactionCoordinator::apply_storage_recovery` rather than reading
-    /// individual fields: that entry point owns version-floor adoption and
-    /// future per-branch version wiring.
+    /// Callers should pass the returned outcome to an upper-layer coordinator
+    /// recovery hook rather than reading individual fields: that entry point
+    /// owns version-floor adoption and future per-branch version wiring.
     ///
     /// ## B5.1 retention contract
     ///

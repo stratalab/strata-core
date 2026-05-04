@@ -15,9 +15,6 @@ use strata_core::id::{CommitVersion, TxnId};
 use strata_core::value::Value;
 use strata_core::{BranchId, Version, Versioned, VersionedValue};
 
-type StrataError = StorageError;
-type StrataResult<T> = StorageResult<T>;
-
 /// Error type for commit failures
 ///
 /// Per spec Core Invariants:
@@ -451,8 +448,8 @@ impl TransactionContext {
 
     /// Return the snapshot store backing this transaction, if any.
     ///
-    /// Engine-owned transaction semantics use the same bounded snapshot view
-    /// as generic reads, so exposing the shared store handle is sufficient.
+    /// Higher-level transaction semantics use the same bounded snapshot view as
+    /// generic reads, so exposing the shared store handle is sufficient.
     pub fn snapshot_store(&self) -> Option<Arc<SegmentedStore>> {
         self.store.clone()
     }
@@ -473,7 +470,7 @@ impl TransactionContext {
     /// - If key doesn't exist in snapshot: tracks `(key, 0)`
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
+    /// Returns `StorageError::invalid_input` if transaction is not active.
     ///
     /// # Example
     ///
@@ -492,7 +489,7 @@ impl TransactionContext {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn get(&mut self, key: &Key) -> StrataResult<Option<Value>> {
+    pub fn get(&mut self, key: &Key) -> StorageResult<Option<Value>> {
         self.guard(key)?;
 
         // 1. Check write_set first (read-your-writes)
@@ -515,9 +512,9 @@ impl TransactionContext {
     ///
     /// This is the core read path that tracks reads for conflict detection.
     /// Reads are bounded by `start_version` for MVCC isolation.
-    fn read_from_snapshot(&mut self, key: &Key) -> StrataResult<Option<Value>> {
+    fn read_from_snapshot(&mut self, key: &Key) -> StorageResult<Option<Value>> {
         let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no store for reads".to_string())
+            StorageError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
         match store.get_versioned(key, self.start_version)? {
@@ -550,8 +547,8 @@ impl TransactionContext {
     /// 3. **snapshot read:** returns full `VersionedValue` from snapshot, tracks in read_set
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
-    pub fn get_versioned(&mut self, key: &Key) -> StrataResult<Option<VersionedValue>> {
+    /// Returns `StorageError::invalid_input` if transaction is not active.
+    pub fn get_versioned(&mut self, key: &Key) -> StorageResult<Option<VersionedValue>> {
         self.guard(key)?;
 
         // 1. Check write_set first (read-your-writes)
@@ -573,9 +570,9 @@ impl TransactionContext {
     }
 
     /// Read from store preserving version metadata, and track in read_set
-    fn get_versioned_from_snapshot(&mut self, key: &Key) -> StrataResult<Option<VersionedValue>> {
+    fn get_versioned_from_snapshot(&mut self, key: &Key) -> StorageResult<Option<VersionedValue>> {
         let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no store for reads".to_string())
+            StorageError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
         let versioned = store.get_versioned(key, self.start_version)?;
@@ -599,8 +596,8 @@ impl TransactionContext {
     /// Note: This DOES track the read in read_set if the key is read from snapshot.
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
-    pub fn exists(&mut self, key: &Key) -> StrataResult<bool> {
+    /// Returns `StorageError::invalid_input` if transaction is not active.
+    pub fn exists(&mut self, key: &Key) -> StorageResult<bool> {
         Ok(self.get(key)?.is_some())
     }
 
@@ -614,7 +611,7 @@ impl TransactionContext {
     /// Results are sorted by key order.
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active or has no snapshot.
+    /// Returns `StorageError::invalid_input` if transaction is not active or has no snapshot.
     ///
     /// # Example
     ///
@@ -634,11 +631,11 @@ impl TransactionContext {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn scan_prefix(&mut self, prefix: &Key) -> StrataResult<Vec<(Key, Value)>> {
+    pub fn scan_prefix(&mut self, prefix: &Key) -> StorageResult<Vec<(Key, Value)>> {
         self.guard(prefix)?;
 
         let store = self.store.as_ref().ok_or_else(|| {
-            StrataError::invalid_input("Transaction has no store for reads".to_string())
+            StorageError::invalid_input("Transaction has no store for reads".to_string())
         })?;
 
         // Get all matching keys from store (bounded by start_version)
@@ -769,7 +766,7 @@ impl TransactionContext {
     /// keys (the operation won't increase the total count). For CAS, pass `None`
     /// because CAS always appends to the cas_set.
     #[inline]
-    fn check_write_limit(&self, key: Option<&Key>) -> StrataResult<()> {
+    fn check_write_limit(&self, key: Option<&Key>) -> StorageResult<()> {
         if self.max_write_entries == 0 {
             return Ok(());
         }
@@ -782,7 +779,7 @@ impl TransactionContext {
         }
         let total = self.write_set.len() + self.delete_set.len() + self.cas_set.len();
         if total >= self.max_write_entries {
-            return Err(StrataError::capacity_exceeded(
+            return Err(StorageError::capacity_exceeded(
                 "transaction_write_buffer",
                 self.max_write_entries,
                 total + 1,
@@ -802,7 +799,7 @@ impl TransactionContext {
     /// - Writes are "blind" - no read_set entry unless you explicitly read first
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
+    /// Returns `StorageError::invalid_input` if transaction is not active.
     ///
     /// # Example
     ///
@@ -821,10 +818,10 @@ impl TransactionContext {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn put(&mut self, key: Key, value: Value) -> StrataResult<()> {
+    pub fn put(&mut self, key: Key, value: Value) -> StorageResult<()> {
         self.guard(&key)?;
         if self.read_only {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Cannot write in a read-only transaction",
             ));
         }
@@ -847,10 +844,10 @@ impl TransactionContext {
     /// Same as `put()`, but also records a TTL so the entry is serialized
     /// into the WAL and preserved through recovery. A `ttl_ms` of 0 means
     /// no TTL (equivalent to `put()`).
-    pub fn put_with_ttl(&mut self, key: Key, value: Value, ttl_ms: u64) -> StrataResult<()> {
+    pub fn put_with_ttl(&mut self, key: Key, value: Value, ttl_ms: u64) -> StorageResult<()> {
         self.guard(&key)?;
         if self.read_only {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Cannot write in a read-only transaction",
             ));
         }
@@ -876,7 +873,7 @@ impl TransactionContext {
     /// versions are pruned later during compaction, not at write time.
     /// Use for internal data (e.g., graph adjacency lists) where version
     /// history is not needed and would waste memory.
-    pub fn put_replace(&mut self, key: Key, value: Value) -> StrataResult<()> {
+    pub fn put_replace(&mut self, key: Key, value: Value) -> StorageResult<()> {
         self.key_write_modes
             .insert(key.clone(), WriteMode::KeepLast(1));
         self.put(key, value)
@@ -893,7 +890,7 @@ impl TransactionContext {
     /// - At commit, creates a tombstone in storage
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
+    /// Returns `StorageError::invalid_input` if transaction is not active.
     ///
     /// # Example
     ///
@@ -912,10 +909,10 @@ impl TransactionContext {
     /// # Ok(())
     /// # }
     /// ```
-    pub fn delete(&mut self, key: Key) -> StrataResult<()> {
+    pub fn delete(&mut self, key: Key) -> StorageResult<()> {
         self.guard(&key)?;
         if self.read_only {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Cannot write in a read-only transaction",
             ));
         }
@@ -947,7 +944,7 @@ impl TransactionContext {
     /// - Multiple CAS operations on different keys are allowed
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
+    /// Returns `StorageError::invalid_input` if transaction is not active.
     ///
     /// # Example
     ///
@@ -976,10 +973,10 @@ impl TransactionContext {
         key: Key,
         expected_version: CommitVersion,
         new_value: Value,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         self.guard(&key)?;
         if self.read_only {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Cannot write in a read-only transaction",
             ));
         }
@@ -1005,10 +1002,10 @@ impl TransactionContext {
         key: Key,
         expected_version: CommitVersion,
         new_value: Value,
-    ) -> StrataResult<()> {
+    ) -> StorageResult<()> {
         self.guard(&key)?;
         if self.read_only {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Cannot write in a read-only transaction",
             ));
         }
@@ -1035,8 +1032,8 @@ impl TransactionContext {
     /// Note: Does not change transaction state or snapshot.
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not active.
-    pub fn clear_operations(&mut self) -> StrataResult<()> {
+    /// Returns `StorageError::invalid_input` if transaction is not active.
+    pub fn clear_operations(&mut self) -> StorageResult<()> {
         self.ensure_active()?;
 
         self.read_set.clear();
@@ -1127,12 +1124,12 @@ impl TransactionContext {
     /// Check if transaction can accept operations
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if transaction is not in `Active` state.
-    pub fn ensure_active(&self) -> StrataResult<()> {
+    /// Returns `StorageError::invalid_input` if transaction is not in `Active` state.
+    pub fn ensure_active(&self) -> StorageResult<()> {
         if self.is_active() {
             Ok(())
         } else {
-            Err(StrataError::invalid_input(format!(
+            Err(StorageError::invalid_input(format!(
                 "Transaction {} is not active: {:?}",
                 self.txn_id, self.status
             )))
@@ -1144,9 +1141,9 @@ impl TransactionContext {
     /// Commit serialization locks only `self.branch_id`. Allowing keys from
     /// other branches would let cross-branch reads bypass that lock, creating
     /// a TOCTOU vulnerability (#1709).
-    fn enforce_branch_scope(&self, key: &Key) -> StrataResult<()> {
+    fn enforce_branch_scope(&self, key: &Key) -> StorageResult<()> {
         if !self.allow_cross_branch && key.namespace.branch_id != self.branch_id {
-            return Err(StrataError::invalid_input(format!(
+            return Err(StorageError::invalid_input(format!(
                 "Key branch {} does not match transaction branch {} — \
                  cross-branch operations are not supported in a single transaction",
                 key.namespace.branch_id, self.branch_id
@@ -1157,13 +1154,13 @@ impl TransactionContext {
 
     /// Common pre-operation guard: verify the transaction is active and the key
     /// belongs to this transaction's branch.
-    fn guard(&mut self, key: &Key) -> StrataResult<()> {
+    fn guard(&mut self, key: &Key) -> StorageResult<()> {
         self.ensure_active()?;
         self.maybe_seed_branch_generation_read_guard(key)?;
         self.enforce_branch_scope(key)
     }
 
-    fn maybe_seed_branch_generation_read_guard(&mut self, key: &Key) -> StrataResult<()> {
+    fn maybe_seed_branch_generation_read_guard(&mut self, key: &Key) -> StorageResult<()> {
         if self.read_only
             || self.branch_generation_guard.is_none()
             || self.branch_generation_guard_seeded
@@ -1197,9 +1194,9 @@ impl TransactionContext {
 
     /// Reject if the same key already has a CAS operation in this transaction.
     /// Used by `put()` and `delete()` to prevent ambiguous CAS+write mixing (#1739 OCC-M1).
-    fn validate_no_cas_conflict(&self, key: &Key) -> StrataResult<()> {
+    fn validate_no_cas_conflict(&self, key: &Key) -> StorageResult<()> {
         if self.cas_set.iter().any(|op| op.key == *key) {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Key already has a CAS operation in this transaction; \
                  mixing put/delete and CAS on the same key is ambiguous",
             ));
@@ -1209,9 +1206,9 @@ impl TransactionContext {
 
     /// Reject if the same key already has a put or delete in this transaction.
     /// Used by `cas()` and `cas_with_read()` to prevent ambiguous write+CAS mixing (#1739 OCC-M1).
-    fn validate_no_write_conflict(&self, key: &Key) -> StrataResult<()> {
+    fn validate_no_write_conflict(&self, key: &Key) -> StorageResult<()> {
         if self.write_set.contains_key(key) || self.delete_set.contains(key) {
-            return Err(StrataError::invalid_input(
+            return Err(StorageError::invalid_input(
                 "Key already has a put/delete in this transaction; \
                  mixing put/delete and CAS on the same key is ambiguous",
             ));
@@ -1225,11 +1222,11 @@ impl TransactionContext {
     /// the transaction should be validated against current storage state.
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if not in `Active` state.
+    /// Returns `StorageError::invalid_input` if not in `Active` state.
     ///
     /// # State Transition
     /// `Active` → `Validating`
-    pub fn mark_validating(&mut self) -> StrataResult<()> {
+    pub fn mark_validating(&mut self) -> StorageResult<()> {
         self.ensure_active()?;
         self.status = TransactionStatus::Validating;
         Ok(())
@@ -1241,17 +1238,17 @@ impl TransactionContext {
     /// applied to storage.
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if not in `Validating` state.
+    /// Returns `StorageError::invalid_input` if not in `Validating` state.
     ///
     /// # State Transition
     /// `Validating` → `Committed`
-    pub fn mark_committed(&mut self) -> StrataResult<()> {
+    pub fn mark_committed(&mut self) -> StorageResult<()> {
         match &self.status {
             TransactionStatus::Validating => {
                 self.status = TransactionStatus::Committed;
                 Ok(())
             }
-            _ => Err(StrataError::invalid_input(format!(
+            _ => Err(StorageError::invalid_input(format!(
                 "Cannot commit transaction {} from state {:?}",
                 self.txn_id, self.status
             ))),
@@ -1271,18 +1268,18 @@ impl TransactionContext {
     /// * `reason` - Human-readable reason for abort
     ///
     /// # Errors
-    /// Returns `StrataError::invalid_input` if already `Committed` or `Aborted`.
+    /// Returns `StorageError::invalid_input` if already `Committed` or `Aborted`.
     ///
     /// # State Transitions
     /// - `Active` → `Aborted`
     /// - `Validating` → `Aborted`
-    pub fn mark_aborted(&mut self, reason: String) -> StrataResult<()> {
+    pub fn mark_aborted(&mut self, reason: String) -> StorageResult<()> {
         match &self.status {
-            TransactionStatus::Committed => Err(StrataError::invalid_input(format!(
+            TransactionStatus::Committed => Err(StorageError::invalid_input(format!(
                 "Cannot abort committed transaction {}",
                 self.txn_id
             ))),
-            TransactionStatus::Aborted { .. } => Err(StrataError::invalid_input(format!(
+            TransactionStatus::Aborted { .. } => Err(StorageError::invalid_input(format!(
                 "Transaction {} already aborted",
                 self.txn_id
             ))),
@@ -1391,15 +1388,15 @@ impl TransactionContext {
     /// - Transaction must be in Committed state (validation passed)
     ///
     /// # Errors
-    /// - StrataError::invalid_input if transaction is not in Committed state
+    /// - StorageError::invalid_input if transaction is not in Committed state
     /// - Error from storage operations if they fail
     pub fn apply_writes<S: Storage>(
         &mut self,
         store: &S,
         commit_version: CommitVersion,
-    ) -> StrataResult<ApplyResult> {
+    ) -> StorageResult<ApplyResult> {
         if !self.is_committed() {
-            return Err(StrataError::invalid_input(format!(
+            return Err(StorageError::invalid_input(format!(
                 "Cannot apply writes: transaction {} is {:?}, must be Committed",
                 self.txn_id, self.status
             )));

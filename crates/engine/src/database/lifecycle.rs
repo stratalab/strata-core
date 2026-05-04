@@ -117,11 +117,11 @@ impl Database {
         (safe_point, pruned, expired)
     }
 
-    /// Prune old checkpoint snapshot files according to the configured
-    /// `snapshot_retention.retain_count` (DG-015).
+    /// Prune old checkpoint snapshot files according to the effective snapshot
+    /// retention count derived from `snapshot_retention.retain_count` (DG-015).
     ///
     /// Always retains:
-    ///   - the `retain_count` newest snapshots, and
+    ///   - the newest snapshots up to the effective retain count, and
     ///   - the snapshot referenced by the live MANIFEST (recovery-critical).
     ///
     /// Per-file delete failures are logged but do not abort the loop. The

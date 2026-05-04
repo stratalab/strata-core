@@ -1,7 +1,7 @@
 //! Storage-owned recovery bootstrap surface.
 //!
-//! This module defines the primitive-neutral boundary that ES4 uses to move
-//! durability recovery mechanics into storage. The public entry point is
+//! This module defines the primitive-neutral boundary for storage-owned
+//! durability recovery mechanics. The public entry point is
 //! `run_storage_recovery`; the smaller helper seams below stay private to keep
 //! higher layers from driving the lower recovery runtime piecemeal.
 
@@ -22,8 +22,8 @@ use crate::{RecoveredState, SegmentedStore, StorageError};
 
 /// Install a loaded snapshot into storage during recovery.
 ///
-/// Storage owns MANIFEST and codec resolution in the ES4 target, but it must
-/// not decode primitive snapshot sections. The callback therefore receives the
+/// Storage owns MANIFEST and codec resolution, but it must not decode primitive
+/// snapshot sections. The callback therefore receives the
 /// resolved install codec and the generic `LoadedSnapshot` container; higher
 /// layers keep ownership of primitive decode and install telemetry.
 pub trait RecoverySnapshotInstallCallback: Send + Sync {
@@ -111,7 +111,7 @@ impl fmt::Debug for StorageRecoveryInput<'_> {
 
 /// Run storage-owned durability recovery.
 ///
-/// This is the ES4 target wrapper for lower recovery mechanics. It validates
+/// This is the storage-owned wrapper for lower recovery mechanics. It validates
 /// and prepares MANIFEST state, resolves codecs, constructs the recovered
 /// `SegmentedStore`, drives snapshot/WAL replay through the storage
 /// coordinator, applies the mechanical lossy WAL fallback when configured, and
@@ -651,7 +651,7 @@ mod tests {
                         _storage: &SegmentedStore|
          -> Result<(), StorageError> { Ok(()) };
         let input = StorageRecoveryInput::new(
-            DatabaseLayout::from_root("/tmp/strata-es4b"),
+            DatabaseLayout::from_root("/tmp/strata-recovery-bootstrap"),
             StorageRecoveryMode::PrimaryCreateManifestIfMissing,
             "identity",
             StorageRuntimeConfig::builder()

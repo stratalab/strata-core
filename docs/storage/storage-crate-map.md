@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This document is a baseline map of `crates/storage` as it exists today.
+This document maps `crates/storage` after the storage consolidation and the
+storage-boundary normalization.
 
-It is not a target design. It is a description of the current ownership and
-behavior in the storage crate, written to support the next major storage-side
-consolidation effort.
+It describes the settled lower-runtime substrate that engine and the current
+upper crates build on.
 
 For the target boundary of the clean storage layer, see
 [storage-charter.md](./storage-charter.md).
@@ -14,10 +14,10 @@ For the target boundary of the clean storage layer, see
 For the cross-boundary ownership question with engine, see
 [storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md).
 
-The important takeaway is that `strata-storage` is already the real lower
-runtime anchor of the system. The remaining work is no longer about finding
-the right lower-runtime owner. It is about severing the final legacy
-dependencies above it cleanly.
+The important takeaway is that `strata-storage` is the real lower runtime
+anchor of the system. The remaining work is above storage: future engine
+consolidation may absorb graph, vector, search, executor-legacy, and security
+responsibilities, but storage should remain the generic persistence substrate.
 
 ## High-Level Shape
 
@@ -41,6 +41,7 @@ Major supporting files:
 - [manifest.rs](../../crates/storage/src/manifest.rs)
 - [compaction.rs](../../crates/storage/src/compaction.rs)
 - [key_encoding.rs](../../crates/storage/src/key_encoding.rs)
+- [runtime_config.rs](../../crates/storage/src/runtime_config.rs)
 
 Major subtrees:
 
@@ -48,6 +49,7 @@ Major subtrees:
   compaction, ref tracking, and quarantine protocol
 - `durability/` — WAL, snapshot/checkpoint, MANIFEST, decoded-row install,
   and recovery-bootstrap mechanics
+- `txn/` — generic transaction context, validation, and manager mechanics
 
 The crate is already substantial. The heaviest ownership points are:
 
@@ -76,8 +78,11 @@ Today `strata-storage` re-exports:
   - `StorageResult`
 - storage engine types:
   - `SegmentedStore`
-  - `VersionedValue`
+  - `VersionedEntry`
   - `StoredValue`
+- storage runtime config types:
+  - `StorageRuntimeConfig`
+  - `StorageBlockCacheConfig`
 - durability runtime types:
   - WAL reader/writer, codec, layout, and format types
   - checkpoint, compaction, snapshot-prune, and MANIFEST-sync helpers
@@ -87,9 +92,7 @@ Today `strata-storage` re-exports:
   - compaction helpers
   - quarantine helpers
 
-This means storage already owns the persistence substrate boundary in active
-code, even though some neighboring runtime responsibilities still live in
-other crates.
+This means storage owns the persistence substrate boundary in active code.
 
 ## Current Dependency Shape
 
@@ -114,7 +117,9 @@ The internal incoming graph today is:
 The root `stratadb` package also depends on storage in dev/test paths.
 
 This confirms that storage is already the effective substrate node of the
-workspace.
+workspace. The direct upper-crate storage edges are current transitional
+workspace shape, not permission for upper layers to drive database recovery,
+checkpoint, open, retention, or product policy below engine.
 
 ## What Storage Already Owns
 
@@ -172,6 +177,19 @@ In [durability/](../../crates/storage/src/durability), storage owns:
 - recovery bootstrap mechanics through
   [recovery_bootstrap.rs](../../crates/storage/src/durability/recovery_bootstrap.rs)
 
+### 6. Storage Runtime Configuration
+
+In [runtime_config.rs](../../crates/storage/src/runtime_config.rs), storage
+owns:
+
+- storage runtime config defaults
+- effective storage knob derivation from raw storage inputs
+- store-local application to `SegmentedStore`
+- process-global block-cache capacity application
+
+Engine owns the public `StrataConfig` / `StorageConfig` surface and adapts it
+into this storage-owned runtime config.
+
 ## What Storage Now Owns
 
 Storage now owns the full lower runtime substrate.
@@ -186,6 +204,7 @@ The major substrate responsibilities now physically owned here are:
 - checkpoint and WAL compaction runtime
 - generic decoded-row snapshot install runtime
 - recovery bootstrap and replay coordination
+- storage runtime config derivation and application
 
 ## Current Architectural Role
 
@@ -210,3 +229,21 @@ The remaining work is above the substrate now:
 
 - keep primitive semantics out of the lower layer
 - let `engine` converge on its own clean domain/runtime boundary
+- keep the documented storage seams raw, mechanical, and policy-free
+
+## Engine Boundary Seams
+
+Storage exposes a small set of storage-owned runtime helpers to engine. These
+helpers are intentional seams, not invitations for engine policy to move down:
+
+| Surface | Storage Owns |
+|---|---|
+| Checkpoint and WAL compaction | `checkpoint_runtime.rs` helpers that operate on checkpoint files, WAL segments, MANIFEST state, and raw outcomes |
+| Snapshot install | `decoded_snapshot_install.rs` validation and install for already decoded storage rows |
+| Recovery bootstrap | `recovery_bootstrap.rs` MANIFEST prep, codec validation, replay, segment recovery, and raw recovery facts |
+| Runtime config | `runtime_config.rs` effective storage values and application to stores/global cache |
+| Retention | storage snapshot pruning mechanics and minimum-retain invariant |
+
+The matching engine responsibilities are documented in
+[../engine/engine-crate-map.md](../engine/engine-crate-map.md) and
+[storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md).

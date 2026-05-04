@@ -42,8 +42,6 @@ use crate::{Key, Storage, StorageResult};
 use std::collections::HashMap;
 use strata_core::id::CommitVersion;
 
-type StrataResult<T> = StorageResult<T>;
-
 /// Types of conflicts that can occur during transaction validation
 ///
 /// See spec Section 3.1 for when each conflict type occurs.
@@ -136,7 +134,7 @@ impl ValidationResult {
 pub fn validate_read_set<S: Storage>(
     read_set: &HashMap<Key, CommitVersion>,
     store: &S,
-) -> StrataResult<ValidationResult> {
+) -> StorageResult<ValidationResult> {
     let mut result = ValidationResult::ok();
 
     for (key, read_version) in read_set {
@@ -179,7 +177,7 @@ pub fn validate_read_set<S: Storage>(
 pub fn validate_cas_set<S: Storage>(
     cas_set: &[CASOperation],
     store: &S,
-) -> StrataResult<ValidationResult> {
+) -> StorageResult<ValidationResult> {
     let mut result = ValidationResult::ok();
 
     for cas_op in cas_set {
@@ -232,7 +230,7 @@ pub fn validate_cas_set<S: Storage>(
 pub fn validate_transaction<S: Storage>(
     txn: &TransactionContext,
     store: &S,
-) -> StrataResult<ValidationResult> {
+) -> StorageResult<ValidationResult> {
     // Per spec Section 3.2 Scenario 3: Read-only transactions ALWAYS commit.
     // "Read-Only Transaction: T1 only reads keys, never writes any → ALWAYS COMMITS"
     // "Why: Read-only transactions have no writes to validate. They simply return their snapshot view."

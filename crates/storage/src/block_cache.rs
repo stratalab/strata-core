@@ -886,7 +886,10 @@ static GLOBAL_CAPACITY: AtomicUsize = AtomicUsize::new(DEFAULT_CAPACITY_BYTES);
 ///
 /// If the cache is already initialized, updates the capacity on the live
 /// instance. If not yet initialized, stores the value for use when
-/// `global_cache()` first creates the cache.
+/// `global_cache()` first creates the cache. This is process-global storage
+/// runtime state: sequential later calls overwrite earlier calls. Concurrent
+/// database opens race, and callers should not rely on a deterministic winner
+/// or on a total ordering between `global_capacity()` and the live cache.
 pub fn set_global_capacity(bytes: usize) {
     GLOBAL_CAPACITY.store(bytes, Ordering::Relaxed);
     if let Some(cache) = GLOBAL_CACHE.get() {
