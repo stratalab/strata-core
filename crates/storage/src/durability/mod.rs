@@ -54,7 +54,9 @@ pub use decoded_snapshot_install::{
 };
 
 // Codec
-pub use codec::{clone_codec, get_codec, CodecError, IdentityCodec, StorageCodec};
+pub use codec::{
+    clone_codec, get_codec, validate_codec_id, CodecError, IdentityCodec, StorageCodec,
+};
 
 // Disk snapshot
 pub use disk_snapshot::{
@@ -90,11 +92,13 @@ pub use recovery::{
     RecoveryCoordinator, RecoveryPlan, RecoveryResult, RecoveryStats,
 };
 
+// Runtime config
+pub use crate::runtime_config::{StorageBlockCacheConfig, StorageRuntimeConfig};
+
 // Recovery bootstrap
 pub use recovery_bootstrap::{
     run_storage_recovery, RecoverySnapshotInstallCallback, StorageLossyWalReplayFacts,
     StorageRecoveryError, StorageRecoveryInput, StorageRecoveryMode, StorageRecoveryOutcome,
-    StorageRuntimeConfig,
 };
 
 // WAL

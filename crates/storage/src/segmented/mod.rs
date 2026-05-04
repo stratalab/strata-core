@@ -17,6 +17,7 @@ use crate::memory_stats::{BranchMemoryStats, StorageMemoryStats};
 use crate::memtable::{Memtable, MemtableEntry};
 use crate::merge_iter::{MergeIterator, MvccIterator, RewritingIterator};
 use crate::pressure::{MemoryPressure, PressureLevel};
+use crate::runtime_config::StorageRuntimeConfig;
 use crate::seekable::{self, SeekableIterator as _};
 use crate::segment::{KVSegment, LevelSegmentIter, OwnedSegmentIter, SegmentEntry};
 use crate::segment_builder::{SegmentBuilder, SplittingSegmentBuilder};
@@ -95,11 +96,8 @@ const NUM_LEVELS: usize = 7;
 /// Number of L0 segments that triggers L0→L1 compaction.
 const L0_COMPACTION_TRIGGER: usize = 4;
 
-/// Target size for a single output segment file (64MB).
-const TARGET_FILE_SIZE: u64 = 64 << 20;
-
 /// Target total size for L1 (256MB).  L_n = LEVEL_BASE_BYTES × LEVEL_MULTIPLIER^(n-1).
-const LEVEL_BASE_BYTES: u64 = 256 << 20;
+const LEVEL_BASE_BYTES: u64 = StorageRuntimeConfig::DEFAULT_LEVEL_BASE_BYTES;
 
 /// Size multiplier between adjacent levels.
 const LEVEL_MULTIPLIER: u64 = 10;
@@ -844,6 +842,7 @@ impl SegmentedStore {
     /// Rotation still works (frozen memtables accumulate), but flush is a no-op
     /// because there is no directory to write segments into.
     pub fn new() -> Self {
+        let runtime_config = StorageRuntimeConfig::default();
         Self {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
@@ -852,18 +851,18 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
-            max_branches: AtomicUsize::new(0),
-            max_versions_per_key: AtomicUsize::new(0),
+            max_branches: AtomicUsize::new(runtime_config.max_branches),
+            max_versions_per_key: AtomicUsize::new(runtime_config.max_versions_per_key),
             snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
-            max_immutable_memtables: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(runtime_config.max_immutable_memtables),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
-            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
-            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
-            data_block_size: AtomicUsize::new(4096),
-            bloom_bits_per_key: AtomicUsize::new(10),
+            target_file_size: AtomicU64::new(runtime_config.target_file_size),
+            level_base_bytes: AtomicU64::new(runtime_config.level_base_bytes),
+            data_block_size: AtomicUsize::new(runtime_config.data_block_size),
+            bloom_bits_per_key: AtomicUsize::new(runtime_config.bloom_bits_per_key),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
             recovery_applied: AtomicBool::new(false),
@@ -876,6 +875,7 @@ impl SegmentedStore {
     /// frozen on the next write.  Call [`flush_oldest_frozen`] to persist
     /// frozen memtables to disk as KV segments.
     pub fn with_dir(segments_dir: PathBuf, write_buffer_size: usize) -> Self {
+        let runtime_config = StorageRuntimeConfig::default();
         Self {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
@@ -884,18 +884,18 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure: MemoryPressure::disabled(),
             bulk_load_branches: DashMap::new(),
-            max_branches: AtomicUsize::new(0),
-            max_versions_per_key: AtomicUsize::new(0),
+            max_branches: AtomicUsize::new(runtime_config.max_branches),
+            max_versions_per_key: AtomicUsize::new(runtime_config.max_versions_per_key),
             snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
-            max_immutable_memtables: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(runtime_config.max_immutable_memtables),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
-            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
-            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
-            data_block_size: AtomicUsize::new(4096),
-            bloom_bits_per_key: AtomicUsize::new(10),
+            target_file_size: AtomicU64::new(runtime_config.target_file_size),
+            level_base_bytes: AtomicU64::new(runtime_config.level_base_bytes),
+            data_block_size: AtomicUsize::new(runtime_config.data_block_size),
+            bloom_bits_per_key: AtomicUsize::new(runtime_config.bloom_bits_per_key),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
             recovery_applied: AtomicBool::new(false),
@@ -908,6 +908,7 @@ impl SegmentedStore {
         write_buffer_size: usize,
         pressure: MemoryPressure,
     ) -> Self {
+        let runtime_config = StorageRuntimeConfig::default();
         Self {
             branches: DashMap::new(),
             version: AtomicU64::new(0),
@@ -916,18 +917,18 @@ impl SegmentedStore {
             next_segment_id: AtomicU64::new(1),
             pressure,
             bulk_load_branches: DashMap::new(),
-            max_branches: AtomicUsize::new(0),
-            max_versions_per_key: AtomicUsize::new(0),
+            max_branches: AtomicUsize::new(runtime_config.max_branches),
+            max_versions_per_key: AtomicUsize::new(runtime_config.max_versions_per_key),
             snapshot_floor: AtomicU64::new(0),
             total_frozen_count: AtomicUsize::new(0),
-            max_immutable_memtables: AtomicUsize::new(0),
+            max_immutable_memtables: AtomicUsize::new(runtime_config.max_immutable_memtables),
             compaction_rate_limiter: arc_swap::ArcSwapOption::empty(),
             ref_registry: ref_registry::SegmentRefRegistry::new(),
             materializing_branches: DashMap::new(),
-            target_file_size: AtomicU64::new(TARGET_FILE_SIZE),
-            level_base_bytes: AtomicU64::new(LEVEL_BASE_BYTES),
-            data_block_size: AtomicUsize::new(4096),
-            bloom_bits_per_key: AtomicUsize::new(10),
+            target_file_size: AtomicU64::new(runtime_config.target_file_size),
+            level_base_bytes: AtomicU64::new(runtime_config.level_base_bytes),
+            data_block_size: AtomicUsize::new(runtime_config.data_block_size),
+            bloom_bits_per_key: AtomicUsize::new(runtime_config.bloom_bits_per_key),
             publish_health: Mutex::new(None),
             last_recovery_health: ArcSwap::from_pointee(RecoveryHealth::Healthy),
             recovery_applied: AtomicBool::new(false),
@@ -1113,23 +1114,38 @@ impl SegmentedStore {
         self.bloom_bits_per_key.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn max_branches_for_test(&self) -> usize {
+    /// Return the configured write buffer size for cross-crate characterization tests.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn write_buffer_size_for_test(&self) -> usize {
+        self.write_buffer_size.load(Ordering::Relaxed) as usize
+    }
+
+    /// Return the configured branch limit for cross-crate characterization tests.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn max_branches_for_test(&self) -> usize {
         self.max_branches.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn max_versions_per_key_for_test(&self) -> usize {
+    /// Return the configured per-key version limit for characterization tests.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn max_versions_per_key_for_test(&self) -> usize {
         self.max_versions_per_key.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn max_immutable_memtables_for_test(&self) -> usize {
+    /// Return the configured immutable-memtable limit for characterization tests.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn max_immutable_memtables_for_test(&self) -> usize {
         self.max_immutable_memtables.load(Ordering::Relaxed)
     }
 
-    #[cfg(test)]
-    pub(crate) fn compaction_rate_limit_for_test(&self) -> u64 {
+    /// Return the configured compaction rate limit for characterization tests.
+    #[cfg(any(test, feature = "fault-injection"))]
+    #[doc(hidden)]
+    pub fn compaction_rate_limit_for_test(&self) -> u64 {
         self.compaction_rate_limiter
             .load_full()
             .map_or(0, |limiter| limiter.rate_bytes_per_sec())

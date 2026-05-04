@@ -5,7 +5,7 @@
 /// Default maximum segment size: 64 MB.
 pub const DEFAULT_SEGMENT_SIZE: u64 = 64 * 1024 * 1024;
 
-/// Default bytes between fsyncs in Standard mode: 4 MB.
+/// Compatibility default for the retained buffered-sync threshold.
 pub const DEFAULT_BUFFERED_SYNC_BYTES: u64 = 4 * 1024 * 1024;
 
 /// WAL configuration parameters.
@@ -16,10 +16,13 @@ pub struct WalConfig {
     /// When a segment exceeds this size, a new segment is created.
     pub segment_size: u64,
 
-    /// Bytes between fsyncs in Standard mode (default: 4MB).
+    /// Retained buffered-sync threshold (default: 4MB).
     ///
-    /// For Standard durability mode, fsync is triggered when this many
-    /// bytes have been written since the last fsync.
+    /// The current writer does not use this field as an inline fsync trigger;
+    /// Standard-mode sync timing is driven by `DurabilityMode::Standard` and
+    /// the engine-owned background flush lifecycle. `validate()` still checks
+    /// it for callers that intentionally require a self-consistent full
+    /// `WalConfig`.
     pub buffered_sync_bytes: u64,
 }
 
@@ -50,13 +53,25 @@ impl WalConfig {
         self
     }
 
-    /// Validate configuration.
+    /// Validate all configuration fields for static consistency.
     pub fn validate(&self) -> Result<(), WalConfigError> {
         if self.segment_size < 1024 {
             return Err(WalConfigError::SegmentSizeTooSmall);
         }
         if self.buffered_sync_bytes > self.segment_size {
             return Err(WalConfigError::BufferedSyncExceedsSegment);
+        }
+        Ok(())
+    }
+
+    /// Validate only invariants the current writer runtime actively consumes.
+    ///
+    /// `buffered_sync_bytes` is retained configuration metadata and is not
+    /// currently an inline fsync trigger, so `WalWriter::new` must not reject
+    /// a writer solely because that inert field exceeds `segment_size`.
+    pub(crate) fn validate_writer_runtime(&self) -> Result<(), WalConfigError> {
+        if self.segment_size < 1024 {
+            return Err(WalConfigError::SegmentSizeTooSmall);
         }
         Ok(())
     }

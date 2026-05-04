@@ -741,6 +741,14 @@ mod tests {
     }
 
     #[test]
+    fn storage_snapshot_retention_clamps_zero_to_one() {
+        let retention = StorageSnapshotRetention::new(0);
+
+        assert_eq!(retention.retain_count, 1);
+        assert_eq!(retention.effective_retain_count(), 1);
+    }
+
+    #[test]
     fn storage_checkpoint_creates_snapshot_and_updates_manifest() {
         let temp_dir = TempDir::new().unwrap();
         let layout = layout(&temp_dir);

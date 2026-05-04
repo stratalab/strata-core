@@ -45,6 +45,19 @@ fn release_freed_memory() {
 /// re-submitting through `schedule_background_compaction`.
 const MAX_IDLE_ROUNDS: u32 = 5;
 
+fn memtable_backpressure_threshold_from_storage_config(
+    storage_config: &super::config::StorageConfig,
+) -> Option<u64> {
+    let runtime_config = super::config::storage_runtime_config_from(storage_config);
+    let write_buffer_size = runtime_config.write_buffer_size as u64;
+    if write_buffer_size == 0 {
+        return None;
+    }
+
+    let max_frozen = runtime_config.max_immutable_memtables as u64;
+    Some(write_buffer_size.saturating_mul(max_frozen.saturating_add(2)))
+}
+
 /// One round of the self-re-scheduling compaction chain.
 ///
 /// Each invocation picks the highest-scoring compaction across all branches,
@@ -255,7 +268,9 @@ impl Database {
             return;
         }
 
-        // Update snapshot floor so compaction respects active snapshots (#1697).
+        // Snapshot floor is engine MVCC policy computed from active
+        // transactions before compaction. It is intentionally not part of the
+        // static storage runtime config setter list.
         self.storage.set_snapshot_floor(self.gc_safe_point());
 
         // Coalesce flush scheduling: skip if a flush task is already in flight.
@@ -442,12 +457,10 @@ impl Database {
 
         // Memtable-based stalling (protects memory usage)
         let cfg = self.config.read();
-        let wbs = cfg.storage.effective_write_buffer_size() as u64;
-        let max_frozen = cfg.storage.effective_max_immutable_memtables() as u64;
+        let threshold = memtable_backpressure_threshold_from_storage_config(&cfg.storage);
         drop(cfg);
 
-        if wbs > 0 {
-            let threshold = wbs * (max_frozen + 2);
+        if let Some(threshold) = threshold {
             let current = self.storage.total_memtable_bytes();
             if current > threshold {
                 std::thread::sleep(std::time::Duration::from_millis(1));
@@ -1058,5 +1071,54 @@ impl Database {
             Arc::increment_strong_count(ptr);
             Arc::from_raw(ptr)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::database::config::StorageConfig;
+
+    #[test]
+    fn memtable_backpressure_threshold_uses_storage_runtime_memory_budget() {
+        let storage = StorageConfig {
+            memory_budget: 32 << 20,
+            write_buffer_size: 512 * 1024,
+            max_immutable_memtables: 7,
+            ..StorageConfig::default()
+        };
+
+        assert_eq!(
+            memtable_backpressure_threshold_from_storage_config(&storage),
+            Some((8 << 20) * 3)
+        );
+    }
+
+    #[test]
+    fn memtable_backpressure_threshold_allows_explicit_zero_write_buffer() {
+        let storage = StorageConfig {
+            write_buffer_size: 0,
+            max_immutable_memtables: 7,
+            ..StorageConfig::default()
+        };
+
+        assert_eq!(
+            memtable_backpressure_threshold_from_storage_config(&storage),
+            None
+        );
+    }
+
+    #[test]
+    fn memtable_backpressure_threshold_saturates_extreme_values() {
+        let storage = StorageConfig {
+            write_buffer_size: usize::MAX,
+            max_immutable_memtables: usize::MAX,
+            ..StorageConfig::default()
+        };
+
+        assert_eq!(
+            memtable_backpressure_threshold_from_storage_config(&storage),
+            Some(u64::MAX)
+        );
     }
 }

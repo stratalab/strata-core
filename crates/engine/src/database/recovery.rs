@@ -29,12 +29,13 @@ use strata_storage::durability::wal::WalReaderError;
 use strata_storage::durability::{
     run_storage_recovery, CoordinatorPlanError, CoordinatorRecoveryError, LoadedSnapshot,
     ManifestError, RecoveryResult, SnapshotReadError, StorageLossyWalReplayFacts,
-    StorageRecoveryError, StorageRecoveryInput, StorageRecoveryMode, StorageRuntimeConfig,
+    StorageRecoveryError, StorageRecoveryInput, StorageRecoveryMode,
 };
+use strata_storage::runtime_config::StorageRuntimeConfig;
 use strata_storage::{DegradationClass, RecoveryHealth, SegmentedStore, StorageError};
 use tracing::{info, warn};
 
-use super::config::{StorageConfig, StrataConfig};
+use super::config::{storage_runtime_config_from, StrataConfig};
 use super::recovery_error::{
     classify_manifest_load_error, from_coordinator_error, ErrorRole, RecoveryError,
 };
@@ -81,6 +82,34 @@ impl RecoveryMode {
     }
 }
 
+/// Engine-owned recovery config bundle.
+///
+/// `run_recovery` needs both public engine config and storage runtime config.
+/// Keeping them in one value makes the invariant explicit: the storage runtime
+/// config is always adapted from the same `StrataConfig` passed to recovery.
+#[derive(Clone, Copy)]
+pub(crate) struct RecoveryRuntimeConfig<'a> {
+    strata_config: &'a StrataConfig,
+    storage_runtime_config: StorageRuntimeConfig,
+}
+
+impl<'a> RecoveryRuntimeConfig<'a> {
+    pub(crate) fn from_strata_config(strata_config: &'a StrataConfig) -> Self {
+        Self {
+            strata_config,
+            storage_runtime_config: storage_runtime_config_from(&strata_config.storage),
+        }
+    }
+
+    pub(crate) fn storage_runtime_config(&self) -> StorageRuntimeConfig {
+        self.storage_runtime_config
+    }
+
+    fn strata_config(&self) -> &'a StrataConfig {
+        self.strata_config
+    }
+}
+
 /// Output of [`Database::run_recovery`].
 ///
 /// Carries the owned resources the caller needs to finish constructing
@@ -121,7 +150,8 @@ impl Database {
     /// 2. MANIFEST load or primary-mode create.
     /// 3. WAL codec resolution (stored id on reopen, configured id on
     ///    first-open or follower-without-MANIFEST).
-    /// 4. `SegmentedStore` construction at the segments directory.
+    /// 4. `SegmentedStore` construction at the segments directory using the
+    ///    caller-supplied storage runtime config.
     /// 5. Storage-owned durability recovery via an engine primitive snapshot
     ///    install callback.
     /// 6. `TransactionCoordinator::from_recovery_with_limits` +
@@ -132,9 +162,12 @@ impl Database {
     pub(crate) fn run_recovery(
         canonical_path: &Path,
         layout: &DatabaseLayout,
-        cfg: &StrataConfig,
+        recovery_config: RecoveryRuntimeConfig<'_>,
         mode: RecoveryMode,
     ) -> Result<RecoveryOutcome, RecoveryError> {
+        let cfg = recovery_config.strata_config();
+        let runtime_config = recovery_config.storage_runtime_config();
+
         // 1-5. Storage-owned durability recovery. Storage owns MANIFEST/codec
         //      prep, generic WAL replay, the mechanical lossy fallback,
         //      runtime config application, and segment recovery. Engine keeps
@@ -151,8 +184,7 @@ impl Database {
             layout.clone(),
             mode.as_storage_mode(),
             cfg.storage.codec.clone(),
-            cfg.storage.effective_write_buffer_size(),
-            storage_runtime_config_from(&cfg.storage),
+            runtime_config,
             cfg.allow_lossy_recovery,
             &snapshot_install,
         ))
@@ -286,19 +318,6 @@ fn degraded_recovery_permitted(
     allow_lossy_recovery: bool,
 ) -> bool {
     allow_lossy_recovery || !policy_refuses(class, allow_missing_manifest)
-}
-
-fn storage_runtime_config_from(config: &StorageConfig) -> StorageRuntimeConfig {
-    StorageRuntimeConfig::new(
-        config.max_branches,
-        config.max_versions_per_key,
-        config.effective_max_immutable_memtables(),
-        config.target_file_size,
-        config.level_base_bytes,
-        config.data_block_size,
-        config.bloom_bits_per_key,
-        config.compaction_rate_limit,
-    )
 }
 
 fn map_storage_recovery_error(
@@ -560,6 +579,20 @@ mod tests {
         }
     }
 
+    fn run_recovery_for_test(
+        canonical_path: &Path,
+        layout: &DatabaseLayout,
+        cfg: &StrataConfig,
+        mode: RecoveryMode,
+    ) -> Result<RecoveryOutcome, RecoveryError> {
+        Database::run_recovery(
+            canonical_path,
+            layout,
+            RecoveryRuntimeConfig::from_strata_config(cfg),
+            mode,
+        )
+    }
+
     #[test]
     fn snapshot_plan_failure_bypasses_lossy_fallback() {
         let temp_dir = TempDir::new().unwrap();
@@ -570,7 +603,7 @@ mod tests {
             allow_lossy_recovery: true,
             ..StrataConfig::default()
         };
-        let result = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
+        let result = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
 
         match result {
             Err(RecoveryError::SnapshotMissing {
@@ -601,7 +634,7 @@ mod tests {
             ..StrataConfig::default()
         };
 
-        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("primary first-open recovery should succeed");
 
         assert!(
@@ -633,20 +666,46 @@ mod tests {
         let layout = DatabaseLayout::from_root(temp_dir.path());
         let cfg = StrataConfig {
             storage: StorageConfig {
+                max_branches: 31,
+                max_versions_per_key: 7,
+                write_buffer_size: 512 * 1024,
+                max_immutable_memtables: 3,
                 target_file_size: 3 * 1024 * 1024,
+                level_base_bytes: 11 * 1024 * 1024,
                 data_block_size: 8 * 1024,
                 bloom_bits_per_key: 13,
+                compaction_rate_limit: 5 * 1024 * 1024,
                 ..StorageConfig::default()
             },
             ..StrataConfig::default()
         };
 
-        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("recovery should succeed with non-default storage config");
 
         assert_eq!(
+            outcome.storage.write_buffer_size_for_test(),
+            cfg.storage.effective_write_buffer_size()
+        );
+        assert_eq!(
+            outcome.storage.max_branches_for_test(),
+            cfg.storage.max_branches
+        );
+        assert_eq!(
+            outcome.storage.max_versions_per_key_for_test(),
+            cfg.storage.max_versions_per_key
+        );
+        assert_eq!(
+            outcome.storage.max_immutable_memtables_for_test(),
+            cfg.storage.effective_max_immutable_memtables()
+        );
+        assert_eq!(
             outcome.storage.target_file_size(),
             cfg.storage.target_file_size
+        );
+        assert_eq!(
+            outcome.storage.level_base_bytes(),
+            cfg.storage.level_base_bytes
         );
         assert_eq!(
             outcome.storage.data_block_size(),
@@ -656,6 +715,10 @@ mod tests {
             outcome.storage.bloom_bits_per_key(),
             cfg.storage.bloom_bits_per_key
         );
+        assert_eq!(
+            outcome.storage.compaction_rate_limit_for_test(),
+            cfg.storage.compaction_rate_limit
+        );
     }
 
     #[test]
@@ -664,9 +727,8 @@ mod tests {
         let layout = DatabaseLayout::from_root(temp_dir.path());
         let cfg = StrataConfig::default();
 
-        let outcome =
-            Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
-                .expect("follower without MANIFEST should fall back to WAL-only recovery");
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
+            .expect("follower without MANIFEST should fall back to WAL-only recovery");
 
         assert!(
             !layout.manifest_path().exists(),
@@ -715,9 +777,8 @@ mod tests {
             .unwrap()
             .is_some());
 
-        let outcome =
-            Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
-                .expect("follower recovery should ignore invalid persisted state");
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Follower)
+            .expect("follower recovery should ignore invalid persisted state");
 
         assert!(outcome.persisted_follower_state.is_none());
         assert!(load_persisted_follower_state(temp_dir.path())
@@ -756,7 +817,7 @@ mod tests {
             .unwrap();
         write_db_manifest_with_snapshot(&layout, database_uuid, "identity", 11, TxnId(9));
 
-        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("snapshot-only recovery should succeed");
 
         assert_eq!(
@@ -798,7 +859,7 @@ mod tests {
             23,
         );
 
-        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("WAL-only recovery should succeed");
 
         assert_eq!(outcome.storage.current_version(), CommitVersion(23));
@@ -827,7 +888,7 @@ mod tests {
             allow_lossy_recovery: true,
             ..StrataConfig::default()
         };
-        let result = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
+        let result = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary);
 
         match result {
             Err(RecoveryError::WalLegacyFormat {
@@ -865,7 +926,7 @@ mod tests {
             allow_lossy_recovery: true,
             ..StrataConfig::default()
         };
-        let outcome = Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
+        let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("lossy recovery should convert replay failure into an empty recovered store");
 
         let report = outcome
@@ -997,7 +1058,7 @@ mod tests {
 
         let cfg = StrataConfig::default();
         let mapped =
-            match Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
+            match run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
                 Err(err) => err,
                 Ok(_) => panic!("callback error should map to public recovery error"),
             };
@@ -1037,7 +1098,7 @@ mod tests {
             ..StrataConfig::default()
         };
         let mapped =
-            match Database::run_recovery(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
+            match run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary) {
                 Err(err) => err,
                 Ok(_) => panic!("snapshot install failure must not lossy-open as empty storage"),
             };

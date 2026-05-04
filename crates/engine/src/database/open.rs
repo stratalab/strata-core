@@ -1,6 +1,5 @@
 //! Database opening and initialization.
 
-use super::config::StorageConfig;
 use crate::background::BackgroundScheduler;
 use crate::coordinator::TransactionCoordinator;
 use crate::{StrataError, StrataResult};
@@ -11,29 +10,11 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use strata_storage::durability::__internal::WalWriterEngineExt;
-use strata_storage::durability::codec::clone_codec;
+use strata_storage::durability::codec::{clone_codec, get_codec, validate_codec_id};
 use strata_storage::durability::layout::DatabaseLayout;
 use strata_storage::durability::wal::{DurabilityMode, WalConfig, WalWriter};
 use strata_storage::SegmentedStore;
 use tracing::{info, warn};
-
-/// Apply all storage configuration settings to a SegmentedStore.
-///
-/// Centralizes storage-config setters for engine-owned store construction.
-/// Disk recovery applies the same knobs through storage's recovery runtime
-/// config before segment recovery runs.
-pub(crate) fn apply_storage_config(storage: &SegmentedStore, cfg: &StorageConfig) {
-    storage.set_max_branches(cfg.max_branches);
-    storage.set_max_versions_per_key(cfg.max_versions_per_key);
-    storage.set_max_immutable_memtables(cfg.effective_max_immutable_memtables());
-    storage.set_target_file_size(cfg.target_file_size);
-    storage.set_level_base_bytes(cfg.level_base_bytes);
-    storage.set_data_block_size(cfg.data_block_size);
-    storage.set_bloom_bits_per_key(cfg.bloom_bits_per_key);
-    if cfg.compaction_rate_limit > 0 {
-        storage.set_compaction_rate_limit(cfg.compaction_rate_limit);
-    }
-}
 
 use strata_core::id::CommitVersion;
 
@@ -80,7 +61,7 @@ fn restrict_file(path: &Path) {
 #[cfg(not(unix))]
 fn restrict_file(_path: &Path) {}
 
-use super::config::{self, StrataConfig};
+use super::config::{self, storage_runtime_config_from, StrataConfig};
 use super::registry::OPEN_DATABASES;
 use super::{Database, PersistenceMode, WalWriterHealth};
 
@@ -425,15 +406,19 @@ impl Database {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
         let wal_dir = layout.wal_dir().to_path_buf();
+        let recovery_config = super::recovery::RecoveryRuntimeConfig::from_strata_config(&cfg);
+        let runtime_config = recovery_config.storage_runtime_config();
 
         // Recovery orchestration is centralized in `run_recovery`.
         let outcome = Database::run_recovery(
             &canonical_path,
             &layout,
-            &cfg,
+            recovery_config,
             super::recovery::RecoveryMode::Follower,
         )
         .map_err(StrataError::from)?;
+
+        runtime_config.apply_global_runtime();
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
@@ -488,6 +473,9 @@ impl Database {
         });
 
         if let Some(state) = outcome.persisted_follower_state {
+            // Follower-state restore sets the live MVCC version recovered by
+            // engine follower policy. This is not static storage runtime
+            // config and does not belong in `StorageRuntimeConfig::apply_to_store`.
             db.storage.set_version(state.visible_version);
             db.coordinator
                 .restore_visible_version(state.visible_version);
@@ -697,12 +685,14 @@ impl Database {
     ) -> StrataResult<Arc<Self>> {
         // Build canonical layout for this database
         let layout = DatabaseLayout::from_root(&canonical_path);
+        let recovery_config = super::recovery::RecoveryRuntimeConfig::from_strata_config(&cfg);
+        let runtime_config = recovery_config.storage_runtime_config();
 
         // Recovery orchestration is centralized in `run_recovery`.
         let outcome = Database::run_recovery(
             &canonical_path,
             &layout,
-            &cfg,
+            recovery_config,
             super::recovery::RecoveryMode::Primary,
         )
         .map_err(StrataError::from)?;
@@ -737,6 +727,8 @@ impl Database {
             wal_dir.clone(),
             outcome.database_uuid,
             durability_mode,
+            // WAL defaults and validation are storage-owned mechanics; engine
+            // still owns the writer lifecycle and health policy.
             WalConfig::default(),
             outcome.wal_codec,
         )?;
@@ -751,23 +743,14 @@ impl Database {
         // completed segment recovery; post-open reads will hit this
         // cache, so configuring it here is functionally equivalent to
         // the pre-D3 ordering.
-        {
-            use strata_storage::block_cache;
-            let effective_cache = cfg.storage.effective_block_cache_size();
-            let cache_bytes = if effective_cache > 0 {
-                effective_cache
-            } else {
-                block_cache::auto_detect_capacity()
-            };
-            block_cache::set_global_capacity(cache_bytes);
-        }
+        runtime_config.apply_global_runtime();
 
         if cfg.storage.memory_budget > 0 {
             info!(target: "strata::db",
                 memory_budget = cfg.storage.memory_budget,
-                effective_cache = cfg.storage.effective_block_cache_size(),
-                effective_write_buffer = cfg.storage.effective_write_buffer_size(),
-                effective_max_immutable = cfg.storage.effective_max_immutable_memtables(),
+                effective_cache = runtime_config.block_cache_configured_bytes(),
+                effective_write_buffer = runtime_config.write_buffer_size,
+                effective_max_immutable = runtime_config.max_immutable_memtables,
                 "Memory budget active — derived storage parameters"
             );
         }
@@ -908,17 +891,17 @@ impl Database {
         crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
 
         // Apply effective block cache size to the global singleton so that
-        // in-memory reads use the profile-tuned capacity instead of the
-        // 256 MB default. On Desktop/Server this is a no-op (effective == 0
-        // triggers the existing auto-detect behavior elsewhere).
-        let effective_cache = cfg.storage.effective_block_cache_size();
-        if effective_cache > 0 {
-            strata_storage::block_cache::set_global_capacity(effective_cache);
-        }
+        // in-memory reads use the profile-tuned or auto-detected capacity
+        // instead of inheriting stale process-wide state.
+        let runtime_config = storage_runtime_config_from(&cfg.storage);
+        runtime_config.apply_global_runtime();
 
         // Create fresh storage with config limits
         let storage = SegmentedStore::new();
-        apply_storage_config(&storage, &cfg.storage);
+        // Storage owns the static `SegmentedStore::set_*` application list.
+        // Cache databases remain in-memory; this only applies runtime knobs
+        // to the fresh store.
+        runtime_config.apply_to_store(&storage);
 
         let bg_threads = cfg.storage.background_threads.max(1);
 
@@ -931,13 +914,12 @@ impl Database {
         // `Option`, so the type signature does not leak "this is a
         // cache database" into the field type. `IdentityCodec` is the
         // typical resolution here and is effectively a no-op at runtime.
-        let wal_codec_for_cache = strata_storage::durability::get_codec(&cfg.storage.codec)
-            .map_err(|e| {
-                StrataError::internal(format!(
-                    "cache database could not initialize codec '{}': {}",
-                    cfg.storage.codec, e
-                ))
-            })?;
+        let wal_codec_for_cache = get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!(
+                "cache database could not initialize codec '{}': {}",
+                cfg.storage.codec, e
+            ))
+        })?;
 
         let db = Arc::new(Self {
             data_dir: PathBuf::new(), // Empty path for ephemeral
@@ -1234,7 +1216,7 @@ impl Database {
         // Validate the configured codec exists before touching any state.
         // Mirrors the primary path so a follower with an unknown codec is
         // rejected consistently — with or without an on-disk MANIFEST.
-        strata_storage::durability::get_codec(&cfg.storage.codec).map_err(|e| {
+        validate_codec_id(&cfg.storage.codec).map_err(|e| {
             StrataError::internal(format!(
                 "invalid storage codec '{}': {}",
                 cfg.storage.codec, e

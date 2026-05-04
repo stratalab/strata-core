@@ -26,6 +26,7 @@ pub mod merge_iter;
 pub mod pressure;
 pub mod quarantine;
 pub mod rate_limiter;
+pub mod runtime_config;
 pub mod seekable;
 pub mod segment;
 pub mod segment_builder;
@@ -48,6 +49,7 @@ pub use quarantine::{
     QUARANTINE_DIR, QUARANTINE_FILENAME,
 };
 pub use rate_limiter::RateLimiter;
+pub use runtime_config::{StorageBlockCacheConfig, StorageRuntimeConfig};
 pub use segment::{KVSegment, OwnedSegmentIter};
 pub use segment_builder::{CompressionCodec, SegmentBuilder, SegmentMeta, SplittingSegmentBuilder};
 pub use segmented::{

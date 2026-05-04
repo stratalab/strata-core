@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use strata_security::SensitiveString;
 use strata_storage::durability::wal::DurabilityMode;
+use strata_storage::runtime_config::StorageRuntimeConfig;
 
 // ============================================================================
 // Shadow Collection Names
@@ -47,22 +48,19 @@ fn default_timeout_ms() -> u64 {
     5000
 }
 
-/// Storage layer resource limits.
+/// Public storage configuration.
 ///
-/// Controls maximum branches and per-transaction write buffer sizes.
-/// All limits default to generous values suitable for production use.
-/// Set to `0` for unlimited (backward-compatible default).
+/// Engine owns this serialized product configuration and adapts the
+/// storage-facing fields into `StorageRuntimeConfig`. Storage owns the runtime
+/// mechanics and effective-value derivation for storage knobs; transaction and
+/// database lifecycle policy fields remain engine-owned.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageConfig {
-    /// Unified memory budget in bytes for storage data structures.
+    /// Unified public memory budget in bytes for storage data structures.
     ///
-    /// When set (> 0), automatically derives `block_cache_size`,
-    /// `write_buffer_size`, and `max_immutable_memtables`:
-    /// - 50% → block cache (read path)
-    /// - 25% → write buffer (×2 with 1 frozen = 50% write path)
-    ///
-    /// Individual field values are **ignored** when `memory_budget > 0`.
-    /// Actual RSS ≈ `memory_budget` + ~25 MB fixed process overhead.
+    /// When set (> 0), storage derives effective block-cache, write-buffer,
+    /// and immutable-memtable runtime values from this unified budget.
+    /// Individual storage resource fields are ignored for that derivation.
     ///
     /// Default: 0 (disabled — individual fields take effect).
     #[serde(default)]
@@ -70,7 +68,8 @@ pub struct StorageConfig {
     /// Maximum number of branches allowed. Default: 1024. Set to 0 for unlimited.
     #[serde(default = "default_max_branches")]
     pub max_branches: usize,
-    /// Maximum entries in a single transaction's write buffer. Default: 500_000. Set to 0 for unlimited.
+    /// Maximum entries in a single transaction's write buffer. Default: 500_000.
+    /// Set to 0 for unlimited.
     #[serde(default = "default_max_write_buffer_entries")]
     pub max_write_buffer_entries: usize,
     /// Maximum versions to retain per key. Default: 0 (unlimited).
@@ -78,63 +77,74 @@ pub struct StorageConfig {
     /// versions exceeding this limit. Explicit KeepLast(n) overrides.
     #[serde(default)]
     pub max_versions_per_key: usize,
-    /// Block cache size in bytes. Caches decompressed segment data blocks.
+    /// Public block-cache size in bytes.
     ///
-    /// Default: 0 (auto-tuned). When 0, the hardware profile detector
-    /// picks an appropriate size for the host:
-    /// - **Embedded** (< 1 GiB RAM): `min(ram / 8, 64 MiB)` — capped for
-    ///   Pi Zero–class devices.
-    /// - **Desktop** / **Server**: falls through to `auto_detect_capacity`,
-    ///   which uses `min(available_ram / 4, 4 GiB)` from `/proc/meminfo`.
-    ///
-    /// Set a non-zero value to override auto-tuning. Set `memory_budget`
-    /// to derive from a unified budget (takes precedence over this field).
+    /// Default: 0 (storage auto-detects at runtime after engine profile
+    /// adjustments). Set a non-zero value to request an explicit cache size.
+    /// Set `memory_budget` to derive from a unified budget; that takes
+    /// precedence over this field.
     #[serde(default)]
     pub block_cache_size: usize,
-    /// Memtable write buffer size in bytes. When a branch's active memtable
-    /// exceeds this threshold, it is frozen and a new active memtable is swapped in.
+    /// Public memtable write-buffer size in bytes.
+    ///
+    /// Storage applies this as the active memtable rotation threshold when
+    /// `memory_budget == 0`.
     /// Default: 128 MiB. Set to 0 to disable automatic rotation.
     #[serde(default = "default_write_buffer_size")]
     pub write_buffer_size: usize,
-    /// Maximum number of frozen (immutable) memtables allowed per branch before
-    /// write stalling kicks in. Default: 4. Set to 0 for unlimited.
+    /// Public frozen-memtable limit per branch.
+    ///
+    /// Storage applies this to memtable rotation when `memory_budget == 0`.
+    /// Engine also uses the effective storage value to decide when transaction
+    /// write-pressure handling should ask storage to flush/compact.
+    /// Default: 4. Set to 0 for unlimited.
     #[serde(default = "default_max_immutable_memtables")]
     pub max_immutable_memtables: usize,
-    /// L0 file count that triggers write slowdown (1 ms yield per write).
-    /// Mirrors RocksDB's `level0_slowdown_writes_trigger`. Default: 20.
+    /// L0 file count that triggers engine transaction slowdown.
+    ///
+    /// This is transaction runtime policy, not storage runtime configuration.
+    /// Default: 0 (disabled).
     #[serde(default = "default_l0_slowdown_writes_trigger")]
     pub l0_slowdown_writes_trigger: usize,
-    /// L0 file count that completely stalls writes until compaction catches up.
-    /// Mirrors RocksDB's `level0_stop_writes_trigger`. Default: 36.
+    /// L0 file count that makes engine transaction commits wait for compaction.
+    ///
+    /// This is transaction runtime policy, not storage runtime configuration.
+    /// Default: 0 (disabled).
     #[serde(default = "default_l0_stop_writes_trigger")]
     pub l0_stop_writes_trigger: usize,
-    /// Number of background worker threads for compaction, flush, and maintenance.
+    /// Number of engine background worker threads for compaction, flush, and
+    /// maintenance.
     /// Default: min(4, available CPU cores). On single-core devices set to 1.
     ///
     /// Class: open-time-only. See `docs/design/architecture-cleanup/durability-recovery-config-matrix.md`.
     #[serde(default = "default_background_threads")]
     pub background_threads: usize,
-    /// Target size for a single output segment file in bytes.
+    /// Target size for a single storage output segment file in bytes.
     /// Default: 64 MiB. On embedded devices (Pi), use 4–8 MiB.
     #[serde(default = "default_target_file_size")]
     pub target_file_size: u64,
-    /// Target total size for L1 in bytes. Higher levels are multiplied by 10×.
+    /// Target storage L1 size in bytes. Higher levels are multiplied by 10×.
     /// Default: 256 MiB. On embedded devices (Pi), use 32 MiB.
     #[serde(default = "default_level_base_bytes")]
     pub level_base_bytes: u64,
-    /// Data block size in bytes for segment files.
-    /// Default: 4096 (4 KiB). Larger blocks improve throughput at the cost of read amplification.
+    /// Storage segment data block size in bytes.
+    /// Default: 4096 (4 KiB). Larger blocks improve throughput at the cost of
+    /// read amplification.
     #[serde(default = "default_data_block_size")]
     pub data_block_size: usize,
-    /// Bloom filter bits per key. Higher values reduce false positives but use more memory.
+    /// Storage bloom-filter bits per key. Higher values reduce false positives
+    /// but use more memory.
     /// Default: 10.
     #[serde(default = "default_bloom_bits_per_key")]
     pub bloom_bits_per_key: usize,
-    /// Compaction I/O rate limit in bytes per second. 0 = unlimited (default).
+    /// Storage compaction I/O rate limit in bytes per second. 0 = unlimited
+    /// (default).
     /// On slow storage (SD cards), set to e.g. 5–10 MB/s to avoid starving user I/O.
     #[serde(default)]
     pub compaction_rate_limit: u64,
-    /// Maximum time (milliseconds) a write can be stalled waiting for L0 compaction.
+    /// Maximum time (milliseconds) an engine transaction can wait for L0 compaction.
+    ///
+    /// This is transaction runtime policy, not storage runtime configuration.
     /// If exceeded, the write returns an error instead of blocking indefinitely.
     /// Default: 30000 (30 seconds). Set to 0 for unlimited (not recommended).
     #[serde(default = "default_write_stall_timeout_ms")]
@@ -213,30 +223,38 @@ fn default_codec() -> String {
 impl StorageConfig {
     /// Effective block cache size, accounting for `memory_budget`.
     pub fn effective_block_cache_size(&self) -> usize {
-        if self.memory_budget > 0 {
-            self.memory_budget / 2
-        } else {
-            self.block_cache_size
-        }
+        storage_runtime_config_from(self).block_cache_configured_bytes()
     }
 
     /// Effective write buffer size, accounting for `memory_budget`.
     pub fn effective_write_buffer_size(&self) -> usize {
-        if self.memory_budget > 0 {
-            self.memory_budget / 4
-        } else {
-            self.write_buffer_size
-        }
+        storage_runtime_config_from(self).write_buffer_size
     }
 
     /// Effective max immutable memtables, accounting for `memory_budget`.
     pub fn effective_max_immutable_memtables(&self) -> usize {
-        if self.memory_budget > 0 {
-            1
-        } else {
-            self.max_immutable_memtables
-        }
+        storage_runtime_config_from(self).max_immutable_memtables
     }
+}
+
+/// Adapt engine-owned public storage config into storage-owned runtime config.
+///
+/// This passes raw public field values to storage. Storage owns the
+/// effective-value derivation for storage resources.
+pub(crate) fn storage_runtime_config_from(config: &StorageConfig) -> StorageRuntimeConfig {
+    StorageRuntimeConfig::builder()
+        .memory_budget(config.memory_budget)
+        .block_cache_size(config.block_cache_size)
+        .write_buffer_size(config.write_buffer_size)
+        .max_branches(config.max_branches)
+        .max_versions_per_key(config.max_versions_per_key)
+        .max_immutable_memtables(config.max_immutable_memtables)
+        .target_file_size(config.target_file_size)
+        .level_base_bytes(config.level_base_bytes)
+        .data_block_size(config.data_block_size)
+        .bloom_bits_per_key(config.bloom_bits_per_key)
+        .compaction_rate_limit(config.compaction_rate_limit)
+        .build()
 }
 
 impl Default for StorageConfig {
@@ -271,7 +289,10 @@ impl Default for StorageConfig {
 /// never broken by pruning.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotRetentionPolicy {
-    /// Maximum number of snapshot files to keep. Must be `>= 1`.
+    /// Maximum number of snapshot files to keep.
+    ///
+    /// Storage pruning preserves at least one snapshot; `0` is accepted for
+    /// config-file compatibility and is treated as `1` by the pruning runtime.
     /// Default: 10.
     #[serde(default = "default_snapshot_retain_count")]
     pub retain_count: usize,
@@ -374,9 +395,9 @@ pub struct StrataConfig {
     /// Individual collections can override via VectorConfig.
     #[serde(default = "default_vector_dtype")]
     pub default_vector_dtype: String,
-    /// Snapshot retention policy. Controls how many `snap-NNNNNN.chk` files
-    /// are kept on disk after each successful checkpoint. The live MANIFEST
-    /// snapshot is always retained.
+    /// Snapshot retention policy. Engine owns the public retention setting;
+    /// storage owns pruning mechanics. The live MANIFEST snapshot is always
+    /// retained.
     #[serde(default)]
     pub snapshot_retention: SnapshotRetentionPolicy,
 }
@@ -522,23 +543,22 @@ auto_embed = false
 
 # Storage resource limits.
 # [storage]
-# memory_budget = 0             # 0 = unlimited; e.g. 33554432 for 32 MiB.
-#                                # Derives cache/buffer/immutable automatically.
-#                                # Actual RSS ≈ memory_budget + ~25 MB overhead.
+# memory_budget = 0             # 0 = disabled; when >0, storage derives cache/buffer/immutable values.
 # max_branches = 1024
-# max_write_buffer_entries = 500000
+# max_write_buffer_entries = 500000 # per-transaction coordinator limit
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
-# block_cache_size = 0          # 0 = auto-tuned per hardware profile:
-#                                #   Embedded  (< 1 GiB RAM): min(ram/8, 64 MiB)
-#                                #   Desktop/Server: min(available_ram/4, 4 GiB)
+# block_cache_size = 0          # 0 = storage auto-detect; nonzero = explicit bytes
 # write_buffer_size = 134217728  # 128 MiB; memtable rotation threshold
 # max_immutable_memtables = 4   # max frozen memtables per branch before write stalling
+# l0_slowdown_writes_trigger = 0 # engine transaction slowdown disabled by default
+# l0_stop_writes_trigger = 0     # engine transaction stall disabled by default
 # background_threads = 4        # compaction/flush workers; default min(4, CPU cores)
 # target_file_size = 67108864   # 64 MiB; segment file target (Pi: 4-8 MiB)
 # level_base_bytes = 268435456  # 256 MiB; L1 target size (Pi: 32 MiB)
 # data_block_size = 4096        # 4 KiB; segment data block size
 # bloom_bits_per_key = 10       # bloom filter bits per key
 # compaction_rate_limit = 0     # 0 = unlimited; bytes/sec cap for compaction I/O
+# write_stall_timeout_ms = 30000 # engine transaction L0 stall timeout
 
 # Snapshot retention. After each successful checkpoint, snapshot files older
 # than the retain window are pruned. The snapshot referenced by the live
@@ -721,6 +741,19 @@ mod tests {
     fn default_toml_parses_correctly() {
         let config: StrataConfig = toml::from_str(StrataConfig::default_toml()).unwrap();
         assert_eq!(config.durability, "standard");
+    }
+
+    #[test]
+    fn default_toml_documents_residual_storage_config_owners() {
+        let default_toml = StrataConfig::default_toml();
+
+        assert!(default_toml.contains("# l0_slowdown_writes_trigger = 0"));
+        assert!(default_toml.contains("# l0_stop_writes_trigger = 0"));
+        assert!(default_toml.contains("# write_stall_timeout_ms = 30000"));
+        assert!(default_toml.contains("per-transaction coordinator limit"));
+        assert!(default_toml.contains("storage auto-detect"));
+        assert!(!default_toml.contains(concat!("Actual", " RSS")));
+        assert!(!default_toml.contains(concat!("Embedded  (< 1 GiB RAM): ", "min")));
     }
 
     #[test]
@@ -1129,6 +1162,9 @@ auto_embed = false
         assert_eq!(config.storage.max_versions_per_key, 0);
         assert_eq!(config.storage.write_buffer_size, 128 * 1024 * 1024);
         assert_eq!(config.storage.max_immutable_memtables, 4);
+        assert_eq!(config.storage.l0_slowdown_writes_trigger, 0);
+        assert_eq!(config.storage.l0_stop_writes_trigger, 0);
+        assert_eq!(config.storage.write_stall_timeout_ms, 30_000);
     }
 
     #[test]
@@ -1169,6 +1205,24 @@ max_immutable_memtables = 8
         assert_eq!(
             config.storage.max_versions_per_key, 0,
             "default must be 0 (unlimited) for backward compat"
+        );
+    }
+
+    #[test]
+    fn storage_runtime_adapter_ignores_engine_owned_and_non_runtime_fields() {
+        let base = StorageConfig::default();
+        let mut changed = base.clone();
+        changed.max_write_buffer_entries = base.max_write_buffer_entries.saturating_add(17);
+        changed.l0_slowdown_writes_trigger = 3;
+        changed.l0_stop_writes_trigger = 7;
+        changed.background_threads = base.background_threads.saturating_add(5).max(1);
+        changed.write_stall_timeout_ms = base.write_stall_timeout_ms.saturating_add(11);
+        changed.codec = "aes-gcm-256".to_string();
+
+        assert_eq!(
+            storage_runtime_config_from(&base),
+            storage_runtime_config_from(&changed),
+            "engine-owned policy and non-runtime fields must not be absorbed into StorageRuntimeConfig"
         );
     }
 

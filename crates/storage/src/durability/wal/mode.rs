@@ -5,7 +5,7 @@
 /// Default maximum time between fsyncs in Standard mode: 100 ms.
 pub const DEFAULT_SYNC_INTERVAL_MS: u64 = 100;
 
-/// Default maximum writes between fsyncs in Standard mode.
+/// Default retained write-count threshold in Standard mode.
 pub const DEFAULT_SYNC_BATCH_SIZE: usize = 1000;
 
 /// Durability mode for WAL operations
@@ -19,7 +19,7 @@ pub const DEFAULT_SYNC_BATCH_SIZE: usize = 1000;
 /// |------|-------|-----------------|
 /// | Cache | Never | All uncommitted |
 /// | Always | Every commit | Zero |
-/// | Standard | Periodic | Up to interval/batch |
+/// | Standard | Background/periodic, plus interval fallback | Up to interval |
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DurabilityMode {
     /// In-memory cache — all data lost on crash (fastest mode)
@@ -39,15 +39,17 @@ pub enum DurabilityMode {
     /// Expect 10ms+ latency per write.
     Always,
 
-    /// fsync every N commits OR every T milliseconds (the default)
+    /// fsync through the background flush lifecycle plus interval fallback.
     ///
-    /// Good balance of speed and safety. May lose up to batch_size
-    /// writes or interval_ms of data on crash.
+    /// Good balance of speed and safety. May lose up to `interval_ms` of data
+    /// on crash while the background flush thread is active. `batch_size` is
+    /// retained in the public type for compatibility, but the current writer
+    /// does not use it as an inline fsync trigger.
     /// Target latency: <30µs.
     Standard {
         /// Maximum time between fsyncs in milliseconds
         interval_ms: u64,
-        /// Maximum writes between fsyncs
+        /// Retained write-count threshold. Not currently an inline fsync trigger.
         batch_size: usize,
     },
 }
@@ -83,14 +85,15 @@ impl DurabilityMode {
     /// # Default Values
     ///
     /// - **interval_ms**: 100 - Maximum 100ms between fsyncs
-    /// - **batch_size**: 1000 - Maximum 1000 writes before fsync
+    /// - **batch_size**: 1000 - retained write-count threshold
     ///
     /// # Rationale
     ///
     /// These defaults balance performance and durability:
     /// - 100ms interval keeps data loss window bounded
-    /// - 1000 batch size handles burst writes efficiently
-    /// - Both thresholds work together - whichever is reached first triggers fsync
+    /// - 1000 batch size remains available to callers that persist or compare
+    ///   the full durability mode, but it is not an inline fsync trigger in the
+    ///   current writer runtime
     ///
     /// This is the recommended mode for production workloads.
     pub fn standard_default() -> Self {

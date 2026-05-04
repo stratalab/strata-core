@@ -2114,7 +2114,7 @@ impl Database {
             }
         }
         // Apply storage/coordinator/cache parameters to the live database
-        self.apply_storage_config_inner(&applied_cfg);
+        self.apply_runtime_storage_config_inner(&applied_cfg);
         Ok(())
     }
 
@@ -2122,37 +2122,17 @@ impl Database {
     ///
     /// Called after every `update_config()` to make storage, coordinator,
     /// and block cache parameters take effect immediately.
-    fn apply_storage_config_inner(&self, cfg: &StrataConfig) {
-        self.storage.set_max_branches(cfg.storage.max_branches);
-        self.storage
-            .set_max_versions_per_key(cfg.storage.max_versions_per_key);
-        self.storage
-            .set_max_immutable_memtables(cfg.storage.effective_max_immutable_memtables());
-        self.storage
-            .set_write_buffer_size(cfg.storage.effective_write_buffer_size());
-        self.storage
-            .set_target_file_size(cfg.storage.target_file_size);
-        self.storage
-            .set_level_base_bytes(cfg.storage.level_base_bytes);
-        self.storage
-            .set_data_block_size(cfg.storage.data_block_size);
-        self.storage
-            .set_bloom_bits_per_key(cfg.storage.bloom_bits_per_key);
-        self.storage
-            .set_compaction_rate_limit(cfg.storage.compaction_rate_limit);
+    fn apply_runtime_storage_config_inner(&self, cfg: &StrataConfig) {
+        let runtime_config = config::storage_runtime_config_from(&cfg.storage);
+        // Storage owns the static `SegmentedStore::set_*` application list.
+        // Engine adapts public config and keeps the coordinator/cache side
+        // effects that are not store setter mechanics.
+        runtime_config.apply_to_store(&self.storage);
 
         self.coordinator
             .set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
 
-        // Block cache
-        use strata_storage::block_cache;
-        let effective_cache = cfg.storage.effective_block_cache_size();
-        let cache_bytes = if effective_cache > 0 {
-            effective_cache
-        } else {
-            block_cache::auto_detect_capacity()
-        };
-        block_cache::set_global_capacity(cache_bytes);
+        runtime_config.apply_global_runtime();
     }
 
     /// Switch the durability mode at runtime (Standard ↔ Always only).
