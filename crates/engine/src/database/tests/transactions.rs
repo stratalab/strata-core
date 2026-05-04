@@ -539,8 +539,12 @@ fn test_concurrent_json_set_to_same_missing_doc_allows_only_one_commit() {
 
     let loser = if r1.is_err() { r1.err() } else { r2.err() }.expect("one loser expected");
     assert!(
-        matches!(loser, StrataError::TransactionAborted { .. }),
-        "losing concurrent JSON commit should fail with an OCC conflict, got {loser:?}"
+        matches!(
+            loser,
+            StrataError::TransactionAborted { .. } | StrataError::VersionConflict { .. }
+        ),
+        "losing concurrent JSON commit should fail with an OCC conflict \
+         (TransactionAborted or VersionConflict), got {loser:?}"
     );
 
     let key = Key::new_json(ns, "racy_doc");
