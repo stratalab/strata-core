@@ -224,17 +224,32 @@ fn default_codec() -> String {
 }
 
 impl StorageConfig {
-    /// Effective block cache size, accounting for `memory_budget`.
+    /// Compatibility helper for the derived block-cache size.
+    ///
+    /// This helper remains for downstream callers that previously read the
+    /// derived value from `StorageConfig`. Engine-internal production code
+    /// should use the storage runtime adapter instead, so storage remains the
+    /// owner of effective-value derivation.
     pub fn effective_block_cache_size(&self) -> usize {
         storage_runtime_config_from(self).block_cache_configured_bytes()
     }
 
-    /// Effective write buffer size, accounting for `memory_budget`.
+    /// Compatibility helper for the derived write-buffer size.
+    ///
+    /// This helper remains for downstream callers that previously read the
+    /// derived value from `StorageConfig`. Engine-internal production code
+    /// should use the storage runtime adapter instead, so storage remains the
+    /// owner of effective-value derivation.
     pub fn effective_write_buffer_size(&self) -> usize {
         storage_runtime_config_from(self).write_buffer_size
     }
 
-    /// Effective max immutable memtables, accounting for `memory_budget`.
+    /// Compatibility helper for the derived immutable-memtable limit.
+    ///
+    /// This helper remains for downstream callers that previously read the
+    /// derived value from `StorageConfig`. Engine-internal production code
+    /// should use the storage runtime adapter instead, so storage remains the
+    /// owner of effective-value derivation.
     pub fn effective_max_immutable_memtables(&self) -> usize {
         storage_runtime_config_from(self).max_immutable_memtables
     }
@@ -289,10 +304,12 @@ impl Default for StorageConfig {
 /// Controls how many on-disk checkpoint snapshots (`snap-NNNNNN.chk`) are kept
 /// after each successful checkpoint. The snapshot referenced by the live
 /// MANIFEST is always retained regardless of `retain_count` so recovery is
-/// never broken by pruning.
+/// never broken by pruning. `retain_count` is the raw public configuration
+/// value; `0` is accepted for compatibility and is clamped to an effective
+/// value of `1` by the storage pruning runtime.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SnapshotRetentionPolicy {
-    /// Maximum number of snapshot files to keep.
+    /// Raw maximum number of newest snapshot files to keep.
     ///
     /// Storage pruning preserves at least one snapshot; `0` is accepted for
     /// config-file compatibility and is treated as `1` by the pruning runtime.
@@ -1406,17 +1423,43 @@ max_branches = 512
     }
 
     #[test]
+    fn effective_storage_config_helpers_delegate_to_runtime_config() {
+        let cfg = StorageConfig {
+            memory_budget: 32 << 20,
+            block_cache_size: 64 << 20,
+            write_buffer_size: 32 << 20,
+            max_immutable_memtables: 3,
+            ..StorageConfig::default()
+        };
+        let runtime_config = storage_runtime_config_from(&cfg);
+
+        assert_eq!(
+            cfg.effective_block_cache_size(),
+            runtime_config.block_cache_configured_bytes()
+        );
+        assert_eq!(
+            cfg.effective_write_buffer_size(),
+            runtime_config.write_buffer_size
+        );
+        assert_eq!(
+            cfg.effective_max_immutable_memtables(),
+            runtime_config.max_immutable_memtables
+        );
+    }
+
+    #[test]
     fn memory_budget_derives_effective_values() {
         let cfg = StorageConfig {
             memory_budget: 32 << 20, // 32 MiB
             ..StorageConfig::default()
         };
-        assert_eq!(cfg.effective_block_cache_size(), 16 << 20);
-        assert_eq!(cfg.effective_write_buffer_size(), 8 << 20);
-        assert_eq!(cfg.effective_max_immutable_memtables(), 1);
+        let runtime_config = storage_runtime_config_from(&cfg);
+        assert_eq!(runtime_config.block_cache_configured_bytes(), 16 << 20);
+        assert_eq!(runtime_config.write_buffer_size, 8 << 20);
+        assert_eq!(runtime_config.max_immutable_memtables, 1);
         // Total: 16 + 8*2 = 32 MiB = budget
-        let total = cfg.effective_block_cache_size()
-            + cfg.effective_write_buffer_size() * (1 + cfg.effective_max_immutable_memtables());
+        let total = runtime_config.block_cache_configured_bytes()
+            + runtime_config.write_buffer_size * (1 + runtime_config.max_immutable_memtables);
         assert_eq!(total, 32 << 20);
     }
 
@@ -1429,9 +1472,10 @@ max_branches = 512
             max_immutable_memtables: 3,
             ..StorageConfig::default()
         };
-        assert_eq!(cfg.effective_block_cache_size(), 64 << 20);
-        assert_eq!(cfg.effective_write_buffer_size(), 32 << 20);
-        assert_eq!(cfg.effective_max_immutable_memtables(), 3);
+        let runtime_config = storage_runtime_config_from(&cfg);
+        assert_eq!(runtime_config.block_cache_configured_bytes(), 64 << 20);
+        assert_eq!(runtime_config.write_buffer_size, 32 << 20);
+        assert_eq!(runtime_config.max_immutable_memtables, 3);
     }
 
     #[test]
@@ -1457,9 +1501,10 @@ max_branches = 512
 "#;
         let config: StrataConfig = toml::from_str(old_toml).unwrap();
         assert_eq!(config.storage.memory_budget, 0);
-        // All effective values match raw fields when budget is 0
+        // All runtime values match raw fields when budget is 0
+        let runtime_config = storage_runtime_config_from(&config.storage);
         assert_eq!(
-            config.storage.effective_write_buffer_size(),
+            runtime_config.write_buffer_size,
             config.storage.write_buffer_size
         );
     }

@@ -939,7 +939,7 @@ mod tests {
         // T3-E12 Phase 2: v2 (and older) segment headers must surface
         // a typed `LegacyFormat` error, not silently parse. This is the
         // discriminator the engine's open path uses to produce
-        // `StrataError::LegacyFormat` and skip the T3-E10 wipe.
+        // legacy-format error and skip the T3-E10 wipe.
         let mut bytes = [0u8; SEGMENT_HEADER_SIZE_V2];
         bytes[0..4].copy_from_slice(&SEGMENT_MAGIC);
         bytes[4..8].copy_from_slice(&2u32.to_le_bytes()); // v2

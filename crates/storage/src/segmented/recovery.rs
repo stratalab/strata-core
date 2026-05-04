@@ -32,10 +32,9 @@ use thiserror::Error;
 
 /// Self-contained outcome of [`SegmentedStore::recover_segments`].
 ///
-/// The engine consumes this directly via
-/// `TransactionCoordinator::apply_storage_recovery`; it never needs to reach
-/// into storage internals to rebuild version state or interpret a raw fault
-/// list.
+/// Upper layers consume this directly through their coordinator recovery hook;
+/// they never need to reach into storage internals to rebuild version state or
+/// interpret a raw fault list.
 #[derive(Debug)]
 #[non_exhaustive]
 pub struct RecoveredState {

@@ -1,8 +1,8 @@
-# ES2 Checkpoint And WAL Compaction Mechanics Plan
+# Checkpoint And WAL Compaction Mechanics Plan
 
 ## Purpose
 
-`ES2` is the first runtime-code movement epic in the engine/storage boundary
+`this cleanup` is the first runtime-code movement epic in the engine/storage boundary
 normalization workstream.
 
 Its purpose is to move generic checkpoint, WAL compaction, snapshot pruning,
@@ -12,31 +12,31 @@ database API and policy owner.
 
 This epic is split into straight lettered phases:
 
-- `ES2A` - boundary API sketch
-- `ES2B` - checkpoint and compaction characterization
-- `ES2C` - storage checkpoint runtime
-- `ES2D` - engine checkpoint wrapper
-- `ES2E` - storage WAL compaction runtime
-- `ES2F` - engine compaction wrapper
-- `ES2G` - residue cleanup and guard pass
+- `Phase A` - boundary API sketch
+- `Phase B` - checkpoint and compaction characterization
+- `Phase C` - storage checkpoint runtime
+- `Phase D` - engine checkpoint wrapper
+- `Phase E` - storage WAL compaction runtime
+- `Phase F` - engine compaction wrapper
+- `Phase G` - residue cleanup and guard pass
 
 Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
 - [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
 - [../storage/storage-charter.md](../storage/storage-charter.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
 
-Before ES2C code movement starts, also write:
+Before Phase C code movement starts, also write:
 
-- [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 
 Checkpoint output feeds snapshot install, and snapshot install feeds recovery.
-ES2C through ES2G can move code sequentially, but ES2 should not design
-checkpoint boundary types in isolation from ES3 and ES4.
+Phase C through Phase G can move code sequentially, but this cleanup should not design
+checkpoint boundary types in isolation from snapshot-install cleanup and recovery-bootstrap cleanup.
 
-## ES2 Verdict
+## this cleanup Verdict
 
 The following should move to `strata-storage`:
 
@@ -67,16 +67,16 @@ The key rule: storage should own what to do with already-materialized
 durability DTOs. Engine should own deciding when to checkpoint, what primitive
 state goes into the DTOs, and how raw storage facts are presented to callers.
 
-ES2 intentionally includes the storage mechanics behind the shutdown
+this cleanup intentionally includes the storage mechanics behind the shutdown
 `fsync_manifest()` path because that path only needs generic MANIFEST
 load/create/active-segment/persist behavior. Engine still owns the shutdown
 barrier, final flush, freeze hooks, registry/file-lock release, and all public
-shutdown semantics. ES4 remains responsible for the broader recovery/open
+shutdown semantics. recovery-bootstrap cleanup remains responsible for the broader recovery/open
 manifest policy move.
 
 ## Current Code Map
 
-The ES2 target surface is concentrated in:
+The this cleanup target surface is concentrated in:
 
 - [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
 
@@ -134,7 +134,7 @@ The current method also mixes policy with storage mechanics:
 
 ### `Database::collect_checkpoint_data`
 
-This function should not move wholesale in ES2.
+This function should not move wholesale in this cleanup.
 
 It walks `SegmentedStore`, but it also knows primitive materialization rules:
 
@@ -145,7 +145,7 @@ It walks `SegmentedStore`, but it also knows primitive materialization rules:
 - vector collection config rows are recognized by key convention
 - vector record bytes are decoded to populate vector snapshot metadata
 
-The ES2 split should assume this stays engine-owned for now. Storage should
+The this cleanup split should assume this stays engine-owned for now. Storage should
 accept `CheckpointData` as an input, not learn how to create all primitive
 sections from live engine state.
 
@@ -158,14 +158,14 @@ engine or primitive-owned adapters.
 This helper is generic storage mechanics, but it is shared with nearby engine
 open/recovery code.
 
-ES2 should avoid duplicating it. The preferred direction is to move a generic
+This cleanup should avoid duplicating it. The preferred direction is to move a generic
 manifest helper into storage as part of the checkpoint/compaction runtime. If
-that creates awkward ES4 coupling, ES2 may leave an engine wrapper temporarily,
-but the helper should have a clear owner by the ES4 recovery move.
+that creates awkward recovery-bootstrap cleanup coupling, this cleanup may leave an engine wrapper temporarily,
+but the helper should have a clear owner by the recovery-bootstrap move.
 
 ## Target Storage Surface
 
-Exact names can change during implementation, but ES2C should introduce one
+Exact names can change during implementation, but Phase C should introduce one
 storage-owned runtime module for checkpoint and WAL compaction mechanics.
 
 Candidate module:
@@ -212,7 +212,7 @@ checkpoint_data
 active_wal_segment
 ```
 
-Resolved by ES2A:
+Resolved by Phase A:
 
 - use `DatabaseLayout`, not ad-hoc `data_dir` paths
 - engine passes an already-created checkpoint codec or an equivalent codec
@@ -222,7 +222,7 @@ Resolved by ES2A:
 - active WAL segment is represented as `NonZeroU64`; segment `0` is rejected
   at the engine boundary instead of being persisted into MANIFEST
 
-Resolved by ES2D:
+Resolved by Phase D:
 
 - snapshot pruning is split out of the checkpoint outcome; storage owns the
   raw pruning helper, while engine keeps lifecycle/configuration policy and
@@ -242,7 +242,7 @@ active_wal_segment
 Engine should translate this outcome into existing database logging and public
 behavior.
 
-ES2C must preserve current missing-MANIFEST behavior unless it explicitly
+Phase C must preserve current missing-MANIFEST behavior unless it explicitly
 documents a behavior change. Today `Database::load_or_create_manifest()`
 creates a missing MANIFEST with `"identity"` in the checkpoint/compact path.
 Passing the configured codec id instead may be the right fix, but it must not
@@ -260,9 +260,9 @@ active_wal_segment
 wal_codec
 ```
 
-ES2A chose `DatabaseLayout` for this boundary.
+Phase A chose `DatabaseLayout` for this boundary.
 
-Resolved by ES2E:
+Resolved by Phase E:
 
 - `active_wal_segment` is `Option<NonZeroU64>` so storage can preserve the
   existing engine behavior exactly: `Some(segment)` updates MANIFEST and
@@ -291,7 +291,7 @@ No checkpoint exists yet. Run checkpoint() before compact().
 
 ## Engine Wrapper Shape
 
-After ES2, `Database::checkpoint()` should be thin:
+After this cleanup, `Database::checkpoint()` should be thin:
 
 ```text
 check_not_shutting_down()
@@ -305,7 +305,7 @@ log database-level outcome
 return Ok
 ```
 
-After ES2, `Database::compact()` should be thin:
+After this cleanup, `Database::compact()` should be thin:
 
 ```text
 check_not_shutting_down()
@@ -322,37 +322,37 @@ of the public database API and carry lifecycle semantics.
 
 ## Implementation Plan
 
-ES2 should land as straight lettered phases unless the code review finds a
+This cleanup should land as straight lettered phases unless the code review finds a
 smaller split is needed:
 
-- `ES2A` writes the joint ES2-ES4 API sketch.
-- `ES2B` locks characterization coverage for checkpoint and WAL compaction
+- `Phase A` writes storage-runtime boundary API sketch.
+- `Phase B` locks characterization coverage for checkpoint and WAL compaction
   behavior.
-- `ES2C` moves generic checkpoint mechanics into storage.
-- `ES2D` thins the engine checkpoint wrapper.
-- `ES2E` moves generic WAL compaction mechanics into storage.
-- `ES2F` thins the engine compaction wrapper.
-- `ES2G` cleans residue and reruns ownership guards.
+- `Phase C` moves generic checkpoint mechanics into storage.
+- `Phase D` thins the engine checkpoint wrapper.
+- `Phase E` moves generic WAL compaction mechanics into storage.
+- `Phase F` thins the engine compaction wrapper.
+- `Phase G` cleans residue and reruns ownership guards.
 
-### ES2A Boundary Sketch
+### Phase A Boundary Sketch
 
-Write [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
+Write [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 before moving code.
 
 The sketch should define the relationship between:
 
 - `StorageCheckpointOutcome`
-- snapshot install stats from ES3
-- `StorageRecoveryOutcome` from ES4
+- snapshot install stats from snapshot-install cleanup
+- `StorageRecoveryOutcome` from recovery-bootstrap cleanup
 
 It should also decide whether common storage layout and manifest helpers are
-introduced now or deferred to ES4.
+introduced now or deferred to recovery-bootstrap cleanup.
 
-### ES2B Characterization Before Movement
+### Phase B Characterization Before Movement
 
 Add or identify tests that characterize current behavior before refactoring.
 
-Minimum ES2B coverage:
+Minimum Phase B coverage:
 
 - checkpoint creates a snapshot and updates the MANIFEST watermark
 - repeated checkpoint of unchanged state is deterministic where current
@@ -373,10 +373,10 @@ Prefer existing engine integration tests where the behavior crosses public
 database APIs. Add storage-layer tests only where the new storage helper can
 be tested without primitive semantics.
 
-ES2B is complete when the characterization suite is green against the pre-move
+Phase B is complete when the characterization suite is green against the pre-move
 engine implementation.
 
-### ES2C Add Storage Checkpoint Runtime
+### Phase C Add Storage Checkpoint Runtime
 
 Create the storage module and move generic checkpoint mechanics behind a
 storage-owned function.
@@ -399,7 +399,7 @@ If snapshot pruning currently depends on engine config types, split the raw
 storage pruning helper from the engine config adapter rather than moving
 engine config into storage.
 
-### ES2D Thin Engine Checkpoint Wrapper
+### Phase D Thin Engine Checkpoint Wrapper
 
 Update `Database::checkpoint()` to call the storage checkpoint runtime.
 
@@ -415,7 +415,7 @@ Keep in engine:
 
 Do not move `collect_checkpoint_data()` in this step.
 
-### ES2E Add Storage WAL Compaction Runtime
+### Phase E Add Storage WAL Compaction Runtime
 
 Move generic WAL compaction construction and execution behind a storage-owned
 function.
@@ -428,7 +428,7 @@ The storage helper should:
 - compact with active segment override
 - return raw removed segment and reclaimed byte counts
 
-### ES2F Thin Engine Compaction Wrapper
+### Phase F Thin Engine Compaction Wrapper
 
 Update `Database::compact()` to call the storage WAL compaction runtime.
 
@@ -440,7 +440,7 @@ Keep in engine:
 - public mapping of no-checkpoint compaction to invalid input
 - database-level logging
 
-### ES2G Clean Residue And Re-run Guards
+### Phase G Clean Residue And Re-run Guards
 
 After the code movement, remove engine imports that should no longer be
 needed:
@@ -453,7 +453,7 @@ needed:
 - `WalOnlyCompactor`
 - `SnapshotWatermark`
 
-ES2G also routes remaining generic MANIFEST mechanics through storage-owned
+Phase G also routes remaining generic MANIFEST mechanics through storage-owned
 helpers where doing so does not move engine policy:
 
 - disk-primary shutdown MANIFEST fsync uses `sync_storage_manifest`, while
@@ -461,7 +461,7 @@ helpers where doing so does not move engine policy:
 - flush-time WAL truncation uses `truncate_storage_wal_after_flush`, while
   engine still decides that the post-flush truncation is best-effort
 
-Then run the guard commands from ES1 and record any intentional remaining
+Then run the guard commands from boundary baseline and record any intentional remaining
 matches.
 
 ## Error Mapping
@@ -495,9 +495,9 @@ storage terms:
 
 Engine owns the public configuration vocabulary and any product defaults.
 
-If the current pruning path is too entangled with `StrataConfig`, ES2 should
-move the filesystem pruning helper and leave engine as the adapter from public
-config to storage pruning options. The direction should still be toward
+If the current pruning path is too entangled with `StrataConfig`, this cleanup
+should move the filesystem pruning helper and leave engine as the adapter from
+public config to storage pruning options. The direction should still be toward
 storage owning the pruning mechanics.
 
 ## Manifest Ownership
@@ -505,8 +505,8 @@ storage owning the pruning mechanics.
 MANIFEST mechanics are shared by checkpoint, compaction, snapshot install, and
 recovery.
 
-ES2C should introduce only the manifest helpers needed for checkpoint and WAL
-compaction, but the shape should anticipate ES4:
+Phase C should introduce only the manifest helpers needed for checkpoint and WAL
+compaction, but the shape should anticipate recovery-bootstrap cleanup:
 
 - load existing MANIFEST
 - create missing MANIFEST with database UUID and codec information
@@ -516,7 +516,7 @@ compaction, but the shape should anticipate ES4:
 
 The helper should not decide primary/follower recovery policy or shutdown
 success semantics. Those belong to engine now; the recovery/open policy move
-belongs to ES4.
+belongs to recovery-bootstrap cleanup.
 
 ## Verification Gates
 
@@ -544,17 +544,17 @@ rg -n 'JsonPath|JsonPatch|SearchSubsystem|Recipe|VectorConfig|DistanceMetric|Cha
 rg -n 'CheckpointCoordinator|WalOnlyCompactor|ManifestManager|RecoveryCoordinator|SnapshotSerializer|install_snapshot|apply_storage_config' crates/engine/src/database
 ```
 
-Expected ES2G direction:
+Expected Phase G direction:
 
 - no new `storage -> engine` dependency
 - no primitive semantic vocabulary in the new storage checkpoint module
 - checkpoint and WAL compaction coordinator usage disappears from engine
   wrappers or remains only in tests/comments
-- recovery and snapshot install residue remains until ES3/ES4
+- recovery and snapshot install residue remains until snapshot-install cleanup/recovery-bootstrap cleanup
 
-## ES2G Guard Results
+## Phase G Guard Results
 
-Recorded after the ES2G cleanup:
+Recorded after the Phase G cleanup:
 
 - `cargo tree -p strata-storage --depth 2`: clean. `strata-storage`
   depends on `strata-core` and external crates, not `strata-engine`.
@@ -570,9 +570,9 @@ Recorded after the ES2G cleanup:
     `compaction.rs` is public error mapping for storage-owned checkpoint
     runtime; engine no longer constructs the checkpoint coordinator there.
   - `snapshot_install.rs` keeps `SnapshotSerializer` and `install_snapshot`
-    until ES3.
+    until snapshot-install cleanup.
   - `recovery.rs` keeps `RecoveryCoordinator`, `ManifestManager`, and
-    snapshot install callbacks until ES4.
+    snapshot install callbacks until recovery-bootstrap cleanup.
   - `open.rs` and `mod.rs` keep `apply_storage_config` as engine-owned
     configuration policy.
   - `recovery_error.rs` has documentation text for recovery-owned
@@ -582,53 +582,53 @@ Recorded after the ES2G cleanup:
   - test matches use `ManifestManager` for assertions, corrupt fixture setup,
     shutdown coverage, and characterization.
 
-ES2G also removes the stale disk-backed cache mode from primary opens:
+Phase G also removes the stale disk-backed cache mode from primary opens:
 `durability = "cache"` is rejected by `StrataConfig`. Cache remains an
 explicit open mode through `Database::cache()` and `OpenSpec::cache()`.
 
 ## Acceptance Checklist
 
-ES2A is complete when:
+Phase A is complete when:
 
-1. The ES2-ES4 joint API sketch exists.
-2. The sketch's own ES2A acceptance checklist is satisfied.
+1. The storage-runtime boundary joint API sketch exists.
+2. The sketch's own Phase A acceptance checklist is satisfied.
 
-ES2B is complete when:
+Phase B is complete when:
 
 1. Checkpoint characterization exists before behavior-preserving movement.
 2. WAL compaction characterization exists before behavior-preserving
    movement.
 
-ES2C is complete when:
+Phase C is complete when:
 
 1. Storage owns generic checkpoint runtime around `CheckpointCoordinator`.
 
-ES2D is complete when:
+Phase D is complete when:
 
 1. Engine `Database::checkpoint()` remains public and thin.
 2. `collect_checkpoint_data()` remains engine-owned or is split through a
    primitive-materialization callback that keeps semantics out of storage.
 
-ES2E is complete when:
+Phase E is complete when:
 
 1. Storage owns generic WAL compaction runtime around `WalOnlyCompactor`.
 
-ES2F is complete when:
+Phase F is complete when:
 
 1. Engine `Database::compact()` remains public and thin.
 2. Existing checkpoint, compaction, and reopen behavior is unchanged.
 3. Storage APIs expose raw facts and storage-local errors only.
 4. No on-disk format changes are introduced.
 
-ES2G is complete when:
+Phase G is complete when:
 
-1. ES1 guard commands have been rerun and intentional residue is recorded.
+1. boundary baseline guard commands have been rerun and intentional residue is recorded.
 
-ES2 as a whole is complete when ES2A through ES2G are complete.
+this cleanup as a whole is complete when Phase A through Phase G are complete.
 
 ## Non-Goals
 
-ES2 does not:
+this cleanup does not:
 
 - move snapshot install machinery
 - move recovery bootstrap machinery

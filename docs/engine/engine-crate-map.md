@@ -2,10 +2,11 @@
 
 ## Purpose
 
-This document is a baseline map of `crates/engine` as it exists today.
+This document maps `crates/engine` after the storage-boundary normalization.
 
-It is not a target design. It is a description of current ownership and
-behavior, written to support the next serious engine/storage boundary cleanup.
+It describes the settled engine responsibilities at the storage boundary and
+the remaining higher-layer consolidation work that will happen above that
+boundary.
 
 For the broader engine cleanup ledger, see
 [engine-pending-items.md](./engine-pending-items.md).
@@ -13,16 +14,16 @@ For the broader engine cleanup ledger, see
 For the cross-boundary audit with storage, see
 [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md).
 
-The important takeaway is that `strata-engine` is not just a database-kernel
-crate. It is currently:
+The important takeaway is that `strata-engine` is the database semantics and
+orchestration layer. It is currently:
 
 - the database open/runtime/bootstrap layer
 - the branch-domain and primitive-semantics owner
 - the subsystem composition host
 - the search/runtime behavior host
 - the branch-bundle import/export host
-- and, in a smaller set of remaining places, the adapter layer that turns raw
-  storage facts into engine policy and public database behavior
+- the adapter layer that turns raw storage facts into engine policy and public
+  database behavior
 
 ## High-Level Shape
 
@@ -40,7 +41,7 @@ Top-level source files:
 Major subtrees:
 
 - `database/` — database open/close/runtime orchestration, recovery, config,
-  follower handling, retention reporting, and compatibility seams
+  follower handling, retention reporting, and storage-boundary adapters
 - `primitives/` — KV/JSON/event/space behavior and primitive extension traits
 - `semantics/` — branch/limits/event/json/vector/value surfaces used as the
   authoritative engine-side import boundary
@@ -209,17 +210,19 @@ machinery.
 
 ## Storage-Boundary Adapters Engine Still Owns
 
-The ES2-ES4 cleanup moved the generic checkpoint, decoded-row snapshot
-install, and recovery bootstrap mechanics into `strata-storage`. Engine still
-contains adapter modules at those boundaries because the public APIs,
-primitive decode, lifecycle policy, and public error taxonomy remain
+The storage-boundary cleanup moved generic checkpoint, WAL compaction, decoded-row
+snapshot install, recovery bootstrap, storage runtime config application, and
+storage retention mechanics into `strata-storage`. Engine still contains
+adapter modules at those boundaries because the public APIs, primitive decode,
+lifecycle policy, product config, and public error taxonomy remain
 engine-owned.
 
 The remaining storage-boundary modules are:
 
 - [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
   - public `Database::checkpoint()` / `Database::compact()` orchestration
-  - conversion of storage checkpoint and retention facts into engine reports
+  - conversion of storage checkpoint, compaction, snapshot-prune, and
+    retention facts into engine reports
   - lifecycle-aware shutdown and retention policy around storage mechanics
 - [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
   - primitive snapshot section decode
@@ -234,12 +237,29 @@ The remaining storage-boundary modules are:
 - parts of [database/open.rs](../../crates/engine/src/database/open.rs)
   - public open/lifecycle sequencing
   - WAL-writer wiring
+  - deriving storage runtime config from public engine config before calling
+    storage-owned application helpers
+- [database/config.rs](../../crates/engine/src/database/config.rs)
+  - public `StrataConfig` and `StorageConfig` compatibility surface
+  - adapter logic that builds storage-owned `StorageRuntimeConfig`
 
 The lower storage mechanics behind these adapters now live in storage-owned
 modules such as `durability/checkpoint_runtime.rs`,
 `durability/decoded_snapshot_install.rs`, and
-`durability/recovery_bootstrap.rs`. ES5 is expected to narrow the remaining
-storage-configuration and WAL-writer runtime seams.
+`durability/recovery_bootstrap.rs`, plus `runtime_config.rs`.
+
+## Final Storage Boundary Map
+
+| Surface | Storage Owns | Engine Owns | Intentional Seam |
+|---|---|---|---|
+| Checkpoint | File construction, raw checkpoint facts, manifest/watermark mechanics | `Database::checkpoint()`, lifecycle checks, public result/error mapping | Engine API calls storage runtime helper |
+| WAL compaction | WAL pruning and manifest active-segment mechanics | `Database::compact()`, lifecycle checks, public result/error mapping | Engine API calls storage runtime helper |
+| Snapshot pruning | Filesystem pruning and raw prune facts | lifecycle-aware retention report | Engine maps raw prune facts to public report |
+| Snapshot install | Generic decoded-row validation and install | primitive section decode, primitive install stats, recovery policy | Engine builds decoded-row plan, storage installs it |
+| Recovery bootstrap | MANIFEST prep, codec validation, replay, raw recovery facts | open policy, degraded/lossy policy, subsystem recovery, coordinator bootstrap | Engine calls storage recovery and interprets outcome |
+| Storage config | storage runtime config builder, effective storage values, store/global application | public `StrataConfig`, product profiles, config compatibility | Engine adapts public config into storage runtime config |
+| Retention | storage pruning mechanics and minimum-retain invariant | public retention policy and lifecycle behavior | Engine passes storage-shaped retention input |
+| Test observability | storage-local runtime snapshots/accessors under test gates | characterization tests and production-use guardrails | Guardrails prevent production dependence |
 
 ## Current Architectural Role
 
@@ -254,14 +274,18 @@ If you describe the crate honestly as it exists today, `strata-engine` is:
 
 ## Main Takeaway
 
-The next cleanup should not treat current engine boundaries as already clean.
+The next cleanup should treat the storage boundary as settled but keep
+engine's internal domain/runtime boundaries explicit.
 
 The important ownership question is not whether engine is too large. It is
 whether code in the crate is:
 
 - semantic/domain behavior that should stay in `engine`, or
-- generic persistence/runtime machinery that should move to `storage`
+- generic persistence/runtime machinery that should stay delegated to
+  `storage`
 
-After ES2-ES4, the semantic side of engine is real and the most critical
-durability mechanics have sunk into storage. The remaining cleanup is to keep
-the adapter code explicit while ES5 finishes the storage-configuration split.
+After the storage-boundary closeout, the semantic side of engine is real and
+the targeted lower storage mechanics have sunk into storage. The remaining cleanup is above this
+boundary: engine can absorb graph, vector, search, executor-legacy, and
+security responsibilities only if the substrate/mechanics boundary documented
+here stays explicit.

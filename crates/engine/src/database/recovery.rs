@@ -101,6 +101,8 @@ impl<'a> RecoveryRuntimeConfig<'a> {
         }
     }
 
+    /// Exposed to open orchestration so it can apply storage runtime globals
+    /// after recovery; the public engine config stays private to this module.
     pub(crate) fn storage_runtime_config(&self) -> StorageRuntimeConfig {
         self.storage_runtime_config
     }
@@ -115,7 +117,7 @@ impl<'a> RecoveryRuntimeConfig<'a> {
 /// Carries the owned resources the caller needs to finish constructing
 /// `Arc<Database>`. All public fields are `pub(crate)` because
 /// `RecoveryOutcome` is an implementation detail of `open.rs`; it is
-/// not part of the ES4 public surface.
+/// not part of the public database recovery surface.
 pub(crate) struct RecoveryOutcome {
     /// MANIFEST-recorded database UUID (or `[0u8; 16]` for follower
     /// without a MANIFEST).
@@ -238,7 +240,7 @@ impl Database {
                 "storage recovered with degraded state"
             );
         }
-        // ES4 health-policy branch. Strict mode refuses authoritative
+        // Recovery health-policy branch. Strict mode refuses authoritative
         // loss; the no-manifest legacy fallback is opt-in; rebuildable
         // caches are always accepted. Lossy recovery (`allow_lossy_recovery`)
         // is the blanket escape hatch and permits every class — it leaves
@@ -287,7 +289,7 @@ impl Database {
     }
 }
 
-/// ES4 strict-mode policy. `true` = refuse to open on this class; `false`
+/// Strict-mode recovery policy. `true` = refuse to open on this class; `false`
 /// = accept. The caller combines this with `allow_lossy_recovery` so
 /// that lossy mode is a blanket override regardless of class.
 ///
@@ -682,10 +684,11 @@ mod tests {
 
         let outcome = run_recovery_for_test(temp_dir.path(), &layout, &cfg, RecoveryMode::Primary)
             .expect("recovery should succeed with non-default storage config");
+        let runtime_config = storage_runtime_config_from(&cfg.storage);
 
         assert_eq!(
             outcome.storage.write_buffer_size_for_test(),
-            cfg.storage.effective_write_buffer_size()
+            runtime_config.write_buffer_size
         );
         assert_eq!(
             outcome.storage.max_branches_for_test(),
@@ -697,7 +700,7 @@ mod tests {
         );
         assert_eq!(
             outcome.storage.max_immutable_memtables_for_test(),
-            cfg.storage.effective_max_immutable_memtables()
+            runtime_config.max_immutable_memtables
         );
         assert_eq!(
             outcome.storage.target_file_size(),

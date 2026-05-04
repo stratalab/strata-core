@@ -5,11 +5,12 @@
 This document turns the storage/engine ownership audit into a concrete
 normalization plan.
 
-The storage consolidation work has already collapsed the old lower-runtime
-split into `strata-storage`. That solved the most visible crate graph problem,
-but it did not fully normalize the boundary above the substrate. Some
-storage-runtime mechanics still live under `strata-engine`, especially around
-database recovery, checkpointing, snapshot install, and storage configuration.
+When this plan started, the storage consolidation work had already collapsed
+the old lower-runtime split into `strata-storage`. That solved the most visible
+crate graph problem, but it had not fully normalized the boundary above the
+substrate. Some storage-runtime mechanics still lived under `strata-engine`,
+especially around database recovery, checkpointing, snapshot install, and
+storage configuration.
 
 The goal of this plan is to finish the ownership correction without flattening
 the architecture:
@@ -33,8 +34,8 @@ At the end of this plan:
 - engine should expose checkpoint, compact, open, recovery, and health APIs
   as database/runtime operations
 - storage should physically own the substrate mechanics behind checkpointing,
-  WAL compaction, snapshot replay/install, manifest preparation, and
-  storage-only config application
+  WAL compaction, generic decoded-row snapshot install, manifest preparation,
+  storage recovery, and storage-only config application
 - engine should be easier to describe as semantic/runtime orchestration rather
   than a mixed host for lower persistence machinery
 
@@ -49,7 +50,7 @@ This plan should be read together with:
 - [../storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
 - [../storage/st2-primitive-transaction-semantics-extraction-plan.md](../storage/st2-primitive-transaction-semantics-extraction-plan.md)
 - [../storage/st3-generic-transaction-runtime-absorption-plan.md](../storage/st3-generic-transaction-runtime-absorption-plan.md)
-- [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 
 ## Rewrite Rules
 
@@ -67,7 +68,8 @@ runtime.
 ### 2. No Primitive Semantics In `storage`
 
 Storage may own durable bytes, versioned records, generic transaction
-runtime, WAL/snapshot replay mechanics, and manifest updates.
+runtime, WAL replay mechanics, generic decoded-row snapshot install mechanics,
+and manifest updates.
 
 Storage must not own:
 
@@ -180,7 +182,7 @@ true:
    - WAL compaction
    - snapshot pruning
    - storage manifest/watermark updates
-   - snapshot decode/replay/install machinery
+   - generic decoded-row snapshot install machinery
    - storage recovery bootstrap
    - storage-only config application
 3. Engine physically owns:
@@ -205,7 +207,8 @@ The following decisions are not deferred:
 - `Database::checkpoint()` remains in engine as public API.
 - `Database::compact()` remains in engine as public API.
 - database open and runtime composition remain in engine.
-- storage owns checkpoint/WAL/snapshot/MANIFEST mechanics.
+- storage owns checkpoint/WAL/MANIFEST mechanics, snapshot file mechanics, and
+  generic decoded-row snapshot install.
 - storage owns storage recovery and replay mechanics.
 - engine owns recovery policy, public error classification, and operator
   reporting.
@@ -216,22 +219,22 @@ The following decisions are not deferred:
 - JSON/event/vector/search semantics do not move down.
 - branch bundle import/export stays in engine.
 
-## Epic Structure
+## Cleanup Structure
 
-This plan is organized as six epics. The list below is the intended
+This plan is organized as six cleanup areas. The list below is the intended
 execution order.
 
-- `ES1` - Boundary Baseline And Guardrails
-- `ES2` - Checkpoint And WAL Compaction Mechanics
-- `ES3` - Snapshot Decode And Install Mechanics
-- `ES4` - Recovery Bootstrap Mechanics
-- `ES5` - Storage Configuration Application
-- `ES6` - Boundary Closeout, Engine Shape, And Documentation
+- Boundary Baseline And Guardrails
+- Checkpoint And WAL Compaction Mechanics
+- Snapshot Decode And Install Mechanics
+- Recovery Bootstrap Mechanics
+- Storage Configuration Application
+- Boundary Closeout, Engine Shape, And Documentation
 
-Each epic may get its own detailed subplan as the cleanup reaches that
+Each area may get its own detailed subplan as the cleanup reaches that
 surface. This document defines the main sequence and ownership contract.
 
-## ES1 - Boundary Baseline And Guardrails
+## Boundary Baseline And Guardrails
 
 ### Goal
 
@@ -239,7 +242,7 @@ Freeze the intended storage/engine boundary before moving runtime mechanics.
 
 Detailed execution plan:
 
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
 
 ### Scope
 
@@ -282,36 +285,37 @@ Detailed execution plan:
 - no recovery migration yet
 - no public API redesign
 
-## ES2 - Checkpoint And WAL Compaction Mechanics
+## Checkpoint And WAL Compaction Mechanics
 
 ### Goal
 
 Move generic checkpoint, WAL compaction, snapshot pruning, and storage
 manifest update mechanics from engine into storage.
 
-Potential detailed execution plan:
+Detailed execution plan:
 
-- [es2-checkpoint-wal-compaction-mechanics-plan.md](./es2-checkpoint-wal-compaction-mechanics-plan.md)
+- [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
 
 Prerequisite design sketch:
 
-- [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 
-ES2 is split into straight lettered phases:
+The checkpoint/WAL cleanup is split into straight lettered phases:
 
-- `ES2A` - boundary API sketch
-- `ES2B` - checkpoint and compaction characterization
-- `ES2C` - storage checkpoint runtime
-- `ES2D` - engine checkpoint wrapper
-- `ES2E` - storage WAL compaction runtime
-- `ES2F` - engine compaction wrapper
-- `ES2G` - residue cleanup and guard pass
+- Phase A - boundary API sketch
+- Phase B - checkpoint and compaction characterization
+- Phase C - storage checkpoint runtime
+- Phase D - engine checkpoint wrapper
+- Phase E - storage WAL compaction runtime
+- Phase F - engine compaction wrapper
+- Phase G - residue cleanup and guard pass
 
-`ES2`, `ES3`, and `ES4` are sequential code moves, but they are not
-independent designs. Checkpoint output feeds snapshot install, and snapshot
-install feeds recovery. Before ES2C code moves, write a joint API sketch for
-the checkpoint, snapshot install, and recovery boundary types so ES2 does not
-choose a storage API shape that ES3 or ES4 immediately has to undo.
+The checkpoint/WAL, snapshot-install, and recovery-bootstrap cleanups are
+sequential code moves, but they are not independent designs. Checkpoint output
+feeds snapshot install, and snapshot install feeds recovery. Before Phase C code
+moves, write a joint API sketch for the checkpoint, snapshot install, and
+recovery boundary types so this cleanup does not choose a storage API shape that
+the later snapshot-install or recovery-bootstrap work immediately has to undo.
 
 ### Scope
 
@@ -360,10 +364,27 @@ Keep in engine:
 
 - no full recovery bootstrap migration
 - no snapshot install migration unless required as a narrow helper agreed in
-  the joint ES2-ES4 API sketch
+  storage-runtime boundary API sketch
 - no config split yet
 
-## ES3 - Snapshot Decode And Install Mechanics
+### Implementation Status
+
+The checkpoint/WAL cleanup is complete. Storage owns the generic checkpoint, WAL compaction,
+snapshot-prune, MANIFEST sync, and flush-time WAL truncation mechanics through
+the storage-owned
+[checkpoint_runtime.rs](../../crates/storage/src/durability/checkpoint_runtime.rs)
+module, re-exported through public durability helpers such as
+`run_storage_checkpoint`, `compact_storage_wal`, `prune_storage_snapshots`,
+`sync_storage_manifest`, and flush-time WAL truncation support. Engine keeps
+`Database::checkpoint()`, `Database::compact()`, shutdown sequencing,
+flush-policy decisions, lifecycle checks, and public error/result mapping.
+
+The intentional seam is that engine passes already materialized checkpoint
+facts and public-operation context into storage helpers. Storage returns raw
+checkpoint, compaction, prune, and manifest facts; engine turns those facts
+into public database behavior.
+
+## Snapshot Decode And Install Mechanics
 
 ### Goal
 
@@ -372,9 +393,9 @@ storage. Engine keeps `LoadedSnapshot` section dispatch and primitive snapshot
 DTO decode. Storage owns only the generic mechanics for installing already
 decoded storage rows into `SegmentedStore`.
 
-Potential detailed execution plan:
+Detailed execution plan:
 
-- `docs/engine/es3-snapshot-decode-install-mechanics-plan.md`
+- [snapshot-decode-install-mechanics-plan.md](./snapshot-decode-install-mechanics-plan.md)
 
 ### Scope
 
@@ -432,7 +453,20 @@ Keep in engine:
 - no public recovery API redesign
 - no search/index recovery redesign
 
-## ES4 - Recovery Bootstrap Mechanics
+### Implementation Status
+
+snapshot-install cleanup is complete. Storage owns only generic decoded-row validation and install
+through `strata_storage::durability::install_decoded_snapshot_rows`. Engine
+keeps `LoadedSnapshot` section iteration, primitive tag dispatch,
+`SnapshotSerializer` primitive DTO decode, primitive-shaped install telemetry,
+snapshot-install recovery policy, and public error mapping.
+
+The snapshot-install correction explicitly rejected moving primitive snapshot decode into
+storage. Engine builds a complete decoded-row plan before storage mutation;
+storage validates and installs rows without knowing JSON, event, vector,
+search, or branch-domain meaning.
+
+## Recovery Bootstrap Mechanics
 
 ### Goal
 
@@ -441,27 +475,29 @@ into storage, while keeping database-level recovery policy in engine.
 
 Detailed execution plan:
 
-- `docs/engine/es4-recovery-bootstrap-mechanics-plan.md`
+- [recovery-bootstrap-mechanics-plan.md](./recovery-bootstrap-mechanics-plan.md)
 
-ES2A baseline decision:
+Storage runtime boundary sketch baseline decision:
 
-- `TransactionCoordinator` stays engine-owned during ES4.
+- `TransactionCoordinator` stays engine-owned during recovery bootstrap.
 
 This is load-bearing. Storage should own recovery replay mechanics and return
 raw `RecoveryStats` / `RecoveredState` facts. Engine should bootstrap
 `TransactionCoordinator` from those facts after storage recovery returns. If
 later work wants to move coordinator ownership, that needs a separate
-coordinator ownership plan, not an incidental ES4 side effect.
+coordinator ownership plan, not an incidental recovery-bootstrap side effect.
 
-ES4 must also preserve two current recovery ordering guarantees:
+Recovery bootstrap must also preserve two current recovery ordering guarantees:
 
 - snapshot-installed versions are folded into `RecoveryStats::final_version`
   before `TransactionCoordinator` bootstrap
 - storage runtime config is applied before `recover_segments()` runs
 
-Until ES5 completes the public config split, engine may build a
-storage-owned runtime config from `StrataConfig.storage` and pass it into the
-ES4 storage recovery API.
+During the recovery-bootstrap cleanup, before the storage-runtime-config cleanup
+completed the public config split, engine built a storage-owned runtime config
+from `StrataConfig.storage` and passed it into the storage recovery API. The
+storage-runtime-config cleanup later made that adapter the standard open/config
+path.
 
 ### Scope
 
@@ -509,7 +545,7 @@ Keep in engine:
 
 ### Implementation Status
 
-ES4 now routes `Database::run_recovery()` through
+The recovery-bootstrap cleanup now routes `Database::run_recovery()` through
 `strata_storage::durability::run_storage_recovery`. Storage owns MANIFEST and
 codec preparation, `RecoveryCoordinator` replay, generic WAL record
 application, mechanical lossy WAL replay fallback, storage runtime config
@@ -520,9 +556,10 @@ Engine still owns the primitive snapshot-install callback, public
 `LossyRecoveryReport`, `TransactionCoordinator` bootstrap, follower-state
 restore, and watermark construction.
 
-The one intentional correctness tightening found during ES4 is documented in
-the ES4 behavior-change ledger: primitive snapshot install callback failures
-now bypass lossy WAL replay instead of allowing an empty lossy open.
+The one intentional correctness tightening found during recovery bootstrap is
+documented in the recovery-bootstrap behavior-change ledger: primitive snapshot
+install callback failures now bypass lossy WAL replay instead of allowing an
+empty lossy open.
 
 ### Non-Goals
 
@@ -530,7 +567,7 @@ now bypass lossy WAL replay instead of allowing an empty lossy open.
 - no branch-domain recovery policy migration into storage
 - no operator report redesign beyond necessary translation updates
 
-## ES5 - Storage Configuration Application
+## Storage Configuration Application
 
 ### Goal
 
@@ -539,7 +576,7 @@ application.
 
 Detailed execution plan:
 
-- `docs/engine/es5-storage-config-application-plan.md`
+- [storage-config-application-plan.md](./storage-config-application-plan.md)
 
 ### Scope
 
@@ -552,9 +589,10 @@ Move downward into storage where storage-only:
 - validation of storage-local config combinations
 - conversion into lower runtime structs
 
-ES4 may introduce the first storage-owned runtime config needed to preserve
-recovery ordering. ES5 completes that split across all open paths and removes
-the remaining engine-side hand-written storage setter application.
+Recovery bootstrap introduced the first storage-owned runtime config needed to
+preserve recovery ordering. The storage-runtime-config cleanup completed that
+split across all open paths and removed the remaining engine-side hand-written
+storage setter application.
 
 Keep in engine:
 
@@ -592,13 +630,31 @@ Keep in engine:
 - no new config format unless explicitly required
 - no executor command redesign
 
-## ES6 - Boundary Closeout, Engine Shape, And Documentation
+### Implementation Status
+
+The storage-runtime-config cleanup is complete. Storage owns `StorageRuntimeConfig`,
+`StorageBlockCacheConfig`, effective storage-value derivation, store-local
+application to `SegmentedStore`, and process-global block-cache capacity
+application. Engine owns public `StrataConfig` / `StorageConfig`, product and
+hardware profiles, compatibility behavior, open policy, and the adapter from
+public config into storage runtime config.
+
+The old engine-side `apply_storage_config` helper and hand-written store
+setter list are gone. Public `StorageConfig::effective_*` methods remain as
+compatibility wrappers, but production engine storage setup uses
+`StorageRuntimeConfig`.
+
+## Boundary Closeout, Engine Shape, And Documentation
 
 ### Goal
 
 Close the normalization workstream, make the new boundary enforceable, and
 document engine's remaining responsibilities explicitly after lower mechanics
 move down.
+
+Detailed execution plan:
+
+- [boundary-closeout-plan.md](./boundary-closeout-plan.md)
 
 ### Scope
 
@@ -613,8 +669,8 @@ move down.
   - primitive semantics
   - branch/domain workflow
   - search/runtime behavior
-- reduce executor-owned workflow where engine should own runtime/product
-  behavior
+- record executor-owned workflow cleanup as future engine-consolidation work
+  where it would otherwise blur runtime/product ownership
 - keep storage-facing adapters narrow and explicit
 
 ### Deliverables
@@ -629,8 +685,8 @@ move down.
    - storage mechanics regressing into engine
    - direct upper-layer bypasses of engine runtime policy
 4. A final list of accepted split surfaces and why they remain split.
-5. Follow-up issues or plans for executor-owned workflows that should move
-   into engine.
+5. Follow-up notes for executor-owned workflows that may need to move into
+   engine during the later engine-consolidation phase.
 6. No reintroduction of lower-runtime mechanics into engine.
 
 ### Constraints
@@ -650,8 +706,8 @@ move down.
 - remaining cross-boundary calls are explicit and justified
 - engine can be described as orchestration and semantics, not storage
   mechanics
-- executor remains a command boundary rather than a workflow host where
-  practical
+- executor workflow cleanup is recorded as future engine-consolidation work
+  rather than treated as a storage-boundary deliverable
 - docs and code structure agree on the main engine pillars
 
 ### Non-Goals
@@ -660,6 +716,27 @@ move down.
 - no CLI presentation changes
 - no broad search redesign unless separately planned
 - no unrelated executor/CLI cleanup
+
+### Implementation Status
+
+The final documentation pass completes the closeout for the storage boundary. The full
+workstream is not complete until the final broad regression gate below is run
+and recorded. The closeout keeps the remaining seams explicit rather than
+trying to remove every engine call into storage.
+
+The accepted post-boundary closeout shape is:
+
+- storage owns generic mechanics and raw substrate facts
+- engine owns public database APIs, lifecycle/open policy, primitive and
+  branch semantics, product config, and public error/report conversion
+- storage test-observability helpers remain behind test/fault-injection gates
+  and are guarded against production engine dependence
+- block-cache capacity remains process-global storage runtime state:
+  sequential applications overwrite earlier values, while concurrent opens
+  race with no deterministic winner
+- direct upper-crate storage dependencies are current transitional workspace
+  shape and must not bypass engine for checkpoint, recovery, open, retention,
+  or database policy
 
 ## Program Verification Gates
 
@@ -717,7 +794,8 @@ Characterization gates should include, before the relevant epic changes code:
 This plan is not complete until all of the following are true at once:
 
 1. `strata-storage` owns generic persistence, transaction, durability,
-   checkpoint, snapshot, recovery, and storage-config mechanics.
+   checkpoint, snapshot file, generic decoded-row snapshot install, recovery,
+   and storage-config mechanics.
 2. `strata-engine` owns database orchestration, public APIs, primitive
    semantics, branch semantics, search/runtime behavior, and product policy.
 3. Engine database modules no longer host low-level storage recovery,

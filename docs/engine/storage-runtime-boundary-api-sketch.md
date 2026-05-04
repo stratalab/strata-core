@@ -1,12 +1,12 @@
-# ES2-ES4 Storage Runtime Boundary API Sketch
+# Storage Runtime Boundary API Sketch
 
 ## Purpose
 
-This is the `ES2A` design sketch for the storage/runtime boundary shared by:
+This is the initial design sketch for the storage/runtime boundary shared by:
 
-- `ES2` - checkpoint and WAL compaction mechanics
-- `ES3` - snapshot decode and install mechanics
-- `ES4` - recovery bootstrap mechanics
+- `checkpoint/WAL cleanup` - checkpoint and WAL compaction mechanics
+- `snapshot-install cleanup` - snapshot decode and install mechanics
+- `recovery-bootstrap cleanup` - recovery bootstrap mechanics
 
 The code moves are sequential, but the APIs are coupled:
 
@@ -16,15 +16,15 @@ The code moves are sequential, but the APIs are coupled:
 - recovery composes MANIFEST preparation, snapshot install, WAL replay, and
   segmented-store bootstrap
 
-This sketch defines the intended type families before ES2 moves checkpoint
-mechanics down into storage.
+This sketch defines the intended type families before the checkpoint/WAL cleanup
+moves checkpoint mechanics down into storage.
 
 Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
-- [es2-checkpoint-wal-compaction-mechanics-plan.md](./es2-checkpoint-wal-compaction-mechanics-plan.md)
-- [es4-recovery-bootstrap-mechanics-plan.md](./es4-recovery-bootstrap-mechanics-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
+- [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
+- [recovery-bootstrap-mechanics-plan.md](./recovery-bootstrap-mechanics-plan.md)
 
 ## Boundary Decision
 
@@ -32,8 +32,8 @@ Use storage-owned runtime APIs around `DatabaseLayout`.
 
 Do not pass ad-hoc `data_dir.join(...)` paths across the boundary. Storage
 already owns `strata_storage::durability::DatabaseLayout`, and recovery already
-uses it. ES2 should extend checkpoint and compaction to use the same layout
-vocabulary.
+uses it. The checkpoint/WAL cleanup should extend checkpoint and compaction to
+use the same layout vocabulary.
 
 Engine remains the public API and policy owner:
 
@@ -60,20 +60,21 @@ those facts into public database behavior.
 
 ## Coordinator Decision
 
-`TransactionCoordinator` stays engine-owned for ES4.
+`TransactionCoordinator` stays engine-owned for recovery bootstrap.
 
 This is the least invasive split and matches the intended architecture:
 storage recovers durable substrate state, while engine owns transaction-facing
 runtime orchestration and public database semantics.
 
-ES4 should therefore not make storage call into engine per replayed record to
-update coordinator state. Storage should replay WAL records directly into
+Recovery bootstrap should therefore not make storage call into engine per
+replayed record to update coordinator state. Storage should replay WAL records directly into
 `SegmentedStore` using storage-owned mechanics, then return `RecoveryStats`
 and `RecoveredState`. Engine then constructs or updates
 `TransactionCoordinator` from those raw facts.
 
 If later work wants to move `TransactionCoordinator`, that should be a
-separate coordinator ownership plan, not an incidental ES4 side effect.
+separate coordinator ownership plan, not an incidental recovery-bootstrap side
+effect.
 
 ## Shared Layout And Manifest Helpers
 
@@ -89,8 +90,9 @@ StorageRuntimeConfig
 CheckpointData
 ```
 
-ES2C should introduce only the manifest helpers needed for checkpoint and WAL
-compaction, but the helper shape should be reusable by ES4.
+The checkpoint/WAL cleanup should introduce only the manifest helpers needed
+for checkpoint and WAL compaction, but the helper shape should be reusable by
+recovery bootstrap.
 
 Candidate internal storage helpers:
 
@@ -112,7 +114,7 @@ These helpers should not decide:
 
 Those remain engine decisions.
 
-## ES2 Checkpoint Boundary
+## Checkpoint Boundary
 
 Candidate module:
 
@@ -134,7 +136,7 @@ StorageCheckpointInput {
 }
 ```
 
-`checkpoint_data` is supplied by engine. ES2 should not move
+`checkpoint_data` is supplied by engine. checkpoint/WAL cleanup should not move
 `Database::collect_checkpoint_data()` wholesale because that function contains
 primitive materialization rules:
 
@@ -160,7 +162,7 @@ StorageCheckpointOutcome {
 The outcome is deliberately raw. Engine logs the database-level message and
 maps storage errors into `StrataError`.
 
-ES2D split snapshot pruning out of the checkpoint outcome. Storage owns the
+Phase D split snapshot pruning out of the checkpoint outcome. Storage owns the
 raw pruning helper and retention minimum, while engine keeps the lifecycle and
 configuration adapter. `Database::checkpoint()` runs pruning after the
 checkpoint and MANIFEST update, preserving the existing non-fatal warning
@@ -168,11 +170,11 @@ behavior for pruning failure.
 
 `manifest_create_codec_id` is explicit because current
 `Database::load_or_create_manifest()` writes `"identity"` when it creates a
-missing MANIFEST in the checkpoint/compact path. ES2C must either preserve
+missing MANIFEST in the checkpoint/compact path. Phase C must either preserve
 that behavior or call out an intentional behavior change with compatibility
 tests before passing the configured checkpoint codec id instead.
 
-## ES2 WAL Compaction Boundary
+## WAL Compaction Boundary
 
 Candidate input:
 
@@ -195,13 +197,13 @@ zero-override fallback.
 
 `database_uuid` and `manifest_create_codec_id` are explicit because current
 `Database::compact()` can create a missing MANIFEST before returning the
-no-checkpoint error. ES2F should preserve that behavior unless it deliberately
+no-checkpoint error. Phase F should preserve that behavior unless it deliberately
 changes the missing-MANIFEST compatibility contract.
 
-ES2G also uses a small `StorageManifestSyncInput` for shutdown-time MANIFEST
+The checkpoint/WAL cleanup also uses a small `StorageManifestSyncInput` for shutdown-time MANIFEST
 fsync. That boundary is intentionally limited to generic MANIFEST
 load/create/active-segment/persist mechanics. Engine still owns shutdown
-sequencing and ES4 still owns recovery/open MANIFEST policy.
+sequencing and recovery bootstrap still owns recovery/open MANIFEST policy.
 
 Candidate output:
 
@@ -216,7 +218,7 @@ StorageWalCompactionOutcome {
 `snapshot_watermark` mirrors `CompactInfo::snapshot_watermark`, the raw
 retention fact currently produced by `WalOnlyCompactor`. It is useful for
 tests and diagnostics, but engine should not turn it into an operator report
-in ES2.
+in checkpoint/WAL cleanup.
 
 Storage should preserve `CompactionError::NoSnapshot` or an equivalent
 storage-local variant. Engine continues mapping that case to the existing
@@ -226,7 +228,7 @@ public invalid-input message:
 No checkpoint exists yet. Run checkpoint() before compact().
 ```
 
-## ES3 Snapshot Install Boundary
+## snapshot-install cleanup Snapshot Install Boundary
 
 Candidate module:
 
@@ -279,10 +281,10 @@ Storage must not learn:
 - graph query semantics
 
 Engine remains responsible for converting a loaded snapshot into this generic
-storage-row plan. The ES3 engine wrapper should become the function ES4
+storage-row plan. The snapshot-install cleanup engine wrapper should become the function recovery-bootstrap cleanup
 recovery calls when the `RecoveryCoordinator` supplies a loaded snapshot.
 
-## ES4 Recovery Boundary
+## recovery-bootstrap cleanup Recovery Boundary
 
 Candidate module:
 
@@ -312,7 +314,7 @@ RecoverySnapshotInstallCallback {
 }
 ```
 
-The ES4 implementation plan refines this callback to pass the resolved
+The recovery-bootstrap cleanup implementation plan refines this callback to pass the resolved
 snapshot install codec as well. That keeps MANIFEST/codec resolution in
 storage while letting engine continue to own primitive snapshot decode.
 
@@ -365,7 +367,7 @@ StorageLossyWalReplayFacts {
 
 Engine decides whether to request lossy WAL replay from config. Storage may
 perform the mechanical wipe only after engine opts in via
-`allow_lossy_wal_replay: true`. The ES4F implementation keeps that opt-in
+`allow_lossy_wal_replay: true`. The recovery-bootstrap implementation keeps that opt-in
 inside the opaque storage replay object so engine cannot pass a mismatched
 policy flag, replay result, or pre-failure applied-record count into the lossy
 outcome helper. Engine still owns `LossyRecoveryReport` wording and public
@@ -393,7 +395,7 @@ wal_replay.final_version = max(wal_replay.final_version, CommitVersion(storage.v
 
 The current `RecoveryCoordinator` does not fold snapshot-installed entry
 versions into `RecoveryStats`; the current engine does that before
-`TransactionCoordinator` bootstrap. ES4 must preserve that behavior.
+`TransactionCoordinator` bootstrap. Recovery bootstrap must preserve that behavior.
 
 Storage recovery must also preserve the current ordering around storage
 configuration:
@@ -406,14 +408,14 @@ recover_segments()
 return StorageRecoveryOutcome
 ```
 
-Until ES5 completes the public config split, engine builds
+Until the storage-runtime-config cleanup completes the public config split, engine builds
 `StorageRuntimeConfig` from `StrataConfig.storage` and passes it down. This
-does not move public config ownership into storage; it only prevents ES4 from
-running `recover_segments()` with default storage knobs.
+does not move public config ownership into storage; it only prevents recovery
+bootstrap from running `recover_segments()` with default storage knobs.
 
-## ES4 Engine Wrapper Shape
+## Recovery Bootstrap Engine Wrapper Shape
 
-After ES4, `Database::run_recovery()` should remain the engine entry point.
+After recovery bootstrap, `Database::run_recovery()` should remain the engine entry point.
 It should do roughly:
 
 ```text
@@ -442,7 +444,7 @@ StorageCheckpointOutcome
     -> recovery uses MANIFEST snapshot_id/watermark to install snapshot and skip WAL
 
 StorageDecodedSnapshotInstallStats
-    -> returned by storage decoded-row install in ES3
+    -> returned by storage decoded-row install in snapshot-install cleanup
     -> may be observed inside the engine snapshot callback
     -> is not embedded in StorageRecoveryOutcome because storage recovery does
        not own primitive decode or primitive install telemetry
@@ -500,9 +502,9 @@ major boundary decisions above.
 
 Deferred details:
 
-- whether ES2 stores `checkpoint_codec` by object or codec id
+- whether checkpoint/WAL cleanup stores `checkpoint_codec` by object or codec id
 - whether pruning stats include bytes
-- whether ES4 recovery returns `StorageRecoveryOutcome.storage` by value or
+- whether recovery bootstrap returns `StorageRecoveryOutcome.storage` by value or
   through a smaller recovered-store wrapper
 - whether manifest helpers are public within `durability` or private to the
   checkpoint/recovery modules
@@ -510,29 +512,29 @@ Deferred details:
 Not deferred:
 
 - use `DatabaseLayout` rather than ad-hoc paths
-- keep `TransactionCoordinator` in engine for ES4
+- keep `TransactionCoordinator` in engine for recovery bootstrap
 - keep primitive checkpoint materialization out of storage
 - preserve snapshot-version folding before coordinator bootstrap
 - preserve storage-config-before-`recover_segments()` ordering
 - preserve lossy hard-fail bypass behavior
 - keep engine policy and public error/report conversion out of storage
 
-## ES2A Acceptance
+## Phase A Acceptance
 
-ES2A is complete when:
+Phase A is complete when:
 
-1. This sketch exists and is linked from the ES2 plan.
-2. ES2 checkpoint and WAL compaction APIs are sketched using
+1. This sketch exists and is linked from the checkpoint/WAL cleanup plan.
+2. Checkpoint and WAL compaction APIs are sketched using
    `DatabaseLayout`.
-3. ES3 snapshot install stats are sketched as physical storage counters.
-4. ES4 recovery outcome is sketched without `TransactionCoordinator`.
+3. Snapshot install stats are sketched as physical storage counters.
+4. Recovery bootstrap outcome is sketched without `TransactionCoordinator`.
 5. The coordinator ownership decision is explicit.
 6. The sketch explains how checkpoint, snapshot install, and recovery
    outcomes compose.
-7. ES4 recovery invariants are explicit:
+7. Recovery bootstrap invariants are explicit:
    - snapshot-version fold before coordinator bootstrap
    - storage config before `recover_segments()`
    - lossy hard-fail bypass preservation
-8. ES2 checkpoint edge cases are explicit:
+8. checkpoint/WAL cleanup checkpoint edge cases are explicit:
    - missing-MANIFEST codec id behavior cannot change silently
    - pruning failure remains nonfatal to checkpoint success

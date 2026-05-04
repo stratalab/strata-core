@@ -1,16 +1,16 @@
-# ES3 Snapshot Install Boundary Plan
+# snapshot-install cleanup Snapshot Install Boundary Plan
 
 ## Purpose
 
-`ES3` is the second runtime cleanup epic in the engine/storage boundary
+`snapshot-install cleanup` is the second runtime cleanup epic in the engine/storage boundary
 normalization workstream.
 
-The original ES3 direction was too broad: it would have moved primitive
+The original snapshot-install cleanup direction was too broad: it would have moved primitive
 snapshot section decode into `strata-storage`. That creates the inverse of the
 current problem. Instead of engine owning storage mechanics, storage would
 start owning engine primitive concerns.
 
-This revised ES3 keeps the ownership rule strict:
+This revised snapshot-install cleanup keeps the ownership rule strict:
 
 ```text
 storage owns durable row mechanics
@@ -24,9 +24,9 @@ in engine.
 Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
-- [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
-- [es2-checkpoint-wal-compaction-mechanics-plan.md](./es2-checkpoint-wal-compaction-mechanics-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
+- [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
 - [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
 - [../storage/storage-charter.md](../storage/storage-charter.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
@@ -64,13 +64,13 @@ Storage must not know:
   guidance
 
 `TypeTag` is an existing storage family identifier with primitive-shaped
-variant names. ES3 should not expand that leak. Storage install code may carry
+variant names. snapshot-install cleanup should not expand that leak. Storage install code may carry
 `TypeTag` as an opaque routing value because `SegmentedStore` already uses it,
 but it should not branch on primitive-specific variants for snapshot install
 statistics or behavior. A later cleanup can consider replacing this with an
 opaque storage family id.
 
-## ES3 Verdict
+## snapshot-install cleanup Verdict
 
 The following should remain in `strata-engine`:
 
@@ -105,20 +105,20 @@ into generic storage rows. Storage only installs those rows.
 
 ## Existing Code Map
 
-The ES3 target surface is concentrated in:
+The snapshot-install cleanup target surface is concentrated in:
 
 - [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
 - [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
 - `SegmentedStore::install_snapshot_entries`
 
 Existing storage format modules already define snapshot DTOs and primitive tag
-constants. ES3 does not need to erase that existing format ownership. The line
+constants. snapshot-install cleanup does not need to erase that existing format ownership. The line
 is runtime behavior: storage should not gain a runtime snapshot installer that
 decodes or interprets those primitive sections.
 
 ## Target Shape
 
-Engine should continue to expose its current recovery-facing helper while ES3
+Engine should continue to expose its current recovery-facing helper while snapshot-install cleanup
 is in progress:
 
 ```text
@@ -189,7 +189,7 @@ Ownership:
 - `SnapshotReader` remains responsible for snapshot header codec validation
   before engine receives `LoadedSnapshot`.
 
-ES3 must add characterization for non-identity snapshot files so this contract
+snapshot-install cleanup must add characterization for non-identity snapshot files so this contract
 does not regress.
 
 ## Partial Mutation Contract
@@ -278,7 +278,7 @@ mention engine policy.
 
 ## Explicit Behavior Changes
 
-ES3 is primarily a boundary cleanup, but two strictness changes intentionally
+snapshot-install cleanup is primarily a boundary cleanup, but two strictness changes intentionally
 land with it because they close recovery/snapshot correctness gaps exposed by
 the new characterization:
 
@@ -298,9 +298,9 @@ allocations. That is defensive implementation detail, not a new boundary owner.
 
 ## Implementation Plan
 
-ES3 restarts from `ES3A`. Each phase is a straight lettered slice.
+snapshot-install cleanup restarts from `Phase A`. Each phase is a straight lettered slice.
 
-### ES3A Snapshot Install Characterization Rebaseline
+### Phase A Snapshot Install Characterization Rebaseline
 
 Restore the pre-move crate state and pin current behavior in engine before any
 new extraction.
@@ -332,11 +332,11 @@ Coverage should include:
 - invalid later section does not partially install earlier valid sections
 - invalid KV type tag does not partially install earlier valid KV rows
 
-ES3A should not move code into storage. It should make the existing behavior
+Phase A should not move code into storage. It should make the existing behavior
 and the desired no-partial-mutation behavior explicit.
 
-Because the pre-ES3A engine installer decoded and mutated section-by-section,
-some ES3A characterization targets cannot be made true with tests alone. ES3A
+Because the pre-Phase A engine installer decoded and mutated section-by-section,
+some Phase A characterization targets cannot be made true with tests alone. Phase A
 may therefore include engine-local fixes that do not move code across the
 storage boundary:
 
@@ -344,10 +344,10 @@ storage boundary:
 - validate KV-section `TypeTag` bytes before mutation
 - keep primitive section decode on the canonical checkpoint section codec
 
-If those fixes land during ES3A, the later ES3C and ES3D phases should be
+If those fixes land during Phase A, the later Phase C and Phase D phases should be
 treated as phase-accounting checkpoints rather than reimplemented work.
 
-### ES3B Generic Storage Row Install Surface
+### Phase B Generic Storage Row Install Surface
 
 Add a storage-owned helper that installs already-decoded generic row groups.
 
@@ -369,16 +369,16 @@ Forbidden storage inputs:
 Storage tests should use synthetic decoded row groups. They should not build
 snapshot primitive sections.
 
-ES3B is complete when storage can install generic decoded row groups without
+Phase B is complete when storage can install generic decoded row groups without
 knowing which primitive produced them.
 
-### ES3C Engine Decode Plan Extraction
+### Phase C Engine Decode Plan Extraction
 
 Refactor engine `database::snapshot_install` into a decode-then-install flow.
 
-If ES3A already introduced this engine-local decode plan to satisfy
-no-partial-mutation characterization, ES3C should verify and preserve that
-shape while integrating the storage generic row install surface from ES3B.
+If Phase A already introduced this engine-local decode plan to satisfy
+no-partial-mutation characterization, Phase C should verify and preserve that
+shape while integrating the storage generic row install surface from Phase B.
 
 Engine should:
 
@@ -394,13 +394,13 @@ Engine should:
 This phase should fix partial mutation from corrupt snapshots by ensuring the
 full plan is built before calling the storage helper.
 
-### ES3D Canonical Section Codec Fix
+### Phase D Canonical Section Codec Fix
 
 Make the engine decode plan use the canonical primitive-section codec used by
 checkpoint construction, not the snapshot header codec id.
 
-If ES3A already made this codec separation explicit, ES3D should retain the
-coverage and ensure the new ES3B storage install surface does not reintroduce
+If Phase A already made this codec separation explicit, Phase D should retain the
+coverage and ensure the new Phase B storage install surface does not reintroduce
 snapshot header codec use for primitive section payloads.
 
 Add or keep tests proving:
@@ -411,10 +411,10 @@ Add or keep tests proving:
   section codec
 - checkpoint + compact + reopen restores rows from the snapshot-only path
 
-If this fix naturally lands with ES3C, the PR should still call it out as the
-ES3D acceptance item.
+If this fix naturally lands with Phase C, the PR should still call it out as the
+Phase D acceptance item.
 
-### ES3E Recovery Wrapper Integration
+### Phase E Recovery Wrapper Integration
 
 Wire the engine snapshot install helper to call the generic storage row install
 surface after engine decode succeeds.
@@ -432,7 +432,7 @@ Storage keeps:
 
 - decoded row group install mechanics only
 
-### ES3F Residue Cleanup And Guards
+### Phase F Residue Cleanup And Guards
 
 Clean up duplicate code and document intentional residue.
 
@@ -443,9 +443,9 @@ Expected result:
 - no storage snapshot install module imports `SnapshotSerializer`
 - no storage snapshot install module imports `primitive_tags`
 - no storage snapshot install module imports primitive snapshot DTOs
-- engine recovery/open MANIFEST policy remains until ES4
+- engine recovery/open MANIFEST policy remains until recovery-bootstrap cleanup
 
-Intentional ES3 residue after cleanup:
+Intentional snapshot-install cleanup residue after cleanup:
 
 - `crates/engine/src/database/snapshot_install.rs` keeps
   `SnapshotSerializer`, `primitive_tags`, primitive snapshot DTO decode, and
@@ -461,9 +461,9 @@ Intentional ES3 residue after cleanup:
   is not runtime install ownership.
 - The strict trailing-data checks and count-preallocation removal in the
   snapshot format/container modules are intentional format-hardening residue
-  bundled with ES3. They do not move primitive install semantics into storage.
+  bundled with snapshot-install cleanup. They do not move primitive install semantics into storage.
 - `RecoveryCoordinator`, MANIFEST/open policy, and recovery outcome mapping
-  remain engine/recovery residue for ES4.
+  remain engine/recovery residue for recovery-bootstrap cleanup.
 
 ## Guardrails
 
@@ -483,7 +483,7 @@ Interpretation:
 - Generic install modules must not use those DTOs or tags. The `*install*.rs`
   guard is intentionally broader than the current
   `decoded_snapshot_install.rs` file so a future storage install module cannot
-  bypass the ES3 boundary by choosing a new filename.
+  bypass the snapshot-install cleanup boundary by choosing a new filename.
 - Any new match in storage outside established format/container code needs an
   explicit boundary justification.
 - A broad search over all `crates/storage/src/durability` is still useful as an
@@ -497,7 +497,7 @@ rg -n 'RecoveryCoordinator|ManifestManager|apply_storage_config' crates/engine/s
 ```
 
 `RecoveryCoordinator`, `ManifestManager`, and open/recovery policy residue are
-not ES3 cleanup targets. They belong to ES4.
+not snapshot-install cleanup targets. They belong to recovery-bootstrap cleanup.
 
 ## Verification Gates
 
@@ -531,7 +531,7 @@ cargo test -p strata-engine --lib test_issue_1730 -- --nocapture
 
 ## Acceptance Checklist
 
-ES3A is complete when:
+Phase A is complete when:
 
 1. Crate code is back to the pre-move boundary.
 2. Engine snapshot install characterization covers current primitive decode
@@ -541,33 +541,33 @@ ES3A is complete when:
 4. Tests cover no partial mutation for decode/validation failures that happen
    before storage install.
 
-ES3B is complete when:
+Phase B is complete when:
 
 1. Storage exposes only a generic decoded row install surface.
 2. Storage install stats are generic.
 3. Storage install errors are storage-local and primitive-agnostic.
 4. Storage tests use synthetic decoded row groups, not primitive snapshot DTOs.
 
-ES3C is complete when:
+Phase C is complete when:
 
 1. Engine builds a complete decoded row install plan before storage mutation.
 2. Engine retains primitive section decode and primitive-specific stats.
 3. Invalid primitive data fails before any storage write.
 
-ES3D is complete when:
+Phase D is complete when:
 
 1. Primitive section decode uses the canonical section codec.
 2. Snapshot header codec validation remains separate.
 3. Non-identity checkpoint + compact + reopen coverage is green.
 
-ES3E is complete when:
+Phase E is complete when:
 
 1. Engine calls the storage generic row install helper only after successful
    primitive decode.
 2. Recovery callback policy remains engine-owned.
 3. Public error behavior is preserved.
 
-ES3F is complete when:
+Phase F is complete when:
 
 1. Storage has no new primitive runtime install concerns.
 2. Engine decode residue is intentional and documented.
@@ -575,7 +575,7 @@ ES3F is complete when:
 
 ## Non-Goals
 
-ES3 does not move:
+snapshot-install cleanup does not move:
 
 - `RecoveryCoordinator`
 - MANIFEST/open policy
@@ -585,4 +585,4 @@ ES3 does not move:
 - branch lifecycle behavior
 - vector/search/graph semantics
 
-Those are either engine responsibilities or later ES4-plus decisions.
+Those are either engine responsibilities or later recovery-bootstrap cleanup-plus decisions.

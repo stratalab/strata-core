@@ -1,17 +1,17 @@
-# ES5 Storage Config Application Plan
+# Storage Config Application Plan
 
 ## Purpose
 
-`ES5` is the storage-configuration application epic in the engine/storage
+`storage-runtime-config cleanup` is the storage-configuration application epic in the engine/storage
 boundary normalization workstream.
 
-`ES2` moved checkpoint, WAL compaction, snapshot pruning, and generic MANIFEST
-sync mechanics toward storage. `ES3` moved generic decoded-row snapshot install
-mechanics into storage while keeping primitive snapshot decode in engine. `ES4`
+`checkpoint/WAL cleanup` moved checkpoint, WAL compaction, snapshot pruning, and generic MANIFEST
+sync mechanics toward storage. `snapshot-install cleanup` moved generic decoded-row snapshot install
+mechanics into storage while keeping primitive snapshot decode in engine. `recovery-bootstrap cleanup`
 moved recovery bootstrap mechanics into storage and introduced the first
 storage-owned `StorageRuntimeConfig` needed by recovery.
 
-`ES5` completes that configuration boundary across the remaining open paths.
+`storage-runtime-config cleanup` completes that configuration boundary across the remaining open paths.
 The goal is not to redesign public configuration. The goal is to stop
 `strata-engine` from hand-applying storage setter lists and deriving
 storage-local effective values while keeping engine in charge of public config
@@ -20,9 +20,9 @@ files, product profiles, compatibility behavior, and database open policy.
 Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
-- [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
-- [es4-recovery-bootstrap-mechanics-plan.md](./es4-recovery-bootstrap-mechanics-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
+- [recovery-bootstrap-mechanics-plan.md](./recovery-bootstrap-mechanics-plan.md)
 - [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
 - [../storage/storage-charter.md](../storage/storage-charter.md)
 
@@ -52,10 +52,10 @@ Storage must not know:
 - engine compatibility signatures
 - `TransactionCoordinator`
 - primitive snapshot section meaning
-- primary/follower database open policy except where ES4 already requires a
+- primary/follower database open policy except where recovery-bootstrap cleanup already requires a
   storage-neutral recovery mode
 
-The ES5 target is:
+The storage-runtime-config cleanup target is:
 
 ```text
 engine adapts public config into storage runtime config
@@ -64,7 +64,7 @@ storage derives and applies storage runtime mechanics
 
 ## Starting State
 
-The important asymmetry after ES4 was:
+The important asymmetry after recovery-bootstrap cleanup was:
 
 - disk recovery already passes a storage-owned `StorageRuntimeConfig` into
   `run_storage_recovery`
@@ -91,14 +91,14 @@ ephemeral/cache open:
     -> engine apply_storage_config -> SegmentedStore setters
 ```
 
-ES5 makes those paths converge.
+storage-runtime-config cleanup makes those paths converge.
 
 ## Non-Negotiables
 
 `StrataConfig` remains engine-owned.
 
 The public config format remains stable unless a later PR explicitly adds a
-compatibility migration. ES5 should not force users to edit existing
+compatibility migration. storage-runtime-config cleanup should not force users to edit existing
 `strata.toml` files.
 
 Storage must not depend on engine.
@@ -107,15 +107,15 @@ Storage must not learn product profiles. Hardware-profile adjustment may still
 mutate engine `StrataConfig` before adaptation; storage should receive a
 storage-shaped runtime input after that product decision has been made.
 
-`TransactionCoordinator` write-buffer-entry limits stay engine-owned for ES5.
+`TransactionCoordinator` write-buffer-entry limits stay engine-owned for storage-runtime-config cleanup.
 `max_write_buffer_entries` limits transaction coordinator behavior, not
 `SegmentedStore` mechanics.
 
-Ephemeral/cache databases remain truly in-memory. ES5 must not introduce a
+Ephemeral/cache databases remain truly in-memory. storage-runtime-config cleanup must not introduce a
 persistent cache mode or any terminology that implies one exists.
 
-WAL flush-thread lifecycle stays engine-owned unless a later ES5 step
-explicitly designs a smaller storage-owned worker surface. The first ES5 pass
+WAL flush-thread lifecycle stays engine-owned unless a later storage-runtime-config cleanup step
+explicitly designs a smaller storage-owned worker surface. The first storage-runtime-config cleanup pass
 should not move shutdown latches, WAL writer health, accepting-transaction
 halts, or database lifecycle callbacks into storage.
 
@@ -175,7 +175,7 @@ those fields into storage.
 
 ## Config Classification
 
-| Public config surface | ES5 target |
+| Public config surface | storage-runtime-config cleanup target |
 |---|---|
 | `StorageConfig::memory_budget` | Engine-owned public field; storage-owned derivation into block cache, write buffer, and immutable memtable count. |
 | `StorageConfig::max_branches` | Engine-owned public field; storage-owned storage of the advisory branch-limit value. Branch-creation enforcement remains unchanged. |
@@ -197,7 +197,7 @@ those fields into storage.
 | `StrataConfig::durability_mode` | Split; engine owns public string compatibility, storage owns WAL durability mechanics. |
 | `SnapshotRetentionPolicy` | Split; engine owns public retention policy, storage owns snapshot prune mechanics. |
 
-## ES5A - Inventory and Characterization
+## Phase A - Inventory and Characterization
 
 Create a focused inventory of every storage config application path.
 
@@ -226,37 +226,37 @@ Expected characterization:
 - compaction-related setters still land on `SegmentedStore`
 - configured codec validation behavior remains unchanged
 - block-cache global capacity is mapped and deferred from order-dependent
-  assertions until ES5F because it is process-wide state
+  assertions until Phase F because it is process-wide state
 
 Acceptance:
 
-- the ES5 plan has a concrete field-by-field map against the current code
+- the storage-runtime-config cleanup plan has a concrete field-by-field map against the current code
 - characterization fails if persistent and ephemeral/cache paths diverge for
   characterized common knobs
 - known path divergence is captured as an explicit characterization test and
   follow-up gap
 - no behavior movement happens before the current behavior is observable
 
-### ES5A Current Inventory
+### Phase A Current Inventory
 
-As of ES5A, the live storage-configuration application surfaces are:
+As of Phase A, the live storage-configuration application surfaces are:
 
-| Surface | Current owner | Current call sites | ES5 disposition |
+| Surface | Current owner | Current call sites | storage-runtime-config cleanup disposition |
 |---|---|---|---|
 | `StorageConfig::effective_block_cache_size` | Engine | `database/open.rs` persistent open, `database/open.rs` cache open, `database/mod.rs` runtime `update_config`, config tests | Move the derivation into storage runtime config; keep public input in engine. |
 | `StorageConfig::effective_write_buffer_size` | Engine | `database/recovery.rs` recovery input, `database/mod.rs` runtime `update_config`, `database/transaction.rs` write-pressure checks, config tests | Move storage derivation into storage runtime config; keep transaction-pressure policy explicit in engine until redesigned. |
 | `StorageConfig::effective_max_immutable_memtables` | Engine | `database/recovery.rs` runtime config adapter, `database/open.rs` cache open, `database/mod.rs` runtime `update_config`, `database/transaction.rs` write-pressure checks, config tests | Move storage derivation into storage runtime config; keep transaction-pressure policy explicit in engine until redesigned. |
 | `database/open.rs::apply_storage_config` | Engine | Cache/ephemeral store construction | Replace with storage-owned runtime config application. |
 | `database/mod.rs::apply_storage_config_inner` | Engine | Runtime `Database::update_config` path | Replace storage setter portion with storage-owned runtime config application; leave coordinator write-entry limit in engine. |
-| `durability/recovery_bootstrap.rs::apply_storage_runtime_config` | Storage | ES4 recovery bootstrap | Promote out of recovery bootstrap and make it the common storage apply helper. |
+| `durability/recovery_bootstrap.rs::apply_storage_runtime_config` | Storage | recovery-bootstrap work | Promote out of recovery bootstrap and make it the common storage apply helper. |
 | Direct `SegmentedStore::set_*` storage-knob calls in engine | Engine | `database/open.rs`, `database/mod.rs` | Remove or route through storage runtime config. |
 | `SegmentedStore::set_snapshot_floor` | Engine | `database/transaction.rs` before compaction | Intentional engine exception; snapshot floor is engine MVCC policy, not static config application. |
 | Block-cache global capacity | Mixed | `database/open.rs` persistent open, `database/open.rs` cache open, `database/mod.rs` runtime `update_config` | Move capacity selection/application into storage runtime config; engine keeps product profile mutation and operator-facing logging. |
-| `WalConfig::default()` for primary WAL writer | Engine call site, storage type | `database/open.rs` | Audit in ES5G; do not move WAL lifecycle in the first ES5 pass. |
+| `WalConfig::default()` for primary WAL writer | Engine call site, storage type | `database/open.rs` | Audit in Phase G; do not move WAL lifecycle in the first storage-runtime-config cleanup pass. |
 | `StrataConfig::durability_mode` | Engine public parser | config validation, primary/follower/cache open, runtime durability changes | Split later only if storage gets a lower runtime durability adapter; public string compatibility stays engine-owned. |
-| `StorageConfig::l0_*` and `write_stall_timeout_ms` | Engine | `database/transaction.rs` write-stall policy | Stay engine for ES5 unless a later storage backpressure design moves the mechanism. |
+| `StorageConfig::l0_*` and `write_stall_timeout_ms` | Engine | `database/transaction.rs` write-stall policy | Stay engine for storage-runtime-config cleanup unless a later storage backpressure design moves the mechanism. |
 
-ES5A characterization added/extended:
+Phase A characterization added/extended:
 
 - persistent open applies observable store runtime knobs, including write
   buffer, branch/version limits, immutable-memtable limits, compaction rate
@@ -271,13 +271,13 @@ ES5A characterization added/extended:
 - recovery runtime config now characterizes the full storage runtime setter set
   that is safely inspectable from engine tests
 
-Known ES5 follow-up gaps:
+Known storage-runtime-config cleanup follow-up gaps:
 
 - block-cache global capacity remains a shared process-wide side effect, so
   tests should avoid order-dependent assertions until storage owns an explicit
   runtime helper for it
 
-## ES5B - Promote StorageRuntimeConfig
+## Phase B - Promote StorageRuntimeConfig
 
 Move `StorageRuntimeConfig` out of the recovery bootstrap module into a stable
 storage runtime config module.
@@ -303,7 +303,7 @@ Deliverables:
   `durability/recovery_bootstrap.rs`
 - re-export the type from an intentional storage module path
 - keep `#[non_exhaustive]` on public config structs/enums
-- preserve the ES4 recovery API behavior
+- preserve the recovery-bootstrap API behavior
 - update docs and imports so recovery bootstrap is a consumer, not the owner
 
 Acceptance:
@@ -313,9 +313,9 @@ Acceptance:
 - engine still adapts from public `StorageConfig`
 - no storage dependency on engine appears
 
-### ES5B Current State
+### Phase B Current State
 
-As of ES5B:
+As of Phase B:
 
 - `StorageRuntimeConfig` lives in `crates/storage/src/runtime_config.rs`
 - storage re-exports `StorageRuntimeConfig` from the crate root and from
@@ -331,7 +331,7 @@ As of ES5B:
 - recovery bootstrap tests only recovery input construction and recovery-time
   application behavior
 
-## ES5C - Move Effective Storage Values Into Storage
+## Phase C - Move Effective Storage Values Into Storage
 
 Move the storage meaning of memory-budget derivation into the storage runtime
 config builder.
@@ -358,9 +358,9 @@ Acceptance:
 - engine no longer needs to know the memory-budget derivation formula in open
   and recovery code
 
-### ES5C Current State
+### Phase C Current State
 
-As of ES5C:
+As of Phase C:
 
 - `StorageRuntimeConfig::builder()` accepts raw storage-facing fields plus
   `memory_budget`
@@ -376,17 +376,17 @@ As of ES5C:
 - persistent and follower open resolve block-cache capacity through
   `StorageRuntimeConfig`
 - cache/ephemeral open applies `StorageRuntimeConfig` directly to the new
-  `SegmentedStore`, fixing the ES5A write-buffer first-open gap
+  `SegmentedStore`, fixing the Phase A write-buffer first-open gap
 - runtime `update_config` applies `StorageRuntimeConfig` directly and resolves
   block-cache capacity through it
 - engine write-pressure checks use `StorageRuntimeConfig` for the effective
   write-buffer and immutable-memtable values while retaining engine-owned
   transaction pressure policy
 
-## ES5D - Centralize Store Application In Storage
+## Phase D - Centralize Store Application In Storage
 
 Close out the remaining store-application cleanup around the storage-owned
-application helper introduced in ES5B and used by ES5C.
+application helper introduced in Phase B and used by Phase C.
 
 Existing target API shape:
 
@@ -412,9 +412,9 @@ Acceptance:
   as engine-owned exceptions
 - recovery and ephemeral/cache open apply the same runtime config mechanics
 
-### ES5D Current State
+### Phase D Current State
 
-As of ES5D:
+As of Phase D:
 
 - `StorageRuntimeConfig::apply_to_store` is the storage-owned application point
   for static `SegmentedStore` runtime knobs
@@ -429,10 +429,10 @@ As of ES5D:
     compaction
   - follower open calls `set_version` only when restoring validated persisted
     follower state, paired with coordinator visible-version restore
-- block-cache global application remains intentionally out of ES5D and is
-  handled by ES5F
+- block-cache global application remains intentionally out of Phase D and is
+  handled by Phase F
 
-## ES5E - Route All Open Paths Through Runtime Config
+## Phase E - Route All Open Paths Through Runtime Config
 
 Make persistent open and ephemeral/cache open share one adapter from public
 engine config to storage runtime config.
@@ -456,9 +456,9 @@ Acceptance:
 - no open path recomputes storage effective values by hand
 - no new disk behavior is introduced for ephemeral/cache databases
 
-### ES5E Current State
+### Phase E Current State
 
-As of ES5E:
+As of Phase E:
 
 - `database/config.rs::storage_runtime_config_from` is the single engine-local
   adapter from public `StorageConfig` to storage-owned `StorageRuntimeConfig`
@@ -475,7 +475,7 @@ As of ES5E:
   `StorageRuntimeConfig::apply_global_runtime`
 - engine open code no longer calls `strata_storage::block_cache::set_global_capacity`
   directly outside tests
-- ES5E includes a serial characterization for default cache open so
+- Phase E includes a serial characterization for default cache open so
   `block_cache_size == 0` no longer silently inherits stale process-wide
   capacity; explicit profile-derived values are asserted exactly, while
   host-dependent auto-detect mode is asserted as a positive non-stale capacity
@@ -483,7 +483,7 @@ As of ES5E:
   pairs `StrataConfig` with the `StorageRuntimeConfig` derived from the same
   public storage config, preventing future call-site drift
 
-## ES5F - Block Cache Boundary
+## Phase F - Block Cache Boundary
 
 Normalize block-cache configuration as storage runtime mechanics.
 
@@ -508,9 +508,9 @@ Acceptance:
 - `block_cache_size > 0` with `memory_budget == 0` still behaves the same
 - `block_cache_size == 0` with no memory budget still uses storage auto-detect
 
-### ES5F Current State
+### Phase F Current State
 
-As of ES5F:
+As of Phase F:
 
 - storage runtime config represents block-cache sizing as
   `StorageBlockCacheConfig::{Auto, Bytes(usize)}` instead of carrying the public
@@ -530,7 +530,7 @@ As of ES5F:
   `StorageRuntimeConfig::block_cache_configured_bytes()` so operator-facing
   compatibility remains `0 == auto`
 
-## ES5G - Codec and WAL Runtime Boundary
+## Phase G - Codec and WAL Runtime Boundary
 
 Audit codec and WAL writer settings after the storage runtime config path is
 centralized.
@@ -561,15 +561,15 @@ Acceptance:
 - no WAL lifecycle code moves without a narrower follow-up design
 - any API changes preserve existing config-file compatibility
 
-### ES5G Current State
+### Phase G Current State
 
-As of ES5G:
+As of Phase G:
 
 | Surface | Owner | Current state |
 |---|---|---|
 | `StorageConfig::codec` public string | Engine | Remains a `strata.toml` field and compatibility-signature input. Engine owns when the public string is read, persisted, and compared for primary/follower/cache open compatibility. |
 | Codec registry lookup and construction | Storage | `durability::get_codec` remains the storage-owned constructor. `durability::validate_codec_id` is the storage-owned preflight helper for call sites that need validation but not a codec value. |
-| Encrypted codec secret source | Split/future | The current AES codec constructor still reads its storage-local environment requirement. ES5G does not add a second engine override path; future product-level secret-source policy stays engine-owned and should be designed separately from registry construction. |
+| Encrypted codec secret source | Split/future | The current AES codec constructor still reads its storage-local environment requirement. Phase G does not add a second engine override path; future product-level secret-source policy stays engine-owned and should be designed separately from registry construction. |
 | MANIFEST codec validation | Storage | `run_storage_recovery` validates the configured codec before recovery-managed side effects, checks existing MANIFEST codec ids, creates missing primary MANIFESTs with the configured codec id, and returns the resolved WAL codec. |
 | Cache-mode `wal_codec` field population | Split | Engine keeps the uniform `Database::wal_codec` field because follower refresh/lifecycle code lives in engine; storage constructs the codec value via `get_codec`. |
 | Checkpoint codec construction | Split | Engine chooses the public codec id from its config snapshot; storage constructs the codec and owns checkpoint byte-format mechanics. |
@@ -583,10 +583,10 @@ As of ES5G:
 | WAL writer construction | Split | Engine constructs the primary `WalWriter` because it owns database open/lifecycle, lock ownership, health latches, and background flush thread wiring; storage owns writer internals, durability mechanics, segment rotation, and config validation. |
 | Background WAL flush thread | Engine | No code moved. Engine still owns thread spawning, shutdown coordination, WAL writer health halt/resume policy, and accepting-transaction latches. |
 
-ES5G intentionally does not move WAL lifecycle code. A future WAL-runtime epic
+Phase G intentionally does not move WAL lifecycle code. A future WAL-runtime epic
 would need a narrower design before storage owns a worker surface.
 
-## ES5H - Retention and Residual Config Cleanup
+## Phase H - Retention and Residual Config Cleanup
 
 Close out the storage config application epic by documenting or moving the
 remaining storage-shaped config surfaces.
@@ -609,9 +609,9 @@ Acceptance:
 - storage-owned fields are either applied by storage runtime config or tracked
   as a future implementation gap
 
-### ES5H Current State
+### Phase H Current State
 
-As of ES5H, the final ownership map for public storage-shaped configuration is:
+As of Phase H, the final ownership map for public storage-shaped configuration is:
 
 | Public surface | Owner | Current state |
 |---|---|---|
@@ -635,15 +635,15 @@ As of ES5H, the final ownership map for public storage-shaped configuration is:
 | `StrataConfig::durability` | Split | Engine owns public string compatibility and where modes are allowed. Storage owns WAL durability mechanics. |
 | `SnapshotRetentionPolicy::retain_count` | Split | Engine owns the public policy. Storage owns pruning mechanics through `StorageSnapshotRetention`, including the minimum one-snapshot retention invariant. |
 
-ES5H also leaves one intentional validation gap: storage runtime config now owns
-where segment sizing and bloom/filter compaction knobs are applied, but ES5 does
-not introduce new config-file rejection for historically accepted values such
+Phase H also leaves one intentional validation gap: storage runtime config now
+owns where segment sizing and bloom/filter compaction knobs are applied, but
+this cleanup does not introduce new config-file rejection for historically accepted values such
 as zero-sized segment-layout knobs. Tightening those values should be a future
 storage validation PR with explicit compatibility notes.
 
-ES5H also leaves the `max_branches` behavior as-is: the value is now routed
-through the storage runtime boundary and stored on `SegmentedStore`, but ES5
-does not introduce a new branch-creation enforcement path. If that public field
+Phase H also leaves the `max_branches` behavior as-is: the value is now routed
+through the storage-runtime boundary and stored on `SegmentedStore`, but this
+cleanup does not introduce a new branch-creation enforcement path. If that public field
 is meant to become a hard limit, it should be designed as a separate storage
 semantics change with characterization for existing multi-branch users.
 
@@ -681,7 +681,7 @@ cargo test -p strata-engine
 ```
 
 If known unrelated failures remain in the full engine suite, document the exact
-failure count and confirm the focused ES5 tests pass.
+failure count and confirm the focused storage-runtime-config cleanup tests pass.
 
 ## Boundary Guards
 
@@ -716,23 +716,23 @@ mechanics. Product profiles, operator-facing comments, compatibility
 fingerprints, and public config migration stay in engine.
 
 The second risk is accidentally changing open behavior while converging the
-paths. This is why ES5A should characterize persistent and ephemeral/cache open
+paths. This is why Phase A should characterize persistent and ephemeral/cache open
 before any code movement.
 
-The third risk is broadening ES5 into WAL lifecycle redesign. WAL writer
+The third risk is broadening storage-runtime-config cleanup into WAL lifecycle redesign. WAL writer
 runtime construction can be cleaned up, but WAL health, shutdown, transaction
 halt, and resume policy are engine lifecycle concerns unless a later subplan
 draws a smaller callback-based surface.
 
 ## Done Criteria
 
-ES5 is done when:
+storage-runtime-config cleanup is done when:
 
 - all open paths use a storage-owned runtime config application path
 - engine owns only the public config adapter, not storage setter mechanics
 - storage owns effective storage resource derivation
 - block-cache capacity application is no longer ad hoc in engine open code
-- recovery still preserves ES4 ordering guarantees
+- recovery still preserves recovery-bootstrap cleanup ordering guarantees
 - existing config files remain compatible
 - tests cover persistent open, ephemeral/cache open, recovery, and memory-budget
   behavior

@@ -109,7 +109,8 @@ pub enum StorageError {
     /// Recovery itself returns [`StorageResult<RecoveredState>`] with the full
     /// classified health; this variant exists for call sites that need to
     /// carry exactly one fault across a `Result` boundary without reshaping
-    /// the outcome type (e.g. cross-crate conversions into `StrataError`).
+    /// the outcome type (e.g. cross-crate conversions into upper-layer
+    /// errors).
     ///
     /// [`RecoveredState`]: crate::segmented::RecoveredState
     #[error(transparent)]

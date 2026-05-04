@@ -1,14 +1,14 @@
-# ES4 Recovery Bootstrap Mechanics Plan
+# Recovery Bootstrap Mechanics Plan
 
 ## Purpose
 
-`ES4` is the recovery-bootstrap epic in the engine/storage boundary
+`recovery-bootstrap cleanup` is the recovery-bootstrap epic in the engine/storage boundary
 normalization workstream.
 
-`ES2` moved checkpoint, WAL compaction, snapshot pruning, and generic MANIFEST
-sync mechanics toward storage. `ES3` moved only generic decoded-row snapshot
+`checkpoint/WAL cleanup` moved checkpoint, WAL compaction, snapshot pruning, and generic MANIFEST
+sync mechanics toward storage. `snapshot-install cleanup` moved only generic decoded-row snapshot
 install mechanics into storage while keeping primitive snapshot decode in
-engine. `ES4` completes the next link in that chain: recovery should use
+engine. `recovery-bootstrap cleanup` completes the next link in that chain: recovery should use
 storage-owned mechanics for MANIFEST preparation, WAL replay, snapshot install
 callback wiring, lossy WAL replay mechanics, storage runtime config
 application, and segment recovery.
@@ -21,10 +21,10 @@ bootstrap.
 Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-- [es1-boundary-baseline-and-guardrails-plan.md](./es1-boundary-baseline-and-guardrails-plan.md)
-- [es2-es4-storage-runtime-boundary-api-sketch.md](./es2-es4-storage-runtime-boundary-api-sketch.md)
-- [es2-checkpoint-wal-compaction-mechanics-plan.md](./es2-checkpoint-wal-compaction-mechanics-plan.md)
-- [es3-snapshot-decode-install-mechanics-plan.md](./es3-snapshot-decode-install-mechanics-plan.md)
+- [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
+- [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
+- [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
+- [snapshot-decode-install-mechanics-plan.md](./snapshot-decode-install-mechanics-plan.md)
 - [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
 - [../storage/storage-charter.md](../storage/storage-charter.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
@@ -62,7 +62,7 @@ Storage must not know:
 - primitive snapshot section decode or primitive install stats
 - degraded-storage open policy
 
-The ES4 target is:
+The recovery-bootstrap cleanup target is:
 
 ```text
 storage recovers durable state and returns raw facts
@@ -71,15 +71,15 @@ engine decides whether those facts permit database open
 
 ## Non-Negotiables
 
-`TransactionCoordinator` stays engine-owned for ES4.
+`TransactionCoordinator` stays engine-owned for recovery-bootstrap cleanup.
 
-This is the load-bearing decision from the ES2-ES4 API sketch. Storage should
+This is the load-bearing decision from storage-runtime boundary API sketch. Storage should
 not call into engine per replayed record to mutate coordinator state. Storage
 should replay durable bytes into `SegmentedStore`, return `RecoveryStats` and
 `RecoveredState`, and let engine bootstrap `TransactionCoordinator` after the
 storage recovery call returns.
 
-ES4 must preserve these current ordering guarantees:
+recovery-bootstrap cleanup must preserve these current ordering guarantees:
 
 - configured codec validation occurs before any recovery-managed directory or
   MANIFEST creation
@@ -96,7 +96,7 @@ ES4 must preserve these current ordering guarantees:
 - lossy replay bypass rules remain hard failures for planning, MANIFEST,
   snapshot-plan, and legacy-format errors
 
-ES4 must not:
+recovery-bootstrap cleanup must not:
 
 - change public recovery/open behavior
 - weaken corruption or quarantine behavior
@@ -135,7 +135,7 @@ The target surface is concentrated in:
   - primary/follower open tail after recovery
 - [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
   - engine-owned primitive decode
-  - ES3 decoded-row install adapter
+  - snapshot-install cleanup decoded-row install adapter
   - recovery snapshot install helper target callback
 
 The storage-owned building blocks already exist:
@@ -149,7 +149,7 @@ The storage-owned building blocks already exist:
 - `strata_storage::SegmentedStore`
 - `SegmentedStore::recover_segments`
 
-ES4 should assemble these storage-owned pieces inside storage instead of
+recovery-bootstrap cleanup should assemble these storage-owned pieces inside storage instead of
 inside engine.
 
 ## Target Module
@@ -160,12 +160,12 @@ Use a storage-owned recovery bootstrap module:
 crates/storage/src/durability/recovery_bootstrap.rs
 ```
 
-`bootstrap.rs` was the name in the original ES2-ES4 sketch. The more explicit
+`bootstrap.rs` was the name in the original storage-runtime boundary sketch. The more explicit
 `recovery_bootstrap.rs` is preferred for implementation because `durability`
 already contains several bootstrap-like paths around checkpoint, WAL, and
 MANIFEST setup.
 
-The completed ES4 module should be re-exported through
+The completed recovery-bootstrap cleanup module should be re-exported through
 `strata_storage::durability` with a small public surface:
 
 ```text
@@ -179,21 +179,21 @@ StorageLossyWalReplayFacts
 RecoverySnapshotInstallCallback
 ```
 
-ES4B intentionally introduces and re-exports only the type/callback surface.
-`run_storage_recovery` is introduced in ES4G once the lower-runtime behavior
+Phase B intentionally introduces and re-exports only the type/callback surface.
+`run_storage_recovery` is introduced in Phase G once the lower-runtime behavior
 has moved far enough to implement the function without a panic or fake no-op.
 
-ES4C temporarily exposed `prepare_storage_manifest_for_recovery` and
+Phase C temporarily exposed `prepare_storage_manifest_for_recovery` and
 `StorageManifestRecoveryPreparation` only through storage's
 `engine-internal`/`__internal` seam so engine could delegate MANIFEST and codec
-preparation before `run_storage_recovery` existed. ES4G removes that public
+preparation before `run_storage_recovery` existed. Phase G removes that public
 transitional bridge; storage may keep smaller private helper seams inside
 `recovery_bootstrap.rs`, but higher layers should call only
 `run_storage_recovery`.
 
-All public storage-local errors, enums, and data structs introduced for ES4
+All public storage-local errors, enums, and data structs introduced for recovery-bootstrap cleanup
 should be `#[non_exhaustive]`. Public data structs should also have
-constructors or defaults so later ES4 steps can add fields without requiring
+constructors or defaults so later recovery-bootstrap cleanup steps can add fields without requiring
 external callers to use struct literals.
 
 ## Target API
@@ -242,7 +242,7 @@ StorageRuntimeConfig {
 }
 ```
 
-Engine builds this from `StrataConfig.storage` until ES5 completes the public
+Engine builds this from `StrataConfig.storage` until storage-runtime-config cleanup completes the public
 configuration split. That adapter does not make storage own product defaults.
 `StorageRuntimeConfig::default()` uses the same storage defaults as
 `SegmentedStore`, so a partially wired test or synthetic construction never
@@ -260,7 +260,7 @@ RecoverySnapshotInstallCallback {
 }
 ```
 
-This refines the older ES2-ES4 sketch. Once storage owns MANIFEST preparation
+This refines the older storage-runtime boundary sketch. Once storage owns MANIFEST preparation
 and codec resolution, storage is the layer that knows which codec the snapshot
 install callback must use. Passing the codec to the engine callback keeps
 primitive decode in engine without forcing engine to redo MANIFEST prep.
@@ -356,7 +356,7 @@ conversion behavior.
 
 ## Engine Wrapper Shape
 
-After ES4, `Database::run_recovery()` remains the engine entry point.
+After recovery-bootstrap cleanup, `Database::run_recovery()` remains the engine entry point.
 
 Target shape:
 
@@ -397,7 +397,7 @@ Engine no longer owns:
 - storage config application before segment recovery
 - `recover_segments()` execution
 
-## ES4A - Characterization And Inventory
+## Phase A - Characterization And Inventory
 
 Goal: lock the current behavior before moving recovery mechanics.
 
@@ -448,12 +448,12 @@ cargo test -p strata-engine --lib checkpoint -- --nocapture
 
 Acceptance:
 
-- ES4 behavior matrix exists in this document or in test names
+- recovery-bootstrap cleanup behavior matrix exists in this document or in test names
 - characterization tests fail on at least one intentionally broken ordering
   if locally mutated
-- no production code moves in ES4A unless needed for test seams
+- no production code moves in Phase A unless needed for test seams
 
-ES4A characterization status:
+Phase A characterization status:
 
 | Behavior | Guard |
 | --- | --- |
@@ -475,7 +475,7 @@ ES4A characterization status:
 | Snapshot-only recovery still works with non-identity snapshot header codecs. | `test_aes_checkpoint_compact_reopen_installs_snapshot` |
 | Checkpoint-only and checkpoint-plus-delta recovery remain covered. | `test_checkpoint_only_restart_recovers_kv_from_snapshot`, `test_checkpoint_plus_delta_wal_replay_merges_sources` |
 
-## ES4B - Storage API Skeleton
+## Phase B - Storage API Skeleton
 
 Goal: introduce the storage-owned type surface without moving behavior.
 
@@ -492,7 +492,7 @@ Tasks:
 - re-export only the intended public storage surface
 - add compile-only or synthetic unit tests for type construction and error
   display where useful
-- do not expose `run_storage_recovery` yet; ES4B is type-only, and ES4G adds
+- do not expose `run_storage_recovery` yet; Phase B is type-only, and Phase G adds
   the function when it can delegate to real moved behavior
 
 Rules:
@@ -509,7 +509,7 @@ Acceptance:
 - engine still uses the old recovery implementation
 - storage ownership grep guards stay clean
 
-## ES4C - Manifest And Codec Preparation
+## Phase C - Manifest And Codec Preparation
 
 Goal: move generic MANIFEST preparation and WAL codec resolution into storage.
 
@@ -547,10 +547,10 @@ StorageManifestRecoveryPreparation {
 }
 ```
 
-Because `run_storage_recovery` intentionally waits until ES4G, this helper is
+Because `run_storage_recovery` intentionally waits until Phase G, this helper is
 temporarily exposed through storage's `engine-internal`/`__internal` seam for
-the engine wrapper during ES4C. It should become storage-private again once
-ES4G routes recovery through the completed storage bootstrap API, unless ES5
+the engine wrapper during Phase C. It should become storage-private again once
+Phase G routes recovery through the completed storage bootstrap API, unless storage-runtime-config cleanup
 needs the narrower helper directly.
 
 Acceptance:
@@ -560,7 +560,7 @@ Acceptance:
 - first-open invalid codec still leaves no poisoned storage directory
 - follower missing-MANIFEST still does not create a MANIFEST
 
-## ES4D - Coordinator Replay Driver
+## Phase D - Coordinator Replay Driver
 
 Goal: move `RecoveryCoordinator` construction and replay driving into storage.
 
@@ -596,11 +596,11 @@ if loaded_snapshot_callback_fired && snapshot_install_codec.is_none() {
 The exact wrapping can differ, but the behavior must remain a hard failure
 with snapshot id context.
 
-Because `run_storage_recovery` intentionally waits until ES4G, ES4D uses a
+Because `run_storage_recovery` intentionally waits until Phase G, Phase D uses a
 temporary `run_storage_coordinator_replay` helper exposed only through
 storage's `engine-internal`/`__internal` seam. The helper returns the raw
-coordinator result and the records-applied count so ES4F can move lossy replay
-mechanics without changing report fields. ES4G should absorb this helper into
+coordinator result and the records-applied count so Phase F can move lossy replay
+mechanics without changing report fields. Phase G should absorb this helper into
 the completed storage recovery API.
 
 Acceptance:
@@ -612,7 +612,7 @@ Acceptance:
 - primitive install stats, if logged, are captured in the engine callback
 - callback install failures still map through the same public recovery path
 
-## ES4E - Snapshot Fold, Runtime Config, And Segment Recovery
+## Phase E - Snapshot Fold, Runtime Config, And Segment Recovery
 
 Goal: move the post-replay storage mechanics into storage while keeping
 engine policy outside storage.
@@ -637,12 +637,12 @@ return StorageRecoveryOutcome
 Storage should not decide whether degraded state permits database open.
 Storage returns `RecoveredState` and its `RecoveryHealth` unchanged.
 
-Because `run_storage_recovery` intentionally waits until ES4G, ES4E uses a
+Because `run_storage_recovery` intentionally waits until Phase G, Phase E uses a
 temporary `complete_storage_recovery_after_replay` helper exposed only through
 storage's `engine-internal`/`__internal` seam. The helper consumes the replayed
 store and raw `RecoveryStats`, folds the installed snapshot version into those
 stats, applies `StorageRuntimeConfig`, runs `recover_segments()`, and returns a
-raw `StorageRecoveryOutcome`. ES4G should absorb this helper into the completed
+raw `StorageRecoveryOutcome`. Phase G should absorb this helper into the completed
 storage recovery API.
 
 Engine should still:
@@ -660,7 +660,7 @@ Acceptance:
 - degraded-storage behavior remains public-policy equivalent
 - coordinator bootstrap still sees the folded final version
 
-## ES4F - Lossy WAL Replay Mechanics
+## Phase F - Lossy WAL Replay Mechanics
 
 Goal: move the mechanical lossy wipe into storage while keeping lossy policy
 and operator reporting in engine.
@@ -724,7 +724,7 @@ Implementation shape:
 - leave public `allow_lossy_recovery` configuration and public error mapping in
   engine
 
-## ES4G - Engine Wrapper Cleanup
+## Phase G - Engine Wrapper Cleanup
 
 Goal: reduce `Database::run_recovery` to engine orchestration and policy.
 
@@ -754,7 +754,7 @@ Acceptance:
 
 Implementation notes:
 
-- `strata_storage::durability::run_storage_recovery` is the public ES4G wrapper
+- `strata_storage::durability::run_storage_recovery` is the public Phase G wrapper
   around MANIFEST/codec preparation, `SegmentedStore` construction,
   coordinator replay, mechanical lossy WAL fallback, storage runtime config,
   and segment recovery
@@ -762,7 +762,7 @@ Implementation notes:
   callback, maps `StorageRecoveryError`, builds `LossyRecoveryReport`, applies
   degraded-storage policy, restores follower state, bootstraps
   `TransactionCoordinator`, and constructs the watermark
-- the temporary ES4C/ES4D/ES4E/ES4F engine bridge helpers are no longer
+- the temporary Phase C/Phase D/Phase E/Phase F engine bridge helpers are no longer
   exported through `durability::__internal`
 - snapshot-plan failures (`SnapshotMissing` and `SnapshotRead`) explicitly
   bypass the lossy WAL fallback alongside MANIFEST planning and legacy-format
@@ -771,7 +771,7 @@ Implementation notes:
   replay remains limited to failures from WAL replay, not primitive snapshot
   decode/install
 
-## ES4H - Guards, Documentation, And Full Parity
+## Phase H - Guards, Documentation, And Full Parity
 
 Goal: finish the cleanup with explicit guardrails.
 
@@ -802,7 +802,7 @@ cargo test -p strata-engine --test recovery_storage_policy -- --nocapture
 cargo test -p strata-engine --lib checkpoint -- --nocapture
 ```
 
-Full assurance before declaring ES4 complete:
+Full assurance before declaring recovery-bootstrap cleanup complete:
 
 ```text
 cargo test -p strata-engine
@@ -811,12 +811,12 @@ cargo test -p strata-engine
 Known pre-existing unrelated failures should be called out with exact test
 names if the full package suite is not green.
 
-ES4H full-package status:
+Phase H full-package status:
 
-`cargo test -p strata-engine` currently passes the ES4 recovery/checkpoint
+`cargo test -p strata-engine` currently passes the recovery-bootstrap and checkpoint
 coverage. `cargo test -p strata-engine --test recovery_storage_policy -- --nocapture`
 also passes separately. The full package suite remains blocked by the same
-broader architecture-cleanup-period failures outside ES4 recovery bootstrap:
+broader architecture-cleanup-period failures outside recovery-bootstrap work:
 
 - `database::branch_mutation::tests::test_rollback_delete_true_surfaces_storage_cleanup_failure`
 - `database::tests::shutdown::shutdown_timeout_halt_interleaving_preserves_invariant`
@@ -838,30 +838,30 @@ Documentation updates:
   lists `durability/recovery_bootstrap.rs` as storage-owned lower durability
   runtime.
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
-  records the ES4 implementation status and the one intentional correctness
+  records the recovery-bootstrap cleanup implementation status and the one intentional correctness
   tightening.
-- This document records the ES4H guard list, behavior-change ledger, and
+- This document records the Phase H guard list, behavior-change ledger, and
   completion criteria.
 
-ES4H implementation status:
+Phase H implementation status:
 
 | Check | Status |
 | --- | --- |
 | Storage owns the recovery bootstrap implementation. | `run_storage_recovery` is re-exported from `strata_storage::durability` and owns MANIFEST/codec prep, coordinator replay, lossy WAL replay mechanics, runtime config application, and segment recovery. |
 | Engine owns recovery policy and public recovery conversion. | `Database::run_recovery()` supplies the primitive snapshot callback, maps `StorageRecoveryError`, applies degraded policy, builds `LossyRecoveryReport`, bootstraps `TransactionCoordinator`, restores follower state, and constructs the watermark. |
-| Temporary ES4 bridge helpers are not public. | `prepare_storage_manifest_for_recovery`, `run_storage_coordinator_replay`, `handle_storage_wal_replay_outcome`, and `complete_storage_recovery_after_replay` are private to `recovery_bootstrap.rs`. |
+| Temporary recovery-bootstrap cleanup bridge helpers are not public. | `prepare_storage_manifest_for_recovery`, `run_storage_coordinator_replay`, `handle_storage_wal_replay_outcome`, and `complete_storage_recovery_after_replay` are private to `recovery_bootstrap.rs`. |
 | Primitive semantics stay out of storage recovery bootstrap. | `recovery_bootstrap.rs` carries `LoadedSnapshot`, codecs, `SegmentedStore`, and raw recovery facts only; primitive section decode remains in engine. |
 
 Acceptance:
 
 - storage owns the recovery bootstrap implementation
 - engine owns recovery policy and public recovery conversion
-- all ES4 guard commands are clean or have documented intentional exceptions
-- all ES4 characterization tests still pass
+- all recovery-bootstrap cleanup guard commands are clean or have documented intentional exceptions
+- all recovery-bootstrap cleanup characterization tests still pass
 
 ## Behavior Changes
 
-No broad behavior redesign is intended for ES4. The implementation did uncover
+No broad behavior redesign is intended for recovery-bootstrap cleanup. The implementation did uncover
 one recovery correctness bug that is intentionally tightened below.
 
 If implementation discovers a correctness bug that must be fixed while moving
@@ -920,9 +920,9 @@ Focused tests:
 - `lossy_wal_replay_snapshot_callback_failure_preserves_partial_storage`
 - `recovery_snapshot_install_failure_bypasses_lossy_fallback_when_enabled`
 
-## Residual Ownership After ES4
+## Residual Ownership After recovery-bootstrap cleanup
 
-Some recovery-adjacent code should intentionally remain in engine after ES4:
+Some recovery-adjacent code should intentionally remain in engine after recovery-bootstrap cleanup:
 
 - `RecoveryError` public taxonomy
 - `RecoveryMode`
@@ -935,7 +935,7 @@ Some recovery-adjacent code should intentionally remain in engine after ES4:
 - subsystem recovery integration
 - primitive snapshot install callback
 
-Some recovery-adjacent work should wait for ES5:
+Some recovery-adjacent work should wait for storage-runtime-config cleanup:
 
 - public `StrataConfig` split
 - storage-owned defaults for every storage runtime knob
@@ -953,7 +953,7 @@ Some work should remain explicitly out of scope:
 
 ## Completion Criteria
 
-ES4 is complete when:
+recovery-bootstrap cleanup is complete when:
 
 1. `Database::run_recovery` calls a storage-owned recovery bootstrap API for
    raw recovery mechanics.
@@ -964,10 +964,10 @@ ES4 is complete when:
 6. Storage returns raw recovery facts and storage-local errors.
 7. Engine maps those facts into `RecoveryError`, `StrataError`,
    `LossyRecoveryReport`, `TransactionCoordinator`, and `RecoveryOutcome`.
-8. Snapshot install still decodes primitive sections in engine through the ES3
+8. Snapshot install still decodes primitive sections in engine through the snapshot-install cleanup
    callback.
 9. `TransactionCoordinator` remains engine-owned.
 10. The configured-codec, snapshot-version-fold, runtime-config, lossy-bypass,
     and follower-state ordering guarantees are characterized by tests.
 11. Storage has no engine dependency and no primitive snapshot install logic.
-12. The ES4 guard commands pass.
+12. The recovery-bootstrap cleanup guard commands pass.

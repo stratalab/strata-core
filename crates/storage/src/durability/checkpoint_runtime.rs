@@ -22,9 +22,15 @@ use crate::durability::layout::DatabaseLayout;
 use crate::SegmentedStore;
 
 /// Storage-level snapshot retention settings.
+///
+/// `retain_count` accepts compatibility values from public callers. The
+/// constructor normalizes it to at least one, while direct struct literals may
+/// still set it to zero; storage pruning clamps again before applying retention
+/// so zero can never delete every snapshot.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageSnapshotRetention {
-    /// Number of newest snapshots to retain. Effective value is at least one.
+    /// Public retention count. Pruning treats zero as an effective value of
+    /// one.
     pub retain_count: usize,
 }
 
@@ -746,6 +752,37 @@ mod tests {
 
         assert_eq!(retention.retain_count, 1);
         assert_eq!(retention.effective_retain_count(), 1);
+    }
+
+    #[test]
+    fn prune_storage_snapshots_clamps_direct_zero_retention_to_one() {
+        let temp_dir = TempDir::new().unwrap();
+        let layout = layout(&temp_dir);
+
+        for id in 1..=5 {
+            run_storage_checkpoint(checkpoint_input(
+                layout.clone(),
+                kv_checkpoint_data(b"k", b"v"),
+                id,
+                1,
+            ))
+            .unwrap();
+        }
+
+        let pruned =
+            prune_storage_snapshots(&layout, StorageSnapshotRetention { retain_count: 0 }).unwrap();
+        assert_eq!(pruned, 4);
+
+        let kept: Vec<u64> = list_snapshots(layout.snapshots_dir())
+            .unwrap()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        assert_eq!(
+            kept,
+            vec![5],
+            "raw retain_count=0 must be treated as retain_count=1 by pruning"
+        );
     }
 
     #[test]

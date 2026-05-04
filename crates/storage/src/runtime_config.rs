@@ -90,8 +90,8 @@ pub struct StorageRuntimeConfig {
     pub write_buffer_size: usize,
     /// Advisory branch-limit value stored on the store; `0` means unlimited.
     ///
-    /// Current storage mechanics record and expose this value, but ES5 does
-    /// not introduce new branch-creation enforcement.
+    /// Current storage mechanics record and expose this value, but runtime
+    /// config application does not introduce new branch-creation enforcement.
     pub max_branches: usize,
     /// Maximum retained versions per key; `0` means unlimited.
     pub max_versions_per_key: usize,
@@ -169,7 +169,10 @@ impl StorageRuntimeConfig {
     /// Apply process-global storage runtime knobs.
     ///
     /// Store-local knobs belong in [`Self::apply_to_store`]. This helper owns
-    /// storage-wide global mechanics such as block-cache capacity.
+    /// storage-wide global mechanics such as block-cache capacity. Block-cache
+    /// capacity is process-global by design; repeated calls overwrite the
+    /// previous capacity when applied sequentially. Concurrent opens race and
+    /// have no deterministic winner.
     pub fn apply_global_runtime(&self) {
         crate::block_cache::set_global_capacity(self.resolved_block_cache_capacity());
     }
@@ -260,8 +263,8 @@ impl StorageRuntimeConfigBuilder {
 
     /// Store an advisory branch-limit value; `0` means unlimited.
     ///
-    /// ES5 centralizes where the value is stored on `SegmentedStore`; it does
-    /// not add branch-creation enforcement.
+    /// Storage runtime config centralizes where the value is stored on
+    /// `SegmentedStore`; it does not add branch-creation enforcement.
     pub fn max_branches(mut self, max: usize) -> Self {
         self.max_branches = max;
         self
@@ -534,5 +537,22 @@ mod tests {
         cfg.apply_global_runtime();
 
         assert_eq!(crate::block_cache::global_capacity(), 32 << 20);
+    }
+
+    #[test]
+    fn apply_global_runtime_sequential_calls_overwrite_process_global_capacity() {
+        let _capacity_guard = GlobalBlockCacheCapacityGuard::capture();
+        let first = StorageRuntimeConfig::builder()
+            .block_cache_size(11 << 20)
+            .build();
+        let second = StorageRuntimeConfig::builder()
+            .block_cache_size(13 << 20)
+            .build();
+
+        first.apply_global_runtime();
+        assert_eq!(crate::block_cache::global_capacity(), 11 << 20);
+
+        second.apply_global_runtime();
+        assert_eq!(crate::block_cache::global_capacity(), 13 << 20);
     }
 }
