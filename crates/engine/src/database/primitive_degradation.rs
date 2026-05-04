@@ -61,7 +61,7 @@ impl PrimitiveDegradationEntry {
     /// Build the matching typed `StrataError` for this degradation.
     pub fn to_error(&self) -> StrataError {
         StrataError::primitive_degraded(
-            self.branch_ref.into(),
+            self.branch_ref,
             self.primitive,
             &self.name,
             self.reason,
