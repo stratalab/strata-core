@@ -23,7 +23,7 @@
 //!     db.event_append("tool_call", serde_json::json!({"tool": "search"}).into())?;
 //!
 //!     // Branch isolation (like git branches)
-//!     db.branches().create("experiment")?;
+//!     db.database().branches().create("experiment")?;
 //!     db.set_branch("experiment")?;
 //!     assert!(db.kv_get("user:name")?.is_none()); // isolated
 //!

@@ -328,8 +328,11 @@ mod tests {
         let key_hex = cache_key("query", "model");
         let entry_key = system_kv_key(branch, &format!("{KEY_PREFIX}{key_hex}"));
 
-        db.transaction(branch, |txn| txn.put(entry_key.clone(), Value::Int(42)))
-            .unwrap();
+        db.transaction(branch, |txn| {
+            txn.put(entry_key.clone(), Value::Int(42))?;
+            Ok(())
+        })
+        .unwrap();
 
         assert!(get(&db, branch, &key_hex).is_none());
     }
@@ -343,7 +346,8 @@ mod tests {
         let entry_key = system_kv_key(branch, &format!("{KEY_PREFIX}{key_hex}"));
 
         db.transaction(branch, |txn| {
-            txn.put(entry_key.clone(), Value::String("not json".into()))
+            txn.put(entry_key.clone(), Value::String("not json".into()))?;
+            Ok(())
         })
         .unwrap();
 
@@ -474,7 +478,8 @@ mod tests {
         };
         let json = serde_json::to_string(&entry).unwrap();
         db.transaction(branch, |txn| {
-            txn.put(entry_key.clone(), Value::String(json))
+            txn.put(entry_key.clone(), Value::String(json))?;
+            Ok(())
         })
         .unwrap();
 

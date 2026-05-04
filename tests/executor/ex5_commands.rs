@@ -661,10 +661,14 @@ fn feature_gated_model_and_generation_commands_fail_cleanly_in_default_builds() 
             .execute(command)
             .expect_err("feature-gated command should fail without embed");
         match error {
-            Error::Internal { reason, .. } => {
+            Error::NotImplemented { feature, reason } => {
+                let combined = format!("{feature} {reason}");
                 assert!(
-                    reason.contains("embed") || reason.contains("Generation"),
-                    "unexpected reason: {reason}"
+                    combined.contains("Embed")
+                        || combined.contains("embed")
+                        || combined.contains("Generation")
+                        || combined.contains("Models"),
+                    "unexpected feature/reason: {feature} / {reason}"
                 );
             }
             other => panic!("unexpected error: {other:?}"),
