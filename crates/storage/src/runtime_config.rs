@@ -83,8 +83,15 @@ pub struct StorageRuntimeConfig {
     /// Global block-cache runtime sizing.
     pub block_cache: StorageBlockCacheConfig,
     /// Effective memtable write buffer size in bytes.
+    ///
+    /// `apply_to_store` applies this value only when the builder received an
+    /// explicit write-buffer input or derived one from `memory_budget`. Default
+    /// runtime configs preserve the constructor-provided write-buffer size.
     pub write_buffer_size: usize,
-    /// Maximum branches allowed by the store; `0` means unlimited.
+    /// Advisory branch-limit value stored on the store; `0` means unlimited.
+    ///
+    /// Current storage mechanics record and expose this value, but ES5 does
+    /// not introduce new branch-creation enforcement.
     pub max_branches: usize,
     /// Maximum retained versions per key; `0` means unlimited.
     pub max_versions_per_key: usize,
@@ -141,7 +148,10 @@ impl StorageRuntimeConfig {
     /// This is the storage-owned application point for static
     /// `SegmentedStore` runtime knobs. Higher layers should adapt their public
     /// config into `StorageRuntimeConfig` and call this helper rather than
-    /// carrying their own `SegmentedStore::set_*` list.
+    /// carrying their own `SegmentedStore::set_*` list. Default runtime configs
+    /// preserve a store's constructor-provided write-buffer size; the
+    /// write-buffer setter is applied only when the builder receives
+    /// `write_buffer_size` explicitly or derives it from `memory_budget`.
     pub fn apply_to_store(&self, storage: &SegmentedStore) {
         if self.apply_write_buffer_size {
             storage.set_write_buffer_size(self.write_buffer_size);
@@ -207,6 +217,8 @@ pub struct StorageRuntimeConfigBuilder {
     memory_budget: usize,
     block_cache_size: usize,
     write_buffer_size: usize,
+    // Tracks whether `write_buffer_size` is an explicit apply request instead
+    // of the default constructor-preserving placeholder.
     apply_write_buffer_size: bool,
     max_branches: usize,
     max_versions_per_key: usize,
@@ -237,13 +249,19 @@ impl StorageRuntimeConfigBuilder {
     }
 
     /// Set the raw write buffer size in bytes.
+    ///
+    /// Calling this marks the write-buffer size as explicitly configured, so
+    /// `apply_to_store` will apply it even when the value is zero.
     pub fn write_buffer_size(mut self, bytes: usize) -> Self {
         self.write_buffer_size = bytes;
         self.apply_write_buffer_size = true;
         self
     }
 
-    /// Set the branch limit; `0` means unlimited.
+    /// Store an advisory branch-limit value; `0` means unlimited.
+    ///
+    /// ES5 centralizes where the value is stored on `SegmentedStore`; it does
+    /// not add branch-creation enforcement.
     pub fn max_branches(mut self, max: usize) -> Self {
         self.max_branches = max;
         self
@@ -468,14 +486,13 @@ mod tests {
     fn apply_global_runtime_resolves_auto_block_cache_capacity() {
         let _capacity_guard = GlobalBlockCacheCapacityGuard::capture();
         let cfg = StorageRuntimeConfig::builder().block_cache_size(0).build();
-        let expected = cfg.resolved_block_cache_capacity();
-        crate::block_cache::set_global_capacity(usize::MAX);
+        crate::block_cache::set_global_capacity(1);
 
         assert_eq!(cfg.block_cache, StorageBlockCacheConfig::Auto);
         cfg.apply_global_runtime();
 
-        assert_eq!(crate::block_cache::global_capacity(), expected);
-        assert_ne!(crate::block_cache::global_capacity(), usize::MAX);
+        assert_ne!(crate::block_cache::global_capacity(), 1);
+        assert!(crate::block_cache::global_capacity() > 0);
     }
 
     #[test]

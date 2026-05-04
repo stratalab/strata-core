@@ -61,7 +61,12 @@ pub struct StorageRecoveryInput<'a> {
     pub mode: StorageRecoveryMode,
     /// Codec id supplied by the caller's runtime configuration.
     pub configured_codec_id: String,
-    /// Runtime knobs applied before segment recovery.
+    /// Runtime knobs used to construct and configure recovered storage.
+    ///
+    /// Recovery has no separate constructor write-buffer argument; it uses
+    /// `runtime_config.write_buffer_size` to create the recovered
+    /// `SegmentedStore`, then applies the remaining runtime knobs through
+    /// `StorageRuntimeConfig::apply_to_store`.
     pub runtime_config: StorageRuntimeConfig,
     /// Whether storage may perform the mechanical lossy WAL replay fallback.
     pub allow_lossy_wal_replay: bool,

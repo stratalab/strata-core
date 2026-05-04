@@ -178,11 +178,11 @@ those fields into storage.
 | Public config surface | ES5 target |
 |---|---|
 | `StorageConfig::memory_budget` | Engine-owned public field; storage-owned derivation into block cache, write buffer, and immutable memtable count. |
-| `StorageConfig::max_branches` | Engine-owned public field; storage-owned store application. |
+| `StorageConfig::max_branches` | Engine-owned public field; storage-owned storage of the advisory branch-limit value. Branch-creation enforcement remains unchanged. |
 | `StorageConfig::max_write_buffer_entries` | Stay engine; transaction coordinator limit. |
 | `StorageConfig::max_versions_per_key` | Engine-owned public field; storage-owned store application. |
 | `StorageConfig::block_cache_size` | Engine-owned public field; storage-owned effective block-cache config and global application. |
-| `StorageConfig::write_buffer_size` | Engine-owned public field; storage-owned effective write-buffer derivation. |
+| `StorageConfig::write_buffer_size` | Engine-owned public field; storage-owned effective write-buffer derivation and application when explicit or memory-budget-derived. |
 | `StorageConfig::max_immutable_memtables` | Engine-owned public field; storage-owned effective value derivation and store application. |
 | `StorageConfig::l0_slowdown_writes_trigger` | Stay engine; transaction runtime slowdown policy. |
 | `StorageConfig::l0_stop_writes_trigger` | Stay engine; transaction runtime stall policy. |
@@ -616,11 +616,11 @@ As of ES5H, the final ownership map for public storage-shaped configuration is:
 | Public surface | Owner | Current state |
 |---|---|---|
 | `StorageConfig::memory_budget` | Split | Engine owns the serialized public field. Storage derives effective block-cache, write-buffer, and immutable-memtable runtime values in `StorageRuntimeConfig::builder`. |
-| `StorageConfig::max_branches` | Split | Engine owns the public field. Storage applies the branch limit through `StorageRuntimeConfig::apply_to_store`. |
+| `StorageConfig::max_branches` | Split | Engine owns the public field. Storage stores the advisory branch-limit value through `StorageRuntimeConfig::apply_to_store`; branch-creation enforcement remains unchanged. |
 | `StorageConfig::max_write_buffer_entries` | Engine | Transaction coordinator write-entry limit; not part of storage runtime config. |
 | `StorageConfig::max_versions_per_key` | Split | Engine owns the public field. Storage applies MVCC version retention through `StorageRuntimeConfig::apply_to_store`. |
 | `StorageConfig::block_cache_size` | Split | Engine owns `0 == auto` public compatibility. Storage owns `StorageBlockCacheConfig::{Auto, Bytes}` and global capacity application. |
-| `StorageConfig::write_buffer_size` | Split | Engine owns the public field. Storage applies the effective memtable rotation threshold. |
+| `StorageConfig::write_buffer_size` | Split | Engine owns the public field. Storage applies the effective memtable rotation threshold when explicit or memory-budget-derived; default runtime configs preserve constructor-provided sizing. |
 | `StorageConfig::max_immutable_memtables` | Split | Engine owns the public field. Storage applies the effective frozen-memtable limit. Engine reads the same effective storage value only to drive transaction backpressure policy. |
 | `StorageConfig::l0_slowdown_writes_trigger` | Engine | Transaction runtime slowdown policy in `database/transaction.rs`; disabled by default. |
 | `StorageConfig::l0_stop_writes_trigger` | Engine | Transaction runtime stall policy in `database/transaction.rs`; disabled by default. |
@@ -640,6 +640,12 @@ where segment sizing and bloom/filter compaction knobs are applied, but ES5 does
 not introduce new config-file rejection for historically accepted values such
 as zero-sized segment-layout knobs. Tightening those values should be a future
 storage validation PR with explicit compatibility notes.
+
+ES5H also leaves the `max_branches` behavior as-is: the value is now routed
+through the storage runtime boundary and stored on `SegmentedStore`, but ES5
+does not introduce a new branch-creation enforcement path. If that public field
+is meant to become a hard limit, it should be designed as a separate storage
+semantics change with characterization for existing multi-branch users.
 
 Public `StorageConfig` comments and generated `strata.toml` comments were
 updated to describe this final ownership split instead of embedding storage

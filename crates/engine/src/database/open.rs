@@ -890,6 +890,19 @@ impl Database {
         // which is fatal on 512 MB devices.
         crate::database::profile::apply_hardware_profile_if_defaults(&mut cfg);
 
+        // T3-E12 §D7: cache-mode databases still populate `wal_codec`
+        // uniformly — the field is always `Box<dyn StorageCodec>`, not
+        // `Option`, so the type signature does not leak "this is a
+        // cache database" into the field type. Construct the codec before
+        // applying process-global runtime config so invalid cache opens fail
+        // without mutating shared storage state.
+        let wal_codec_for_cache = get_codec(&cfg.storage.codec).map_err(|e| {
+            StrataError::internal(format!(
+                "cache database could not initialize codec '{}': {}",
+                cfg.storage.codec, e
+            ))
+        })?;
+
         // Apply effective block cache size to the global singleton so that
         // in-memory reads use the profile-tuned or auto-detected capacity
         // instead of inheriting stale process-wide state.
@@ -908,18 +921,6 @@ impl Database {
         // Create coordinator starting at version 1 (no recovery needed), with write buffer limit
         let coordinator = TransactionCoordinator::new(CommitVersion(1));
         coordinator.set_max_write_buffer_entries(cfg.storage.max_write_buffer_entries);
-
-        // T3-E12 §D7: cache-mode databases still populate `wal_codec`
-        // uniformly — the field is always `Box<dyn StorageCodec>`, not
-        // `Option`, so the type signature does not leak "this is a
-        // cache database" into the field type. `IdentityCodec` is the
-        // typical resolution here and is effectively a no-op at runtime.
-        let wal_codec_for_cache = get_codec(&cfg.storage.codec).map_err(|e| {
-            StrataError::internal(format!(
-                "cache database could not initialize codec '{}': {}",
-                cfg.storage.codec, e
-            ))
-        })?;
 
         let db = Arc::new(Self {
             data_dir: PathBuf::new(), // Empty path for ephemeral

@@ -487,6 +487,33 @@ fn es5e_cache_open_applies_default_block_cache_runtime_config() {
 
 #[test]
 #[serial(open_databases)]
+fn es5g_cache_open_rejects_invalid_codec_before_global_cache_mutation() {
+    let _capacity_guard = BlockCacheCapacityGuard::capture();
+    let cfg = StrataConfig {
+        storage: StorageConfig {
+            block_cache_size: 7 << 20,
+            codec: "missing-codec".to_string(),
+            ..StorageConfig::default()
+        },
+        ..StrataConfig::default()
+    };
+
+    strata_storage::block_cache::set_global_capacity(1);
+
+    let error = Database::open_runtime(super::spec::OpenSpec::cache().with_config(cfg))
+        .expect_err("cache open should reject an unknown storage codec");
+
+    assert!(
+        error
+            .to_string()
+            .contains("cache database could not initialize codec 'missing-codec'"),
+        "error should name the rejected cache codec, got: {error}"
+    );
+    assert_eq!(strata_storage::block_cache::global_capacity(), 1);
+}
+
+#[test]
+#[serial(open_databases)]
 fn es5c_follower_open_applies_block_cache_runtime_config() {
     let temp_dir = TempDir::new().unwrap();
     let db_path = temp_dir.path().join("es5c_follower_block_cache");

@@ -65,7 +65,10 @@ pub struct StorageConfig {
     /// Default: 0 (disabled — individual fields take effect).
     #[serde(default)]
     pub memory_budget: usize,
-    /// Maximum number of branches allowed. Default: 1024. Set to 0 for unlimited.
+    /// Public advisory branch-limit setting. Default: 1024. Set to 0 for unlimited.
+    ///
+    /// Storage records this runtime value on the store, but current storage
+    /// mechanics do not enforce a branch-creation limit.
     #[serde(default = "default_max_branches")]
     pub max_branches: usize,
     /// Maximum entries in a single transaction's write buffer. Default: 500_000.
@@ -544,7 +547,7 @@ auto_embed = false
 # Storage resource limits.
 # [storage]
 # memory_budget = 0             # 0 = disabled; when >0, storage derives cache/buffer/immutable values.
-# max_branches = 1024
+# max_branches = 1024          # advisory; stored by storage, not yet enforced
 # max_write_buffer_entries = 500000 # per-transaction coordinator limit
 # max_versions_per_key = 0    # 0 = unlimited; set to e.g. 100 to cap MVCC history
 # block_cache_size = 0          # 0 = storage auto-detect; nonzero = explicit bytes
