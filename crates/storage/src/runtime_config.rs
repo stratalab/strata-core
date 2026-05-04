@@ -13,10 +13,11 @@ use crate::segmented::SegmentedStore;
 /// automatic sizing. That sentinel is converted at the storage runtime boundary
 /// so storage no longer carries an ambiguous raw integer for global cache
 /// application.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum StorageBlockCacheConfig {
     /// Resolve capacity from storage's host-memory auto-detection.
+    #[default]
     Auto,
     /// Set the global block cache to an explicit byte capacity.
     ///
@@ -63,12 +64,6 @@ impl StorageBlockCacheConfig {
     /// Whether this config requests storage auto-detection.
     pub const fn is_auto(self) -> bool {
         matches!(self, Self::Auto)
-    }
-}
-
-impl Default for StorageBlockCacheConfig {
-    fn default() -> Self {
-        Self::Auto
     }
 }
 
