@@ -6,10 +6,11 @@
 //!
 //! ## Design
 //!
-//! - **Engine-owned:** `OpenSpec` belongs to the engine crate. Product defaults
-//!   (which subsystems to include) are owned by executor's `default_product_spec`.
+//! - **Engine-owned:** `OpenSpec` belongs to the engine crate. Product open
+//!   policy is owned by the engine's product-open API.
 //! - **Mode constructors:** `primary()`, `follower()`, `cache()` make intent clear.
-//! - **Builder pattern:** `with_*` methods for optional configuration.
+//! - **Builder pattern:** `with_*` methods support explicit low-level runtime
+//!   opening when callers need to assemble their own subsystem set.
 //!
 //! ## Example
 //!
@@ -18,11 +19,15 @@
 //!
 //! let spec = OpenSpec::primary("/data")
 //!     .with_config(config)
-//!     .with_subsystem(GraphSubsystem)
-//!     .with_subsystem(VectorSubsystem);
+//!     .with_subsystem(SearchSubsystem);
 //!
 //! let db = Database::open_runtime(spec)?;
 //! ```
+//!
+//! Product callers should use `open_product_database()` or
+//! `open_product_cache()`. Until graph/vector/search are all engine-owned,
+//! those functions accept caller-built subsystem instances as a temporary
+//! bridge.
 
 use std::path::{Path, PathBuf};
 
@@ -254,22 +259,25 @@ impl std::fmt::Debug for OpenSpec {
 /// Create an `OpenSpec` for a minimal cache database with only `SearchSubsystem`.
 ///
 /// This is the engine-internal profile for tests and utilities that don't need
-/// the full product subsystem set (Graph, Vector, Search). For product code,
-/// use `strata_executor::Strata::cache()` instead.
+/// the product open policy. Product code should use the engine product-open
+/// API, which owns default branch and built-in recipe bootstrap behavior.
 pub fn search_only_cache_spec() -> OpenSpec {
     OpenSpec::cache().with_subsystem(crate::search::SearchSubsystem)
 }
 
 /// Create an `OpenSpec` for a minimal primary database with only `SearchSubsystem`.
 ///
-/// For product code, use `strata_executor::Strata::open()` instead.
+/// This is a low-level runtime profile for tests and utilities. Product code
+/// should use the engine product-open API, and application callers should use
+/// the executor-facing `Strata::open()` API.
 pub fn search_only_primary_spec<P: AsRef<std::path::Path>>(path: P) -> OpenSpec {
     OpenSpec::primary(path).with_subsystem(crate::search::SearchSubsystem)
 }
 
 /// Create an `OpenSpec` for a minimal follower database with only `SearchSubsystem`.
 ///
-/// For product code, use `strata_executor::Strata::open_follower()` instead.
+/// This is a low-level runtime profile for tests and utilities. Product code
+/// should use the engine product-open API with follower options.
 pub fn search_only_follower_spec<P: AsRef<std::path::Path>>(path: P) -> OpenSpec {
     OpenSpec::follower(path).with_subsystem(crate::search::SearchSubsystem)
 }

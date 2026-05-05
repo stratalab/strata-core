@@ -155,7 +155,6 @@ all.
 The direct normal incoming graph today is:
 
 - `strata-executor`
-- `strata-executor-legacy`
 - `strata-graph`
 - `strata-search`
 - `strata-vector`
@@ -175,10 +174,10 @@ workspace, but it is not yet the only runtime owner above storage.
 ### Current Normal Workspace Graph
 
 The verified normal dependency graph for engine-adjacent crates is below.
-`EG1A` re-verified this graph on 2026-05-04 with `cargo metadata
---format-version 1 --no-deps`; no drift was found from the consolidation plan.
-The phase tracking plan is
-[eg1-implementation-plan.md](./eg1-implementation-plan.md).
+`EG3D` re-verified this graph on 2026-05-05 after deleting
+`strata-executor-legacy`. The phase tracking plans are
+[eg1-implementation-plan.md](./eg1-implementation-plan.md) and
+[eg3-implementation-plan.md](./eg3-implementation-plan.md).
 
 ```text
 strata-storage       -> strata-core
@@ -187,20 +186,19 @@ strata-graph         -> strata-core, strata-engine, strata-storage
 strata-vector        -> strata-core, strata-engine, strata-storage
 strata-search        -> strata-core, strata-engine, strata-graph, strata-storage, strata-vector
 strata-intelligence  -> strata-core, strata-engine, strata-inference, strata-search, strata-vector
-strata-executor      -> strata-core, strata-engine, strata-executor-legacy,
-                        strata-graph, strata-intelligence, strata-search,
+strata-executor      -> strata-core, strata-engine, strata-graph,
+                        strata-intelligence, strata-search,
                         strata-storage, strata-vector
-strata-executor-legacy -> strata-core, strata-engine, strata-graph,
-                          strata-vector
 strata-cli           -> strata-executor, strata-intelligence
 stratadb             -> strata-executor
 ```
 
 This graph is the reason the next cleanup should consolidate graph, vector,
-search, and executor-legacy into engine before designing `storage-next`.
-Security/open options are already engine-owned after `EG2`. Today the remaining
-peer crates are direct engine consumers, but several of them also still bypass
-engine and reach storage directly.
+and search into engine before designing `storage-next`. Security/open options
+are already engine-owned after `EG2`, and product open/bootstrap is
+engine-owned after `EG3`. Today the remaining peer crates are direct engine
+consumers, but several of them also still bypass engine and reach storage
+directly.
 
 The current inverse normal storage graph is:
 
@@ -218,10 +216,9 @@ strata-storage
 storage bypasses that the engine consolidation plan removes.
 
 Because most upper crates also depend on engine, the full inverse tree shows
-executor, executor-legacy, graph, intelligence, search, and vector under the
-engine branch as ordinary engine consumers. That is not itself a storage
-bypass; the bypasses that matter here are the direct normal storage edges above
-engine.
+executor, graph, intelligence, search, and vector under the engine branch as
+ordinary engine consumers. That is not itself a storage bypass; the bypasses
+that matter here are the direct normal storage edges above engine.
 
 ### Direct Storage Bypasses Above Engine
 
@@ -237,8 +234,8 @@ tracked in [eg1-implementation-plan.md](./eg1-implementation-plan.md):
 - `strata-executor` uses storage keys, namespaces, type tags, validation, and
   storage errors directly.
 
-`strata-executor-legacy`, `strata-intelligence`, `strata-cli`, and the root
-`stratadb` package do not currently have direct normal storage dependencies.
+`strata-intelligence`, `strata-cli`, and the root `stratadb` package do not
+currently have direct normal storage dependencies.
 Root dev-dependencies and storage-facing tests do import storage directly; those
 are tracked separately in the `EG1` implementation plan for the `EG1D` guard
 policy.
@@ -375,6 +372,6 @@ whether code in the crate is:
 
 After the storage-boundary closeout, the semantic side of engine is real and
 the targeted lower storage mechanics have sunk into storage. The remaining
-cleanup is above this boundary: engine can absorb graph, vector, search, and
-executor-legacy responsibilities only if the substrate/mechanics boundary
-documented here stays explicit.
+cleanup is above this boundary: engine can absorb graph, vector, and search
+responsibilities only if the substrate/mechanics boundary documented here stays
+explicit.

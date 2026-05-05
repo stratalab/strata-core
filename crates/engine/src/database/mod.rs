@@ -28,6 +28,7 @@ pub mod merge_registry;
 pub mod observers;
 pub mod open_options;
 pub mod primitive_degradation;
+mod product_open;
 pub mod profile;
 pub(crate) mod recovery;
 mod recovery_error;
@@ -57,6 +58,10 @@ pub use observers::{
 };
 pub use open_options::{AccessMode, OpenOptions};
 pub use primitive_degradation::{PrimitiveDegradationEntry, PrimitiveDegradationRegistry};
+pub use product_open::{
+    open_product_cache, open_product_database, ProductOpenError, ProductOpenOutcome,
+    ProductOpenResult,
+};
 pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{
     AdvanceError, BlockReason, BlockedTxn, FollowerStatus, RefreshHookError, RefreshOutcome,

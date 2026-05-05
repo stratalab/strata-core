@@ -20,8 +20,9 @@ For the cross-boundary ownership question with engine, see
 
 The important takeaway is that `strata-storage` is the real lower runtime
 anchor of the system. The remaining work is above storage: future engine
-consolidation may absorb graph, vector, search, executor-legacy, and security
-responsibilities, but storage should remain the generic persistence substrate.
+consolidation may absorb graph, vector, and search responsibilities; security
+and executor-legacy have already been absorbed. Storage should remain the
+generic persistence substrate.
 
 ## High-Level Shape
 

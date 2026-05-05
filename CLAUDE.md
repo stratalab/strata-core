@@ -109,7 +109,9 @@ current allowed surface:
 **Product:** `SystemBranchCapability` (`pub` type, `pub(crate)` constructor), `Provider`,
 `ControlRegistry`, `ControlEntry`, `ControlOwner`, `BehaviorClass`, `PersistenceClass`
 
-**Open/Security:** `AccessMode`, `OpenOptions`, `SensitiveString`
+**Open/Security:** `AccessMode`, `OpenOptions`, `open_product_database`,
+`open_product_cache`, `ProductOpenOutcome`, `ProductOpenError`,
+`ProductOpenResult`, `SensitiveString`
 
 **Search/Retrieval:** `RetrievalService`, `SearchRequest`, `SearchResponse`,
 `DiffSearchRequest`, `DiffSearchResponse`, `ResolvedRecipe`, `RecipeInfo`,

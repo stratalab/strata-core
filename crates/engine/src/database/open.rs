@@ -118,8 +118,8 @@ impl Database {
     /// ```
     pub(crate) fn open<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use OpenSpec with the executor's
-        // default_product_spec() or search_only_primary_spec(path).
+        // Product callers should use the engine product-open API; tests and
+        // utilities can also use search_only_primary_spec(path).
         let spec =
             super::spec::OpenSpec::primary(path).with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
@@ -383,8 +383,8 @@ impl Database {
     /// (similar to RocksDB secondary instances).
     pub(crate) fn open_follower<P: AsRef<Path>>(path: P) -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use OpenSpec with the executor's
-        // default_product_follower_spec() or search_only_follower_spec(path).
+        // Product callers should use the engine product-open API; tests and
+        // utilities can also use search_only_follower_spec(path).
         let spec =
             super::spec::OpenSpec::follower(path).with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
@@ -868,8 +868,8 @@ impl Database {
     /// | `open(path)` | Yes | Yes (per config) | Yes |
     pub(crate) fn cache() -> StrataResult<Arc<Self>> {
         // Engine-only open uses only SearchSubsystem (no graph/vector dependency).
-        // For the full subsystem set, use OpenSpec with the executor's
-        // default_product_cache_spec() or search_only_cache_spec().
+        // Product callers should use the engine product-open API; tests and
+        // utilities can also use search_only_cache_spec().
         let spec = super::spec::OpenSpec::cache().with_subsystem(crate::search::SearchSubsystem);
         Self::open_runtime(spec)
     }

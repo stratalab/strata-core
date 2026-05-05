@@ -53,11 +53,12 @@ pub use database::profile::{
     Profile,
 };
 pub use database::{
-    AccessMode, BranchRetentionEntry, CacheMetrics, Database, DatabaseDiskUsage,
-    DegradedPrimitiveEntry, ErrorRole, HealthReport, LossyErrorKind, LossyRecoveryReport,
-    ModelConfig, OpenOptions, OrphanReason, OrphanStorageEntry, PrimitiveDegradationEntry,
-    PrimitiveDegradationRegistry, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
-    PrimitiveDegradedObserverRegistry, ReclaimStatus, RecoveryError, RetentionBlocker,
+    open_product_cache, open_product_database, AccessMode, BranchRetentionEntry, CacheMetrics,
+    Database, DatabaseDiskUsage, DegradedPrimitiveEntry, ErrorRole, HealthReport, LossyErrorKind,
+    LossyRecoveryReport, ModelConfig, OpenOptions, OrphanReason, OrphanStorageEntry,
+    PrimitiveDegradationEntry, PrimitiveDegradationRegistry, PrimitiveDegradedEvent,
+    PrimitiveDegradedObserver, PrimitiveDegradedObserverRegistry, ProductOpenError,
+    ProductOpenOutcome, ProductOpenResult, ReclaimStatus, RecoveryError, RetentionBlocker,
     RetentionReport, RetentionTotals, StorageConfig, StorageMetricsSummary, StrataConfig,
     SubsystemHealth, SubsystemStatus, SystemMetrics, WalWriterHealth,
 };
