@@ -36,6 +36,7 @@ pub mod instrumentation;
 pub mod limits;
 pub mod recovery;
 pub mod semantics;
+mod sensitive;
 pub mod transaction;
 pub mod transaction_ops; // TransactionOps Trait Definition
 
@@ -52,13 +53,13 @@ pub use database::profile::{
     Profile,
 };
 pub use database::{
-    BranchRetentionEntry, CacheMetrics, Database, DatabaseDiskUsage, DegradedPrimitiveEntry,
-    ErrorRole, HealthReport, LossyErrorKind, LossyRecoveryReport, ModelConfig, OrphanReason,
-    OrphanStorageEntry, PrimitiveDegradationEntry, PrimitiveDegradationRegistry,
-    PrimitiveDegradedEvent, PrimitiveDegradedObserver, PrimitiveDegradedObserverRegistry,
-    ReclaimStatus, RecoveryError, RetentionBlocker, RetentionReport, RetentionTotals,
-    StorageConfig, StorageMetricsSummary, StrataConfig, SubsystemHealth, SubsystemStatus,
-    SystemMetrics, WalWriterHealth,
+    AccessMode, BranchRetentionEntry, CacheMetrics, Database, DatabaseDiskUsage,
+    DegradedPrimitiveEntry, ErrorRole, HealthReport, LossyErrorKind, LossyRecoveryReport,
+    ModelConfig, OpenOptions, OrphanReason, OrphanStorageEntry, PrimitiveDegradationEntry,
+    PrimitiveDegradationRegistry, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
+    PrimitiveDegradedObserverRegistry, ReclaimStatus, RecoveryError, RetentionBlocker,
+    RetentionReport, RetentionTotals, StorageConfig, StorageMetricsSummary, StrataConfig,
+    SubsystemHealth, SubsystemStatus, SystemMetrics, WalWriterHealth,
 };
 pub use error::{
     ConstraintReason, DetailValue, ErrorCode, ErrorDetails, PrimitiveDegradedReason, StrataError,
@@ -78,6 +79,7 @@ pub use semantics::vector::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
+pub use sensitive::SensitiveString;
 pub use strata_storage::durability::wal::DurabilityMode;
 pub use strata_storage::durability::WalCounters;
 pub use strata_storage::StorageIterator;

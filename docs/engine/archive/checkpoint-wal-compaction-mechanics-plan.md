@@ -24,9 +24,9 @@ Read this together with:
 
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
 - [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
-- [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
+- [../architecture/architecture-recovery-target.md](../../architecture/architecture-recovery-target.md)
 
 Before Phase C code movement starts, also write:
 
@@ -78,7 +78,7 @@ manifest policy move.
 
 The this cleanup target surface is concentrated in:
 
-- [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
+- [database/compaction.rs](../../../crates/engine/src/database/compaction.rs)
 
 Relevant storage-owned types already live below engine:
 

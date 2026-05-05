@@ -27,9 +27,9 @@ Read this together with:
 - [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
 - [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 - [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
-- [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
+- [../architecture/architecture-recovery-target.md](../../architecture/architecture-recovery-target.md)
 
 ## Boundary Rule
 
@@ -107,8 +107,8 @@ into generic storage rows. Storage only installs those rows.
 
 The snapshot-install cleanup target surface is concentrated in:
 
-- [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
-- [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
+- [database/snapshot_install.rs](../../../crates/engine/src/database/snapshot_install.rs)
+- [database/recovery.rs](../../../crates/engine/src/database/recovery.rs)
 - `SegmentedStore::install_snapshot_entries`
 
 Existing storage format modules already define snapshot DTOs and primitive tag

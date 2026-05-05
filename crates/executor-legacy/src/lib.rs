@@ -7,7 +7,7 @@ mod error;
 pub use bootstrap::Strata;
 pub use error::Error;
 
-pub use strata_security::{AccessMode, OpenOptions};
+pub use strata_engine::{AccessMode, OpenOptions};
 
 /// Transitional result type for the bootstrap-only legacy shell.
 pub type Result<T> = std::result::Result<T, Error>;

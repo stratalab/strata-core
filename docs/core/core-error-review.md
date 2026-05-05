@@ -19,7 +19,7 @@ ownership model under a smaller file.
 This review should be read together with:
 
 - [error-research.md](./error-research.md)
-- [../engine/engine-error-architecture.md](../engine/engine-error-architecture.md)
+- [../engine/archive/engine-error-architecture.md](../engine/archive/engine-error-architecture.md)
 
 That research memo is the external and cross-project justification for the
 direction below. The engine document is the target implementation home for the

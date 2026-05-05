@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use strata_engine::ModelConfig;
+use strata_engine::{ModelConfig, SensitiveString};
 
 use crate::bridge::Primitives;
 use crate::{Output, Result};
@@ -22,7 +22,7 @@ pub(crate) fn configure_model(
         cfg.model = Some(ModelConfig {
             endpoint,
             model,
-            api_key: api_key.map(strata_security::SensitiveString::from),
+            api_key: api_key.map(SensitiveString::from),
             timeout_ms: timeout_ms.unwrap_or(5000),
         });
     })

@@ -25,8 +25,8 @@ This audit should be read together with:
 - [storage-charter.md](./storage-charter.md)
 - [storage-crate-map.md](./storage-crate-map.md)
 - [../engine/engine-crate-map.md](../engine/engine-crate-map.md)
-- [../engine/engine-storage-boundary-normalization-plan.md](../engine/engine-storage-boundary-normalization-plan.md)
-- [../engine/boundary-closeout-plan.md](../engine/boundary-closeout-plan.md)
+- [../engine/archive/engine-storage-boundary-normalization-plan.md](../engine/archive/engine-storage-boundary-normalization-plan.md)
+- [../engine/archive/boundary-closeout-plan.md](../engine/archive/boundary-closeout-plan.md)
 
 ## Current Verdict
 

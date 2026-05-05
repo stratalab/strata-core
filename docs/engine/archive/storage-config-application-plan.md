@@ -23,8 +23,8 @@ Read this together with:
 - [boundary-baseline-and-guardrails-plan.md](./boundary-baseline-and-guardrails-plan.md)
 - [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 - [recovery-bootstrap-mechanics-plan.md](./recovery-bootstrap-mechanics-plan.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
 
 ## Boundary Rule
 

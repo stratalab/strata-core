@@ -9,7 +9,11 @@ the remaining higher-layer consolidation work that will happen above that
 boundary.
 
 For the broader engine cleanup ledger, see
-[engine-pending-items.md](./engine-pending-items.md).
+[engine-pending-items.md](./archive/engine-pending-items.md).
+
+For the planned consolidation of graph, vector, search, and legacy bootstrap
+into engine, see
+[engine-consolidation-plan.md](./engine-consolidation-plan.md).
 
 For the cross-boundary audit with storage, see
 [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md).
@@ -71,8 +75,11 @@ Today `strata-engine` re-exports:
 
 - database/runtime types:
   - `Database`
+  - `AccessMode`
+  - `OpenOptions`
   - `StrataConfig`
   - `StorageConfig`
+  - `SensitiveString`
   - `HealthReport`
   - `RetentionReport`
   - `RecoveryError`
@@ -129,15 +136,23 @@ Those are related, but they are not identical roles.
 
 - `strata-core`
 - `strata-storage`
-- `strata-security`
 
-At runtime and in active test/development paths, that is now the clean semantic
-stack we wanted. The old `core-legacy` compat crate is no longer in engine’s
-dependency graph at all.
+At runtime and in active test/development paths, the lower dependency stack is
+now:
+
+```text
+strata-core -> strata-storage -> strata-engine
+```
+
+`EG2` absorbed the old security/open-options surface into engine, so
+`AccessMode`, `OpenOptions`, and `SensitiveString` are now engine-owned types.
+
+The old `core-legacy` compat crate is no longer in engine's dependency graph at
+all.
 
 ### Incoming Workspace Dependents
 
-The internal incoming graph today is:
+The direct normal incoming graph today is:
 
 - `strata-executor`
 - `strata-executor-legacy`
@@ -151,8 +166,82 @@ And then, above those:
 - `strata-cli`
 - `stratadb`
 
+`strata-intelligence` also depends on `strata-inference`, which is currently
+outside the engine stack and supplies model/inference support.
+
 This confirms that engine is already the main semantic/runtime hub of the
-workspace.
+workspace, but it is not yet the only runtime owner above storage.
+
+### Current Normal Workspace Graph
+
+The verified normal dependency graph for engine-adjacent crates is below.
+`EG1A` re-verified this graph on 2026-05-04 with `cargo metadata
+--format-version 1 --no-deps`; no drift was found from the consolidation plan.
+The phase tracking plan is
+[eg1-implementation-plan.md](./eg1-implementation-plan.md).
+
+```text
+strata-storage       -> strata-core
+strata-engine        -> strata-core, strata-storage
+strata-graph         -> strata-core, strata-engine, strata-storage
+strata-vector        -> strata-core, strata-engine, strata-storage
+strata-search        -> strata-core, strata-engine, strata-graph, strata-storage, strata-vector
+strata-intelligence  -> strata-core, strata-engine, strata-inference, strata-search, strata-vector
+strata-executor      -> strata-core, strata-engine, strata-executor-legacy,
+                        strata-graph, strata-intelligence, strata-search,
+                        strata-storage, strata-vector
+strata-executor-legacy -> strata-core, strata-engine, strata-graph,
+                          strata-vector
+strata-cli           -> strata-executor, strata-intelligence
+stratadb             -> strata-executor
+```
+
+This graph is the reason the next cleanup should consolidate graph, vector,
+search, and executor-legacy into engine before designing `storage-next`.
+Security/open options are already engine-owned after `EG2`. Today the remaining
+peer crates are direct engine consumers, but several of them also still bypass
+engine and reach storage directly.
+
+The current inverse normal storage graph is:
+
+```text
+strata-storage
+|-- strata-engine
+|-- strata-executor
+|-- strata-graph
+|-- strata-search
+`-- strata-vector
+```
+
+`strata-engine` is the intended permanent dependent. `strata-executor`,
+`strata-graph`, `strata-search`, and `strata-vector` are transitional direct
+storage bypasses that the engine consolidation plan removes.
+
+Because most upper crates also depend on engine, the full inverse tree shows
+executor, executor-legacy, graph, intelligence, search, and vector under the
+engine branch as ordinary engine consumers. That is not itself a storage
+bypass; the bypasses that matter here are the direct normal storage edges above
+engine.
+
+### Direct Storage Bypasses Above Engine
+
+These normal production direct storage dependencies are accurate today and
+should be treated as consolidation inputs. The source-level inventory is
+tracked in [eg1-implementation-plan.md](./eg1-implementation-plan.md):
+
+- `strata-graph` uses storage keys, namespaces, type tags, and transaction
+  contexts directly.
+- `strata-vector` uses storage keys, namespaces, type tags, storage reads, and
+  transaction contexts directly.
+- `strata-search` uses storage keys/namespaces in retrieval substrate code.
+- `strata-executor` uses storage keys, namespaces, type tags, validation, and
+  storage errors directly.
+
+`strata-executor-legacy`, `strata-intelligence`, `strata-cli`, and the root
+`stratadb` package do not currently have direct normal storage dependencies.
+Root dev-dependencies and storage-facing tests do import storage directly; those
+are tracked separately in the `EG1` implementation plan for the `EG1D` guard
+policy.
 
 ## What Engine Owns Today
 
@@ -285,7 +374,7 @@ whether code in the crate is:
   `storage`
 
 After the storage-boundary closeout, the semantic side of engine is real and
-the targeted lower storage mechanics have sunk into storage. The remaining cleanup is above this
-boundary: engine can absorb graph, vector, search, executor-legacy, and
-security responsibilities only if the substrate/mechanics boundary documented
-here stays explicit.
+the targeted lower storage mechanics have sunk into storage. The remaining
+cleanup is above this boundary: engine can absorb graph, vector, search, and
+executor-legacy responsibilities only if the substrate/mechanics boundary
+documented here stays explicit.

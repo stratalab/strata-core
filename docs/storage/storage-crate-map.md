@@ -11,6 +11,10 @@ upper crates build on.
 For the target boundary of the clean storage layer, see
 [storage-charter.md](./storage-charter.md).
 
+For the explicit allowlist of storage operations the consolidated engine may
+consume, see
+[v1-storage-consumption-contract.md](./v1-storage-consumption-contract.md).
+
 For the cross-boundary ownership question with engine, see
 [storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md).
 

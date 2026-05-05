@@ -16,9 +16,9 @@ This document is the engine-facing landing zone for that work.
 
 It should be read together with:
 
-- [../core/core-error-review.md](../core/core-error-review.md)
-- [../core/error-research.md](../core/error-research.md)
-- [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
+- [../core/core-error-review.md](../../core/core-error-review.md)
+- [../core/error-research.md](../../core/error-research.md)
+- [../core/core-minimal-surface-implementation-plan.md](../../core/core-minimal-surface-implementation-plan.md)
 - [engine-pending-items.md](./engine-pending-items.md)
 
 The `core` docs establish the ownership move. This document establishes the

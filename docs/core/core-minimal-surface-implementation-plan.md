@@ -223,7 +223,7 @@ error.
 
 - use [core-error-review.md](./core-error-review.md) as the ownership baseline
 - use [error-research.md](./error-research.md) as the external design basis
-- use [../engine/engine-error-architecture.md](../engine/engine-error-architecture.md)
+- use [../engine/archive/engine-error-architecture.md](../engine/archive/engine-error-architecture.md)
   as the future engine-side implementation target
 - audit the current `StrataError` and supporting error types
 - identify which families belong in:

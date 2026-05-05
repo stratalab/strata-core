@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::bridge::Primitives;
 use crate::{Error, Output, Result};
-use strata_security::SensitiveString;
+use strata_engine::SensitiveString;
 
 /// Handle ConfigGet command: return the current database configuration.
 pub(crate) fn config_get(p: &Arc<Primitives>) -> Result<Output> {

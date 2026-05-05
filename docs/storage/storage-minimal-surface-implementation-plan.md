@@ -35,7 +35,7 @@ This plan should be read together with:
 - [durability-crate-map.md](./durability-crate-map.md)
 - [../engine/engine-crate-map.md](../engine/engine-crate-map.md)
 - [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
-- [../engine/engine-pending-items.md](../engine/engine-pending-items.md)
+- [../engine/archive/engine-pending-items.md](../engine/archive/engine-pending-items.md)
 - [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
 
 ## Rewrite Rules
@@ -396,7 +396,7 @@ Move the branch-bundle workflow out of the lower runtime and into `engine`.
 
 Detailed execution plan:
 
-- [../engine/st5-branch-bundle-lift-plan.md](../engine/st5-branch-bundle-lift-plan.md)
+- [../engine/archive/st5-branch-bundle-lift-plan.md](../engine/archive/st5-branch-bundle-lift-plan.md)
 
 ### Scope
 
@@ -435,7 +435,7 @@ letting branch workflows live beside them.
 
 Detailed execution plan:
 
-- [../engine/st6-legacy-core-dependency-severance-plan.md](../engine/st6-legacy-core-dependency-severance-plan.md)
+- [../engine/archive/st6-legacy-core-dependency-severance-plan.md](../engine/archive/st6-legacy-core-dependency-severance-plan.md)
 
 ### Goal
 
@@ -485,7 +485,7 @@ engine-owned families such as:
 
 Detailed execution plan:
 
-- [../engine/st7-core-legacy-deletion-plan.md](../engine/st7-core-legacy-deletion-plan.md)
+- [../engine/archive/st7-core-legacy-deletion-plan.md](../engine/archive/st7-core-legacy-deletion-plan.md)
 
 ### Goal
 

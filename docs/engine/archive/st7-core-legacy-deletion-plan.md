@@ -19,8 +19,8 @@ Read this together with:
 
 - [st6-legacy-core-dependency-severance-plan.md](./st6-legacy-core-dependency-severance-plan.md)
 - [engine-pending-items.md](./engine-pending-items.md)
-- [../storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
-- [../core/core-minimal-surface-implementation-plan.md](../core/core-minimal-surface-implementation-plan.md)
+- [../storage/storage-minimal-surface-implementation-plan.md](../../storage/storage-minimal-surface-implementation-plan.md)
+- [../core/core-minimal-surface-implementation-plan.md](../../core/core-minimal-surface-implementation-plan.md)
 
 ## Goal
 
@@ -58,7 +58,7 @@ The crate is still a workspace member in:
 
 And still physically exists under:
 
-- [crates/core-legacy/](../../crates/core-legacy)
+- [crates/core-legacy/](../../../crates/core-legacy)
 
 Even though it no longer has reverse dependents.
 
@@ -66,7 +66,7 @@ Even though it no longer has reverse dependents.
 
 The shell is still pinned by:
 
-- [crates/core-legacy/tests/compat_shell.rs](../../crates/core-legacy/tests/compat_shell.rs)
+- [crates/core-legacy/tests/compat_shell.rs](../../../crates/core-legacy/tests/compat_shell.rs)
 
 That test is correct for `ST6E`, but it must disappear with the crate. Do not
 move it somewhere else and preserve the shell story by accident.
@@ -119,9 +119,9 @@ shell exists” to “shell deleted”.
 
 The primary live docs to update are:
 
-- [docs/engine/engine-pending-items.md](./engine-pending-items.md)
-- [docs/engine/st6-legacy-core-dependency-severance-plan.md](./st6-legacy-core-dependency-severance-plan.md)
-- [docs/storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
+- [docs/engine/archive/engine-pending-items.md](./engine-pending-items.md)
+- [docs/engine/archive/st6-legacy-core-dependency-severance-plan.md](./st6-legacy-core-dependency-severance-plan.md)
+- [docs/storage/storage-minimal-surface-implementation-plan.md](../../storage/storage-minimal-surface-implementation-plan.md)
 
 Historical baseline docs under `docs/core/` can continue to mention
 `strata-core-legacy` where they are clearly describing the old state.

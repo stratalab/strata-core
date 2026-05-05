@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
-use strata_engine::Database;
-use strata_security::AccessMode;
+use strata_engine::{AccessMode, Database};
 
 use crate::bridge::{
     access_denied, database_info, is_read_only, reject_reserved_branch, requires_session,
@@ -1410,7 +1409,7 @@ impl Executor {
 mod tests {
     use std::sync::Arc;
 
-    use strata_security::AccessMode;
+    use strata_engine::AccessMode;
 
     use crate::{BranchId, Command, DistanceMetric, Error, Executor, Output, Strata};
 

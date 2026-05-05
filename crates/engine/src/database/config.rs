@@ -4,10 +4,9 @@
 //! On first open, a default `strata.toml` is created. To change settings,
 //! edit the file and restart — same model as Redis.
 
-use crate::{StrataError, StrataResult};
+use crate::{SensitiveString, StrataError, StrataResult};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-use strata_security::SensitiveString;
 use strata_storage::durability::wal::DurabilityMode;
 use strata_storage::runtime_config::StorageRuntimeConfig;
 
