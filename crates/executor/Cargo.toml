@@ -23,7 +23,6 @@ google = ["embed", "strata-intelligence/google"]
 arrow = ["dep:arrow", "dep:parquet"]
 
 [dependencies]
-strata-executor-legacy = { path = "../executor-legacy" }
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }

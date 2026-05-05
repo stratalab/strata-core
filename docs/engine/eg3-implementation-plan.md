@@ -133,13 +133,16 @@ If a temporary subsystem handoff is required to remove `strata-executor-legacy`
 before `EG4`/`EG5`, name it as transitional and make the deletion criterion
 obvious in code and docs.
 
-## Current Code To Absorb
+## Retired Code Absorbed
 
-The current bootstrap shell is:
+The bootstrap shell absorbed during `EG3` was:
 
-- [crates/executor-legacy/src/bootstrap.rs](../../crates/executor-legacy/src/bootstrap.rs)
-- [crates/executor-legacy/src/lib.rs](../../crates/executor-legacy/src/lib.rs)
-- [crates/executor-legacy/src/error.rs](../../crates/executor-legacy/src/error.rs)
+- `crates/executor-legacy/src/bootstrap.rs`
+- `crates/executor-legacy/src/lib.rs`
+- `crates/executor-legacy/src/error.rs`
+
+Those files and the `crates/executor-legacy` workspace package were deleted in
+`EG3D` after executor cut over to engine product open.
 
 Current executor call sites:
 
@@ -233,7 +236,11 @@ The engine-owned error should distinguish at least:
 - ordinary engine open failure
 - cache open failure
 - lock-without-IPC-socket failure
-- bootstrap/default-branch failure
+
+Default-branch bootstrap runs inside `Database::open_runtime`, which currently
+does not expose a stable lifecycle phase in its error type. Until that changes,
+default-branch failures surface as the source of ordinary disk/cache open
+failures rather than through a separate product-open variant.
 
 All public engine error/result enums added in this phase must be
 `#[non_exhaustive]`.
@@ -261,10 +268,10 @@ nature obvious in review.
 
 | Section | Status | Deliverable |
 | --- | --- | --- |
-| `EG3A` | Pending | Product open/cache/follower/IPC characterization. |
-| `EG3B` | Pending | Engine-owned product open API and result/error types. |
-| `EG3C` | Pending | Bootstrap policy moved into engine product open. |
-| `EG3D` | Pending | Executor cutover, legacy crate retirement, and guards. |
+| `EG3A` | Complete | Product open/cache/follower/IPC characterization. |
+| `EG3B` | Complete | Engine-owned product open API and result/error types. |
+| `EG3C` | Complete | Bootstrap policy moved into engine product open. |
+| `EG3D` | Complete | Executor cutover, legacy crate retirement, and guards. |
 
 ## Shared Commands
 
@@ -276,10 +283,15 @@ rg -n "strata_executor_legacy|strata-executor-legacy|executor-legacy" \
   -g '!target/**'
 ```
 
-Current legacy inverse dependency tree:
+Retired legacy package guard:
 
 ```bash
-cargo tree -i strata-executor-legacy --workspace --edges normal --depth 2
+if cargo metadata --format-version 1 --no-deps \
+  | jq -r '.packages[].name' \
+  | rg '^strata-executor-legacy$'; then
+  echo "strata-executor-legacy is still a workspace package"
+  exit 1
+fi
 ```
 
 Executor dependency check:
@@ -300,14 +312,13 @@ Engine product-open substrate inventory:
 
 ```bash
 rg -n "OpenSpec|open_runtime|seed_builtin_recipes|default_branch|ensure_default_branch|already in use by another process|OPEN_DATABASES" \
-  crates/engine/src crates/executor-legacy/src crates/executor/src \
+  crates/engine/src crates/executor/src \
   -g '*.rs'
 ```
 
 Focused verification:
 
 ```bash
-cargo test -p strata-executor-legacy
 cargo test -p strata-executor
 cargo test -p stratadb --test executor_ex6_runtime
 cargo test -p stratadb --test engine_security_surface
@@ -317,12 +328,8 @@ cargo check -p strata-executor
 cargo fmt --check
 ```
 
-After `EG3D`, `cargo test -p strata-executor-legacy` is expected to be replaced
-by either:
-
-- no command because the crate is deleted, or
-- a focused compatibility-shell command if a temporary shell is explicitly kept
-  until `EG9`.
+After `EG3D`, `cargo test -p strata-executor-legacy` is intentionally gone
+because the crate was deleted.
 
 ## EG3A - Product Open Characterization
 
@@ -377,7 +384,41 @@ Pin the current product open behavior before moving the bootstrap shell.
 - any untestable current behavior is listed explicitly in this document before
   `EG3B`
 
-Status: pending.
+Status: complete.
+
+Implemented in:
+
+- [../../tests/executor_ex6_runtime.rs](../../tests/executor_ex6_runtime.rs)
+
+The characterization coverage exercises the public `strata_executor::Strata`
+surface and does not import `strata_executor_legacy` directly. It pins local
+primary open, read-only primary open, follower runtime mode, follower
+access-mode forcing, follower reads plus typed/session write rejection, cache
+open, product subsystem registration order, built-in recipe seeding, IPC
+fallback with a socket, read-only IPC fallback access-mode propagation, public
+IPC `new_handle()` default-branch refresh, the IPC `database()` panic contract,
+and the exact actionable lock error when no socket is present. The tests also
+serialize this integration file's product-open cases so the deliberate
+`OPEN_DATABASES` registry manipulation used for IPC simulation does not race
+sibling tests.
+
+The current public executor branch-existence command is not follower-safe: it
+routes through an engine branch-index transaction and fails on a follower before
+it can report `false`. Because of that existing behavior, `EG3A` records
+follower non-bootstrap of a missing default branch with a narrow engine
+observation on the local follower handle rather than a public executor
+`BranchExists` assertion.
+
+The seed-failure warning-only path is not forced in `EG3A`: there is no public
+fault hook that makes `seed_builtin_recipes()` fail after database open succeeds
+without changing product code. `EG3C` must preserve the warning-only behavior
+when moving seeding into engine-owned product open, and should add an
+engine-local characterization if a narrow fault hook already exists or is added
+for that move.
+
+`EG3A` also fixed an executor access-mode bug found while adding read-only IPC
+coverage: typed methods on an IPC-backed `Strata` handle now reject write
+commands client-side when the handle's selected access mode is `ReadOnly`.
 
 ## EG3B - Engine Product Open API
 
@@ -421,7 +462,38 @@ executor over yet.
 - all new public engine error/result enums are `#[non_exhaustive]`
 - focused engine checks pass
 
-Status: pending.
+Status: complete.
+
+Implemented in:
+
+- [../../crates/engine/src/database/product_open.rs](../../crates/engine/src/database/product_open.rs)
+- [../../crates/engine/src/database/mod.rs](../../crates/engine/src/database/mod.rs)
+- [../../crates/engine/src/lib.rs](../../crates/engine/src/lib.rs)
+- [../../CLAUDE.md](../../CLAUDE.md)
+
+`EG3B` adds public `ProductOpenOutcome`, `ProductOpenError`, and
+`ProductOpenResult` types plus crate-visible `open_product_database()` and
+`open_product_cache()` functions. The functions are intentionally not
+cross-crate public in `EG3B` because they do not yet run full product bootstrap:
+default-branch policy and recipe seeding move in `EG3C`, and only then should
+executor be able to cut over to them. The function shape accepts only boxed
+engine `Subsystem` instances as the temporary EG3 bridge, so engine still does
+not name or depend on graph/vector crates. The outcome can represent either a
+local `Arc<Database>` or an IPC fallback marker containing the requested data
+directory, socket path, and selected access mode; executor remains responsible
+for constructing IPC transport.
+
+Primary lock failure classification now exists in engine product open:
+
+- lock failure with `<data_dir>/strata.sock` present returns
+  `ProductOpenOutcome::Ipc`
+- lock failure without the socket returns
+  `ProductOpenError::LockedWithoutIpcSocket` with the current user-facing
+  message
+
+This section intentionally does not move product bootstrap policy yet. Default
+branch selection and built-in recipe seeding remain in the legacy caller until
+`EG3C`, so executor behavior is unchanged in `EG3B`.
 
 ## EG3C - Bootstrap Policy Move
 
@@ -466,7 +538,22 @@ policy.
 - no storage behavior or physical format changes were made
 - `cargo check -p strata-engine` passes
 
-Status: pending.
+### Result
+
+`EG3C` makes engine product open build primary/follower/cache `OpenSpec`
+values. Primary and cache specs set the product default branch `"default"`;
+follower specs intentionally do not request default-branch bootstrap. Built-in
+recipe seeding now runs in engine product open after successful local primary
+and cache opens, and seeding failures remain warning-only.
+
+Default-branch creation still uses the existing `OpenSpec` bootstrap path. No
+second product-open branch-creation path was added. The product-open functions
+are now cross-crate public and re-exported from `strata_engine` for the `EG3D`
+executor cutover. Focused engine tests cover default-branch bootstrap,
+follower non-bootstrap, subsystem bridge ordering, recipe seeding success, and
+warning-only recipe seeding failure.
+
+Status: complete.
 
 ## EG3D - Executor Cutover And Legacy Edge Removal
 
@@ -515,7 +602,30 @@ Make executor call engine product open directly and remove the normal
 - the transitional subsystem-instantiation helper is documented with its EG4/EG5
   deletion criterion
 
-Status: pending.
+### Result
+
+Executor now calls `strata_engine::open_product_database()` and
+`strata_engine::open_product_cache()` directly from
+[../../crates/executor/src/compat.rs](../../crates/executor/src/compat.rs).
+`ProductOpenOutcome::Local` maps to the existing local `Executor` backend and
+`ProductOpenOutcome::Ipc` maps to the existing executor-owned `IpcClient`
+connection path. `ProductOpenError` maps to the existing executor `Internal`
+error shape, preserving the current user-facing lock-without-socket message.
+
+The temporary subsystem handoff is isolated in
+`legacy_product_subsystems_until_graph_vector_absorption()`. It constructs the
+current graph, vector, search subsystem order for engine product open while
+graph and vector still live outside engine. Delete this helper after the graph
+and vector absorption phases make engine able to build the full product runtime
+internally.
+
+`crates/executor/Cargo.toml` no longer depends on
+`strata-executor-legacy`; the legacy crate was removed from the workspace and
+its source files were deleted. The storage-surface guard now rejects
+production manifest or source references to the retired package/import/path so
+the edge cannot return silently.
+
+Status: complete.
 
 ## EG3 Closeout
 
@@ -531,6 +641,6 @@ Status: pending.
 - crate graph docs reflect the new graph
 - guard coverage prevents accidental legacy-edge regression
 
-Status: pending.
+Status: complete.
 
 The next implementation phase after `EG3` is `EG4`.

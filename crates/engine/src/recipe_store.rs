@@ -4,6 +4,13 @@
 //! User recipes live on the user's branch in `_system_` space.
 //! Lookup order: user branch → `_system_` branch fallback.
 
+#[cfg(any(test, feature = "test-support"))]
+use std::collections::HashMap;
+#[cfg(any(test, feature = "test-support"))]
+use std::path::{Path, PathBuf};
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{Mutex, OnceLock};
+
 use crate::primitives::branch::resolve_branch_name;
 use crate::search::recipe::{builtin_defaults, get_builtin_recipe, Recipe, BUILTIN_RECIPE_NAMES};
 use crate::system_space::system_kv_key;
@@ -17,11 +24,51 @@ fn system_branch_id() -> BranchId {
     resolve_branch_name(SYSTEM_BRANCH)
 }
 
+#[cfg(any(test, feature = "test-support"))]
+fn seed_builtin_recipes_failure_slot() -> &'static Mutex<HashMap<PathBuf, String>> {
+    static SLOT: OnceLock<Mutex<HashMap<PathBuf, String>>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
+pub(crate) fn inject_seed_builtin_recipes_failure_for_test(
+    path: &Path,
+    message: impl Into<String>,
+) {
+    seed_builtin_recipes_failure_slot()
+        .lock()
+        .expect("seed recipe failure slot should not be poisoned")
+        .insert(path.to_path_buf(), message.into());
+}
+
+#[cfg(any(test, feature = "test-support"))]
+#[allow(dead_code)]
+pub(crate) fn clear_seed_builtin_recipes_failure_for_test(path: &Path) {
+    seed_builtin_recipes_failure_slot()
+        .lock()
+        .expect("seed recipe failure slot should not be poisoned")
+        .remove(path);
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn take_seed_builtin_recipes_failure_for_test(path: &Path) -> Option<String> {
+    seed_builtin_recipes_failure_slot()
+        .lock()
+        .expect("seed recipe failure slot should not be poisoned")
+        .remove(path)
+}
+
 /// Seed all built-in recipes onto the `_system_` branch.
 ///
 /// Only writes recipes that don't already exist on `_system_`.
 /// Safe to call on every open — skips seeding if recipes are present.
 pub fn seed_builtin_recipes(db: &Database) -> StrataResult<()> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(message) = take_seed_builtin_recipes_failure_for_test(db.data_dir()) {
+        return Err(StrataError::internal(message));
+    }
+
     use crate::search::recipe::builtin_recipes;
     let sys_branch = system_branch_id();
 

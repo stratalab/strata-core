@@ -978,7 +978,7 @@ Final upper-crate storage bypass guard:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage" \
-  crates/{graph,vector,search,executor,executor-legacy,intelligence,cli} \
+  crates/{graph,vector,search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 

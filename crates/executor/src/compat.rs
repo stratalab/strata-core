@@ -1,7 +1,10 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use strata_engine::{AccessMode, Database, HealthReport, OpenOptions, SystemMetrics};
+use strata_engine::{
+    open_product_cache, open_product_database, AccessMode, Database, HealthReport, OpenOptions,
+    ProductOpenError, ProductOpenOutcome, SystemMetrics,
+};
 use strata_storage::validate_space_name;
 
 use crate::ipc::IpcClient;
@@ -29,30 +32,53 @@ impl Strata {
     /// Open a database with explicit options.
     pub fn open_with<P: AsRef<Path>>(path: P, options: OpenOptions) -> Result<Self> {
         let data_dir = path.as_ref().to_path_buf();
-        let legacy = open_with_legacy_bootstrap(&data_dir, options)?;
-        let access_mode = legacy.access_mode();
-        if legacy.is_ipc() {
-            drop(legacy);
-            let socket_path = data_dir.join("strata.sock");
-            let client = IpcClient::connect(&socket_path).map_err(|error| Error::Io {
-                reason: format!("Failed to connect to IPC server: {error}"),
-                hint: None,
-            })?;
-            return Self::from_ipc_client(client, access_mode);
-        }
+        let outcome = open_product_database(
+            &data_dir,
+            options,
+            legacy_product_subsystems_until_graph_vector_absorption(),
+        )
+        .map_err(product_open_error)?;
 
-        let db = legacy.database();
-        drop(legacy);
-        Self::from_local_executor(Executor::new_with_mode(db, access_mode), access_mode)
+        match outcome {
+            ProductOpenOutcome::Local {
+                db, access_mode, ..
+            } => Self::from_local_executor(Executor::new_with_mode(db, access_mode), access_mode),
+            ProductOpenOutcome::Ipc {
+                socket_path,
+                access_mode,
+                ..
+            } => {
+                let client = IpcClient::connect(&socket_path).map_err(|error| Error::Io {
+                    reason: format!("Failed to connect to IPC server: {error}"),
+                    hint: None,
+                })?;
+                Self::from_ipc_client(client, access_mode)
+            }
+            _ => Err(Error::Internal {
+                reason: "engine returned an unknown product open outcome".to_string(),
+                hint: None,
+            }),
+        }
     }
 
     /// Open an ephemeral in-memory database.
     pub fn cache() -> Result<Self> {
-        let legacy = cache_with_legacy_bootstrap()?;
-        let access_mode = legacy.access_mode();
-        let db = legacy.database();
-        drop(legacy);
-        Self::from_local_executor(Executor::new_with_mode(db, access_mode), access_mode)
+        let outcome = open_product_cache(legacy_product_subsystems_until_graph_vector_absorption())
+            .map_err(product_open_error)?;
+
+        match outcome {
+            ProductOpenOutcome::Local {
+                db, access_mode, ..
+            } => Self::from_local_executor(Executor::new_with_mode(db, access_mode), access_mode),
+            ProductOpenOutcome::Ipc { .. } => Err(Error::Internal {
+                reason: "cache product open unexpectedly returned an IPC fallback".to_string(),
+                hint: None,
+            }),
+            _ => Err(Error::Internal {
+                reason: "engine returned an unknown product cache outcome".to_string(),
+                hint: None,
+            }),
+        }
     }
 
     /// Create an independent handle to the same database.
@@ -271,6 +297,16 @@ impl Strata {
     }
 
     fn execute_cmd(&self, command: Command) -> Result<Output> {
+        if matches!(self.backend, Backend::Ipc { .. })
+            && self.access_mode == AccessMode::ReadOnly
+            && command.is_write()
+        {
+            return Err(Error::AccessDenied {
+                command: command.name().to_string(),
+                hint: Some("Database is in read-only mode.".to_string()),
+            });
+        }
+
         match &self.backend {
             Backend::Local { executor } => executor.execute(command),
             Backend::Ipc { client } => client
@@ -338,23 +374,19 @@ impl Strata {
     }
 }
 
-fn open_with_legacy_bootstrap(
-    data_dir: &Path,
-    options: OpenOptions,
-) -> Result<strata_executor_legacy::Strata> {
-    strata_executor_legacy::Strata::open_with(data_dir, options).map_err(legacy_bootstrap_error)
+fn legacy_product_subsystems_until_graph_vector_absorption(
+) -> Vec<Box<dyn strata_engine::Subsystem>> {
+    vec![
+        Box::new(strata_graph::GraphSubsystem),
+        Box::new(strata_vector::VectorSubsystem),
+        Box::new(strata_engine::SearchSubsystem),
+    ]
 }
 
-fn cache_with_legacy_bootstrap() -> Result<strata_executor_legacy::Strata> {
-    strata_executor_legacy::Strata::cache().map_err(legacy_bootstrap_error)
-}
-
-fn legacy_bootstrap_error(error: strata_executor_legacy::Error) -> Error {
-    match error {
-        strata_executor_legacy::Error::Io { reason } => Error::Io { reason, hint: None },
-        strata_executor_legacy::Error::Internal { reason } => {
-            Error::Internal { reason, hint: None }
-        }
+fn product_open_error(error: ProductOpenError) -> Error {
+    Error::Internal {
+        reason: error.to_string(),
+        hint: None,
     }
 }
 

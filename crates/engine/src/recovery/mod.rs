@@ -11,17 +11,13 @@
 //! lifecycle-unification refactor in stratalab/strata-core#2354 exists to
 //! enforce.
 //!
-//! ## Composition lives above the engine
+//! ## Runtime Composition
 //!
-//! The engine crate declares the trait and the spec but does not
-//! compose the production subsystem list itself, because it cannot
-//! depend on `strata-vector` (adding that edge would cycle —
-//! `strata-vector → strata-engine`). The executor owns composition:
-//! [`crates::executor::src::api::mod::default_product_spec`] returns an
-//! `OpenSpec` preloaded with `[VectorSubsystem, SearchSubsystem]`
-//! and every `Strata::open` / `open_with` / `cache` path routes through
-//! it. Engine-internal tests that do not load the vector crate can
-//! install `[SearchSubsystem]` directly via `OpenSpec::with_subsystem`.
+//! The engine crate declares the trait and owns the product-open policy. Until
+//! graph/vector/search are all engine-owned, product callers pass the current
+//! subsystem instances into the engine product-open API as a temporary bridge.
+//! Engine-internal tests that do not load the vector crate can install
+//! `[SearchSubsystem]` directly via `OpenSpec::with_subsystem`.
 //!
 //! ## Lifecycle
 //!

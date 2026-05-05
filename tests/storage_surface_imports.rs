@@ -80,7 +80,6 @@ const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
     "crates/vector",
     "crates/search",
     "crates/executor",
-    "crates/executor-legacy",
     "crates/intelligence",
     "crates/cli",
 ];
@@ -208,6 +207,12 @@ const RETIRED_SECURITY_PACKAGE: &str = concat!("strata", "-", "security");
 const RETIRED_SECURITY_IMPORT: &str = concat!("strata", "_", "security");
 const RETIRED_SECURITY_RELATIVE_PATHS: &[&str] =
     &[concat!("../", "security"), concat!("crates/", "security")];
+const RETIRED_EXECUTOR_LEGACY_PACKAGE: &str = concat!("strata", "-", "executor", "-", "legacy");
+const RETIRED_EXECUTOR_LEGACY_IMPORT: &str = concat!("strata", "_", "executor", "_", "legacy");
+const RETIRED_EXECUTOR_LEGACY_RELATIVE_PATHS: &[&str] = &[
+    concat!("../", "executor", "-", "legacy"),
+    concat!("crates/", "executor", "-", "legacy"),
+];
 
 #[test]
 fn storage_facing_types_are_not_imported_from_strata_core() {
@@ -258,6 +263,33 @@ fn engine_consolidation_security_surface_is_engine_owned() {
     assert!(
         violations.is_empty(),
         "security/open surface must be consumed from `strata_engine`; retired crate references found:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_legacy_executor_bootstrap_is_retired() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![repo_root.join("Cargo.toml")];
+    collect_rust_files(&repo_root.join("src"), &mut files);
+    collect_manifest_files(&repo_root.join("src"), &mut files);
+    collect_rust_files(&repo_root.join("crates"), &mut files);
+    collect_manifest_files(&repo_root.join("crates"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) || should_skip_manifest(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        let contents = fs::read_to_string(&file).expect("read production file");
+        violations.extend(find_retired_executor_legacy_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "product open/bootstrap must be consumed from `strata_engine`; retired executor-legacy references found:\n{}",
         violations.join("\n")
     );
 }
@@ -423,6 +455,28 @@ fn find_retired_security_surface_violations(rel: &str, contents: &str) -> Vec<St
     violations
 }
 
+fn find_retired_executor_legacy_violations(rel: &str, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.contains(RETIRED_EXECUTOR_LEGACY_PACKAGE)
+            || line.contains(RETIRED_EXECUTOR_LEGACY_IMPORT)
+            || RETIRED_EXECUTOR_LEGACY_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: retired executor-legacy bootstrap reference: {}",
+                rel,
+                line_no + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    violations
+}
+
 fn allowed_engine_consolidation_storage_use(
     rel: &str,
 ) -> Option<&'static AllowedEngineConsolidationStorageUse> {
@@ -551,6 +605,18 @@ fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
         {
             violations.push(format!(
                 "{}:{}: manifest references deleted `strata-durability` surface",
+                rel,
+                line_no + 1
+            ));
+        }
+
+        if line.contains(RETIRED_EXECUTOR_LEGACY_PACKAGE)
+            || RETIRED_EXECUTOR_LEGACY_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: manifest references retired `strata-executor-legacy` bootstrap crate",
                 rel,
                 line_no + 1
             ));

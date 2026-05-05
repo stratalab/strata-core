@@ -18,9 +18,10 @@ reach directly into storage:
 - `strata-graph`
 - `strata-vector`
 - `strata-search`
-- `strata-executor-legacy`
 
 `EG2` has already absorbed and deleted `strata-security`; it remains in this
+plan only as a completed phase record.
+`EG3` has absorbed and deleted `strata-executor-legacy`; it remains in this
 plan only as a completed phase record.
 
 This plan consolidates those responsibilities into `strata-engine` so the
@@ -60,11 +61,9 @@ strata-search          -> strata-core, strata-engine, strata-graph,
                           strata-storage, strata-vector
 strata-intelligence    -> strata-core, strata-engine, strata-inference,
                           strata-search, strata-vector
-strata-executor        -> strata-core, strata-engine, strata-executor-legacy,
-                          strata-graph, strata-intelligence, strata-search,
+strata-executor        -> strata-core, strata-engine, strata-graph,
+                          strata-intelligence, strata-search,
                           strata-storage, strata-vector
-strata-executor-legacy -> strata-core, strata-engine, strata-graph,
-                          strata-vector
 strata-cli             -> strata-executor, strata-intelligence
 stratadb               -> strata-executor
 ```
@@ -81,8 +80,8 @@ The direct storage bypasses above engine are:
 - `strata-executor`
   - storage keys, namespaces, type tags, validation helpers, and storage errors
 
-`strata-executor-legacy` and `strata-intelligence` do not currently have direct
-normal storage imports, but they depend on crates that do.
+`strata-intelligence` does not currently have direct normal storage imports,
+but it depends on crates that do.
 
 ## Direct Storage Rule
 
@@ -542,9 +541,9 @@ Move or recreate in engine:
 
 Executor should call engine-owned product open APIs directly.
 
-**Current code to absorb:**
+**Retired code absorbed:**
 
-The relevant starting point is `crates/executor-legacy/src/bootstrap.rs`:
+The relevant starting point was `crates/executor-legacy/src/bootstrap.rs`:
 
 - `Strata::open`
 - `Strata::open_with`
@@ -611,8 +610,11 @@ temporary graph/vector subsystem-instantiation bridge.
 ### EG3D - Executor Cutover And Legacy Edge Removal
 
 Route executor open/cache/follower paths through the engine API, remove the
-normal `strata-executor-legacy` dependency, and either delete the crate or leave
-a documented `EG9` compatibility shell.
+normal `strata-executor-legacy` dependency, and delete the crate.
+
+Current status: complete. Executor now calls engine product open directly, the
+legacy crate is no longer a workspace member, and production guards reject
+retired bootstrap crate references.
 
 ## EG4 - Graph Absorption
 
@@ -1001,12 +1003,12 @@ Delete or retire the peer crates absorbed by engine and enforce the final graph.
 
 Remove from the workspace when no normal dependents remain:
 
-- `crates/executor-legacy`
 - `crates/graph`
 - `crates/vector`
 - `crates/search`
 
-`crates/security` was deleted by `EG2D`.
+`crates/security` was deleted by `EG2D`. `crates/executor-legacy` was deleted
+by `EG3D`.
 
 Remove workspace dependency entries and feature plumbing for deleted crates.
 
@@ -1076,7 +1078,7 @@ Current graph inspection:
 ```bash
 cargo metadata --format-version 1 --no-deps \
   | jq -r '.packages[]
-      | select((.name|test("^strata-(storage|engine|graph|vector|search|intelligence|executor|executor-legacy|cli)$")) or .name=="stratadb")
+      | select((.name|test("^strata-(storage|engine|graph|vector|search|intelligence|executor|cli)$")) or .name=="stratadb")
       | "\(.name) -> \([.dependencies[] | select(.kind == null and .path != null) | .name] | join(", "))"'
 ```
 
@@ -1084,7 +1086,7 @@ Current production direct storage bypass inventory:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage|strata_storage" \
-  src crates/{graph,vector,search,executor,executor-legacy,intelligence,cli} \
+  src crates/{graph,vector,search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 
@@ -1100,7 +1102,7 @@ Final production direct storage bypass guard:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage|strata_storage" \
-  src crates/{graph,vector,search,executor,executor-legacy,intelligence,cli} \
+  src crates/{graph,vector,search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 
@@ -1125,8 +1127,8 @@ Final executor dependency guard:
 cargo tree -p strata-executor --edges normal --depth 1
 ```
 
-At closeout, executor should not depend on storage, graph, vector, search,
-security, or executor-legacy.
+At closeout, executor should not depend on storage, graph, vector, search, or
+security. The executor-legacy edge is already retired.
 
 Final intelligence dependency guard:
 
@@ -1186,9 +1188,9 @@ renames.
 
 ### Compatibility Shells Can Hide In The Graph
 
-If graph/vector/search/executor-legacy remain as re-export crates, the
-workspace may look consolidated while behavior is still split. Any compatibility
-shell must be documented and guarded with a deletion criterion.
+If graph/vector/search remain as re-export crates, the workspace may look
+consolidated while behavior is still split. Any compatibility shell must be
+documented and guarded with a deletion criterion.
 
 ### Engine Will Get Bigger Before It Gets Cleaner
 
