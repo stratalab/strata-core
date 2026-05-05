@@ -151,9 +151,11 @@ fn sensitive_config_strings_are_redacted_but_serde_transparent() {
 
 #[test]
 fn sensitive_config_strings_support_from_string_and_str_inputs() {
-    let mut config = StrataConfig::default();
-    config.anthropic_api_key = Some("sk-ant-from-str".into());
-    config.openai_api_key = Some(String::from("sk-openai-from-string").into());
+    let config = StrataConfig {
+        anthropic_api_key: Some("sk-ant-from-str".into()),
+        openai_api_key: Some(String::from("sk-openai-from-string").into()),
+        ..StrataConfig::default()
+    };
     let direct_secret = SensitiveString::from("sk-direct");
 
     assert_eq!(
