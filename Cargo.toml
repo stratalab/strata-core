@@ -20,7 +20,6 @@ members = [
     "crates/inference",
     "crates/intelligence",
     "crates/cli",
-    "crates/security",
     "crates/executor",
     "crates/executor-legacy",
     "crates/search",
@@ -104,6 +103,7 @@ serial_test = "3"
 # Cryptography
 sha2 = "0.10"
 aes-gcm = "0.10"
+zeroize = "1"
 
 # System
 fs2 = "0.4"

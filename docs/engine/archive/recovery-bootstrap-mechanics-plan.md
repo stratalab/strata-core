@@ -25,9 +25,9 @@ Read this together with:
 - [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 - [checkpoint-wal-compaction-mechanics-plan.md](./checkpoint-wal-compaction-mechanics-plan.md)
 - [snapshot-decode-install-mechanics-plan.md](./snapshot-decode-install-mechanics-plan.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
-- [../architecture/architecture-recovery-target.md](../architecture/architecture-recovery-target.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
+- [../architecture/architecture-recovery-target.md](../../architecture/architecture-recovery-target.md)
 
 ## Boundary Rule
 
@@ -110,7 +110,7 @@ recovery-bootstrap cleanup must not:
 
 The target surface is concentrated in:
 
-- [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
+- [database/recovery.rs](../../../crates/engine/src/database/recovery.rs)
   - configured codec validation
   - `prepare_manifest`
   - WAL codec resolution
@@ -125,15 +125,15 @@ The target surface is concentrated in:
   - coordinator bootstrap
   - follower-state restore
   - watermark construction
-- [database/recovery_error.rs](../../crates/engine/src/database/recovery_error.rs)
+- [database/recovery_error.rs](../../../crates/engine/src/database/recovery_error.rs)
   - engine recovery taxonomy
   - public `StrataError` conversion
   - primary/follower error wording
-- [database/open.rs](../../crates/engine/src/database/open.rs)
+- [database/open.rs](../../../crates/engine/src/database/open.rs)
   - `apply_storage_config`
   - directory permission helper currently used by recovery
   - primary/follower open tail after recovery
-- [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
+- [database/snapshot_install.rs](../../../crates/engine/src/database/snapshot_install.rs)
   - engine-owned primitive decode
   - snapshot-install cleanup decoded-row install adapter
   - recovery snapshot install helper target callback
@@ -831,10 +831,10 @@ broader architecture-cleanup-period failures outside recovery-bootstrap work:
 
 Documentation updates:
 
-- [engine-crate-map.md](./engine-crate-map.md) now describes
+- [engine-crate-map.md](../engine-crate-map.md) now describes
   `database/recovery.rs` as an engine policy/public-error adapter over
   `run_storage_recovery`, not as the owner of lower replay mechanics.
-- [../storage/storage-crate-map.md](../storage/storage-crate-map.md) now
+- [../storage/storage-crate-map.md](../../storage/storage-crate-map.md) now
   lists `durability/recovery_bootstrap.rs` as storage-owned lower durability
   runtime.
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)

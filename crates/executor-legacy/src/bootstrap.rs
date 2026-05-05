@@ -2,9 +2,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use strata_engine::database::OpenSpec;
-use strata_engine::{Database, SearchSubsystem};
+use strata_engine::{AccessMode, Database, OpenOptions, SearchSubsystem};
 use strata_graph::GraphSubsystem;
-use strata_security::{AccessMode, OpenOptions};
 use strata_vector::VectorSubsystem;
 
 use crate::{Error, Result};
@@ -173,7 +172,7 @@ fn engine_error(error: strata_engine::StrataError) -> Error {
 #[cfg(test)]
 mod tests {
     use super::Strata;
-    use strata_security::{AccessMode, OpenOptions};
+    use strata_engine::{AccessMode, OpenOptions};
 
     #[test]
     fn cache_returns_local_read_write_handle() {

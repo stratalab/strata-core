@@ -1,8 +1,7 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
-use strata_engine::{Database, Transaction};
-use strata_security::AccessMode;
+use strata_engine::{AccessMode, Database, Transaction};
 use strata_storage::Namespace;
 
 use crate::bridge::{
@@ -833,7 +832,7 @@ mod tests {
     use std::sync::Arc;
 
     use strata_core::Value;
-    use strata_security::AccessMode;
+    use strata_engine::AccessMode;
     use strata_storage::{Key, Namespace};
 
     use super::SessionBackend;

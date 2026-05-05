@@ -1,8 +1,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use strata_engine::{Database, HealthReport, SystemMetrics};
-use strata_security::{AccessMode, OpenOptions};
+use strata_engine::{AccessMode, Database, HealthReport, OpenOptions, SystemMetrics};
 use strata_storage::validate_space_name;
 
 use crate::ipc::IpcClient;

@@ -27,7 +27,6 @@ strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
 strata-graph = { path = "../graph" }
 strata-vector = { path = "../vector" }
-strata-security = { path = "../security" }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 

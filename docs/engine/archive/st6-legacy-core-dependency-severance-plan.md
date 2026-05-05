@@ -20,8 +20,8 @@ Read this together with:
 
 - [engine-pending-items.md](./engine-pending-items.md)
 - [engine-error-architecture.md](./engine-error-architecture.md)
-- [../storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
-- [../core/co5-engine-domain-and-primitive-eviction-plan.md](../core/co5-engine-domain-and-primitive-eviction-plan.md)
+- [../storage/storage-minimal-surface-implementation-plan.md](../../storage/storage-minimal-surface-implementation-plan.md)
+- [../core/co5-engine-domain-and-primitive-eviction-plan.md](../../core/co5-engine-domain-and-primitive-eviction-plan.md)
 
 ## Goal
 
@@ -55,10 +55,10 @@ deletion-preparation problem.
 
 Modern `crates/core` already hosts the foundational shared language:
 
-- [crates/core/src/id.rs](../../crates/core/src/id.rs)
-- [crates/core/src/branch.rs](../../crates/core/src/branch.rs)
-- [crates/core/src/value.rs](../../crates/core/src/value.rs)
-- [crates/core/src/contract/*](../../crates/core/src/contract)
+- [crates/core/src/id.rs](../../../crates/core/src/id.rs)
+- [crates/core/src/branch.rs](../../../crates/core/src/branch.rs)
+- [crates/core/src/value.rs](../../../crates/core/src/value.rs)
+- [crates/core/src/contract/*](../../../crates/core/src/contract)
 
 Those exports are now used by `storage`, `engine`, and the active upper crates.
 
@@ -76,16 +76,16 @@ owners. They now forward older compatibility paths to:
 The important thing is that the public surface is already mostly corrected:
 
 - branch-domain seam:
-  - [crates/engine/src/branch_domain.rs](../../crates/engine/src/branch_domain.rs)
+  - [crates/engine/src/branch_domain.rs](../../../crates/engine/src/branch_domain.rs)
 - limits:
-  - [crates/engine/src/limits.rs](../../crates/engine/src/limits.rs)
+  - [crates/engine/src/limits.rs](../../../crates/engine/src/limits.rs)
 - primitive seams:
-  - [crates/engine/src/semantics/json.rs](../../crates/engine/src/semantics/json.rs)
-  - [crates/engine/src/semantics/vector.rs](../../crates/engine/src/semantics/vector.rs)
-  - [crates/engine/src/semantics/event.rs](../../crates/engine/src/semantics/event.rs)
-  - [crates/engine/src/semantics/value.rs](../../crates/engine/src/semantics/value.rs)
+  - [crates/engine/src/semantics/json.rs](../../../crates/engine/src/semantics/json.rs)
+  - [crates/engine/src/semantics/vector.rs](../../../crates/engine/src/semantics/vector.rs)
+  - [crates/engine/src/semantics/event.rs](../../../crates/engine/src/semantics/event.rs)
+  - [crates/engine/src/semantics/value.rs](../../../crates/engine/src/semantics/value.rs)
 - parent error seam:
-  - [crates/engine/src/error.rs](../../crates/engine/src/error.rs)
+  - [crates/engine/src/error.rs](../../../crates/engine/src/error.rs)
 
 `ST6` should therefore collapse these seams into real ownership rather than
 inventing new module structure.
@@ -101,7 +101,7 @@ The repo already contains the ratchets that should drive the rest of `ST6`:
     import paths
 - [tests/engine_error_surface.rs](../../tests/engine_error_surface.rs)
   - proves engine is the active parent-error owner
-- [crates/core-legacy/tests/compat_shell.rs](../../crates/core-legacy/tests/compat_shell.rs)
+- [crates/core-legacy/tests/compat_shell.rs](../../../crates/core-legacy/tests/compat_shell.rs)
   - keeps the forwarding shell pinned against the modern core/engine owners
     while the crate still exists
 
@@ -157,13 +157,13 @@ Move:
 
 Destination:
 
-- expand [crates/engine/src/branch_domain.rs](../../crates/engine/src/branch_domain.rs)
+- expand [crates/engine/src/branch_domain.rs](../../../crates/engine/src/branch_domain.rs)
   into the authoritative branch-domain owner
-- keep [crates/engine/src/limits.rs](../../crates/engine/src/limits.rs) as the
+- keep [crates/engine/src/limits.rs](../../../crates/engine/src/limits.rs) as the
   authoritative limits owner
-- keep [crates/engine/src/semantics/event.rs](../../crates/engine/src/semantics/event.rs)
+- keep [crates/engine/src/semantics/event.rs](../../../crates/engine/src/semantics/event.rs)
   as the authoritative event owner
-- keep [crates/engine/src/semantics/value.rs](../../crates/engine/src/semantics/value.rs)
+- keep [crates/engine/src/semantics/value.rs](../../../crates/engine/src/semantics/value.rs)
   as the authoritative runtime-value-helper owner
 
 Required cleanup:
@@ -188,18 +188,18 @@ Goal:
 
 Move:
 
-- [crates/core-legacy/src/primitives/json.rs](../../crates/core-legacy/src/primitives/json.rs)
-- [crates/core-legacy/src/primitives/vector.rs](../../crates/core-legacy/src/primitives/vector.rs)
+- [crates/core-legacy/src/primitives/json.rs](../../../crates/core-legacy/src/primitives/json.rs)
+- [crates/core-legacy/src/primitives/vector.rs](../../../crates/core-legacy/src/primitives/vector.rs)
 
 Destination:
 
-- [crates/engine/src/semantics/json.rs](../../crates/engine/src/semantics/json.rs)
-- [crates/engine/src/semantics/vector.rs](../../crates/engine/src/semantics/vector.rs)
+- [crates/engine/src/semantics/json.rs](../../../crates/engine/src/semantics/json.rs)
+- [crates/engine/src/semantics/vector.rs](../../../crates/engine/src/semantics/vector.rs)
 
 Caller fallout already visible in the current tree:
 
-- [crates/vector/src/filter.rs](../../crates/vector/src/filter.rs)
-  and [crates/vector/src/types.rs](../../crates/vector/src/types.rs)
+- [crates/vector/src/filter.rs](../../../crates/vector/src/filter.rs)
+  and [crates/vector/src/types.rs](../../../crates/vector/src/types.rs)
   needed to be repointed to the engine-owned helper surface
 - root tests still needed their engine-surface seam checks tightened so direct
   legacy helper imports stop compiling unnoticed
@@ -226,11 +226,11 @@ Goal:
 
 Move:
 
-- [crates/core-legacy/src/error.rs](../../crates/core-legacy/src/error.rs)
+- [crates/core-legacy/src/error.rs](../../../crates/core-legacy/src/error.rs)
 
 Destination:
 
-- [crates/engine/src/error.rs](../../crates/engine/src/error.rs)
+- [crates/engine/src/error.rs](../../../crates/engine/src/error.rs)
 
 This slice includes:
 
@@ -274,13 +274,13 @@ Goal:
 
 Manifest cutovers needed:
 
-- [crates/engine/Cargo.toml](../../crates/engine/Cargo.toml)
-- [crates/graph/Cargo.toml](../../crates/graph/Cargo.toml)
-- [crates/vector/Cargo.toml](../../crates/vector/Cargo.toml)
-- [crates/search/Cargo.toml](../../crates/search/Cargo.toml)
-- [crates/intelligence/Cargo.toml](../../crates/intelligence/Cargo.toml)
-- [crates/executor/Cargo.toml](../../crates/executor/Cargo.toml)
-- [crates/executor-legacy/Cargo.toml](../../crates/executor-legacy/Cargo.toml)
+- [crates/engine/Cargo.toml](../../../crates/engine/Cargo.toml)
+- [crates/graph/Cargo.toml](../../../crates/graph/Cargo.toml)
+- [crates/vector/Cargo.toml](../../../crates/vector/Cargo.toml)
+- [crates/search/Cargo.toml](../../../crates/search/Cargo.toml)
+- [crates/intelligence/Cargo.toml](../../../crates/intelligence/Cargo.toml)
+- [crates/executor/Cargo.toml](../../../crates/executor/Cargo.toml)
+- [crates/executor-legacy/Cargo.toml](../../../crates/executor-legacy/Cargo.toml)
 
 Target split after the cutover:
 

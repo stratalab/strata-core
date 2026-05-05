@@ -27,10 +27,11 @@ It should be read together with:
 
 - [storage-minimal-surface-implementation-plan.md](./storage-minimal-surface-implementation-plan.md)
 - [storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md)
+- [v1-storage-consumption-contract.md](./v1-storage-consumption-contract.md)
 - [../core/core-charter.md](../core/core-charter.md)
 - [../engine/engine-crate-map.md](../engine/engine-crate-map.md)
 - [../core/co4-storage-boundary-eviction-plan.md](../core/co4-storage-boundary-eviction-plan.md)
-- [../engine/engine-pending-items.md](../engine/engine-pending-items.md)
+- [../engine/archive/engine-pending-items.md](../engine/archive/engine-pending-items.md)
 - [storage-crate-map.md](./storage-crate-map.md)
 - [concurrency-crate-map.md](./concurrency-crate-map.md)
 - [durability-crate-map.md](./durability-crate-map.md)

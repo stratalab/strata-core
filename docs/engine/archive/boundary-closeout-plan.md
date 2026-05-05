@@ -23,8 +23,8 @@ Read this together with:
 - [snapshot-decode-install-mechanics-plan.md](./snapshot-decode-install-mechanics-plan.md)
 - [recovery-bootstrap-mechanics-plan.md](./recovery-bootstrap-mechanics-plan.md)
 - [storage-config-application-plan.md](./storage-config-application-plan.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
 
 ## Boundary Rule
 
@@ -618,12 +618,12 @@ The closeout doc should explicitly classify these surfaces:
 Phase F refreshes the canonical boundary docs so they describe the settled
 architecture after the storage-boundary normalization:
 
-- [engine-crate-map.md](./engine-crate-map.md) now describes engine as the
+- [engine-crate-map.md](../engine-crate-map.md) now describes engine as the
   database orchestration and semantics layer over storage-owned mechanics
-- [../storage/storage-crate-map.md](../storage/storage-crate-map.md) now
+- [../storage/storage-crate-map.md](../../storage/storage-crate-map.md) now
   describes storage as the persistence, transaction, durability, recovery, and
   storage-runtime config substrate
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
   is the closeout audit for the accepted seams
 - [engine-storage-boundary-normalization-plan.md](./engine-storage-boundary-normalization-plan.md)
   records checkpoint/WAL, snapshot-install, recovery-bootstrap,

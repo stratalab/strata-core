@@ -26,6 +26,7 @@ pub mod config;
 pub mod dag_hook;
 pub mod merge_registry;
 pub mod observers;
+pub mod open_options;
 pub mod primitive_degradation;
 pub mod profile;
 pub(crate) mod recovery;
@@ -54,6 +55,7 @@ pub use observers::{
     ObserverErrorKind, PrimitiveDegradedEvent, PrimitiveDegradedObserver,
     PrimitiveDegradedObserverRegistry, ReplayInfo, ReplayObserver, ReplayObserverRegistry,
 };
+pub use open_options::{AccessMode, OpenOptions};
 pub use primitive_degradation::{PrimitiveDegradationEntry, PrimitiveDegradationRegistry};
 pub use recovery_error::{ErrorRole, RecoveryError};
 pub use refresh::{

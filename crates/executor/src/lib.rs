@@ -34,13 +34,12 @@ pub use types::*;
 
 pub use strata_core::Value;
 pub use strata_engine::{
-    apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware,
+    apply_hardware_profile_if_defaults, apply_profile_if_defaults, detect_hardware, AccessMode,
     BranchDiffEntry, BranchDiffResult, CherryPickFilter, CherryPickInfo, ConflictEntry, DiffFilter,
     DiffOptions, DiffSummary, DurabilityMode, ForkInfo, HardwareInfo, MergeInfo, MergeStrategy,
-    ModelConfig, Profile, RevertInfo, SpaceDiff, StorageConfig, StorageIterator, StrataConfig,
-    SystemMetrics, WalCounters,
+    ModelConfig, OpenOptions, Profile, RevertInfo, SpaceDiff, StorageConfig, StorageIterator,
+    StrataConfig, SystemMetrics, WalCounters,
 };
-pub use strata_security::{AccessMode, OpenOptions};
 pub use strata_storage::{Key, Namespace};
 
 /// Result type for executor operations.

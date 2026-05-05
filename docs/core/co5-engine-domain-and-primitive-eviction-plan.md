@@ -17,8 +17,8 @@ Read this together with:
 - [core-crate-map.md](./core-crate-map.md)
 - [core-minimal-surface-implementation-plan.md](./core-minimal-surface-implementation-plan.md)
 - [core-error-review.md](./core-error-review.md)
-- [../engine/engine-error-architecture.md](../engine/engine-error-architecture.md)
-- [../engine/engine-pending-items.md](../engine/engine-pending-items.md)
+- [../engine/archive/engine-error-architecture.md](../engine/archive/engine-error-architecture.md)
+- [../engine/archive/engine-pending-items.md](../engine/archive/engine-pending-items.md)
 
 ## CO5 Verdict
 

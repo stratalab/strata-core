@@ -57,11 +57,11 @@ The remaining problem is physical ownership inside engine:
 
 The boundary baseline inventory covers these files:
 
-- [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
-- [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
-- [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
-- [database/open.rs](../../crates/engine/src/database/open.rs)
-- [database/config.rs](../../crates/engine/src/database/config.rs)
+- [database/compaction.rs](../../../crates/engine/src/database/compaction.rs)
+- [database/snapshot_install.rs](../../../crates/engine/src/database/snapshot_install.rs)
+- [database/recovery.rs](../../../crates/engine/src/database/recovery.rs)
+- [database/open.rs](../../../crates/engine/src/database/open.rs)
+- [database/config.rs](../../../crates/engine/src/database/config.rs)
 
 The plan intentionally does not inventory all of `engine::database`. Modules
 such as lifecycle, follower refresh, health reporting, retention reporting,
@@ -383,7 +383,7 @@ should refine.
 Before checkpoint/WAL cleanup moves code, write one joint API sketch for checkpoint/WAL cleanup, snapshot-install cleanup, and recovery-bootstrap cleanup:
 
 ```text
-docs/engine/storage-runtime-boundary-api-sketch.md
+docs/engine/archive/storage-runtime-boundary-api-sketch.md
 ```
 
 Checkpoint output feeds snapshot install, and snapshot install feeds recovery.

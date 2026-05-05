@@ -6,8 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use strata_engine::Database;
-use strata_security::AccessMode;
+use strata_engine::{AccessMode, Database};
 
 use crate::{Error, Session};
 

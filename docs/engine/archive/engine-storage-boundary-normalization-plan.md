@@ -41,15 +41,15 @@ At the end of this plan:
 
 This plan should be read together with:
 
-- [engine-crate-map.md](./engine-crate-map.md)
+- [engine-crate-map.md](../engine-crate-map.md)
 - [engine-pending-items.md](./engine-pending-items.md)
 - [engine-error-architecture.md](./engine-error-architecture.md)
-- [../storage/storage-charter.md](../storage/storage-charter.md)
-- [../storage/storage-crate-map.md](../storage/storage-crate-map.md)
-- [../storage/storage-engine-ownership-audit.md](../storage/storage-engine-ownership-audit.md)
-- [../storage/storage-minimal-surface-implementation-plan.md](../storage/storage-minimal-surface-implementation-plan.md)
-- [../storage/st2-primitive-transaction-semantics-extraction-plan.md](../storage/st2-primitive-transaction-semantics-extraction-plan.md)
-- [../storage/st3-generic-transaction-runtime-absorption-plan.md](../storage/st3-generic-transaction-runtime-absorption-plan.md)
+- [../storage/storage-charter.md](../../storage/storage-charter.md)
+- [../storage/storage-crate-map.md](../../storage/storage-crate-map.md)
+- [../storage/storage-engine-ownership-audit.md](../../storage/storage-engine-ownership-audit.md)
+- [../storage/storage-minimal-surface-implementation-plan.md](../../storage/storage-minimal-surface-implementation-plan.md)
+- [../storage/st2-primitive-transaction-semantics-extraction-plan.md](../../storage/st2-primitive-transaction-semantics-extraction-plan.md)
+- [../storage/st3-generic-transaction-runtime-absorption-plan.md](../../storage/st3-generic-transaction-runtime-absorption-plan.md)
 - [storage-runtime-boundary-api-sketch.md](./storage-runtime-boundary-api-sketch.md)
 
 ## Rewrite Rules
@@ -147,24 +147,24 @@ crate. It was lower-runtime code still physically hosted inside engine.
 
 The strongest original candidates were:
 
-- [database/compaction.rs](../../crates/engine/src/database/compaction.rs)
+- [database/compaction.rs](../../../crates/engine/src/database/compaction.rs)
   - checkpoint creation
   - WAL compaction
   - snapshot pruning
   - MANIFEST watermark updates
-- [database/snapshot_install.rs](../../crates/engine/src/database/snapshot_install.rs)
+- [database/snapshot_install.rs](../../../crates/engine/src/database/snapshot_install.rs)
   - snapshot section decoding
   - replay/install into `SegmentedStore`
-- [database/recovery.rs](../../crates/engine/src/database/recovery.rs)
+- [database/recovery.rs](../../../crates/engine/src/database/recovery.rs)
   - MANIFEST preparation
   - WAL codec resolution
   - storage recovery orchestration
   - replay bootstrap
   - storage recovery degradation/lossiness plumbing
-- [database/open.rs](../../crates/engine/src/database/open.rs)
+- [database/open.rs](../../../crates/engine/src/database/open.rs)
   - storage-only configuration application
   - WAL writer settings and runtime wiring
-- [database/config.rs](../../crates/engine/src/database/config.rs)
+- [database/config.rs](../../../crates/engine/src/database/config.rs)
   - storage-facing config defaults and interpretation mixed with
     engine-facing config surface
 
@@ -372,7 +372,7 @@ Keep in engine:
 The checkpoint/WAL cleanup is complete. Storage owns the generic checkpoint, WAL compaction,
 snapshot-prune, MANIFEST sync, and flush-time WAL truncation mechanics through
 the storage-owned
-[checkpoint_runtime.rs](../../crates/storage/src/durability/checkpoint_runtime.rs)
+[checkpoint_runtime.rs](../../../crates/storage/src/durability/checkpoint_runtime.rs)
 module, re-exported through public durability helpers such as
 `run_storage_checkpoint`, `compact_storage_wal`, `prune_storage_snapshots`,
 `sync_storage_manifest`, and flush-time WAL truncation support. Engine keeps
