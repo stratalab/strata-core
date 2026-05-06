@@ -25,7 +25,6 @@ arrow = ["dep:arrow", "dep:parquet"]
 [dependencies]
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
-strata-graph = { path = "../graph" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-storage = { path = "../storage" }

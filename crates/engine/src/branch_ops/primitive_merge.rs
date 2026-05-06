@@ -33,13 +33,13 @@
 //!   load the vector crate), the handler is a pure pass-through and HNSW
 //!   backends only catch up to the merged KV state on the next full recovery.
 //! - `GraphMergeHandler::plan` dispatches to the per-database
-//!   `MergeHandlerRegistry`, which the graph crate populates via
+//!   `MergeHandlerRegistry`, which the engine-owned graph module populates via
 //!   `GraphSubsystem::initialize()`. It implements the semantic merge
 //!   algorithm: decoded edge diffing, additive merging of disjoint edges,
 //!   referential integrity validation, additive catalog merging. If unset
-//!   (engine-only unit tests that don't load the graph crate), the handler
-//!   falls back to `check_graph_merge_divergence` — the tactical "refuse
-//!   divergent graph merges" rule.
+//!   (engine-only unit tests that do not initialize the graph subsystem), the
+//!   handler falls back to `check_graph_merge_divergence` — the tactical
+//!   "refuse divergent graph merges" rule.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -95,15 +95,14 @@ pub(crate) struct MergePrecheckCtx<'a> {
 /// KV / Vector / Event handlers use the default trait implementation,
 /// which delegates to `classify_typed_entries_for_tag` (the same 14-case
 /// decision matrix the generic merge runs). `GraphMergeHandler::plan`
-/// overrides the default to dispatch to the graph crate's semantic merge
+/// overrides the default to dispatch to graph's semantic merge
 /// algorithm. `JsonMergeHandler::plan` overrides to do per-document
 /// path-level merge AND emit secondary index `MergeAction`s atomically
 /// with the doc updates — see `branch_ops/json_merge.rs` and the
 /// `JsonMergeHandler` implementation in this file.
 ///
-/// `pub` (re-exported from `strata_engine`) so primitive crates registering
-/// graph plan callbacks can borrow it through the function-pointer
-/// signature.
+/// `pub` (re-exported from `strata_engine`) so graph/vector migration
+/// callbacks can borrow it through the function-pointer signature.
 ///
 /// `db` is provided so handlers whose `plan` needs to read auxiliary
 /// state from storage (e.g. `JsonMergeHandler` reading `IndexDef`s from
@@ -1084,14 +1083,14 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
 
 /// Function pointer type for the graph semantic merge plan.
 ///
-/// The graph crate provides this implementation and registers it via
+/// The engine-owned graph module provides this implementation and registers it via
 /// `db.merge_registry().register_graph(graph_plan_fn)` during
 /// `GraphSubsystem::initialize()`. The engine's `GraphMergeHandler::plan`
 /// method dispatches to it if registered, falling back to divergence
 /// refusal + default classify behavior if not.
 ///
 /// Returns the per-handler `PrimitiveMergePlan` shape directly so the
-/// graph crate doesn't need access to engine-internal types beyond what's
+/// graph planning does not need access to engine-internal types beyond what's
 /// already `pub` (`MergeAction`, `ConflictEntry`).
 ///
 /// The function may return `Err` if decoding the cell's adjacency lists
@@ -1100,13 +1099,13 @@ pub type GraphMergePlanFn = fn(&MergePlanCtx<'_>) -> StrataResult<PrimitiveMerge
 
 /// Graph merge handler.
 ///
-/// Dispatches to the graph crate's semantic merge — decoded edge diffing,
+/// Dispatches to graph's semantic merge — decoded edge diffing,
 /// additive merging of disjoint edges, referential integrity validation,
 /// additive catalog merging — registered via the per-database
 /// `MergeHandlerRegistry`.
 ///
 /// If no graph plan function is registered (typical for engine-only unit
-/// tests that don't load the graph crate), the handler falls back to:
+/// tests that do not initialize the graph subsystem), the handler falls back to:
 /// - `precheck`: refuses any merge where both source and target made
 ///   graph modifications since the merge base
 /// - `plan`: the default 14-case classification

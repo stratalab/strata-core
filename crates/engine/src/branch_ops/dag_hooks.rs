@@ -4,10 +4,9 @@
 //!
 //! Strata records every fork, merge, revert, cherry-pick, branch create, and
 //! branch delete as a node in a graph called `_branch_dag` stored on the
-//! `_system_` branch. The graph crate (`strata-graph`) implements the actual
-//! write logic. The engine needs to call into the graph crate from `fork_branch`,
-//! `merge_branches`, and friends — but the engine cannot depend on the graph
-//! crate directly (cycle: `strata-graph` already depends on `strata-engine`).
+//! `_system_` branch. The engine-owned graph module implements the actual
+//! write logic. Branch operations call through this hook surface so lineage
+//! mutation code does not need to depend directly on graph storage details.
 //!
 //! ## Authority (post-B3)
 //!

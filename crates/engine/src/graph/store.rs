@@ -24,7 +24,7 @@ use strata_core::id::TxnId;
 use strata_core::BranchId;
 use strata_storage::{Key, TypeTag};
 
-use crate::types::NodeData;
+use crate::graph::types::NodeData;
 
 /// Staged graph index operation to be applied after commit.
 ///
@@ -108,7 +108,11 @@ impl GraphBackendState {
     ///
     /// Called by `GraphCommitObserver` after transaction commit.
     /// Returns the number of operations applied.
-    pub fn apply_pending_ops(&self, txn_id: TxnId, graph_store: &crate::GraphStore) -> usize {
+    pub fn apply_pending_ops(
+        &self,
+        txn_id: TxnId,
+        graph_store: &crate::graph::GraphStore,
+    ) -> usize {
         if let Some((_, ops)) = self.pending_ops.remove(&txn_id) {
             let count = ops.len();
             for op in ops {
@@ -130,7 +134,7 @@ impl GraphBackendState {
 }
 
 /// Apply a single staged graph operation.
-fn apply_staged_graph_op(graph_store: &crate::GraphStore, op: StagedGraphOp) {
+fn apply_staged_graph_op(graph_store: &crate::graph::GraphStore, op: StagedGraphOp) {
     match op {
         StagedGraphOp::IndexNode {
             branch_id,
@@ -156,11 +160,11 @@ fn apply_staged_graph_op(graph_store: &crate::GraphStore, op: StagedGraphOp) {
 // Commit Observers and Refresh Hooks
 // =============================================================================
 
-use std::sync::Weak;
-use strata_engine::database::observers::{
+use crate::database::observers::{
     AbortInfo, AbortObserver, CommitInfo, CommitObserver, ObserverError,
 };
-use strata_engine::{Database, RefreshHook, RefreshHookError};
+use crate::{Database, RefreshHook, RefreshHookError};
+use std::sync::Weak;
 
 /// Ensure runtime hooks are wired for this database instance.
 ///
@@ -187,7 +191,7 @@ pub fn ensure_runtime_wiring(db: &Arc<Database>, state: &Arc<GraphBackendState>)
     let refresh_hook = Arc::new(GraphRefreshHook {
         db: Arc::downgrade(db),
     });
-    if let Ok(hooks) = db.extension::<strata_engine::RefreshHooks>() {
+    if let Ok(hooks) = db.extension::<crate::RefreshHooks>() {
         hooks.register(refresh_hook);
     }
 }
@@ -217,7 +221,7 @@ impl CommitObserver for GraphCommitObserver {
 
         // Get graph backend state and apply pending ops for this commit only.
         if let Ok(state) = db.extension::<GraphBackendState>() {
-            let graph_store = crate::GraphStore::new(db.clone());
+            let graph_store = crate::graph::GraphStore::new(db.clone());
             let applied = state.apply_pending_ops(info.txn_id, &graph_store);
             if applied > 0 {
                 tracing::debug!(
@@ -273,7 +277,9 @@ fn parse_graph_node_key(key: &Key) -> Result<Option<(String, String)>, String> {
     Ok(Some((parts[0].to_string(), parts[2].to_string())))
 }
 
-fn decode_graph_node_data(value: &strata_core::Value) -> Result<crate::types::NodeData, String> {
+fn decode_graph_node_data(
+    value: &strata_core::Value,
+) -> Result<crate::graph::types::NodeData, String> {
     use strata_core::Value;
 
     let Value::String(json) = value else {
@@ -298,7 +304,7 @@ enum GraphRefreshOp {
         space: String,
         graph: String,
         node_id: String,
-        data: crate::types::NodeData,
+        data: crate::graph::types::NodeData,
     },
     Remove {
         branch_id: BranchId,
@@ -309,11 +315,11 @@ enum GraphRefreshOp {
 }
 
 struct PendingGraphRefresh {
-    graph_store: crate::GraphStore,
+    graph_store: crate::graph::GraphStore,
     ops: Vec<GraphRefreshOp>,
 }
 
-impl strata_engine::PreparedRefresh for PendingGraphRefresh {
+impl crate::PreparedRefresh for PendingGraphRefresh {
     fn publish(self: Box<Self>) {
         for op in self.ops {
             match op {
@@ -359,11 +365,11 @@ impl RefreshHook for GraphRefreshHook {
         &self,
         puts: &[(Key, strata_core::Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
-    ) -> Result<Box<dyn strata_engine::PreparedRefresh>, RefreshHookError> {
+    ) -> Result<Box<dyn crate::PreparedRefresh>, RefreshHookError> {
         let Some(db) = self.db.upgrade() else {
-            return Ok(Box::new(strata_engine::NoopPreparedRefresh));
+            return Ok(Box::new(crate::NoopPreparedRefresh));
         };
-        let graph_store = crate::GraphStore::new(db);
+        let graph_store = crate::graph::GraphStore::new(db);
         let mut ops = Vec::with_capacity(puts.len() + pre_read_deletes.len());
 
         for (key, value) in puts {
@@ -402,7 +408,7 @@ impl RefreshHook for GraphRefreshHook {
         Ok(Box::new(PendingGraphRefresh { graph_store, ops }))
     }
 
-    fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
+    fn freeze_to_disk(&self, _db: &Database) -> crate::StrataResult<()> {
         Ok(())
     }
 }
@@ -410,19 +416,19 @@ impl RefreshHook for GraphRefreshHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext::GraphStoreExt;
-    use crate::types::NodeData;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use strata_core::BranchId;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::search::EntityRef;
-    use strata_engine::search::Searchable;
-    use strata_engine::RefreshOutcome;
-    use strata_engine::{
+    use crate::database::OpenSpec;
+    use crate::graph::ext::GraphStoreExt;
+    use crate::graph::types::NodeData;
+    use crate::search::EntityRef;
+    use crate::search::Searchable;
+    use crate::RefreshOutcome;
+    use crate::{
         Database, NoopPreparedRefresh, PreparedRefresh, RefreshHook, RefreshHookError,
         RefreshHooks, SearchRequest, SearchSubsystem, Subsystem,
     };
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use strata_core::BranchId;
 
     #[derive(Clone)]
     struct FailOnceRefreshSubsystem {
@@ -462,7 +468,7 @@ mod tests {
             Ok(Box::new(NoopPreparedRefresh))
         }
 
-        fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
+        fn freeze_to_disk(&self, _db: &Database) -> crate::StrataResult<()> {
             Ok(())
         }
     }
@@ -472,11 +478,11 @@ mod tests {
             "graph-test-fail-once"
         }
 
-        fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
+        fn recover(&self, _db: &Arc<Database>) -> crate::StrataResult<()> {
             Ok(())
         }
 
-        fn initialize(&self, db: &Arc<Database>) -> strata_engine::StrataResult<()> {
+        fn initialize(&self, db: &Arc<Database>) -> crate::StrataResult<()> {
             let hooks = db.extension::<RefreshHooks>()?;
             hooks.register(Arc::new(FailOnceRefreshHook {
                 fail_once: self.fail_once.clone(),
@@ -494,7 +500,7 @@ mod tests {
     #[test]
     fn test_manual_abort_clears_pending_graph_ops() {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
-        let graph_store = crate::GraphStore::new(db.clone());
+        let graph_store = crate::graph::GraphStore::new(db.clone());
         let branch_id = BranchId::new();
 
         graph_store
@@ -510,7 +516,7 @@ mod tests {
             "default",
             "g",
             "n_abort",
-            &crate::types::NodeData::default(),
+            &crate::graph::types::NodeData::default(),
             &state,
         )
         .unwrap();
@@ -530,19 +536,19 @@ mod tests {
 
     #[test]
     fn graph_refresh_indexes_follower_nodes_by_graph_semantics() {
-        let path = unique_test_dir("strata-graph-follower-refresh");
+        let path = unique_test_dir("engine-graph-follower-refresh");
 
         {
             let primary = Database::open_runtime(
                 OpenSpec::primary(&path)
                     .with_subsystem(SearchSubsystem)
-                    .with_subsystem(crate::GraphSubsystem),
+                    .with_subsystem(crate::graph::GraphSubsystem),
             )
             .unwrap();
             let follower = Database::open_runtime(
                 OpenSpec::follower(&path)
                     .with_subsystem(SearchSubsystem)
-                    .with_subsystem(crate::GraphSubsystem),
+                    .with_subsystem(crate::graph::GraphSubsystem),
             )
             .unwrap();
 
@@ -551,8 +557,8 @@ mod tests {
             let graph = "papers";
             let node_id = "quasar-node";
 
-            let primary_graph = crate::GraphStore::new(primary.clone());
-            let follower_graph = crate::GraphStore::new(follower.clone());
+            let primary_graph = crate::graph::GraphStore::new(primary.clone());
+            let follower_graph = crate::graph::GraphStore::new(follower.clone());
 
             primary_graph
                 .create_graph(branch_id, space, graph, None)
@@ -620,7 +626,7 @@ mod tests {
 
     #[test]
     fn graph_refresh_does_not_leak_before_visibility_advance() {
-        let path = unique_test_dir("strata-graph-follower-blocked");
+        let path = unique_test_dir("engine-graph-follower-blocked");
         let branch_id = BranchId::new();
         let space = "tenant_a";
         let fail_once = Arc::new(AtomicBool::new(false));
@@ -628,20 +634,20 @@ mod tests {
         let primary = Database::open_runtime(
             OpenSpec::primary(&path)
                 .with_subsystem(SearchSubsystem)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
         )
         .unwrap();
         let follower = Database::open_runtime(
             OpenSpec::follower(&path)
                 .with_subsystem(SearchSubsystem)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
         )
         .unwrap();
 
-        let primary_graph = crate::GraphStore::new(primary.clone());
-        let follower_graph = crate::GraphStore::new(follower.clone());
+        let primary_graph = crate::graph::GraphStore::new(primary.clone());
+        let follower_graph = crate::graph::GraphStore::new(follower.clone());
         primary_graph
             .create_graph(branch_id, space, "papers", None)
             .unwrap();
@@ -682,7 +688,7 @@ mod tests {
 
     #[test]
     fn graph_restart_keeps_blocked_search_state_clamped() {
-        let path = unique_test_dir("strata-graph-follower-restart-blocked");
+        let path = unique_test_dir("engine-graph-follower-restart-blocked");
         let branch_id = BranchId::new();
         let space = "tenant_a";
         let fail_once = Arc::new(AtomicBool::new(false));
@@ -690,20 +696,20 @@ mod tests {
         let primary = Database::open_runtime(
             OpenSpec::primary(&path)
                 .with_subsystem(SearchSubsystem)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
         )
         .unwrap();
         let follower = Database::open_runtime(
             OpenSpec::follower(&path)
                 .with_subsystem(SearchSubsystem)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(FailOnceRefreshSubsystem::new(fail_once.clone())),
         )
         .unwrap();
 
-        let primary_graph = crate::GraphStore::new(primary.clone());
-        let follower_graph = crate::GraphStore::new(follower.clone());
+        let primary_graph = crate::graph::GraphStore::new(primary.clone());
+        let follower_graph = crate::graph::GraphStore::new(follower.clone());
         primary_graph
             .create_graph(branch_id, space, "papers", None)
             .unwrap();
@@ -746,13 +752,13 @@ mod tests {
         let reopened = Database::open_runtime(
             OpenSpec::follower(&path)
                 .with_subsystem(SearchSubsystem)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(FailOnceRefreshSubsystem::new(Arc::new(AtomicBool::new(
                     false,
                 )))),
         )
         .unwrap();
-        let reopened_graph = crate::GraphStore::new(reopened);
+        let reopened_graph = crate::graph::GraphStore::new(reopened);
         assert!(
             reopened_graph.search(&req).unwrap().hits.is_empty(),
             "follower reopen must not load blocked graph docs from primary caches"
@@ -763,18 +769,18 @@ mod tests {
 
     #[test]
     fn graph_search_recovery_rebuilds_node_id_text_on_slow_path() {
-        let path = unique_test_dir("strata-graph-recovery-slow");
+        let path = unique_test_dir("engine-graph-recovery-slow");
         let branch_id = BranchId::new();
         let space = "tenant_a";
 
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(&path)
-                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(crate::graph::GraphSubsystem)
                     .with_subsystem(SearchSubsystem),
             )
             .unwrap();
-            let graph = crate::GraphStore::new(db.clone());
+            let graph = crate::graph::GraphStore::new(db.clone());
 
             graph
                 .create_graph(branch_id, space, "papers", None)
@@ -802,11 +808,11 @@ mod tests {
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(&path)
-                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(crate::graph::GraphSubsystem)
                     .with_subsystem(SearchSubsystem),
             )
             .unwrap();
-            let graph = crate::GraphStore::new(db);
+            let graph = crate::graph::GraphStore::new(db);
             let req = SearchRequest::new(branch_id, "quasar").with_space(space);
             let response = graph.search(&req).unwrap();
             assert_eq!(response.hits.len(), 1);
@@ -821,18 +827,18 @@ mod tests {
 
     #[test]
     fn graph_search_recovery_fast_path_prunes_stale_graph_docs() {
-        let path = unique_test_dir("strata-graph-recovery-fast");
+        let path = unique_test_dir("engine-graph-recovery-fast");
         let branch_id = BranchId::new();
         let space = "tenant_a";
 
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(&path)
-                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(crate::graph::GraphSubsystem)
                     .with_subsystem(SearchSubsystem),
             )
             .unwrap();
-            let graph = crate::GraphStore::new(db.clone());
+            let graph = crate::graph::GraphStore::new(db.clone());
             graph
                 .create_graph(branch_id, space, "papers", None)
                 .unwrap();
@@ -852,7 +858,7 @@ mod tests {
                 )
                 .unwrap();
 
-            let index = db.extension::<strata_engine::InvertedIndex>().unwrap();
+            let index = db.extension::<crate::InvertedIndex>().unwrap();
             index.index_document(
                 &EntityRef::Graph {
                     branch_id,
@@ -871,11 +877,11 @@ mod tests {
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(&path)
-                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(crate::graph::GraphSubsystem)
                     .with_subsystem(SearchSubsystem),
             )
             .unwrap();
-            let graph = crate::GraphStore::new(db);
+            let graph = crate::graph::GraphStore::new(db);
 
             let stale_req = SearchRequest::new(branch_id, "ghostterm").with_space(space);
             assert!(
@@ -897,7 +903,7 @@ mod tests {
 
     #[test]
     fn graph_search_recovery_fast_path_is_noop_when_storage_is_unchanged() {
-        let path = unique_test_dir("strata-graph-recovery-fast-noop");
+        let path = unique_test_dir("engine-graph-recovery-fast-noop");
         let branch_id = BranchId::new();
         let space = "tenant_a";
         let manifest_path = path.join("search").join("search.manifest");
@@ -905,11 +911,11 @@ mod tests {
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(&path)
-                    .with_subsystem(crate::GraphSubsystem)
+                    .with_subsystem(crate::graph::GraphSubsystem)
                     .with_subsystem(SearchSubsystem),
             )
             .unwrap();
-            let graph = crate::GraphStore::new(db.clone());
+            let graph = crate::graph::GraphStore::new(db.clone());
             graph
                 .create_graph(branch_id, space, "papers", None)
                 .unwrap();
@@ -939,11 +945,11 @@ mod tests {
 
         let reopened = Database::open_runtime(
             OpenSpec::primary(&path)
-                .with_subsystem(crate::GraphSubsystem)
+                .with_subsystem(crate::graph::GraphSubsystem)
                 .with_subsystem(SearchSubsystem),
         )
         .unwrap();
-        let graph = crate::GraphStore::new(reopened);
+        let graph = crate::graph::GraphStore::new(reopened);
         let modified_after = std::fs::metadata(&manifest_path)
             .unwrap()
             .modified()

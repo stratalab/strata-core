@@ -76,7 +76,6 @@ struct AllowedEngineConsolidationStorageUse {
 
 const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
     "src",
-    "crates/graph",
     "crates/vector",
     "crates/search",
     "crates/executor",
@@ -84,43 +83,16 @@ const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
     "crates/cli",
 ];
 
+const ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS: &[&str] = &[
+    "src",
+    "crates/vector/src",
+    "crates/search/src",
+    "crates/executor/src",
+    "crates/intelligence/src",
+    "crates/cli/src",
+];
+
 const ALLOWED_ENGINE_CONSOLIDATION_STORAGE_USES: &[AllowedEngineConsolidationStorageUse] = &[
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/Cargo.toml",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/bulk.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/edges.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/ext.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/keys.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/lib.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/merge.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/merge_handler.rs",
-        removal_epic: "EG4",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/graph/src/store.rs",
-        removal_epic: "EG4",
-    },
     AllowedEngineConsolidationStorageUse {
         path: "crates/vector/Cargo.toml",
         removal_epic: "EG5",
@@ -213,6 +185,10 @@ const RETIRED_EXECUTOR_LEGACY_RELATIVE_PATHS: &[&str] = &[
     concat!("../", "executor", "-", "legacy"),
     concat!("crates/", "executor", "-", "legacy"),
 ];
+const RETIRED_GRAPH_PACKAGE: &str = concat!("strata", "-", "graph");
+const RETIRED_GRAPH_IMPORT: &str = concat!("strata", "_", "graph");
+const RETIRED_GRAPH_RELATIVE_PATHS: &[&str] =
+    &[concat!("../", "graph"), concat!("crates/", "graph")];
 
 #[test]
 fn storage_facing_types_are_not_imported_from_strata_core() {
@@ -290,6 +266,70 @@ fn engine_consolidation_legacy_executor_bootstrap_is_retired() {
     assert!(
         violations.is_empty(),
         "product open/bootstrap must be consumed from `strata_engine`; retired executor-legacy references found:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_graph_crate_is_retired() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let retired_dir = repo_root.join(RETIRED_GRAPH_RELATIVE_PATHS[1]);
+    assert!(
+        !retired_dir.exists(),
+        "graph implementation must live in `strata_engine`; retired graph crate directory still exists at {}",
+        retired_dir.display()
+    );
+
+    let mut files = vec![repo_root.join("Cargo.toml")];
+    collect_rust_files(&repo_root.join("src"), &mut files);
+    collect_manifest_files(&repo_root.join("src"), &mut files);
+    collect_rust_files(&repo_root.join("crates"), &mut files);
+    collect_manifest_files(&repo_root.join("crates"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) || should_skip_manifest(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        let contents = fs::read_to_string(&file).expect("read production file");
+        violations.extend(find_retired_graph_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "graph behavior must be consumed from `strata_engine`; retired graph crate references found:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_graph_subsystem_is_engine_product_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for root in ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS {
+        collect_rust_files(&repo_root.join(root), &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read production source file");
+        violations.extend(find_upper_graph_subsystem_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production crates above engine must not assemble `GraphSubsystem`; graph product runtime registration is engine-owned:\n{}",
         violations.join("\n")
     );
 }
@@ -419,6 +459,10 @@ fn should_skip_manifest(path: &Path) -> bool {
     rel.contains("/target/")
 }
 
+fn is_test_source_path(rel: &str) -> bool {
+    rel == "tests" || rel.starts_with("tests/") || rel.contains("/tests/")
+}
+
 fn repo_relative_path(repo_root: &Path, path: &Path) -> String {
     path.strip_prefix(repo_root)
         .expect("path should be under repository root")
@@ -475,6 +519,287 @@ fn find_retired_executor_legacy_violations(rel: &str, contents: &str) -> Vec<Str
     }
 
     violations
+}
+
+fn find_retired_graph_violations(rel: &str, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.contains(RETIRED_GRAPH_PACKAGE)
+            || line.contains(RETIRED_GRAPH_IMPORT)
+            || RETIRED_GRAPH_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: retired graph crate reference: {}",
+                rel,
+                line_no + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    violations
+}
+
+fn find_upper_graph_subsystem_violations(rel: &str, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut skipped_cfg_test_depth = None;
+    let mut lex_state = RustCodeLexState::default();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        let code = rust_code_only_line(line, &mut lex_state);
+
+        if let Some(depth) = skipped_cfg_test_depth.as_mut() {
+            update_brace_depth(depth, &code);
+            if *depth == 0 {
+                skipped_cfg_test_depth = None;
+            }
+            continue;
+        }
+
+        let trimmed = code.trim();
+        if is_cfg_test_attr(trimmed) {
+            pending_cfg_test = true;
+            continue;
+        }
+
+        if pending_cfg_test {
+            if trimmed.is_empty() || trimmed.starts_with("#[") {
+                continue;
+            }
+
+            if line_declares_inline_module(trimmed) {
+                let mut depth = 0usize;
+                update_brace_depth(&mut depth, &code);
+                if depth > 0 {
+                    skipped_cfg_test_depth = Some(depth);
+                }
+                pending_cfg_test = false;
+                continue;
+            }
+
+            pending_cfg_test = false;
+        }
+
+        if code.contains("GraphSubsystem") {
+            violations.push(format!(
+                "{}:{}: production upper crate names `GraphSubsystem`: {}",
+                rel,
+                line_no + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    violations
+}
+
+fn is_cfg_test_attr(trimmed_code: &str) -> bool {
+    let compact = trimmed_code
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+
+    compact.starts_with("#[cfg(") && compact.contains("test") && !compact.contains("not(test)")
+}
+
+fn line_declares_inline_module(trimmed_code: &str) -> bool {
+    if !trimmed_code.contains('{') {
+        return false;
+    }
+
+    let before_brace = trimmed_code.split('{').next().unwrap_or_default();
+    let mut saw_mod = false;
+    for token in before_brace
+        .split(|ch: char| !is_rust_identifier_continue(ch))
+        .filter(|token| !token.is_empty())
+    {
+        if saw_mod {
+            return true;
+        }
+        saw_mod = token == "mod";
+    }
+
+    false
+}
+
+fn update_brace_depth(depth: &mut usize, line: &str) {
+    for ch in line.chars() {
+        match ch {
+            '{' => *depth += 1,
+            '}' => *depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+}
+
+#[derive(Default)]
+struct RustCodeLexState {
+    mode: RustCodeLexMode,
+}
+
+#[derive(Default)]
+enum RustCodeLexMode {
+    #[default]
+    Code,
+    BlockComment {
+        depth: usize,
+    },
+    CookedLiteral {
+        delimiter: u8,
+        escaped: bool,
+    },
+    RawString {
+        hashes: usize,
+    },
+}
+
+fn rust_code_only_line(line: &str, state: &mut RustCodeLexState) -> String {
+    let bytes = line.as_bytes();
+    let mut code = String::with_capacity(line.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        match &mut state.mode {
+            RustCodeLexMode::Code => {
+                if starts_with(bytes, index, b"//") {
+                    push_spaces_for_remaining(&mut code, bytes, index);
+                    break;
+                }
+
+                if starts_with(bytes, index, b"/*") {
+                    state.mode = RustCodeLexMode::BlockComment { depth: 1 };
+                    push_spaces(&mut code, 2);
+                    index += 2;
+                    continue;
+                }
+
+                if let Some((literal_len, hashes)) = raw_string_start(bytes, index) {
+                    state.mode = RustCodeLexMode::RawString { hashes };
+                    push_spaces(&mut code, literal_len);
+                    index += literal_len;
+                    continue;
+                }
+
+                if bytes[index] == b'"'
+                    || (bytes[index] == b'\'' && !looks_like_lifetime(bytes, index))
+                {
+                    state.mode = RustCodeLexMode::CookedLiteral {
+                        delimiter: bytes[index],
+                        escaped: false,
+                    };
+                    code.push(' ');
+                    index += 1;
+                    continue;
+                }
+
+                code.push(bytes[index] as char);
+                index += 1;
+            }
+            RustCodeLexMode::BlockComment { depth } => {
+                if starts_with(bytes, index, b"/*") {
+                    *depth += 1;
+                    push_spaces(&mut code, 2);
+                    index += 2;
+                    continue;
+                }
+
+                if starts_with(bytes, index, b"*/") {
+                    *depth = depth.saturating_sub(1);
+                    push_spaces(&mut code, 2);
+                    index += 2;
+                    if *depth == 0 {
+                        state.mode = RustCodeLexMode::Code;
+                    }
+                    continue;
+                }
+
+                code.push(' ');
+                index += 1;
+            }
+            RustCodeLexMode::CookedLiteral { delimiter, escaped } => {
+                code.push(' ');
+                if *escaped {
+                    *escaped = false;
+                } else if bytes[index] == b'\\' {
+                    *escaped = true;
+                } else if bytes[index] == *delimiter {
+                    state.mode = RustCodeLexMode::Code;
+                }
+                index += 1;
+            }
+            RustCodeLexMode::RawString { hashes } => {
+                if raw_string_ends_at(bytes, index, *hashes) {
+                    push_spaces(&mut code, 1 + *hashes);
+                    index += 1 + *hashes;
+                    state.mode = RustCodeLexMode::Code;
+                    continue;
+                }
+
+                code.push(' ');
+                index += 1;
+            }
+        }
+    }
+
+    code
+}
+
+fn raw_string_start(bytes: &[u8], index: usize) -> Option<(usize, usize)> {
+    let mut cursor = match bytes.get(index) {
+        Some(b'r') => index + 1,
+        Some(b'b') if bytes.get(index + 1) == Some(&b'r') => index + 2,
+        _ => return None,
+    };
+
+    while bytes.get(cursor) == Some(&b'#') {
+        cursor += 1;
+    }
+
+    if bytes.get(cursor) == Some(&b'"') {
+        Some((
+            cursor + 1 - index,
+            cursor - index - usize::from(bytes[index] == b'b') - 1,
+        ))
+    } else {
+        None
+    }
+}
+
+fn raw_string_ends_at(bytes: &[u8], index: usize, hashes: usize) -> bool {
+    bytes.get(index) == Some(&b'"')
+        && (0..hashes).all(|offset| bytes.get(index + 1 + offset) == Some(&b'#'))
+}
+
+fn starts_with(bytes: &[u8], index: usize, needle: &[u8]) -> bool {
+    bytes.get(index..index + needle.len()) == Some(needle)
+}
+
+fn looks_like_lifetime(bytes: &[u8], index: usize) -> bool {
+    let Some(next) = bytes.get(index + 1).copied() else {
+        return false;
+    };
+
+    is_rust_identifier_start(next as char) && bytes.get(index + 2) != Some(&b'\'')
+}
+
+fn is_rust_identifier_start(ch: char) -> bool {
+    ch == '_' || ch.is_ascii_alphabetic()
+}
+
+fn is_rust_identifier_continue(ch: char) -> bool {
+    is_rust_identifier_start(ch) || ch.is_ascii_digit()
+}
+
+fn push_spaces(code: &mut String, count: usize) {
+    code.extend(std::iter::repeat_n(' ', count));
+}
+
+fn push_spaces_for_remaining(code: &mut String, bytes: &[u8], index: usize) {
+    push_spaces(code, bytes.len().saturating_sub(index));
 }
 
 fn allowed_engine_consolidation_storage_use(
@@ -619,6 +944,19 @@ fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
                 "{}:{}: manifest references retired `strata-executor-legacy` bootstrap crate",
                 rel,
                 line_no + 1
+            ));
+        }
+
+        if line.contains(RETIRED_GRAPH_PACKAGE)
+            || RETIRED_GRAPH_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: manifest references retired `{}` crate",
+                rel,
+                line_no + 1,
+                RETIRED_GRAPH_PACKAGE
             ));
         }
     }
@@ -829,4 +1167,101 @@ fn sample() {
             .any(|line| line.contains("storage_traits::Storage")),
         "self-alias import blocks should be detected"
     );
+}
+
+#[test]
+fn graph_subsystem_guard_detects_production_use() {
+    let contents = r#"
+use strata_engine::GraphSubsystem;
+
+fn product_runtime() {
+    let _subsystem = GraphSubsystem;
+}
+"#;
+
+    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    assert_eq!(violations.len(), 2);
+}
+
+#[test]
+fn graph_subsystem_guard_ignores_cfg_test_modules() {
+    let contents = r#"
+fn production_code() {}
+
+#[cfg(test)]
+mod tests {
+    use strata_engine::GraphSubsystem;
+
+    fn test_runtime() {
+        let _subsystem = GraphSubsystem;
+    }
+}
+"#;
+
+    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn graph_subsystem_guard_ignores_braces_inside_cfg_test_literals_and_comments() {
+    let contents = r###"
+#[cfg(test)]
+mod tests {
+    use strata_engine::GraphSubsystem;
+
+    const CLOSE_BRACE: &str = "}";
+    const RAW_BRACES: &str = r#"{ }"#;
+
+    // }
+    /* { */
+
+    fn test_runtime() {
+        let _subsystem = GraphSubsystem;
+    }
+}
+
+fn product_runtime() {
+    let _subsystem = strata_engine::GraphSubsystem;
+}
+"###;
+
+    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(
+        violations[0].contains("product_runtime")
+            || violations[0].contains("strata_engine::GraphSubsystem"),
+        "{violations:?}"
+    );
+}
+
+#[test]
+fn graph_subsystem_guard_ignores_cfg_test_modules_with_nonstandard_names() {
+    let contents = r#"
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) mod graph_tests {
+    use strata_engine::GraphSubsystem;
+
+    fn test_runtime() {
+        let _subsystem = GraphSubsystem;
+    }
+}
+"#;
+
+    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    assert!(violations.is_empty(), "{violations:?}");
+}
+
+#[test]
+fn graph_subsystem_guard_does_not_ignore_not_test_cfg_modules() {
+    let contents = r#"
+#[cfg(not(test))]
+mod runtime {
+    fn product_runtime() {
+        let _subsystem = strata_engine::GraphSubsystem;
+    }
+}
+"#;
+
+    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    assert_eq!(violations.len(), 1, "{violations:?}");
 }

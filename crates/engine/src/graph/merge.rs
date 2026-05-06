@@ -44,15 +44,15 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::{MergeStrategy, VersionedEntry};
+use crate::{StrataError, StrataResult};
 use strata_core::Value;
 use strata_core::VersionedValue;
-use strata_engine::{MergeStrategy, VersionedEntry};
-use strata_engine::{StrataError, StrataResult};
 use strata_storage::Key;
 
-use crate::keys;
-use crate::packed;
-use crate::types::{EdgeData, GraphMeta, NodeData};
+use crate::graph::keys;
+use crate::graph::packed;
+use crate::graph::types::{EdgeData, GraphMeta, NodeData};
 
 // =============================================================================
 // Public types

@@ -10,7 +10,7 @@
 //!   policy is owned by the engine's product-open API.
 //! - **Mode constructors:** `primary()`, `follower()`, `cache()` make intent clear.
 //! - **Builder pattern:** `with_*` methods support explicit low-level runtime
-//!   opening when callers need to assemble their own subsystem set.
+//!   opening for engine internals and tests.
 //!
 //! ## Example
 //!
@@ -25,9 +25,9 @@
 //! ```
 //!
 //! Product callers should use `open_product_database()` or
-//! `open_product_cache()`. Until graph/vector/search are all engine-owned,
-//! those functions accept caller-built subsystem instances as a temporary
-//! bridge.
+//! `open_product_cache()`. Those functions compose the engine-owned graph and
+//! search subsystems internally and accept only the temporary external vector
+//! bridge until vector is absorbed into engine.
 
 use std::path::{Path, PathBuf};
 
@@ -207,6 +207,11 @@ impl OpenSpec {
     /// Add a subsystem to the initialization list.
     ///
     /// Subsystems are recovered/initialized in the order they are added.
+    ///
+    /// This is a low-level runtime hook for engine internals and tests. Product
+    /// callers should use `open_product_database()` or `open_product_cache()`
+    /// so engine owns runtime composition.
+    #[doc(hidden)]
     pub fn with_subsystem(mut self, subsystem: impl Subsystem) -> Self {
         self.subsystems.push(Box::new(subsystem));
         self
@@ -214,7 +219,9 @@ impl OpenSpec {
 
     /// Add multiple subsystems to the initialization list.
     ///
-    /// Convenience method for adding pre-boxed subsystems.
+    /// Convenience method for adding pre-boxed subsystems. This is a low-level
+    /// runtime hook for engine internals and tests, not product composition.
+    #[doc(hidden)]
     pub fn with_subsystems(mut self, subsystems: Vec<Box<dyn Subsystem>>) -> Self {
         self.subsystems.extend(subsystems);
         self

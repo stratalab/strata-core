@@ -1,4 +1,4 @@
-//! Core graph types for the strata-graph module.
+//! Core graph types for the engine-owned graph module.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

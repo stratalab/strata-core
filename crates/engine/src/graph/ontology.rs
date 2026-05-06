@@ -5,9 +5,9 @@
 
 use std::collections::HashMap;
 
+use crate::{StrataError, StrataResult};
 use strata_core::BranchId;
 use strata_core::Value;
-use strata_engine::{StrataError, StrataResult};
 
 use super::keys;
 use super::types::*;
@@ -878,9 +878,9 @@ fn json_type_name(v: &serde_json::Value) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::OpenSpec;
+    use crate::{Database, SearchSubsystem};
     use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

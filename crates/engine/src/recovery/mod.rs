@@ -13,11 +13,11 @@
 //!
 //! ## Runtime Composition
 //!
-//! The engine crate declares the trait and owns the product-open policy. Until
-//! graph/vector/search are all engine-owned, product callers pass the current
-//! subsystem instances into the engine product-open API as a temporary bridge.
-//! Engine-internal tests that do not load the vector crate can install
-//! `[SearchSubsystem]` directly via `OpenSpec::with_subsystem`.
+//! The engine crate declares the trait and owns the product-open policy.
+//! Product open composes engine-owned graph/search subsystems internally and
+//! accepts only the temporary external vector bridge until vector is absorbed.
+//! Engine-internal tests and utilities that do not need product behavior can
+//! still install explicit low-level subsystem lists via `OpenSpec`.
 //!
 //! ## Lifecycle
 //!

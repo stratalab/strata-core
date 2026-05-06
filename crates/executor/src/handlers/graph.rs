@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
+use strata_engine::graph::types::{CascadePolicy, Direction, EdgeData, GraphMeta, NodeData};
+use strata_engine::graph::GraphStoreExt;
 use strata_engine::TransactionContext;
-use strata_graph::ext::GraphStoreExt;
-use strata_graph::types::{Direction, EdgeData, GraphMeta, NodeData};
 
 use crate::bridge::{
     require_branch_exists, serde_json_to_value_public, to_core_branch_id,
@@ -645,11 +645,11 @@ fn parse_direction(direction: Option<&str>) -> Result<Direction> {
     }
 }
 
-fn parse_cascade_policy(s: Option<&str>) -> Result<strata_graph::types::CascadePolicy> {
+fn parse_cascade_policy(s: Option<&str>) -> Result<CascadePolicy> {
     match s {
-        None | Some("ignore") => Ok(strata_graph::types::CascadePolicy::Ignore),
-        Some("cascade") => Ok(strata_graph::types::CascadePolicy::Cascade),
-        Some("detach") => Ok(strata_graph::types::CascadePolicy::Detach),
+        None | Some("ignore") => Ok(CascadePolicy::Ignore),
+        Some("cascade") => Ok(CascadePolicy::Cascade),
+        Some("detach") => Ok(CascadePolicy::Detach),
         Some(other) => Err(crate::Error::InvalidInput {
             reason: format!(
                 "Invalid cascade_policy '{}'. Must be 'cascade', 'detach', or 'ignore'.",

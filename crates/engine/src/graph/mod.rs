@@ -1,4 +1,4 @@
-//! Graph module for strata-graph.
+//! Engine-owned graph module.
 //!
 //! Provides a property graph overlay on top of Strata's KV storage.
 //! Nodes and edges are stored as KV entries under the `_graph_` space,
@@ -26,19 +26,20 @@ pub mod store;
 pub mod traversal;
 pub mod types;
 
-pub use branch_dag::GraphSubsystem;
-pub use store::{GraphBackendState, StagedGraphOp};
-pub use strata_engine::{
+pub use crate::{
     is_system_branch, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord, MergeRecord,
     BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
+pub use branch_dag::GraphSubsystem;
+pub use ext::GraphStoreExt;
+pub use store::{GraphBackendState, StagedGraphOp};
 
 use std::sync::Arc;
 
+use crate::Database;
+use crate::{StrataError, StrataResult};
 use adjacency::AdjacencyIndex;
 use strata_core::{BranchId, Value};
-use strata_engine::Database;
-use strata_engine::{StrataError, StrataResult};
 use strata_storage::Key;
 use types::*;
 
@@ -158,7 +159,7 @@ impl GraphStore {
         space: &str,
         graph: &str,
     ) -> StrataResult<AdjacencyIndex> {
-        use crate::ext::GraphStoreExt;
+        use crate::graph::ext::GraphStoreExt;
 
         let fwd_prefix = keys::all_forward_adj_prefix(graph);
         let fwd_prefix_key = keys::storage_key(branch_id, space, &fwd_prefix);
@@ -195,30 +196,27 @@ impl GraphStore {
 // Searchable implementation
 // =============================================================================
 
-impl strata_engine::search::Searchable for GraphStore {
-    fn search(
-        &self,
-        req: &strata_engine::SearchRequest,
-    ) -> StrataResult<strata_engine::SearchResponse> {
+impl crate::search::Searchable for GraphStore {
+    fn search(&self, req: &crate::SearchRequest) -> StrataResult<crate::SearchResponse> {
+        use crate::search::{EntityRef, InvertedIndex, SearchHit, SearchStats};
         use std::time::Instant;
-        use strata_engine::search::{EntityRef, InvertedIndex, SearchHit, SearchStats};
 
         let start = Instant::now();
         let _refresh_guard = self.db.refresh_query_guard();
         let index = self.db.extension::<InvertedIndex>()?;
 
         if !index.is_enabled() || index.total_docs() == 0 {
-            return Ok(strata_engine::SearchResponse::empty());
+            return Ok(crate::SearchResponse::empty());
         }
 
-        let parsed = strata_engine::search::tokenizer::parse_query(&req.query);
-        let phrase_cfg = strata_engine::search::PhraseConfig {
+        let parsed = crate::search::tokenizer::parse_query(&req.query);
+        let phrase_cfg = crate::search::PhraseConfig {
             phrases: &parsed.phrases,
             boost: req.phrase_boost,
             slop: req.phrase_slop,
             filter: req.phrase_filter,
         };
-        let prox_cfg = strata_engine::search::ProximityConfig {
+        let prox_cfg = crate::search::ProximityConfig {
             enabled: req.proximity,
             window: req.proximity_window,
             weight: req.proximity_weight,
@@ -282,7 +280,7 @@ impl strata_engine::search::Searchable for GraphStore {
         let mut stats = SearchStats::new(elapsed, hits.len());
         stats = stats.with_index_used(true);
 
-        Ok(strata_engine::SearchResponse {
+        Ok(crate::SearchResponse {
             hits,
             truncated: false,
             stats,
@@ -313,7 +311,7 @@ impl GraphStore {
         node_id: &str,
         data: &NodeData,
     ) {
-        let Ok(index) = self.db.extension::<strata_engine::search::InvertedIndex>() else {
+        let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() else {
             return;
         };
         if !index.is_enabled() {
@@ -322,7 +320,7 @@ impl GraphStore {
 
         let text = Self::build_node_search_text(node_id, data);
         let user_key = keys::node_key(graph, node_id);
-        let entity_ref = strata_engine::search::EntityRef::Graph {
+        let entity_ref = crate::search::EntityRef::Graph {
             branch_id,
             space: space.to_string(),
             key: user_key,
@@ -340,7 +338,7 @@ impl GraphStore {
         graph: &str,
         node_id: &str,
     ) {
-        let Ok(index) = self.db.extension::<strata_engine::search::InvertedIndex>() else {
+        let Ok(index) = self.db.extension::<crate::search::InvertedIndex>() else {
             return;
         };
         if !index.is_enabled() {
@@ -348,7 +346,7 @@ impl GraphStore {
         }
 
         let user_key = keys::node_key(graph, node_id);
-        let entity_ref = strata_engine::search::EntityRef::Graph {
+        let entity_ref = crate::search::EntityRef::Graph {
             branch_id,
             space: space.to_string(),
             key: user_key,
@@ -408,6 +406,6 @@ impl GraphStore {
             text.push_str(node_id);
         }
 
-        Some(strata_engine::search::truncate_text(&text, 100))
+        Some(crate::search::truncate_text(&text, 100))
     }
 }

@@ -966,8 +966,9 @@ engine consolidation:
 - Engine currently re-exports a small number of storage types. Each re-export
   should either become an engine-owned type or remain documented as an explicit
   public engine contract.
-- Graph, vector, search, and executor currently import storage directly. Those
-  imports are migration debt, not an extension of this contract.
+- Vector, search, and executor currently import storage directly. Those imports
+  are migration debt, not an extension of this contract. Graph storage use moved
+  into engine during `EG4`.
 - Engine tests may inspect storage format details. That is acceptable when the
   test is explicitly characterizing recovery, checkpoint, manifest, snapshot,
   WAL, or storage-runtime behavior.
@@ -978,7 +979,7 @@ Final upper-crate storage bypass guard:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage" \
-  crates/{graph,vector,search,executor,intelligence,cli} \
+  crates/{vector,search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 

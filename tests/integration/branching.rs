@@ -1176,7 +1176,7 @@ fn event_merge_cross_space_divergence_succeeds() {
 
 #[test]
 fn graph_merge_disjoint_node_additions_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -1310,7 +1310,7 @@ fn graph_merge_disjoint_node_additions_succeeds() {
 
 #[test]
 fn graph_merge_single_sided_source_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -1421,7 +1421,7 @@ fn graph_merge_single_sided_source_succeeds() {
 
 #[test]
 fn graph_merge_single_sided_target_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     // Symmetric to the source-only case: only target adds graph data after
     // the fork. The generic merge path is a no-op for graph in this case
@@ -1532,7 +1532,7 @@ fn graph_merge_no_changes_does_not_block_kv_merge() {
 
 #[test]
 fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     // Scenario B from the design doc — the most subtle corruption pattern.
     // Pre-fork: nodes alice and bob exist on target.
@@ -1636,7 +1636,7 @@ fn graph_merge_concurrent_node_delete_and_edge_add_rejected() {
 
 #[test]
 fn graph_merge_disjoint_edge_additions_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     // Pre-fork: alice, bob, carol, dave (no edges).
     // Source adds alice→carol. Target adds bob→dave.
@@ -1725,7 +1725,7 @@ fn graph_merge_disjoint_edge_additions_succeeds() {
 
 #[test]
 fn graph_merge_dangling_edge_rejected() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     // Pre-fork: alice, carol exist.
     // Source adds edge alice→carol.
@@ -1788,7 +1788,7 @@ fn graph_merge_dangling_edge_rejected() {
 
 #[test]
 fn graph_merge_conflicting_node_props_lww_source_wins() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     // Pre-fork: alice exists with role=user.
     // Source modifies alice's properties to role=admin.
@@ -1859,7 +1859,7 @@ fn graph_merge_conflicting_node_props_lww_source_wins() {
 
 #[test]
 fn graph_merge_conflicting_node_props_strict_rejects() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -1933,8 +1933,8 @@ fn graph_merge_conflicting_node_props_strict_rejects() {
 /// scenario was rejected by the tactical refusal.
 #[test]
 fn cherry_pick_graph_disjoint_node_additions_succeeds() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::CherryPickFilter;
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2041,8 +2041,8 @@ fn cherry_pick_graph_disjoint_node_additions_succeeds() {
 /// propagate as `Err`.
 #[test]
 fn cherry_pick_graph_dangling_edge_rejected() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::CherryPickFilter;
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2102,8 +2102,8 @@ fn cherry_pick_graph_dangling_edge_rejected() {
 /// consistency.
 #[test]
 fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::CherryPickFilter;
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2167,9 +2167,9 @@ fn cherry_pick_graph_atomic_filter_with_keys_rejected() {
 #[test]
 fn cherry_pick_graph_excluded_via_primitives_filter_works() {
     use strata_core::PrimitiveType;
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::primitives::kv::KVStore;
     use strata_engine::CherryPickFilter;
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2245,9 +2245,9 @@ fn cherry_pick_graph_excluded_via_primitives_filter_works() {
 /// the early-return path because `filter.keys` is None there.
 #[test]
 fn cherry_pick_graph_dropped_via_non_graph_key_filter_succeeds() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::primitives::kv::KVStore;
     use strata_engine::CherryPickFilter;
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2357,7 +2357,7 @@ fn cherry_pick_kv_only_no_graph_changes_works() {
 /// as a set union — both new graphs coexist.
 #[test]
 fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -2438,7 +2438,7 @@ fn graph_merge_catalog_additive_disjoint_creates_succeeds() {
 /// dropped from the catalog, the new graph is added.
 #[test]
 fn graph_merge_catalog_additive_one_deletes_one_creates_succeeds() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3375,7 +3375,7 @@ fn cow_diff_matches_expected_complex() {
 /// from that space.
 #[test]
 fn graph_in_user_space_create_and_query_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3437,7 +3437,7 @@ fn graph_in_user_space_create_and_query_succeeds() {
 /// independent — same node IDs, different data, no cross-contamination.
 #[test]
 fn graph_in_two_spaces_independent() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3491,7 +3491,7 @@ fn graph_in_two_spaces_independent() {
 /// the data via COW exactly like KV/JSON.
 #[test]
 fn graph_in_user_space_survives_fork() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3539,7 +3539,7 @@ fn graph_in_user_space_survives_fork() {
 /// user-space graph merge cleanly with bidirectional consistency.
 #[test]
 fn graph_in_user_space_semantic_merge_succeeds() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3632,7 +3632,7 @@ fn graph_in_user_space_semantic_merge_succeeds() {
 /// same way it does to graphs in the reserved `_graph_` space.
 #[test]
 fn graph_in_user_space_referential_integrity_rejects_dangling() {
-    use strata_graph::types::{EdgeData, NodeData};
+    use strata_engine::graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3695,7 +3695,7 @@ fn graph_in_user_space_referential_integrity_rejects_dangling() {
 /// be able to target it.
 #[test]
 fn graph_store_accepts_reserved_system_dag_space() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3705,12 +3705,17 @@ fn graph_store_accepts_reserved_system_dag_space() {
     let branch_id = strata_engine::primitives::branch::resolve_branch_name("main");
 
     p.graph
-        .create_graph(branch_id, strata_graph::keys::GRAPH_SPACE, "g", None)
+        .create_graph(
+            branch_id,
+            strata_engine::graph::keys::GRAPH_SPACE,
+            "g",
+            None,
+        )
         .unwrap();
     p.graph
         .add_node(
             branch_id,
-            strata_graph::keys::GRAPH_SPACE,
+            strata_engine::graph::keys::GRAPH_SPACE,
             "g",
             "alice",
             NodeData::default(),
@@ -3719,7 +3724,12 @@ fn graph_store_accepts_reserved_system_dag_space() {
 
     let alice = p
         .graph
-        .get_node(branch_id, strata_graph::keys::GRAPH_SPACE, "g", "alice")
+        .get_node(
+            branch_id,
+            strata_engine::graph::keys::GRAPH_SPACE,
+            "g",
+            "alice",
+        )
         .unwrap();
     assert!(alice.is_some());
 
@@ -3764,7 +3774,7 @@ fn graph_store_accepts_reserved_system_dag_space() {
 ///   `catalog contains "g"` ⇔ `any g/* keys exist in storage`.
 #[test]
 fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -3857,7 +3867,7 @@ fn graph_merge_whole_graph_delete_vs_target_add_is_atomic() {
 /// entries — so the indexes always reflect the projected `NodeData`.
 #[test]
 fn graph_merge_lww_node_keeps_ref_and_type_indexes_consistent() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();
@@ -5916,7 +5926,7 @@ fn verify_graph_adjacency(
 /// relationship and writing to all five primitives on both sides.
 #[test]
 fn cross_primitive_fork_isolation() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
@@ -6056,7 +6066,7 @@ fn cross_primitive_fork_isolation() {
 /// (no conflicts) and target must end up with both sides' contributions.
 #[test]
 fn cross_primitive_merge_disjoint() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
@@ -6185,7 +6195,7 @@ fn cross_primitive_merge_disjoint() {
 /// each primitive's conflicts semantically — not just byte-for-byte.
 #[test]
 fn cross_primitive_merge_overlapping_lww() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
@@ -6393,8 +6403,8 @@ fn cross_primitive_merge_overlapping_lww() {
 /// primitives, then runs each primitive's invariant checker.
 #[test]
 fn cross_primitive_merge_invariant_sweep() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::primitives::json::index::{self as jindex, IndexType};
-    use strata_graph::types::{EdgeData, NodeData};
 
     let test_db = TestDb::new();
     let p = test_db.all_primitives();
@@ -6680,8 +6690,8 @@ fn cross_primitive_merge_invariant_sweep() {
 /// they survive restart for free via WAL replay.
 #[test]
 fn cross_primitive_merge_rollback_via_reopen() {
+    use strata_engine::graph::types::{EdgeData, NodeData};
     use strata_engine::primitives::json::index::{self as jindex, IndexType};
-    use strata_graph::types::{EdgeData, NodeData};
 
     // Use strict (always-fsync) durability to guarantee WAL fsync
     // before reopen — mirrors `always_mode_all_primitives_survive_reopen`.
@@ -6967,7 +6977,7 @@ fn cross_primitive_merge_rollback_via_reopen() {
 /// the cutover.
 fn dag_node_id_for_key(test_db: &TestDb, key: &str) -> String {
     match test_db.db.branches().control_record(key) {
-        Ok(Some(rec)) => strata_graph::branch_dag::dag_branch_node_id_for_ref(rec.branch),
+        Ok(Some(rec)) => strata_engine::graph::branch_dag::dag_branch_node_id_for_ref(rec.branch),
         _ => key.to_string(),
     }
 }
@@ -6976,7 +6986,7 @@ fn dag_query_node(
     test_db: &TestDb,
     p: &AllPrimitives,
     name: &str,
-) -> Option<strata_graph::types::NodeData> {
+) -> Option<strata_engine::graph::types::NodeData> {
     use strata_engine::SYSTEM_BRANCH;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     let node_id = dag_node_id_for_key(test_db, name);
@@ -7001,9 +7011,9 @@ fn dag_outgoing(
     p: &AllPrimitives,
     name: &str,
     edge_type: &str,
-) -> Vec<strata_graph::types::Neighbor> {
+) -> Vec<strata_engine::graph::types::Neighbor> {
+    use strata_engine::graph::types::Direction;
     use strata_engine::SYSTEM_BRANCH;
-    use strata_graph::types::Direction;
     let system_id = strata_engine::primitives::branch::resolve_branch_name(SYSTEM_BRANCH);
     let node_id = dag_node_id_for_key(test_db, name);
     p.graph
@@ -7355,7 +7365,7 @@ fn dag_records_branch_create_and_delete() {
         .unwrap()
         .unwrap()
         .branch;
-    let deleted_node_id = strata_graph::branch_dag::dag_branch_node_id_for_ref(branch_ref);
+    let deleted_node_id = strata_engine::graph::branch_dag::dag_branch_node_id_for_ref(branch_ref);
 
     // After create, branch should exist in DAG with status=active and a
     // populated created_at timestamp.
@@ -7417,7 +7427,7 @@ fn dag_repeated_merge_advances_merge_base() {
     // which becomes the merge-base override for the next merge call.
     // Without this property, repeated merges would always re-walk back to
     // the original fork point and re-apply already-merged changes.
-    use strata_graph::branch_dag::find_last_merge_version;
+    use strata_engine::graph::branch_dag::find_last_merge_version;
 
     let test_db = TestDb::new();
     let branches = test_db.db.branches();

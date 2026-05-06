@@ -2654,9 +2654,9 @@ mod tests {
     /// Recording DAG hook for migration-backfill tests. Captures every
     /// event passed to `record_event` and replays them from `log`.
     ///
-    /// Engine cannot depend on the graph crate (where the real
-    /// `GraphDagHook` lives), so tests that exercise DAG-backed migration
-    /// install this mock instead.
+    /// Tests that exercise DAG-backed migration install this mock instead of
+    /// the engine graph module's runtime hook so they can assert the exact
+    /// recorded events without graph storage side effects.
     struct RecordingDagHook {
         events: std::sync::Mutex<Vec<DagEvent>>,
     }

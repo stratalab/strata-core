@@ -1178,7 +1178,7 @@ fn graph_commit_makes_writes_visible() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
     session
@@ -1235,7 +1235,7 @@ fn graph_and_kv_atomic() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
     session
@@ -1509,7 +1509,7 @@ fn graph_kv_rollback_discards_both() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
     session
@@ -1806,7 +1806,7 @@ fn vector_commit_makes_writes_visible() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
 
@@ -1854,7 +1854,7 @@ fn vector_and_kv_atomic() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
 
@@ -2005,7 +2005,7 @@ fn vector_hnsw_updated_after_commit() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
 
@@ -2059,7 +2059,7 @@ fn vector_rollback_does_not_update_hnsw() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
     create_test_collection(&mut session, "emb", 3);
 
@@ -3325,7 +3325,7 @@ fn all_primitives_atomic_commit() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
     session
@@ -3470,7 +3470,7 @@ fn all_primitives_atomic_rollback() {
         strata_engine::database::OpenSpec::cache().with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let mut session = Session::new(db.clone());
 
     session

@@ -15,7 +15,6 @@ The next problem is above that boundary. Several crates are already engine
 concepts in practice, but they still exist as peer crates and several of them
 reach directly into storage:
 
-- `strata-graph`
 - `strata-vector`
 - `strata-search`
 
@@ -23,6 +22,8 @@ reach directly into storage:
 plan only as a completed phase record.
 `EG3` has absorbed and deleted `strata-executor-legacy`; it remains in this
 plan only as a completed phase record.
+`EG4` has absorbed and deleted `strata-graph`; it remains in this plan only as
+a completed phase record.
 
 This plan consolidates those responsibilities into `strata-engine` so the
 workspace can settle into the intended stack:
@@ -55,14 +56,13 @@ is:
 ```text
 strata-storage         -> strata-core
 strata-engine          -> strata-core, strata-storage
-strata-graph           -> strata-core, strata-engine, strata-storage
 strata-vector          -> strata-core, strata-engine, strata-storage
-strata-search          -> strata-core, strata-engine, strata-graph,
-                          strata-storage, strata-vector
+strata-search          -> strata-core, strata-engine, strata-storage,
+                          strata-vector
 strata-intelligence    -> strata-core, strata-engine, strata-inference,
                           strata-search, strata-vector
-strata-executor        -> strata-core, strata-engine, strata-graph,
-                          strata-intelligence, strata-search,
+strata-executor        -> strata-core, strata-engine, strata-intelligence,
+                          strata-search,
                           strata-storage, strata-vector
 strata-cli             -> strata-executor, strata-intelligence
 stratadb               -> strata-executor
@@ -70,8 +70,6 @@ stratadb               -> strata-executor
 
 The direct storage bypasses above engine are:
 
-- `strata-graph`
-  - storage keys, namespaces, type tags, and transaction contexts
 - `strata-vector`
   - storage keys, namespaces, type tags, storage scans, transaction contexts,
     and storage trait calls
@@ -82,6 +80,10 @@ The direct storage bypasses above engine are:
 
 `strata-intelligence` does not currently have direct normal storage imports,
 but it depends on crates that do.
+
+`EG4` removed graph from this list by moving graph runtime, storage-key mapping,
+transaction extension behavior, merge behavior, and branch DAG behavior into
+engine.
 
 ## Direct Storage Rule
 
@@ -101,9 +103,9 @@ edge:
   or build the storage substrate
 - temporary migration shims named in this plan and deleted by closeout
 
-Executor, intelligence, CLI, graph, vector, search, and product code are not
-storage tests. If they need a storage fact, engine must expose a semantic API or
-a narrow runtime API for that fact.
+Executor, intelligence, CLI, vector, search, and product code are not storage
+tests. If they need a storage fact, engine must expose a semantic API or a
+narrow runtime API for that fact. Graph is now engine-owned after `EG4`.
 
 This rule is the main acceptance condition for the plan.
 
@@ -114,9 +116,10 @@ paths for hypothetical external users.
 
 That means:
 
-- deleting `strata-graph`, `strata-vector`, `strata-search`, and
-  `strata-executor-legacy` is allowed
+- deleting `strata-vector` and `strata-search` is allowed
+- `strata-graph` has already been absorbed and deleted by `EG4`
 - `strata-security` has already been absorbed and deleted by `EG2`
+- `strata-executor-legacy` has already been absorbed and deleted by `EG3`
 - long-lived re-export crates are not required for compatibility
 - API compatibility is valuable only where it protects current in-repo callers,
   current CLI/executor behavior, or test characterization
@@ -233,6 +236,32 @@ temporary subsystem handoff may be needed to remove `strata-executor-legacy`
 without creating a crate cycle. That handoff must be named as transitional and
 deleted after graph/vector absorption. Do not introduce a polished
 `ProductSubsystemProfile` abstraction that survives closeout.
+
+The retirement schedule is:
+
+- `EG3` may leave a named bridge only because graph/vector are still outside
+  engine. The bridge is not product architecture.
+- `EG4` must remove `GraphSubsystem` from all production upper-crate assembly.
+  After graph absorption, graph lifecycle registration is engine-owned.
+- `EG5` must remove `VectorSubsystem` from all production upper-crate assembly.
+  After vector absorption, product open should not accept an externally supplied
+  subsystem bundle.
+- `EG6` must make search runtime registration internal to engine-owned product
+  composition. `SearchSubsystem` can remain an engine implementation detail or
+  test hook, but not a product-open assembly concept.
+- `EG7`/`EG9` must either delete `OpenSpec::with_subsystem` /
+  `OpenSpec::with_subsystems` from the normal public engine surface or narrow
+  them to clearly named engine-internal/test-only hooks.
+
+The guard target by closeout is:
+
+- no production crate above engine calls `with_subsystem` or
+  `with_subsystems`
+- no production crate above engine constructs `Box<dyn Subsystem>`
+- no production crate above engine names `GraphSubsystem`, `VectorSubsystem`,
+  or `SearchSubsystem` for runtime composition
+- product open uses an engine-owned runtime composition path, not a caller-
+  supplied subsystem list
 
 ## End-State Definition
 
@@ -533,7 +562,7 @@ Move or recreate in engine:
 - product primary open
 - product follower open
 - product cache open
-- default subsystem profile contract
+- temporary product runtime composition bridge
 - default branch bootstrap
 - built-in recipe seeding
 - lock-to-IPC fallback classification currently used by the legacy bootstrap
@@ -679,26 +708,55 @@ engine implementation detail once graph moves into engine.
 - do not redesign graph query semantics
 - do not move graph semantics into storage
 
+Implementation tracking:
+[eg4-implementation-plan.md](./eg4-implementation-plan.md).
+
 ### EG4A - Graph Code Map And Characterization
 
 Map graph modules, storage touchpoints, subsystem registration, merge behavior,
 branch DAG behavior, and search integration. Add or identify tests that pin
 those behaviors before movement.
 
-### EG4B - Move Graph Runtime Into Engine
+### EG4B - Engine Graph Module Move
 
 Physically move graph runtime and storage-key mapping into an engine-owned
 module. Preserve format, key families, and transaction behavior.
 
-### EG4C - Cut Over Graph Consumers
+### EG4C - Runtime Wiring And Product Open Composition
+
+Wire engine-owned graph lifecycle, merge registration, branch DAG hooks,
+status-cache behavior, graph refresh hooks, and product-open composition.
+Remove graph from upper-crate subsystem assembly while preserving the temporary
+vector bridge until `EG5`.
+
+### EG4D - Transaction Extension And Storage-Key Boundary
+
+Move graph transaction extension behavior and graph key construction into the
+engine-owned graph module. Ensure executor transaction handlers consume graph
+through engine rather than importing storage or a graph peer crate.
+
+### EG4E - Consumer Cutover
 
 Update search and executor imports to engine-owned graph surfaces. Remove graph
 storage access outside engine as soon as the code physically moves.
 
-### EG4D - Retire The Graph Crate
+### EG4F - Tests And Integration Relocation
+
+Move graph unit tests with the implementation, update root integration helpers,
+and preserve graph branch, merge, recovery, search, and transaction
+characterization under engine-owned imports.
+
+### EG4G - Retire The Graph Crate And Tighten Guards
 
 Delete `strata-graph` when no normal dependents remain, or reduce it to a
-documented temporary shell with an `EG9` deletion criterion.
+documented zero-logic shell with a same-phase deletion criterion. Remove graph
+crate/package references and verify graph entries remain absent from the
+direct-storage bypass allowlist.
+
+### EG4H - Closeout Review
+
+Review all remaining graph crate references, graph-related storage bypasses,
+product-open composition, and docs before starting vector absorption.
 
 ## EG5 - Vector Absorption
 
@@ -942,9 +1000,11 @@ Remove direct dependencies from intelligence to:
 
 - `strata-search`
 - `strata-vector`
-- dev-only `strata-graph` unless the tests are rewritten to use engine
 
 Update imports to engine-owned search/vector surfaces.
+
+The old dev-only graph dependency was removed during `EG4` when intelligence
+tests were rewritten to use engine-owned graph imports.
 
 **Design notes:**
 
@@ -1003,12 +1063,11 @@ Delete or retire the peer crates absorbed by engine and enforce the final graph.
 
 Remove from the workspace when no normal dependents remain:
 
-- `crates/graph`
 - `crates/vector`
 - `crates/search`
 
 `crates/security` was deleted by `EG2D`. `crates/executor-legacy` was deleted
-by `EG3D`.
+by `EG3D`. `crates/graph` was deleted by `EG4G`.
 
 Remove workspace dependency entries and feature plumbing for deleted crates.
 

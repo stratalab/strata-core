@@ -73,7 +73,7 @@ fn parse_graph_node_index_entry(
     };
     let data: GraphNodeData = serde_json::from_str(json).ok()?;
 
-    // Keep this in sync with strata-graph's GraphStore::build_node_search_text().
+    // Keep this in sync with GraphStore::build_node_search_text().
     let mut text = String::new();
     text.push_str(node_id);
     if let Some(ref ot) = data.object_type {

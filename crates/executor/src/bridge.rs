@@ -4,9 +4,8 @@ use strata_core::{Value, VersionedValue as CoreVersionedValue};
 use strata_engine::{
     AccessMode, BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog,
     JsonPath, JsonStore as PrimitiveJsonStore, JsonValue, KVStore as PrimitiveKVStore, Limits,
-    SpaceIndex as PrimitiveSpaceIndex, StrataError, StrataResult,
+    PrimitiveGraphStore, SpaceIndex as PrimitiveSpaceIndex, StrataError, StrataResult,
 };
-use strata_graph::PrimitiveGraphStore;
 use strata_storage::validate_space_name;
 use strata_vector::VectorStore as PrimitiveVectorStore;
 

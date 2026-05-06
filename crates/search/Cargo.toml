@@ -20,7 +20,6 @@ rerank = ["dep:ureq"]
 [dependencies]
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
-strata-graph = { path = "../graph" }
 strata-storage = { path = "../storage" }
 strata-vector = { path = "../vector" }
 rayon = { workspace = true }

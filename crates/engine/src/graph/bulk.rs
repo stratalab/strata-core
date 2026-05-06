@@ -40,7 +40,7 @@ impl GraphStore {
         // transactions below would each pay the cost of an idempotent check
         // anyway; centralizing it here in one small transaction is cheaper.
         self.db.transaction(branch_id, |txn| {
-            strata_engine::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
+            crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
         })?;
 
         // Read ontology status once before the loop
@@ -298,7 +298,7 @@ impl GraphStore {
         // and other space-aware callers can see graph data on this branch.
         // Mirrors the bulk_insert pattern above.
         self.db.transaction(branch_id, |txn| {
-            strata_engine::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
+            crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)
         })?;
 
         // Check ontology constraints if frozen
@@ -431,8 +431,8 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::SearchSubsystem;
+    use crate::database::OpenSpec;
+    use crate::SearchSubsystem;
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

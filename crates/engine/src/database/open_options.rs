@@ -16,7 +16,8 @@ pub enum AccessMode {
 ///
 /// Configuration settings such as durability, embedding, model provider, and
 /// storage resources are managed by [`StrataConfig`](crate::StrataConfig).
-/// `OpenOptions` only controls product access policy and follower mode.
+/// `OpenOptions` controls product access policy, follower mode, and the default
+/// branch that primary/cache product opens create or reuse.
 #[derive(Debug, Clone)]
 pub struct OpenOptions {
     /// The access mode for the returned product handle.
@@ -28,6 +29,11 @@ pub struct OpenOptions {
     /// operations are rejected. Call `refresh()` to see new commits from the
     /// primary.
     pub follower: bool,
+    /// Default branch to create or reuse for primary product opens.
+    ///
+    /// If unset, product open uses `"default"`. Follower opens do not create
+    /// branch state; they read the primary's persisted default branch marker.
+    pub default_branch: Option<String>,
 }
 
 impl OpenOptions {
@@ -47,6 +53,12 @@ impl OpenOptions {
         self.follower = enabled;
         self
     }
+
+    /// Set the default branch for primary/cache product opens.
+    pub fn default_branch(mut self, name: impl Into<String>) -> Self {
+        self.default_branch = Some(name.into());
+        self
+    }
 }
 
 impl Default for OpenOptions {
@@ -54,6 +66,7 @@ impl Default for OpenOptions {
         Self {
             access_mode: AccessMode::ReadWrite,
             follower: false,
+            default_branch: None,
         }
     }
 }

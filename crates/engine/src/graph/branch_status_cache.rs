@@ -38,7 +38,7 @@
 
 use dashmap::DashMap;
 
-use strata_engine::DagBranchStatus;
+use crate::DagBranchStatus;
 
 /// Cache of branch statuses, populated from the `_branch_dag` graph.
 ///

@@ -3,8 +3,8 @@
 //! When an entity (KV key, JSON doc) is deleted, this module handles cleanup
 //! of any graph nodes bound to it via entity_ref.
 
+use crate::StrataResult;
 use strata_core::BranchId;
-use strata_engine::StrataResult;
 
 use super::types::{CascadeError, CascadePolicy, CascadeResult};
 use super::GraphStore;
@@ -79,10 +79,10 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
+    use crate::database::OpenSpec;
+    use crate::graph::types::*;
+    use crate::{Database, SearchSubsystem};
     use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

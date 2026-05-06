@@ -41,7 +41,7 @@ fn open_options_builders_keep_access_mode_and_follower_independent() {
     assert!(!default_options.follower);
     assert_eq!(
         format!("{:?}", default_options),
-        "OpenOptions { access_mode: ReadWrite, follower: false }"
+        "OpenOptions { access_mode: ReadWrite, follower: false, default_branch: None }"
     );
 
     let new_options = OpenOptions::new();
@@ -51,6 +51,7 @@ fn open_options_builders_keep_access_mode_and_follower_independent() {
     let literal_options = OpenOptions {
         access_mode: AccessMode::ReadOnly,
         follower: true,
+        default_branch: None,
     };
     assert_eq!(literal_options.access_mode, AccessMode::ReadOnly);
     assert!(literal_options.follower);
@@ -82,21 +83,30 @@ fn open_options_builders_keep_access_mode_and_follower_independent() {
         .access_mode(AccessMode::ReadOnly);
     assert_eq!(follower_then_read_only.access_mode, AccessMode::ReadOnly);
     assert!(follower_then_read_only.follower);
+    assert_eq!(follower_then_read_only.default_branch, None);
+
+    let custom_default = OpenOptions::new().default_branch("main");
+    assert_eq!(custom_default.access_mode, AccessMode::ReadWrite);
+    assert!(!custom_default.follower);
+    assert_eq!(custom_default.default_branch.as_deref(), Some("main"));
 
     let cloned = follower_then_read_only.clone();
     assert_eq!(cloned.access_mode, AccessMode::ReadOnly);
     assert!(cloned.follower);
+    assert_eq!(cloned.default_branch, None);
 }
 
 #[test]
 fn executor_open_surface_still_reexports_open_options() {
     let options: OpenOptions = ExecutorOpenOptions::new()
         .access_mode(ExecutorAccessMode::ReadOnly)
-        .follower(true);
+        .follower(true)
+        .default_branch("main");
     let read_only: AccessMode = ExecutorAccessMode::ReadOnly;
 
     assert_eq!(options.access_mode, read_only);
     assert!(options.follower);
+    assert_eq!(options.default_branch.as_deref(), Some("main"));
 }
 
 #[test]

@@ -99,7 +99,7 @@ fn create_disk_db_with_default_branch(
 ) -> std::sync::Arc<Database> {
     Database::open_runtime(
         OpenSpec::primary(path)
-            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_engine::GraphSubsystem)
             .with_subsystem(VectorSubsystem)
             .with_subsystem(SearchSubsystem)
             .with_default_branch(default_branch),
@@ -110,7 +110,7 @@ fn create_disk_db_with_default_branch(
 fn create_disk_db_without_default_branch(path: &std::path::Path) -> std::sync::Arc<Database> {
     Database::open_runtime(
         OpenSpec::primary(path)
-            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_engine::GraphSubsystem)
             .with_subsystem(VectorSubsystem)
             .with_subsystem(SearchSubsystem),
     )
