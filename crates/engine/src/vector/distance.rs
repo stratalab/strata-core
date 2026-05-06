@@ -12,7 +12,7 @@
 //! - **x86_64**: AVX2 with runtime `is_x86_feature_detected!` fallback to scalar.
 //! - **Other targets**: Scalar fallback.
 
-use crate::DistanceMetric;
+use crate::semantics::vector::DistanceMetric;
 
 // ============================================================================
 // Prefetch hint (hides DRAM latency for embedding fetches)
@@ -754,7 +754,7 @@ pub fn compute_binary_similarity(
     norm_stored: Option<f32>,
 ) -> f32 {
     // Binary inner product: ⟨ō, q_normalized_rotated⟩
-    let ip = crate::quantize::binary_inner_product(code, q_rotated, dimension);
+    let ip = crate::vector::quantize::binary_inner_product(code, q_rotated, dimension);
 
     // Avoid division by zero
     if quantized_dot.abs() < 1e-10 {
@@ -1240,7 +1240,7 @@ mod tests {
 
     #[test]
     fn test_binary_similarity_euclidean() {
-        use crate::quantize::RaBitQParams;
+        use crate::vector::quantize::RaBitQParams;
 
         let dim = 64;
         let mut params = RaBitQParams::new(dim);

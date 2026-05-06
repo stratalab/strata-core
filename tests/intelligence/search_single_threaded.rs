@@ -38,7 +38,7 @@ fn test_r8_search_deterministic_across_threads() {
             let db = db.clone();
             let query = query.clone();
             thread::spawn(move || {
-                let vector = strata_vector::VectorStore::new(db);
+                let vector = strata_engine::VectorStore::new(db);
                 vector.search(branch_id, "embeddings", &query, 20, None).unwrap()
             })
         })
@@ -85,7 +85,7 @@ fn test_r8_scores_identical_across_threads() {
             let db = db.clone();
             let query = query.clone();
             thread::spawn(move || {
-                let vector = strata_vector::VectorStore::new(db);
+                let vector = strata_engine::VectorStore::new(db);
                 vector.search(branch_id, "embeddings", &query, 10, None).unwrap()
             })
         })
@@ -140,7 +140,7 @@ fn test_r8_concurrent_search_and_modify() {
             let db = db.clone();
             let query = seeded_random_vector(384, thread_id as u64);
             thread::spawn(move || {
-                let vector = strata_vector::VectorStore::new(db);
+                let vector = strata_engine::VectorStore::new(db);
                 for _ in 0..10 {
                     let _ = vector.search(branch_id, "embeddings", &query, 10, None);
                 }

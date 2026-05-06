@@ -1,7 +1,8 @@
 //! Vector CRUD and batch operations.
 
 use super::*;
-use crate::ext::{apply_staged_vector_op, VectorStoreExt};
+use crate::vector::ext::VectorStoreExt;
+use strata_storage::TransactionContext;
 
 impl VectorStore {
     /// Insert a vector (upsert semantics)
@@ -66,13 +67,14 @@ impl VectorStore {
             }
         }
 
-        // Run the transactional KV write + VectorId allocation via ext trait
-        let (version, staged_op) = self
+        // Run the transactional KV write + VectorId allocation via ext trait.
+        // The engine transaction extension queues backend maintenance for the
+        // commit observer, so the HNSW update is applied exactly once after
+        // successful commit.
+        let version = self
             .db
             .transaction(branch_id, |txn| {
-                strata_engine::primitives::space::ensure_space_registered_in_txn(
-                    txn, &branch_id, space,
-                )?;
+                crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)?;
                 txn.vector_upsert(
                     branch_id,
                     space,
@@ -87,12 +89,49 @@ impl VectorStore {
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
 
-        // Post-commit: apply HNSW backend update (best-effort, non-fatal)
-        apply_staged_vector_op(&state, staged_op);
-
         debug!(target: "strata::vector", collection, branch_id = %branch_id, "Vector upserted");
 
         Ok(version)
+    }
+
+    /// Insert a vector using an existing transaction context.
+    ///
+    /// The KV write participates in the caller's transaction. In-memory vector
+    /// index maintenance is queued on the database-owned backend state and is
+    /// applied only by the engine commit observer after the transaction commits.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_in_transaction(
+        &self,
+        txn: &mut TransactionContext,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        key: &str,
+        embedding: &[f32],
+        metadata: Option<JsonValue>,
+    ) -> VectorResult<Version> {
+        self.insert_in_transaction_inner(
+            txn, branch_id, space, collection, key, embedding, metadata, None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn insert_in_transaction_inner(
+        &self,
+        txn: &mut TransactionContext,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        key: &str,
+        embedding: &[f32],
+        metadata: Option<JsonValue>,
+        source_ref: Option<EntityRef>,
+    ) -> VectorResult<Version> {
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+        let state = self.state()?;
+        txn.vector_upsert(
+            branch_id, space, collection, key, embedding, metadata, source_ref, &state,
+        )
     }
 
     /// Get a vector by key
@@ -113,7 +152,6 @@ impl VectorStore {
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
         // Get record from KV with version info
-        use strata_storage::Storage;
         let version = CommitVersion(self.db.storage().version());
         let Some(versioned_value) = self
             .db
@@ -174,6 +212,21 @@ impl VectorStore {
             versioned_value.version,
             versioned_value.timestamp,
         )))
+    }
+
+    /// Get a vector using an existing transaction context.
+    ///
+    /// Reads from the transaction context, so uncommitted writes from the same
+    /// transaction are visible.
+    pub fn get_in_transaction(
+        &self,
+        txn: &mut TransactionContext,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        key: &str,
+    ) -> VectorResult<Option<VectorRecord>> {
+        txn.vector_get(branch_id, space, collection, key)
     }
 
     /// Get a vector as of a past timestamp.
@@ -249,7 +302,6 @@ impl VectorStore {
     ) -> VectorResult<Option<strata_core::VersionedHistory<VectorEntry>>> {
         let kv_key = Key::new_vector(self.namespace_for(branch_id, space), collection, key);
 
-        use strata_storage::Storage;
         let raw_history = self
             .db
             .storage()
@@ -316,22 +368,33 @@ impl VectorStore {
         // Ensure collection is loaded before delegating to ext trait
         self.ensure_collection_loaded(branch_id, space, collection)?;
 
-        let state = self.state()?;
         let result = self.db.transaction(branch_id, |txn| {
-            txn.vector_delete(branch_id, space, collection, key, &state)
+            self.delete_in_transaction(txn, branch_id, space, collection, key)
                 .map_err(|e| e.into_strata_error(branch_id))
         });
-        let (existed, staged_op) = match result {
+        let existed = match result {
             Ok(v) => v,
             Err(e) => return Err(VectorError::Storage(e.to_string())),
         };
 
-        // Post-commit: apply HNSW backend delete (best-effort, non-fatal)
-        if let Some(op) = staged_op {
-            apply_staged_vector_op(&state, op);
-        }
-
         Ok(existed)
+    }
+
+    /// Delete a vector using an existing transaction context.
+    ///
+    /// Returns true if the vector existed and queues backend maintenance for
+    /// the engine commit observer.
+    pub fn delete_in_transaction(
+        &self,
+        txn: &mut TransactionContext,
+        branch_id: BranchId,
+        space: &str,
+        collection: &str,
+        key: &str,
+    ) -> VectorResult<bool> {
+        self.ensure_collection_loaded(branch_id, space, collection)?;
+        let state = self.state()?;
+        txn.vector_delete(branch_id, space, collection, key, &state)
     }
 
     /// Batch insert multiple vectors (upsert semantics)
@@ -421,9 +484,7 @@ impl VectorStore {
         // Commit all KV writes in a single transaction
         self.db
             .transaction(branch_id, |txn| {
-                strata_engine::primitives::space::ensure_space_registered_in_txn(
-                    txn, &branch_id, space,
-                )?;
+                crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)?;
                 for (key, value) in &kv_writes {
                     txn.put(key.clone(), value.clone())?;
                 }
@@ -439,7 +500,7 @@ impl VectorStore {
             } else {
                 backend.set_inline_meta(
                     vector_id,
-                    crate::types::InlineMeta {
+                    crate::vector::types::InlineMeta {
                         key,
                         source_ref: None,
                     },
@@ -474,7 +535,6 @@ impl VectorStore {
 
         let collection_id = CollectionId::new(branch_id, space, collection);
 
-        use strata_storage::Storage;
         let version = CommitVersion(self.db.storage().version());
 
         let state = self.state()?;
@@ -627,8 +687,6 @@ impl VectorStore {
         space: &str,
         collection: &str,
     ) -> VectorResult<Vec<String>> {
-        use strata_storage::Storage;
-
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 

@@ -502,8 +502,8 @@ fn generate_orthogonal_matrix(dim: usize, seed: u64) -> Vec<f32> {
     let mut i = 0;
     while i < total {
         // Box-Muller transform: generate pairs of N(0,1) from U(0,1)
-        let u1: f64 = rng.gen::<f64>().max(1e-300); // clamp away from 0 to avoid ln(0)
-        let u2: f64 = rng.gen::<f64>();
+        let u1: f64 = rng.random::<f64>().max(1e-300); // clamp away from 0 to avoid ln(0)
+        let u2: f64 = rng.random::<f64>();
         let r = (-2.0 * u1.ln()).sqrt();
         let theta = 2.0 * std::f64::consts::PI * u2;
         matrix.push((r * theta.cos()) as f32);
@@ -535,8 +535,8 @@ fn generate_orthogonal_matrix(dim: usize, seed: u64) -> Vec<f32> {
         if norm < 1e-10 {
             // Degenerate row (extremely rare) — regenerate and re-orthogonalize.
             for k in 0..dim {
-                let u1: f64 = rng.gen::<f64>().max(1e-300);
-                let u2: f64 = rng.gen::<f64>();
+                let u1: f64 = rng.random::<f64>().max(1e-300);
+                let u2: f64 = rng.random::<f64>();
                 let r = (-2.0 * u1.ln()).sqrt();
                 let theta = 2.0 * std::f64::consts::PI * u2;
                 matrix[i * dim + k] = (r * theta.cos()) as f32;

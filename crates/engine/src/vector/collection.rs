@@ -6,7 +6,7 @@
 //!
 //! CollectionId and CollectionInfo are defined in types.rs.
 
-use crate::VectorError;
+use crate::vector::VectorError;
 
 /// Validate a collection name
 ///

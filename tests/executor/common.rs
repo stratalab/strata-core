@@ -2,9 +2,9 @@
 
 use std::sync::Arc;
 use strata_engine::database::OpenSpec;
+use strata_engine::VectorSubsystem;
 use strata_engine::{Database, SearchSubsystem};
 use strata_executor::{Executor, Output, Session};
-use strata_vector::VectorSubsystem;
 
 fn test_cache_db() -> Arc<Database> {
     Database::open_runtime(

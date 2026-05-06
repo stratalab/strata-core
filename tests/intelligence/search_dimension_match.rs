@@ -3,7 +3,7 @@
 //! Invariant R1: Query dimension must match collection dimension.
 
 use crate::common::*;
-use strata_vector::VectorError;
+use strata_engine::VectorError;
 
 /// Test query with correct dimension works
 #[test]

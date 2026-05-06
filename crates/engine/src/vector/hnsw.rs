@@ -27,9 +27,9 @@ use std::cell::RefCell;
 use std::cmp::{Ordering, Reverse};
 use std::collections::{BTreeMap, BinaryHeap, HashMap};
 
-use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::heap::VectorHeap;
-use crate::types::InlineMeta;
+use crate::vector::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
+use crate::vector::heap::VectorHeap;
+use crate::vector::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// HNSW configuration parameters
@@ -2028,7 +2028,7 @@ mod tests {
 
     #[test]
     fn test_hnsw_vs_brute_force_recall() {
-        use crate::brute_force::BruteForceBackend;
+        use crate::vector::brute_force::BruteForceBackend;
 
         let dim = 32;
         let n = 200;
@@ -2228,7 +2228,7 @@ mod tests {
     #[test]
     fn test_hnsw_multi_query_recall() {
         // Rigorous recall test: 500 vectors, 20 random queries, average recall >= 0.95
-        use crate::brute_force::BruteForceBackend;
+        use crate::vector::brute_force::BruteForceBackend;
 
         let dim = 64;
         let n = 500;
@@ -2655,7 +2655,7 @@ mod tests {
 #[cfg(test)]
 mod profiling_tests {
     use super::*;
-    use crate::distance::compute_similarity;
+    use crate::vector::distance::compute_similarity;
     use std::collections::HashMap as StdHashMap;
     use std::time::Instant;
 
@@ -2845,7 +2845,7 @@ mod profiling_tests {
     #[test]
     #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_norm_cache_vs_recompute() {
-        use crate::distance::cosine_similarity_with_norms;
+        use crate::vector::distance::cosine_similarity_with_norms;
 
         let n = 10_000;
         let dim = 128;

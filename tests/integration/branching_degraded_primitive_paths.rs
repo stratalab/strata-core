@@ -325,7 +325,7 @@ fn vector_lazy_reload_corruption_fails_closed_on_triggering_read() {
     // the already-loaded backend.
     {
         let state = test_db.vector().state().unwrap();
-        let cid = strata_vector::CollectionId::new(resolve("main"), "default", "v1");
+        let cid = strata_engine::CollectionId::new(resolve("main"), "default", "v1");
         state.backends.remove(&cid);
     }
 

@@ -84,7 +84,6 @@ struct Regression {
 struct Threshold {
     metric_pattern: &'static str,
     max_regression_pct: f64,
-    label: &'static str,
 }
 
 const THRESHOLDS: &[Threshold] = &[
@@ -92,35 +91,29 @@ const THRESHOLDS: &[Threshold] = &[
     Threshold {
         metric_pattern: "ops_per_sec",
         max_regression_pct: -5.0,
-        label: "throughput",
     },
     Threshold {
         metric_pattern: "load_ops_sec",
         max_regression_pct: -5.0,
-        label: "throughput",
     },
     Threshold {
         metric_pattern: "run_ops_sec",
         max_regression_pct: -5.0,
-        label: "throughput",
     },
     // Median latency: max 5% regression (positive = regression for latency)
     Threshold {
         metric_pattern: "p50",
         max_regression_pct: 5.0,
-        label: "median latency",
     },
     // Tail latency: max 10% regression
     Threshold {
         metric_pattern: "p99",
         max_regression_pct: 10.0,
-        label: "tail latency",
     },
     // BEIR nDCG@10: max 0.01 absolute drop (handled specially)
     Threshold {
         metric_pattern: "ndcg",
         max_regression_pct: -100.0,
-        label: "retrieval quality",
     },
 ];
 
@@ -326,22 +319,15 @@ fn run_branch_strata(iterations: usize, large_merge_keys: usize) -> SuiteResult 
     let mat_iters = iterations.min(64);
     let mut materialize_lat = Vec::with_capacity(mat_iters);
     {
-        use strata_core::types::BranchId as CoreBranchId;
-        use strata_core::value::Value as CoreValue;
-        use strata_engine::database::spec::OpenSpec;
-        use strata_engine::{Database as EngineDatabase, KVStore, SearchSubsystem};
-        use strata_graph::GraphSubsystem;
-        use strata_vector::VectorSubsystem;
+        use strata_core::{BranchId as CoreBranchId, Value as CoreValue};
+        use strata_engine::{open_product_database, KVStore, OpenOptions, ProductOpenOutcome};
 
         let mat_tmpdir = tempfile::TempDir::new().expect("materialize tmpdir");
-        // Match the executor's default_product_spec — GraphSubsystem
-        // installs the DAG hook that `branches().fork()` requires.
-        let mat_spec = OpenSpec::primary(mat_tmpdir.path())
-            .with_subsystem(GraphSubsystem)
-            .with_subsystem(VectorSubsystem)
-            .with_subsystem(SearchSubsystem);
-        let mat_db =
-            EngineDatabase::open_runtime(mat_spec).expect("materialize engine open");
+        let mat_outcome = open_product_database(mat_tmpdir.path(), OpenOptions::default())
+            .expect("materialize product open");
+        let ProductOpenOutcome::Local { db: mat_db, .. } = mat_outcome else {
+            panic!("fresh materialize benchmark database should open locally");
+        };
         for i in 0..mat_iters {
             let parent = format!("mat-parent-{:08}", i);
             let child = format!("mat-child-{:08}", i);

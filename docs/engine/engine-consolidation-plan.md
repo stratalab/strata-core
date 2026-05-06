@@ -12,10 +12,9 @@ application. Engine now sits on top as the database semantics and orchestration
 layer.
 
 The next problem is above that boundary. Several crates are already engine
-concepts in practice, but they still exist as peer crates and several of them
-reach directly into storage:
+concepts in practice, but at least one still exists as a peer crate and reaches
+directly into storage:
 
-- `strata-vector`
 - `strata-search`
 
 `EG2` has already absorbed and deleted `strata-security`; it remains in this
@@ -23,6 +22,8 @@ plan only as a completed phase record.
 `EG3` has absorbed and deleted `strata-executor-legacy`; it remains in this
 plan only as a completed phase record.
 `EG4` has absorbed and deleted `strata-graph`; it remains in this plan only as
+a completed phase record.
+`EG5` has absorbed and deleted `strata-vector`; it remains in this plan only as
 a completed phase record.
 
 This plan consolidates those responsibilities into `strata-engine` so the
@@ -56,23 +57,18 @@ is:
 ```text
 strata-storage         -> strata-core
 strata-engine          -> strata-core, strata-storage
-strata-vector          -> strata-core, strata-engine, strata-storage
-strata-search          -> strata-core, strata-engine, strata-storage,
-                          strata-vector
+strata-search          -> strata-core, strata-engine, strata-storage
 strata-intelligence    -> strata-core, strata-engine, strata-inference,
-                          strata-search, strata-vector
+                          strata-search
 strata-executor        -> strata-core, strata-engine, strata-intelligence,
                           strata-search,
-                          strata-storage, strata-vector
+                          strata-storage
 strata-cli             -> strata-executor, strata-intelligence
 stratadb               -> strata-executor
 ```
 
 The direct storage bypasses above engine are:
 
-- `strata-vector`
-  - storage keys, namespaces, type tags, storage scans, transaction contexts,
-    and storage trait calls
 - `strata-search`
   - storage keys and namespaces in retrieval substrate code
 - `strata-executor`
@@ -84,6 +80,9 @@ but it depends on crates that do.
 `EG4` removed graph from this list by moving graph runtime, storage-key mapping,
 transaction extension behavior, merge behavior, and branch DAG behavior into
 engine.
+`EG5` removed vector from this list by moving vector runtime, storage-key
+mapping, transaction extension behavior, recovery, merge behavior, and sidecar
+cache policy into engine.
 
 ## Direct Storage Rule
 
@@ -103,9 +102,10 @@ edge:
   or build the storage substrate
 - temporary migration shims named in this plan and deleted by closeout
 
-Executor, intelligence, CLI, vector, search, and product code are not storage
+Executor, intelligence, CLI, search, and product code are not storage
 tests. If they need a storage fact, engine must expose a semantic API or a
-narrow runtime API for that fact. Graph is now engine-owned after `EG4`.
+narrow runtime API for that fact. Graph is now engine-owned after `EG4`; vector
+is now engine-owned after `EG5`.
 
 This rule is the main acceptance condition for the plan.
 
@@ -117,6 +117,7 @@ paths for hypothetical external users.
 That means:
 
 - deleting `strata-vector` and `strata-search` is allowed
+- `strata-vector` has already been absorbed and deleted by `EG5`
 - `strata-graph` has already been absorbed and deleted by `EG4`
 - `strata-security` has already been absorbed and deleted by `EG2`
 - `strata-executor-legacy` has already been absorbed and deleted by `EG3`
@@ -274,7 +275,7 @@ The consolidation is complete when:
    orchestration interfaces, and search subsystem behavior.
 4. `strata-engine` owns access-mode/open-option/security types. This is already
    true after `EG2`.
-5. `strata-engine` owns the product open/bootstrap policy currently hosted in
+5. `strata-engine` owns the product open/bootstrap policy previously hosted in
    `strata-executor-legacy`.
 6. `strata-executor` no longer depends on `strata-storage`, `strata-graph`,
    `strata-vector`, `strata-search`, `strata-security`, or
@@ -726,8 +727,8 @@ module. Preserve format, key families, and transaction behavior.
 
 Wire engine-owned graph lifecycle, merge registration, branch DAG hooks,
 status-cache behavior, graph refresh hooks, and product-open composition.
-Remove graph from upper-crate subsystem assembly while preserving the temporary
-vector bridge until `EG5`.
+Remove graph from upper-crate subsystem assembly. `EG5C` later removes the
+temporary vector bridge and makes vector product-open composition engine-owned.
 
 ### EG4D - Transaction Extension And Storage-Key Boundary
 
@@ -765,6 +766,9 @@ product-open composition, and docs before starting vector absorption.
 Move vector runtime, vector subsystem, vector storage mapping, and vector
 sidecar cache policy into engine.
 
+Detailed implementation plan:
+[eg5-implementation-plan.md](./eg5-implementation-plan.md).
+
 **Scope:**
 
 Move the `strata-vector` implementation into engine, including:
@@ -790,8 +794,9 @@ moved down into storage.
 
 **Design notes:**
 
-The vector crate currently has the broadest direct storage use above engine.
-Particular care is needed around:
+Before `EG5B`, the vector crate had the broadest direct storage use above
+engine. The implementation now lives in engine, but the remaining vector
+cleanup still needs particular care around:
 
 - startup recovery scans
 - follower vs primary sidecar-cache rules
@@ -802,7 +807,7 @@ Particular care is needed around:
 
 **Acceptance:**
 
-- `strata-vector` has no normal storage dependency, or the crate is deleted
+- `strata-vector` is deleted
 - intelligence imports vector types from engine
 - executor imports vector surfaces from engine
 - search imports vector surfaces from engine until search is absorbed
@@ -821,26 +826,47 @@ Map vector storage touchpoints, recovery scans, sidecar cache policy, merge
 handlers, branch deletion, space purge, and extension initialization. Add or
 identify runtime tests before moving code.
 
-### EG5B - Move Vector Runtime Into Engine
+### EG5B - Engine Vector Module And Type Consolidation
 
-Physically move vector runtime, key mapping, transaction extension behavior, and
-collection metadata into engine without changing storage format or index
-semantics.
+Physically move vector runtime, key mapping, collection metadata, and
+implementation records into engine while keeping the engine-owned public vector
+DTOs canonical.
 
-### EG5C - Move Sidecar And Recovery Paths
+### EG5C - Runtime Wiring And Product Open Composition
 
-Move vector recovery, sidecar cache rebuild, follower/primary cache policy, and
-purge behavior into engine-owned modules.
+Move `VectorSubsystem` into engine-owned product runtime composition and delete
+the external vector subsystem bridge from production product open.
 
-### EG5D - Cut Over Vector Consumers
+### EG5D - Transaction Extension And Backend State Absorption
 
-Update search, intelligence, and executor imports to engine-owned vector
-surfaces. Remove all vector storage access outside engine.
+Move `VectorStoreExt`, staged vector operations, pending-op maintenance, and
+shared backend state maintenance into engine.
 
-### EG5E - Retire The Vector Crate
+### EG5E - Recovery, Sidecar, Lifecycle, And Purge Migration
 
-Delete `strata-vector` when no normal dependents remain, or reduce it to a
-documented temporary shell with an `EG9` deletion criterion.
+Move vector recovery, sidecar cache rebuild, follower/primary cache policy,
+lifecycle hooks, branch purge, collection purge, and space purge behavior into
+engine-owned modules.
+
+### EG5F - Merge, Search, Intelligence, And Executor Cutover
+
+Update vector merge behavior and all production vector consumers to engine-owned
+vector surfaces. Remove vector-specific storage access outside engine.
+
+### EG5G - Retire The Vector Crate And Tighten Guards
+
+Delete `strata-vector` when no normal dependents remain. `EG5B` already removed
+the vector entries from the direct-storage bypass allowlist because the
+compatibility shell no longer had a storage edge; `EG5G` adds the final
+retired-crate guard after normal dependents are gone.
+
+### EG5H - Closeout Review
+
+Review vector crate references, vector-related storage bypasses, product-open
+composition, guards, and docs before starting search absorption. `EG5H`
+confirmed vector is engine-owned, `strata-vector` is retired from metadata and
+normal dependency trees, and remaining direct storage bypasses belong to
+`strata-search`/`strata-executor` cleanup in `EG6`/`EG7`.
 
 ## EG6 - Search Absorption
 
@@ -992,16 +1018,13 @@ conversion paths. Tighten the direct-storage guard for executor to zero.
 **Goal:**
 
 Make intelligence depend on engine for search/vector types and on inference for
-model execution, with no peer primitive/runtime crate dependencies.
+model execution, with no remaining peer primitive/runtime crate dependencies.
 
 **Scope:**
 
-Remove direct dependencies from intelligence to:
-
-- `strata-search`
-- `strata-vector`
-
-Update imports to engine-owned search/vector surfaces.
+Remove the remaining direct dependency from intelligence to `strata-search`.
+`EG5G` already removed the old `strata-vector` dependency; `EG8` must preserve
+that state while cutting over search imports to engine-owned surfaces.
 
 The old dev-only graph dependency was removed during `EG4` when intelligence
 tests were rewritten to use engine-owned graph imports.
@@ -1009,7 +1032,8 @@ tests were rewritten to use engine-owned graph imports.
 **Design notes:**
 
 Intelligence should not learn storage. It should also not need graph/vector peer
-crates after those domains are engine-owned.
+crates after those domains are engine-owned; vector already satisfies that rule
+after `EG5G`.
 
 The intended shape is:
 
@@ -1034,14 +1058,14 @@ model-backed expansion/rerank implementations, and inference/provider wiring.
 
 ### EG8A - Intelligence Dependency Rebaseline
 
-Re-run intelligence dependency and import inventories after search/vector moves.
-Confirm no direct storage access exists and identify remaining peer crate
-imports.
+Re-run intelligence dependency and import inventories after vector absorption and
+before search cutover. Confirm no direct storage access exists and identify the
+remaining search peer-crate imports.
 
-### EG8B - Cut Over Search And Vector Imports
+### EG8B - Cut Over Search Imports And Preserve Vector Cutover
 
-Update intelligence to use engine-owned search/vector traits, DTOs, and runtime
-surfaces.
+Update intelligence to use engine-owned search traits, DTOs, and runtime
+surfaces while confirming vector imports still come from engine.
 
 ### EG8C - Preserve The Inference Boundary
 
@@ -1050,8 +1074,8 @@ intelligence/inference. Confirm engine still has no inference dependency.
 
 ### EG8D - Tighten Intelligence Dependency Guard
 
-Remove intelligence dependencies on graph, vector, search, security, and storage
-from manifests and guard allowlists.
+Remove intelligence dependencies on search and storage from manifests and guard
+allowlists. Keep the existing graph/vector/security absence enforced.
 
 ## EG9 - Crate Deletion And Workspace Closeout
 
@@ -1063,11 +1087,11 @@ Delete or retire the peer crates absorbed by engine and enforce the final graph.
 
 Remove from the workspace when no normal dependents remain:
 
-- `crates/vector`
 - `crates/search`
 
 `crates/security` was deleted by `EG2D`. `crates/executor-legacy` was deleted
-by `EG3D`. `crates/graph` was deleted by `EG4G`.
+by `EG3D`. `crates/graph` was deleted by `EG4G`. `crates/vector` was deleted by
+`EG5G`.
 
 Remove workspace dependency entries and feature plumbing for deleted crates.
 
@@ -1096,8 +1120,10 @@ There should be no normal production dependency on:
 - `strata-vector`
 - `strata-search`
 
-unless the crate is intentionally retained as a compatibility shell with a
-documented removal date and no storage access.
+`strata-search` may only survive closeout if it is intentionally retained as a
+compatibility shell with a documented removal date and no storage access. The
+other retired crates above are already deleted and guarded against
+reintroduction.
 
 `strata-security` is no longer a workspace crate and is guarded against
 reintroduction.
@@ -1137,7 +1163,7 @@ Current graph inspection:
 ```bash
 cargo metadata --format-version 1 --no-deps \
   | jq -r '.packages[]
-      | select((.name|test("^strata-(storage|engine|graph|vector|search|intelligence|executor|cli)$")) or .name=="stratadb")
+      | select((.name|test("^strata-(storage|engine|search|intelligence|executor|cli)$")) or .name=="stratadb")
       | "\(.name) -> \([.dependencies[] | select(.kind == null and .path != null) | .name] | join(", "))"'
 ```
 
@@ -1145,7 +1171,7 @@ Current production direct storage bypass inventory:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage|strata_storage" \
-  src crates/{graph,vector,search,executor,intelligence,cli} \
+  src crates/{search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 
@@ -1161,14 +1187,14 @@ Final production direct storage bypass guard:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage|strata_storage" \
-  src crates/{graph,vector,search,executor,intelligence,cli} \
+  src crates/{executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 
-At closeout, the final production guard should return no matches because those
-crates are deleted, retired, or no longer import storage. Root dev-dependencies
-and storage-facing tests need their own explicit `EG1D` exception policy; they
-should not be hidden by the production guard.
+At closeout, the final production guard should return no matches because search
+has been absorbed/deleted and executor/intelligence/CLI no longer import
+storage. Root dev-dependencies and storage-facing tests need their own explicit
+`EG1D` exception policy; they should not be hidden by the production guard.
 
 Final inverse dependency guard:
 

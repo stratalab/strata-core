@@ -21,7 +21,6 @@ rerank = ["dep:ureq"]
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
 strata-storage = { path = "../storage" }
-strata-vector = { path = "../vector" }
 rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

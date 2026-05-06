@@ -1,7 +1,8 @@
 use std::sync::Arc;
 
-use strata_engine::{TransactionContext, VectorConfig};
-use strata_vector::ext::VectorStoreExt;
+use strata_engine::{
+    TransactionContext, VectorConfig, VectorEntry, VectorMatch as EngineVectorMatch,
+};
 
 use crate::bridge::{
     extract_version, from_engine_metric, require_branch_exists, serde_json_to_value_public,
@@ -23,7 +24,7 @@ fn convert_vector_result<T>(
 }
 
 fn to_versioned_vector_data(
-    entry: &strata_vector::VectorEntry,
+    entry: &VectorEntry,
     version: u64,
     timestamp: u64,
 ) -> Result<VersionedVectorData> {
@@ -63,7 +64,7 @@ fn enrich_dimension_error(collection: &str, error: Error) -> Error {
     }
 }
 
-fn to_vector_match(vector_match: strata_vector::VectorMatch) -> Result<VectorMatch> {
+fn to_vector_match(vector_match: EngineVectorMatch) -> Result<VectorMatch> {
     let metadata = vector_match
         .metadata
         .map(serde_json_to_value_public)
@@ -619,29 +620,13 @@ pub(crate) fn execute_in_txn(
             convert_result(validate_not_internal_collection(&collection))?;
             convert_result(validate_key(&key))?;
             convert_result(validate_vector(&vector, &primitives.limits))?;
-            primitives
-                .vector
-                .ensure_collection_loaded(branch_id, space, &collection)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
             let metadata = metadata
                 .map(value_to_serde_json_public)
                 .transpose()
                 .map_err(Error::from)?;
-            let state = primitives
+            let version = primitives
                 .vector
-                .state()
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let (version, _) = ctx
-                .vector_upsert(
-                    branch_id,
-                    space,
-                    &collection,
-                    &key,
-                    &vector,
-                    metadata,
-                    None,
-                    &state,
-                )
+                .insert_in_transaction(ctx, branch_id, space, &collection, &key, &vector, metadata)
                 .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
             Ok(Output::VectorWriteResult {
                 collection,
@@ -654,16 +639,9 @@ pub(crate) fn execute_in_txn(
         } => {
             convert_result(validate_not_internal_collection(&collection))?;
             convert_result(validate_key(&key))?;
-            primitives
+            let deleted = primitives
                 .vector
-                .ensure_collection_loaded(branch_id, space, &collection)
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let state = primitives
-                .vector
-                .state()
-                .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
-            let (deleted, _) = ctx
-                .vector_delete(branch_id, space, &collection, &key, &state)
+                .delete_in_transaction(ctx, branch_id, space, &collection, &key)
                 .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
             Ok(Output::VectorDeleteResult {
                 collection,
@@ -676,8 +654,9 @@ pub(crate) fn execute_in_txn(
         } => {
             convert_result(validate_not_internal_collection(&collection))?;
             convert_result(validate_key(&key))?;
-            let record = ctx
-                .vector_get(branch_id, space, &collection, &key)
+            let record = primitives
+                .vector
+                .get_in_transaction(ctx, branch_id, space, &collection, &key)
                 .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
             match record {
                 Some(record) => {
@@ -705,8 +684,9 @@ pub(crate) fn execute_in_txn(
         } => {
             convert_result(validate_not_internal_collection(&collection))?;
             convert_result(validate_key(&key))?;
-            let record = ctx
-                .vector_get(branch_id, space, &collection, &key)
+            let record = primitives
+                .vector
+                .get_in_transaction(ctx, branch_id, space, &collection, &key)
                 .map_err(|error| Error::from(error.into_strata_error(branch_id)))?;
             Ok(Output::Bool(record.is_some()))
         }

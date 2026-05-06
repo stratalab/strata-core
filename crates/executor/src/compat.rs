@@ -2,13 +2,17 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use strata_engine::{
-    open_product_cache, open_product_database, AccessMode, Database, HealthReport, OpenOptions,
-    ProductOpenError, ProductOpenOutcome, SystemMetrics,
+    open_product_cache, open_product_database, AccessMode, Database, HealthReport, MergeInfo,
+    MergeStrategy, OpenOptions, ProductOpenError, ProductOpenOutcome, SystemMetrics, WalCounters,
 };
 use strata_storage::validate_space_name;
 
 use crate::ipc::IpcClient;
-use crate::{BranchId, Command, DatabaseInfo, Error, Executor, Output, Result, Session, Value};
+use crate::{
+    BatchItemResult, BatchKvEntry, BranchDiffResult, BranchId, Command, DatabaseInfo,
+    EmbedStatusInfo, Error, Executor, ForkInfo, Output, Result, SearchQuery, SearchResultHit,
+    SearchStatsOutput, Session, Value,
+};
 
 /// High-level database handle for opening databases and creating sessions.
 pub struct Strata {
@@ -32,12 +36,7 @@ impl Strata {
     /// Open a database with explicit options.
     pub fn open_with<P: AsRef<Path>>(path: P, options: OpenOptions) -> Result<Self> {
         let data_dir = path.as_ref().to_path_buf();
-        let outcome = open_product_database(
-            &data_dir,
-            options,
-            transitional_product_subsystems_until_vector_absorption(),
-        )
-        .map_err(product_open_error)?;
+        let outcome = open_product_database(&data_dir, options).map_err(product_open_error)?;
 
         match outcome {
             ProductOpenOutcome::Local {
@@ -63,8 +62,7 @@ impl Strata {
 
     /// Open an ephemeral in-memory database.
     pub fn cache() -> Result<Self> {
-        let outcome = open_product_cache(transitional_product_subsystems_until_vector_absorption())
-            .map_err(product_open_error)?;
+        let outcome = open_product_cache().map_err(product_open_error)?;
 
         match outcome {
             ProductOpenOutcome::Local {
@@ -132,6 +130,32 @@ impl Strata {
         match self.execute_cmd(Command::Metrics)? {
             Output::Metrics(metrics) => Ok(metrics),
             other => Err(unexpected_output("Metrics", other)),
+        }
+    }
+
+    /// Return the current WAL durability counters.
+    ///
+    /// Ephemeral handles return zeroed counters.
+    pub fn durability_counters(&self) -> Result<WalCounters> {
+        match self.execute_cmd(Command::DurabilityCounters)? {
+            Output::DurabilityCounters(counters) => Ok(counters),
+            other => Err(unexpected_output("DurabilityCounters", other)),
+        }
+    }
+
+    /// Enable or disable automatic embedding for embeddable writes.
+    pub fn set_auto_embed(&self, enabled: bool) -> Result<()> {
+        match self.execute_cmd(Command::ConfigSetAutoEmbed { enabled })? {
+            Output::Unit => Ok(()),
+            other => Err(unexpected_output("ConfigSetAutoEmbed", other)),
+        }
+    }
+
+    /// Return the current embedding pipeline status.
+    pub fn embed_status(&self) -> Result<EmbedStatusInfo> {
+        match self.execute_cmd(Command::EmbedStatus)? {
+            Output::EmbedStatus(status) => Ok(status),
+            other => Err(unexpected_output("EmbedStatus", other)),
         }
     }
 
@@ -242,6 +266,11 @@ impl Strata {
         Ok(())
     }
 
+    /// Return branch lifecycle helpers bound to this handle.
+    pub fn branches(&self) -> Branches<'_> {
+        Branches { db: self }
+    }
+
     /// Put a value in the current branch and space.
     pub fn kv_put(&self, key: &str, value: impl Into<Value>) -> Result<u64> {
         extract_version(
@@ -266,6 +295,55 @@ impl Strata {
             Output::Maybe(value) => Ok(value),
             Output::MaybeVersioned(value) => Ok(value.map(|versioned| versioned.value)),
             other => Err(unexpected_output("KvGet", other)),
+        }
+    }
+
+    /// Scan key-value pairs from the current branch and space.
+    pub fn kv_scan(&self, start: Option<&str>, limit: Option<u64>) -> Result<Vec<(String, Value)>> {
+        match self.execute_cmd(Command::KvScan {
+            branch: Some(self.current_branch.clone()),
+            space: Some(self.current_space.clone()),
+            start: start.map(ToOwned::to_owned),
+            limit,
+        })? {
+            Output::KvScanResult(rows) => Ok(rows),
+            other => Err(unexpected_output("KvScan", other)),
+        }
+    }
+
+    /// Put multiple key-value pairs in the current branch and space.
+    pub fn kv_batch_put(&self, entries: Vec<BatchKvEntry>) -> Result<Vec<BatchItemResult>> {
+        match self.execute_cmd(Command::KvBatchPut {
+            branch: Some(self.current_branch.clone()),
+            space: Some(self.current_space.clone()),
+            entries,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            other => Err(unexpected_output("KvBatchPut", other)),
+        }
+    }
+
+    /// Delete multiple keys from the current branch and space.
+    pub fn kv_batch_delete(&self, keys: Vec<String>) -> Result<Vec<BatchItemResult>> {
+        match self.execute_cmd(Command::KvBatchDelete {
+            branch: Some(self.current_branch.clone()),
+            space: Some(self.current_space.clone()),
+            keys,
+        })? {
+            Output::BatchResults(results) => Ok(results),
+            other => Err(unexpected_output("KvBatchDelete", other)),
+        }
+    }
+
+    /// Count key-value entries in the current branch and space.
+    pub fn kv_count(&self, prefix: Option<&str>) -> Result<u64> {
+        match self.execute_cmd(Command::KvCount {
+            branch: Some(self.current_branch.clone()),
+            space: Some(self.current_space.clone()),
+            prefix: prefix.map(ToOwned::to_owned),
+        })? {
+            Output::Uint(count) => Ok(count),
+            other => Err(unexpected_output("KvCount", other)),
         }
     }
 
@@ -294,6 +372,18 @@ impl Strata {
                 payload,
             })?,
         )
+    }
+
+    /// Run a search in the current branch and space.
+    pub fn search(&self, search: SearchQuery) -> Result<(Vec<SearchResultHit>, SearchStatsOutput)> {
+        match self.execute_cmd(Command::Search {
+            branch: Some(self.current_branch.clone()),
+            space: Some(self.current_space.clone()),
+            search,
+        })? {
+            Output::SearchResults { hits, stats, .. } => Ok((hits, stats)),
+            other => Err(unexpected_output("Search", other)),
+        }
     }
 
     fn execute_cmd(&self, command: Command) -> Result<Output> {
@@ -374,9 +464,73 @@ impl Strata {
     }
 }
 
-fn transitional_product_subsystems_until_vector_absorption(
-) -> Vec<Box<dyn strata_engine::Subsystem>> {
-    vec![Box::new(strata_vector::VectorSubsystem)]
+/// Branch lifecycle helpers bound to a [`Strata`] handle.
+pub struct Branches<'a> {
+    db: &'a Strata,
+}
+
+impl Branches<'_> {
+    /// Create a branch.
+    pub fn create(&self, branch: &str) -> Result<u64> {
+        match self.db.execute_cmd(Command::BranchCreate {
+            branch_id: Some(branch.to_string()),
+            metadata: None,
+        })? {
+            Output::BranchWithVersion { version, .. } => Ok(version),
+            other => Err(unexpected_output("BranchCreate", other)),
+        }
+    }
+
+    /// Delete a branch.
+    pub fn delete(&self, branch: &str) -> Result<()> {
+        match self.db.execute_cmd(Command::BranchDelete {
+            branch: BranchId::from(branch),
+        })? {
+            Output::Unit => Ok(()),
+            other => Err(unexpected_output("BranchDelete", other)),
+        }
+    }
+
+    /// Fork a branch.
+    pub fn fork(&self, source: &str, destination: &str) -> Result<ForkInfo> {
+        match self.db.execute_cmd(Command::BranchFork {
+            source: source.to_string(),
+            destination: destination.to_string(),
+            message: None,
+            creator: None,
+        })? {
+            Output::BranchForked(info) => Ok(info),
+            other => Err(unexpected_output("BranchFork", other)),
+        }
+    }
+
+    /// Diff two branches.
+    pub fn diff(&self, branch_a: &str, branch_b: &str) -> Result<BranchDiffResult> {
+        match self.db.execute_cmd(Command::BranchDiff {
+            branch_a: branch_a.to_string(),
+            branch_b: branch_b.to_string(),
+            filter_primitives: None,
+            filter_spaces: None,
+            as_of: None,
+        })? {
+            Output::BranchDiff(diff) => Ok(diff),
+            other => Err(unexpected_output("BranchDiff", other)),
+        }
+    }
+
+    /// Merge one branch into another.
+    pub fn merge(&self, source: &str, target: &str, strategy: MergeStrategy) -> Result<MergeInfo> {
+        match self.db.execute_cmd(Command::BranchMerge {
+            source: source.to_string(),
+            target: target.to_string(),
+            strategy,
+            message: None,
+            creator: None,
+        })? {
+            Output::BranchMerged(info) => Ok(info),
+            other => Err(unexpected_output("BranchMerge", other)),
+        }
+    }
 }
 
 fn product_open_error(error: ProductOpenError) -> Error {
@@ -427,7 +581,6 @@ mod tests {
         let outcome = strata_engine::open_product_database(
             dir.path(),
             OpenOptions::default().default_branch(default_branch),
-            super::transitional_product_subsystems_until_vector_absorption(),
         )
         .expect("disk database should open through product open");
         let db = match outcome {

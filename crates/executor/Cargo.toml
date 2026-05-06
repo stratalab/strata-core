@@ -28,7 +28,6 @@ strata-engine = { path = "../engine" }
 strata-intelligence = { path = "../intelligence" }
 strata-search = { path = "../search" }
 strata-storage = { path = "../storage" }
-strata-vector = { path = "../vector" }
 rmp-serde = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -47,12 +47,10 @@ impl VectorStore {
         branch_id: BranchId,
         source_branch_id: Option<BranchId>,
     ) -> VectorResult<()> {
-        use strata_storage::Storage;
-
         let version = CommitVersion(self.db.storage().version());
 
         // Get all spaces for this branch (SpaceIndex.list always includes "default")
-        let space_index = strata_engine::SpaceIndex::new(self.db.clone());
+        let space_index = crate::SpaceIndex::new(self.db.clone());
         let spaces = space_index
             .list(branch_id)
             .map_err(|e| VectorError::Storage(e.to_string()))?;
@@ -151,8 +149,6 @@ impl VectorStore {
         space: &str,
         collection_name: &str,
     ) -> VectorResult<usize> {
-        use strata_storage::Storage;
-
         let state = self.state()?;
         let version = CommitVersion(self.db.storage().version());
         let ns = self.namespace_for(branch_id, space);
@@ -370,7 +366,7 @@ impl VectorStore {
                 .unwrap_or_default();
             backend.set_inline_meta(
                 new_vid,
-                crate::types::InlineMeta {
+                crate::vector::types::InlineMeta {
                     key: vector_user_key,
                     source_ref: vec_record.source_ref.clone(),
                 },

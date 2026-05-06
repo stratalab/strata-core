@@ -959,16 +959,17 @@ contract revision names them:
 The current codebase still has storage exposure that should be tightened during
 engine consolidation:
 
-- `Database::storage()` exposes `Arc<SegmentedStore>` and is used by peer
-  crates today. After graph/vector/search/executor storage bypasses are
+- `Database::storage()` exposes `Arc<SegmentedStore>` and is still used by some
+  upper-layer migration code. After search/executor storage bypasses are
   removed, this should be narrowed or documented as an engine-internal/testing
-  escape hatch.
+  escape hatch. Graph moved into engine during `EG4`; vector moved into engine
+  and the peer crate was deleted during `EG5`.
 - Engine currently re-exports a small number of storage types. Each re-export
   should either become an engine-owned type or remain documented as an explicit
   public engine contract.
-- Vector, search, and executor currently import storage directly. Those imports
-  are migration debt, not an extension of this contract. Graph storage use moved
-  into engine during `EG4`.
+- Search and executor currently import storage directly. Those imports are
+  migration debt, not an extension of this contract. Graph storage use moved into
+  engine during `EG4`; vector storage use moved into engine during `EG5`.
 - Engine tests may inspect storage format details. That is acceptable when the
   test is explicitly characterizing recovery, checkpoint, manifest, snapshot,
   WAL, or storage-runtime behavior.
@@ -979,7 +980,7 @@ Final upper-crate storage bypass guard:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage" \
-  crates/{vector,search,executor,intelligence,cli} \
+  crates/{search,executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 

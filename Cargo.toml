@@ -21,7 +21,6 @@ members = [
     "crates/cli",
     "crates/executor",
     "crates/search",
-    "crates/vector",
 ]
 
 [workspace.package]
@@ -188,7 +187,6 @@ proptest = { workspace = true }
 strata-core = { package = "strata-core", path = "crates/core" }
 strata-storage = { path = "crates/storage" }
 strata-engine = { path = "crates/engine", features = ["test-support"] }
-strata-vector = { path = "crates/vector" }
 strata-intelligence = { path = "crates/intelligence" }
 strata-search = { path = "crates/search" }
 uuid = { workspace = true }

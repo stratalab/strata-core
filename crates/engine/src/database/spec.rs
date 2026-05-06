@@ -25,9 +25,8 @@
 //! ```
 //!
 //! Product callers should use `open_product_database()` or
-//! `open_product_cache()`. Those functions compose the engine-owned graph and
-//! search subsystems internally and accept only the temporary external vector
-//! bridge until vector is absorbed into engine.
+//! `open_product_cache()`. Those functions compose the engine-owned graph,
+//! vector, and search subsystems internally.
 
 use std::path::{Path, PathBuf};
 

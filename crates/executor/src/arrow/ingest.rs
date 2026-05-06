@@ -350,7 +350,7 @@ fn register_space(p: &Arc<Primitives>, branch_id: BranchId, space: &str) -> Resu
 }
 
 fn convert_vector_result<T>(
-    r: std::result::Result<T, strata_vector::VectorError>,
+    r: std::result::Result<T, strata_engine::VectorError>,
     branch_id: BranchId,
 ) -> Result<T> {
     convert_result(r.map_err(|e| e.into_strata_error(branch_id)))

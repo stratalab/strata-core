@@ -156,7 +156,6 @@ The direct normal incoming graph today is:
 
 - `strata-executor`
 - `strata-search`
-- `strata-vector`
 - `strata-intelligence`
 
 And then, above those:
@@ -173,21 +172,21 @@ workspace, but it is not yet the only runtime owner above storage.
 ### Current Normal Workspace Graph
 
 The verified normal dependency graph for engine-adjacent crates is below.
-`EG4G` re-verified this graph on 2026-05-05 after deleting the temporary
-`strata-graph` shell. The phase tracking plans are
+`EG5H` re-verified this graph on 2026-05-06 after deleting the
+`strata-vector` crate and closing out vector absorption. The phase tracking
+plans are
 [eg1-implementation-plan.md](./eg1-implementation-plan.md),
 [eg3-implementation-plan.md](./eg3-implementation-plan.md), and
-[eg4-implementation-plan.md](./eg4-implementation-plan.md).
+[eg5-implementation-plan.md](./eg5-implementation-plan.md).
 
 ```text
 strata-storage       -> strata-core
 strata-engine        -> strata-core, strata-storage
-strata-vector        -> strata-core, strata-engine, strata-storage
-strata-search        -> strata-core, strata-engine, strata-storage, strata-vector
-strata-intelligence  -> strata-core, strata-engine, strata-inference, strata-search, strata-vector
+strata-search        -> strata-core, strata-engine, strata-storage
+strata-intelligence  -> strata-core, strata-engine, strata-inference, strata-search
 strata-executor      -> strata-core, strata-engine,
                         strata-intelligence, strata-search,
-                        strata-storage, strata-vector
+                        strata-storage
 strata-cli           -> strata-executor, strata-intelligence
 stratadb             -> strata-executor
 ```
@@ -195,9 +194,9 @@ stratadb             -> strata-executor
 This graph is the reason engine consolidation should finish vector and search
 absorption before designing `storage-next`. Security/open options are already
 engine-owned after `EG2`, product open/bootstrap is engine-owned after `EG3`,
-and graph is engine-owned after `EG4`. Today the remaining peer crates are
-direct engine consumers, but several of them also still bypass engine and reach
-storage directly.
+graph is engine-owned after `EG4`, and vector is engine-owned after `EG5`.
+Today the remaining peer crates are direct engine consumers, but several of them
+also still bypass engine and reach storage directly.
 
 The current inverse normal storage graph is:
 
@@ -205,20 +204,23 @@ The current inverse normal storage graph is:
 strata-storage
 |-- strata-engine
 |-- strata-executor
-|-- strata-search
-`-- strata-vector
+`-- strata-search
 ```
 
-`strata-engine` is the intended permanent dependent. `strata-executor`,
-`strata-search`, and `strata-vector` are transitional direct storage bypasses
-that the engine consolidation plan removes. `EG4` removed `strata-graph` by
+`strata-engine` is the intended permanent dependent. `strata-executor`
+and `strata-search` are transitional direct storage bypasses that the engine
+consolidation plan removes. `EG4` removed `strata-graph` by
 moving graph implementation, storage-key mapping, transaction extension,
-runtime hooks, and branch DAG behavior into engine.
+runtime hooks, and branch DAG behavior into engine. `EG5` moved vector
+implementation, storage-key mapping, transaction extension, recovery hooks,
+merge behavior, and sidecar-cache policy into engine, then deleted the retired
+`strata-vector` package after search, intelligence, executor, benchmarks, and
+root tests moved to `strata_engine::vector`.
 
 Because most upper crates also depend on engine, the full inverse tree shows
-executor, intelligence, search, and vector under the engine branch as ordinary
-engine consumers. That is not itself a storage bypass; the bypasses that matter
-here are the direct normal storage edges above engine.
+executor, intelligence, and search under the engine branch as ordinary engine
+consumers. That is not itself a storage bypass; the bypasses that matter here
+are the direct normal storage edges above engine.
 
 ### Direct Storage Bypasses Above Engine
 
@@ -226,8 +228,6 @@ These normal production direct storage dependencies are accurate today and
 should be treated as consolidation inputs. The source-level inventory is
 tracked in [eg1-implementation-plan.md](./eg1-implementation-plan.md):
 
-- `strata-vector` uses storage keys, namespaces, type tags, storage reads, and
-  transaction contexts directly.
 - `strata-search` uses storage keys/namespaces in retrieval substrate code.
 - `strata-executor` uses storage keys, namespaces, type tags, validation, and
   storage errors directly.

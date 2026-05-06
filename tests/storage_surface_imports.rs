@@ -76,7 +76,6 @@ struct AllowedEngineConsolidationStorageUse {
 
 const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
     "src",
-    "crates/vector",
     "crates/search",
     "crates/executor",
     "crates/intelligence",
@@ -85,46 +84,22 @@ const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
 
 const ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS: &[&str] = &[
     "src",
-    "crates/vector/src",
     "crates/search/src",
     "crates/executor/src",
     "crates/intelligence/src",
     "crates/cli/src",
 ];
 
+const ENGINE_CONSOLIDATION_VECTOR_CONSUMER_SCAN_ROOTS: &[&str] = &[
+    "src",
+    "benchmarks",
+    "crates/search",
+    "crates/executor",
+    "crates/intelligence",
+    "crates/cli",
+];
+
 const ALLOWED_ENGINE_CONSOLIDATION_STORAGE_USES: &[AllowedEngineConsolidationStorageUse] = &[
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/Cargo.toml",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/ext.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/merge_handler.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/recovery.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/store/collections.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/store/crud.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/store/mod.rs",
-        removal_epic: "EG5",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/vector/src/store/recovery.rs",
-        removal_epic: "EG5",
-    },
     AllowedEngineConsolidationStorageUse {
         path: "crates/search/Cargo.toml",
         removal_epic: "EG6",
@@ -189,6 +164,10 @@ const RETIRED_GRAPH_PACKAGE: &str = concat!("strata", "-", "graph");
 const RETIRED_GRAPH_IMPORT: &str = concat!("strata", "_", "graph");
 const RETIRED_GRAPH_RELATIVE_PATHS: &[&str] =
     &[concat!("../", "graph"), concat!("crates/", "graph")];
+const RETIRED_VECTOR_PACKAGE: &str = concat!("strata", "-", "vector");
+const RETIRED_VECTOR_IMPORT: &str = concat!("strata", "_", "vector");
+const RETIRED_VECTOR_RELATIVE_PATHS: &[&str] =
+    &[concat!("../", "vector"), concat!("crates/", "vector")];
 
 #[test]
 fn storage_facing_types_are_not_imported_from_strata_core() {
@@ -324,7 +303,11 @@ fn engine_consolidation_graph_subsystem_is_engine_product_owned() {
         }
 
         let contents = fs::read_to_string(&file).expect("read production source file");
-        violations.extend(find_upper_graph_subsystem_violations(&rel, &contents));
+        violations.extend(find_upper_subsystem_violations(
+            &rel,
+            &contents,
+            "GraphSubsystem",
+        ));
     }
 
     assert!(
@@ -335,10 +318,184 @@ fn engine_consolidation_graph_subsystem_is_engine_product_owned() {
 }
 
 #[test]
+fn engine_consolidation_vector_subsystem_is_engine_product_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for root in ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS {
+        collect_rust_files(&repo_root.join(root), &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read production source file");
+        violations.extend(find_upper_subsystem_violations(
+            &rel,
+            &contents,
+            "VectorSubsystem",
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production crates above engine must not assemble `VectorSubsystem`; vector product runtime registration is engine-owned:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_vector_crate_is_retired() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let retired_dir = repo_root.join(RETIRED_VECTOR_RELATIVE_PATHS[1]);
+    assert!(
+        !retired_dir.exists(),
+        "vector implementation must live in `strata_engine`; retired vector crate directory still exists at {}",
+        retired_dir.display()
+    );
+
+    let mut files = vec![repo_root.join("Cargo.toml")];
+    collect_rust_files(&repo_root.join("src"), &mut files);
+    collect_manifest_files(&repo_root.join("src"), &mut files);
+    collect_rust_files(&repo_root.join("benchmarks"), &mut files);
+    collect_manifest_files(&repo_root.join("benchmarks"), &mut files);
+    collect_rust_files(&repo_root.join("crates"), &mut files);
+    collect_manifest_files(&repo_root.join("crates"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) || should_skip_manifest(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        let contents = fs::read_to_string(&file).expect("read production file");
+        violations.extend(find_retired_vector_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "vector behavior must be consumed from `strata_engine`; retired vector crate references found:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_vector_consumers_use_engine_surface() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    files.push(repo_root.join("Cargo.toml"));
+    for root in ENGINE_CONSOLIDATION_VECTOR_CONSUMER_SCAN_ROOTS {
+        let path = repo_root.join(root);
+        collect_rust_files(&path, &mut files);
+        collect_manifest_files(&path, &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read production source or manifest");
+        for (line_no, line) in contents.lines().enumerate() {
+            if line.contains("strata_vector") || line.contains("strata-vector") {
+                violations.push(format!("{}:{}: {}", rel, line_no + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production crates above engine must consume vector surfaces from `strata_engine`, not the retired vector crate:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_executor_vector_transaction_surface_is_engine_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    collect_rust_files(&repo_root.join("crates/executor/src"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read executor source file");
+        for (line_no, line) in contents.lines().enumerate() {
+            if line.contains("strata_vector")
+                || line.contains("VectorStoreExt")
+                || line.contains("StagedVectorOp")
+                || line.contains("apply_staged_vector_op")
+            {
+                violations.push(format!("{}:{}: {}", rel, line_no + 1, line.trim()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "executor production code must consume vector surfaces from `strata_engine`, not the retired vector crate or internal staged-op API:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_vector_storage_key_layout_is_engine_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for root in ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS {
+        collect_rust_files(&repo_root.join(root), &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read production source file");
+        violations.extend(find_vector_storage_key_layout_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production crates above engine must not construct vector storage key layout directly:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn storage_surface_manifests_do_not_regress_to_deleted_or_transitional_crates() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut manifests = Vec::new();
     manifests.push(repo_root.join("Cargo.toml"));
+    collect_manifest_files(&repo_root.join("benchmarks"), &mut manifests);
     collect_manifest_files(&repo_root.join("crates"), &mut manifests);
 
     let mut violations = Vec::new();
@@ -543,7 +700,37 @@ fn find_retired_graph_violations(rel: &str, contents: &str) -> Vec<String> {
     violations
 }
 
-fn find_upper_graph_subsystem_violations(rel: &str, contents: &str) -> Vec<String> {
+fn find_retired_vector_violations(rel: &str, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.contains(RETIRED_VECTOR_PACKAGE)
+            || line.contains(RETIRED_VECTOR_IMPORT)
+            || RETIRED_VECTOR_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: retired vector crate reference: {}",
+                rel,
+                line_no + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    violations
+}
+
+const VECTOR_STORAGE_KEY_LAYOUT_MARKERS: &[&str] = &[
+    "TypeTag::Vector",
+    "Key::new_vector",
+    "Key::new_vector_config",
+    "Key::vector_collection_prefix",
+    "new_vector_config_prefix",
+];
+
+fn find_vector_storage_key_layout_violations(rel: &str, contents: &str) -> Vec<String> {
     let mut violations = Vec::new();
     let mut pending_cfg_test = false;
     let mut skipped_cfg_test_depth = None;
@@ -584,11 +771,64 @@ fn find_upper_graph_subsystem_violations(rel: &str, contents: &str) -> Vec<Strin
             pending_cfg_test = false;
         }
 
-        if code.contains("GraphSubsystem") {
+        if VECTOR_STORAGE_KEY_LAYOUT_MARKERS
+            .iter()
+            .any(|marker| code.contains(marker))
+        {
+            violations.push(format!("{}:{}: {}", rel, line_no + 1, line.trim()));
+        }
+    }
+
+    violations
+}
+
+fn find_upper_subsystem_violations(rel: &str, contents: &str, subsystem_name: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+    let mut pending_cfg_test = false;
+    let mut skipped_cfg_test_depth = None;
+    let mut lex_state = RustCodeLexState::default();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        let code = rust_code_only_line(line, &mut lex_state);
+
+        if let Some(depth) = skipped_cfg_test_depth.as_mut() {
+            update_brace_depth(depth, &code);
+            if *depth == 0 {
+                skipped_cfg_test_depth = None;
+            }
+            continue;
+        }
+
+        let trimmed = code.trim();
+        if is_cfg_test_attr(trimmed) {
+            pending_cfg_test = true;
+            continue;
+        }
+
+        if pending_cfg_test {
+            if trimmed.is_empty() || trimmed.starts_with("#[") {
+                continue;
+            }
+
+            if line_declares_inline_module(trimmed) {
+                let mut depth = 0usize;
+                update_brace_depth(&mut depth, &code);
+                if depth > 0 {
+                    skipped_cfg_test_depth = Some(depth);
+                }
+                pending_cfg_test = false;
+                continue;
+            }
+
+            pending_cfg_test = false;
+        }
+
+        if code.contains(subsystem_name) {
             violations.push(format!(
-                "{}:{}: production upper crate names `GraphSubsystem`: {}",
+                "{}:{}: production upper crate names `{}`: {}",
                 rel,
                 line_no + 1,
+                subsystem_name,
                 line.trim()
             ));
         }
@@ -959,6 +1199,27 @@ fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
                 RETIRED_GRAPH_PACKAGE
             ));
         }
+
+        if line.contains(RETIRED_VECTOR_PACKAGE)
+            || RETIRED_VECTOR_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: manifest references retired `{}` crate",
+                rel,
+                line_no + 1,
+                RETIRED_VECTOR_PACKAGE
+            ));
+        }
+
+        if line.contains("strata-core-legacy") || line.contains("core-legacy") {
+            violations.push(format!(
+                "{}:{}: manifest references retired `strata-core-legacy` crate",
+                rel,
+                line_no + 1
+            ));
+        }
     }
 
     violations
@@ -1170,6 +1431,51 @@ fn sample() {
 }
 
 #[test]
+fn vector_storage_key_layout_guard_detects_production_use() {
+    let contents = r#"
+fn product_runtime() {
+    let _tag = TypeTag::Vector;
+    let _row = Key::new_vector(namespace, collection, key);
+    let _config = Key::new_vector_config(namespace, collection);
+    let _prefix = Key::vector_collection_prefix(namespace, collection);
+    let _config_prefix = new_vector_config_prefix(namespace);
+}
+"#;
+
+    let violations =
+        find_vector_storage_key_layout_violations("crates/example/src/lib.rs", contents);
+    assert_eq!(violations.len(), 5, "{violations:?}");
+}
+
+#[test]
+fn vector_storage_key_layout_guard_ignores_literals_comments_and_cfg_test_modules() {
+    let contents = r###"
+const TAG_TEXT: &str = "TypeTag::Vector";
+const RAW_PREFIX: &str = r#"Key::vector_collection_prefix"#;
+
+// Key::new_vector(namespace, collection, key)
+/* Key::new_vector_config(namespace, collection) */
+
+#[cfg(test)]
+mod vector_storage_tests {
+    fn test_runtime() {
+        let _tag = TypeTag::Vector;
+        let _row = Key::new_vector(namespace, collection, key);
+    }
+}
+
+fn product_runtime() {
+    let _tag = TypeTag::Vector;
+}
+"###;
+
+    let violations =
+        find_vector_storage_key_layout_violations("crates/example/src/lib.rs", contents);
+    assert_eq!(violations.len(), 1, "{violations:?}");
+    assert!(violations[0].contains("TypeTag::Vector"), "{violations:?}");
+}
+
+#[test]
 fn graph_subsystem_guard_detects_production_use() {
     let contents = r#"
 use strata_engine::GraphSubsystem;
@@ -1179,7 +1485,8 @@ fn product_runtime() {
 }
 "#;
 
-    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
     assert_eq!(violations.len(), 2);
 }
 
@@ -1198,7 +1505,8 @@ mod tests {
 }
 "#;
 
-    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
     assert!(violations.is_empty(), "{violations:?}");
 }
 
@@ -1225,7 +1533,8 @@ fn product_runtime() {
 }
 "###;
 
-    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
     assert_eq!(violations.len(), 1, "{violations:?}");
     assert!(
         violations[0].contains("product_runtime")
@@ -1247,7 +1556,8 @@ pub(crate) mod graph_tests {
 }
 "#;
 
-    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
     assert!(violations.is_empty(), "{violations:?}");
 }
 
@@ -1262,6 +1572,7 @@ mod runtime {
 }
 "#;
 
-    let violations = find_upper_graph_subsystem_violations("crates/example/src/lib.rs", contents);
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
     assert_eq!(violations.len(), 1, "{violations:?}");
 }

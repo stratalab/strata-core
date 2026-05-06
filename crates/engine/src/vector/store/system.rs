@@ -3,7 +3,7 @@
 //! All system collections live in the `_system_` space, invisible to users.
 
 use super::*;
-use strata_engine::system_space::SYSTEM_SPACE;
+use crate::system_space::SYSTEM_SPACE;
 
 impl VectorStore {
     pub fn create_system_collection(
@@ -12,7 +12,7 @@ impl VectorStore {
         name: &str,
         config: VectorConfig,
     ) -> VectorResult<Versioned<CollectionInfo>> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
 
         validate_system_collection_name(name)?;
 
@@ -67,7 +67,7 @@ impl VectorStore {
         embedding: &[f32],
         metadata: Option<JsonValue>,
     ) -> VectorResult<Version> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.insert(
             branch_id,
@@ -92,7 +92,7 @@ impl VectorStore {
         metadata: Option<JsonValue>,
         source_ref: EntityRef,
     ) -> VectorResult<Version> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.insert_inner(
             branch_id,
@@ -107,7 +107,7 @@ impl VectorStore {
 
     /// Delete a system collection (idempotent — returns Ok if it doesn't exist).
     pub fn delete_system_collection(&self, branch_id: BranchId, name: &str) -> VectorResult<()> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(name)?;
 
         if !self.collection_exists(branch_id, SYSTEM_SPACE, name)? {
@@ -154,7 +154,7 @@ impl VectorStore {
         query: &[f32],
         k: usize,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_with_sources(branch_id, SYSTEM_SPACE, collection, query, k)
     }
@@ -172,7 +172,7 @@ impl VectorStore {
         k: usize,
         as_of_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_at_with_sources(branch_id, SYSTEM_SPACE, collection, query, k, as_of_ts)
     }
@@ -195,7 +195,7 @@ impl VectorStore {
         start_ts: u64,
         end_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_at_in_range_with_sources(
             branch_id,
@@ -222,7 +222,7 @@ impl VectorStore {
         start_ts: u64,
         end_ts: u64,
     ) -> VectorResult<Vec<VectorMatchWithSource>> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.search_with_sources_in_range(
             branch_id,
@@ -242,7 +242,7 @@ impl VectorStore {
         collection: &str,
         key: &str,
     ) -> VectorResult<bool> {
-        use crate::collection::validate_system_collection_name;
+        use crate::vector::collection::validate_system_collection_name;
         validate_system_collection_name(collection)?;
         self.delete(branch_id, SYSTEM_SPACE, collection, key)
     }

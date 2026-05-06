@@ -3,7 +3,7 @@
 //! Invariant R2: All metrics return "higher is better" scores.
 
 use crate::common::*;
-use strata_vector::DistanceMetric;
+use strata_engine::DistanceMetric;
 
 /// Test cosine similarity: higher score = more similar
 #[test]

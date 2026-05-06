@@ -5,12 +5,16 @@
 //!
 //! Usage:
 //!   cargo run --release --bin beir -- [OPTIONS]
+//!   cargo run --release --features embed --bin beir -- --recipe hybrid
 //!
 //! Options:
 //!   --datasets nfcorpus,scifact   Comma-separated dataset names (default: nfcorpus)
 //!   --recipe keyword|hybrid       Named recipe (default: keyword)
 //!   --k 10                        Top-k for evaluation (default: 10)
 //!   --data-dir ./datasets/beir    Where BEIR datasets are stored
+//!
+//! Recipes that require vector search (`hybrid`, `semantic`, `default`, `rag`)
+//! need the benchmark crate's `embed` feature and a working inference setup.
 
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
@@ -244,6 +248,11 @@ fn run_dataset(dataset_name: &str, dataset_dir: &Path, recipe: &str, k: usize) {
     if needs_embed {
         db.set_auto_embed(true)
             .expect("Failed to enable auto-embed");
+        let status = db.embed_status().expect("Failed to read embed status");
+        assert!(
+            status.auto_embed,
+            "recipe '{recipe}' requires embeddings; rebuild with `--features embed` and a working inference setup"
+        );
     }
 
     // Index corpus (sorted by doc_id for deterministic BM25 statistics)

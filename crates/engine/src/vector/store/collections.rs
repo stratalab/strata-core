@@ -7,11 +7,11 @@ impl VectorStore {
         &self,
         branch_id: BranchId,
         name: &str,
-        reason: strata_engine::PrimitiveDegradedReason,
+        reason: crate::PrimitiveDegradedReason,
         detail: impl Into<String>,
     ) -> VectorError {
         let detail = detail.into();
-        let err = strata_engine::database::primitive_degradation::mark_primitive_degraded(
+        let err = crate::database::primitive_degradation::mark_primitive_degraded(
             &self.db,
             branch_id,
             strata_core::contract::PrimitiveType::Vector,
@@ -21,14 +21,14 @@ impl VectorStore {
         )
         .map(|entry| entry.to_error())
         .or_else(|| {
-            strata_engine::database::primitive_degradation::primitive_degraded_error(
+            crate::database::primitive_degradation::primitive_degraded_error(
                 &self.db,
                 branch_id,
                 strata_core::contract::PrimitiveType::Vector,
                 name,
             )
         })
-        .unwrap_or_else(|| strata_engine::StrataError::serialization(detail));
+        .unwrap_or_else(|| crate::StrataError::serialization(detail));
         VectorError::Degraded(Box::new(err))
     }
 
@@ -51,7 +51,7 @@ impl VectorStore {
             space,
             name,
             config,
-            crate::IndexBackendType::default(),
+            IndexBackendType::default(),
         )
     }
 
@@ -65,7 +65,7 @@ impl VectorStore {
         space: &str,
         name: &str,
         config: VectorConfig,
-        backend_type: crate::IndexBackendType,
+        backend_type: IndexBackendType,
     ) -> VectorResult<Versioned<CollectionInfo>> {
         // Validate name
         validate_collection_name(name)?;
@@ -104,9 +104,7 @@ impl VectorStore {
         // Use transaction for atomic storage
         self.db
             .transaction(branch_id, |txn| {
-                strata_engine::primitives::space::ensure_space_registered_in_txn(
-                    txn, &branch_id, space,
-                )?;
+                crate::primitives::space::ensure_space_registered_in_txn(txn, &branch_id, space)?;
                 Ok(txn.put(config_key.clone(), Value::Bytes(config_bytes.clone()))?)
             })
             .map_err(|e| VectorError::Storage(e.to_string()))?;
@@ -162,7 +160,7 @@ impl VectorStore {
     ///
     /// - **The cache is write-through.** Every vector that lives in
     ///   the on-disk cache is also in KV. A wiped cache is rebuilt by
-    ///   `recover_from_db` (`crates/vector/src/recovery.rs`) by
+    ///   `recover_from_db` (`crates/engine/src/vector/recovery.rs`) by
     ///   scanning KV. Worst case: T2's first recovery after a crash
     ///   takes the slow KV-scan path instead of the mmap fast path.
     ///   No data loss.
@@ -220,7 +218,7 @@ impl VectorStore {
         // but never returned (the primary delete already committed).
         // See the concurrency note on this function for the latent
         // race with concurrent `create_collection` of the same name.
-        crate::recovery::purge_collection_disk_cache(self.db.data_dir(), &collection_id);
+        crate::vector::recovery::purge_collection_disk_cache(self.db.data_dir(), &collection_id);
 
         info!(target: "strata::vector", collection = name, branch_id = %branch_id, "Collection deleted");
 
@@ -228,27 +226,25 @@ impl VectorStore {
     }
 
     /// Purge every collection in the in-memory backend state for
-    /// `(branch_id, space)` and wipe each collection's on-disk caches.
-    /// Returns the number of collections removed.
+    /// `(branch_id, space)` and wipe the full on-disk cache tree for the
+    /// space. Returns the number of loaded collections removed.
     ///
     /// **Best-effort cleanup hook for `space_delete --force`.** This
-    /// helper reads `state.backends` directly (not the KV config keys)
-    /// so callers may invoke it AFTER the primary-delete transaction
-    /// has wiped the config rows — the in-memory state still has the
-    /// `CollectionId` entries that the recovery pass loaded earlier,
-    /// which is what we need to evict here.
+    /// helper reads `state.backends` directly (not the KV config keys), so
+    /// callers may invoke it before or after the primary-delete transaction.
+    /// The disk purge does not depend on loaded backends.
     ///
-    /// Disk cache purge is gated on a non-empty `data_dir` (ephemeral
-    /// databases never write caches in the first place).
+    /// Disk cache purge is stronger than the in-memory backend scan: it removes
+    /// the whole branch/space cache directory so orphan sidecars that no longer
+    /// have loaded backends cannot survive `space_delete --force`.
     ///
     /// # Concurrency note
     ///
     /// Same latent race as `delete_collection`: a concurrent
-    /// `create_collection` for one of the target `CollectionId`s can
-    /// interleave with this purge and have its freshly-written cache
-    /// wiped. Today this is benign for the same two reasons listed on
-    /// `delete_collection` (write-through cache + new heaps in
-    /// `Owned` mode). Read that note before changing the cache
+    /// `create_collection` in the target space can interleave with this purge
+    /// and have its freshly-written cache wiped. Today this is benign for the
+    /// same two reasons listed on `delete_collection` (write-through cache +
+    /// new heaps in `Owned` mode). Read that note before changing the cache
     /// representation.
     pub fn purge_collections_in_space(
         &self,
@@ -267,8 +263,8 @@ impl VectorStore {
         let data_dir = self.db.data_dir().to_path_buf();
         for cid in &target_cids {
             state.backends.remove(cid);
-            crate::recovery::purge_collection_disk_cache(&data_dir, cid);
         }
+        crate::vector::recovery::purge_space_disk_cache(&data_dir, branch_id, space);
         if n > 0 {
             info!(
                 target: "strata::vector",
@@ -279,6 +275,33 @@ impl VectorStore {
             );
         }
         Ok(n)
+    }
+
+    /// Stage deletion of every persisted vector row in a branch/space.
+    ///
+    /// This is the engine-owned vector half of force space deletion. It removes
+    /// both collection config rows and vector data rows while allowing the
+    /// caller to keep all primitive row deletes in one transaction.
+    pub fn delete_space_data_in_transaction(
+        &self,
+        txn: &mut TransactionContext,
+        branch_id: BranchId,
+        space: &str,
+    ) -> VectorResult<usize> {
+        let namespace = self.namespace_for(branch_id, space);
+        let prefix = Key::new(namespace, TypeTag::Vector, Vec::new());
+        let entries = txn
+            .scan_prefix(&prefix)
+            .map_err(|e| VectorError::Storage(e.to_string()))?;
+        let keys: Vec<Key> = entries.into_iter().map(|(key, _)| key).collect();
+        let rows_deleted = keys.len();
+
+        for key in keys {
+            txn.delete(key)
+                .map_err(|e| VectorError::Storage(e.to_string()))?;
+        }
+
+        Ok(rows_deleted)
     }
 
     /// Purge every loaded collection for a branch, across all spaces.
@@ -298,7 +321,7 @@ impl VectorStore {
         let data_dir = self.db.data_dir().to_path_buf();
         for cid in &target_cids {
             state.backends.remove(cid);
-            crate::recovery::purge_collection_disk_cache(&data_dir, cid);
+            crate::vector::recovery::purge_collection_disk_cache(&data_dir, cid);
         }
         if n > 0 {
             info!(
@@ -320,8 +343,6 @@ impl VectorStore {
         branch_id: BranchId,
         space: &str,
     ) -> VectorResult<Vec<CollectionInfo>> {
-        use strata_storage::Storage;
-
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::new_vector_config_prefix(namespace);
 
@@ -348,7 +369,7 @@ impl VectorStore {
                     return Err(self.degrade_collection_read(
                         branch_id,
                         &name,
-                        strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
+                        crate::PrimitiveDegradedReason::ConfigDecodeFailure,
                         "Expected Bytes value for collection record",
                     ));
                 }
@@ -357,7 +378,7 @@ impl VectorStore {
                 self.degrade_collection_read(
                     branch_id,
                     &name,
-                    strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
+                    crate::PrimitiveDegradedReason::ConfigDecodeFailure,
                     format!("Failed to decode collection record during list: {e}"),
                 )
             })?;
@@ -365,7 +386,7 @@ impl VectorStore {
                 self.degrade_collection_read(
                     branch_id,
                     &name,
-                    strata_engine::PrimitiveDegradedReason::ConfigShapeConversion,
+                    crate::PrimitiveDegradedReason::ConfigShapeConversion,
                     format!("Failed to convert collection config during list: {e}"),
                 )
             })?;
@@ -395,8 +416,6 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<bool> {
-        use strata_storage::Storage;
-
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = CommitVersion(self.db.storage().version());
 
@@ -416,8 +435,6 @@ impl VectorStore {
         name: &str,
     ) -> VectorResult<Option<Versioned<CollectionInfo>>> {
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
-
-        use strata_storage::Storage;
         let version = CommitVersion(self.db.storage().version());
 
         let Some(versioned_value) = self

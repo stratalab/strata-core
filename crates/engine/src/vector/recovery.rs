@@ -35,12 +35,14 @@ use std::cell::Cell;
 #[cfg(test)]
 use std::io;
 
+use crate::database::observers::{AbortInfo, AbortObserver};
+use crate::semantics::vector::{CollectionId, VectorConfig, VectorId};
+use crate::vector::{CollectionRecord, IndexBackendFactory, IndexBackendType, VectorRecord};
+use crate::Database;
+use crate::StrataResult;
 use strata_core::id::CommitVersion;
 use strata_core::BranchId;
-use strata_engine::database::observers::{AbortInfo, AbortObserver};
-use strata_engine::Database;
-use strata_engine::StrataResult;
-use strata_storage::{Key, Storage, TypeTag};
+use strata_storage::{Key, TypeTag};
 use tracing::info;
 
 #[cfg(test)]
@@ -93,9 +95,7 @@ pub(crate) fn mmap_path(
     space: &str,
     collection_name: &str,
 ) -> std::path::PathBuf {
-    branch_cache_dir(data_dir, branch_id)
-        .join(space)
-        .join(format!("{}.vec", collection_name))
+    space_cache_dir(data_dir, branch_id, space).join(format!("{}.vec", collection_name))
 }
 
 /// Compute the on-disk cache directory for a branch.
@@ -107,6 +107,17 @@ pub(crate) fn branch_cache_dir(
 ) -> std::path::PathBuf {
     let branch_hex = format!("{:032x}", u128::from_be_bytes(*branch_id.as_bytes()));
     data_dir.join("vectors").join(branch_hex)
+}
+
+/// Compute the on-disk cache directory for one branch/space pair.
+///
+/// Layout: `{data_dir}/vectors/{branch_hex}/{space}/`.
+pub(crate) fn space_cache_dir(
+    data_dir: &std::path::Path,
+    branch_id: BranchId,
+    space: &str,
+) -> std::path::PathBuf {
+    branch_cache_dir(data_dir, branch_id).join(space)
 }
 
 /// Wipe the on-disk vector caches (`.vec` heap mmap and `_graphs/` graph
@@ -145,6 +156,28 @@ pub(crate) fn purge_collection_disk_cache(data_dir: &std::path::Path, cid: &supe
     }
 }
 
+/// Wipe the entire on-disk vector cache tree for one branch/space pair.
+///
+/// This is stronger than per-collection purge and is used during space delete
+/// to remove orphan sidecar files that no longer have a loaded backend.
+pub(crate) fn purge_space_disk_cache(data_dir: &std::path::Path, branch_id: BranchId, space: &str) {
+    if data_dir.as_os_str().is_empty() || space.is_empty() {
+        return;
+    }
+
+    let space_dir = space_cache_dir(data_dir, branch_id, space);
+    if space_dir.exists() {
+        if let Err(e) = std::fs::remove_dir_all(&space_dir) {
+            tracing::warn!(
+                target: "strata::vector",
+                path = ?space_dir,
+                error = %e,
+                "Failed to remove vector space cache dir during purge"
+            );
+        }
+    }
+}
+
 /// Wipe the entire on-disk vector cache tree for a branch.
 ///
 /// This is stronger than per-collection purge and is used during branch delete
@@ -170,10 +203,10 @@ pub(crate) fn purge_branch_disk_cache(data_dir: &std::path::Path, branch_id: Bra
 /// Internal recovery implementation that works with &Database
 fn recover_from_db(db: &Database) -> StrataResult<()> {
     use super::{CollectionId, IndexBackendFactory, VectorBackendState, VectorConfig, VectorId};
-    use crate::heap::VectorHeap;
+    use crate::vector::heap::VectorHeap;
     use std::sync::Arc;
     use strata_core::Value;
-    use strata_storage::{Key, Namespace, Storage};
+    use strata_storage::{Key, Namespace};
 
     // Skip recovery for cache databases
     if db.is_cache() {
@@ -222,7 +255,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
             Ok(entries) => entries
                 .into_iter()
                 .filter_map(|(k, _)| String::from_utf8(k.user_key.to_vec()).ok())
-                .filter(|s| s != strata_engine::system_space::SYSTEM_SPACE)
+                .filter(|s| s != crate::system_space::SYSTEM_SPACE)
                 .collect(),
             Err(e) => {
                 tracing::warn!(
@@ -237,7 +270,7 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
         if !spaces.iter().any(|s| s == "default") {
             spaces.insert(0, "default".to_string());
         }
-        spaces.push(strata_engine::system_space::SYSTEM_SPACE.to_string());
+        spaces.push(crate::system_space::SYSTEM_SPACE.to_string());
         for space in &spaces {
             let space = space.as_str();
             let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
@@ -286,12 +319,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             error = %e,
                             "Failed to decode collection record during recovery; marking collection degraded"
                         );
-                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                        crate::database::primitive_degradation::mark_primitive_degraded(
                             db,
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_engine::PrimitiveDegradedReason::ConfigDecodeFailure,
+                            crate::PrimitiveDegradedReason::ConfigDecodeFailure,
                             format!("{e}"),
                         );
                         continue;
@@ -310,12 +343,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                             error = %e,
                             "Failed to convert collection config during recovery; marking collection degraded"
                         );
-                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                        crate::database::primitive_degradation::mark_primitive_degraded(
                             db,
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_engine::PrimitiveDegradedReason::ConfigShapeConversion,
+                            crate::PrimitiveDegradedReason::ConfigShapeConversion,
                             format!("{e}"),
                         );
                         continue;
@@ -388,12 +421,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                         // B5.4 — vector rebuild failure must fail closed. A
                         // partial mmap-only or empty backend is not trusted
                         // enough to serve branch-visible reads.
-                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                        crate::database::primitive_degradation::mark_primitive_degraded(
                             db,
                             branch_id,
                             strata_core::contract::PrimitiveType::Vector,
                             &collection_name,
-                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
+                            crate::PrimitiveDegradedReason::ConfigMismatch,
                             format!("failed to scan vectors during recovery: {e}"),
                         );
                         continue;
@@ -416,12 +449,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 error = %e,
                                 "Failed to decode vector record during recovery; marking collection degraded"
                             );
-                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            crate::database::primitive_degradation::mark_primitive_degraded(
                                 db,
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
+                                crate::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -448,12 +481,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 error = %e,
                                 "Failed to insert vector during recovery; marking collection degraded"
                             );
-                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            crate::database::primitive_degradation::mark_primitive_degraded(
                                 db,
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
+                                crate::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -483,12 +516,12 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
                                 error = %e,
                                 "Failed to insert vector during recovery; marking collection degraded"
                             );
-                            strata_engine::database::primitive_degradation::mark_primitive_degraded(
+                            crate::database::primitive_degradation::mark_primitive_degraded(
                                 db,
                                 branch_id,
                                 strata_core::contract::PrimitiveType::Vector,
                                 &collection_name,
-                                strata_engine::PrimitiveDegradedReason::ConfigMismatch,
+                                crate::PrimitiveDegradedReason::ConfigMismatch,
                                 format!("{e}"),
                             );
                             continue;
@@ -605,22 +638,16 @@ fn recover_from_db(db: &Database) -> StrataResult<()> {
 /// Used with `OpenSpec::with_subsystem(VectorSubsystem)` for explicit subsystem registration.
 pub struct VectorSubsystem;
 
-impl strata_engine::recovery::Subsystem for VectorSubsystem {
+impl crate::recovery::Subsystem for VectorSubsystem {
     fn name(&self) -> &'static str {
         "vector"
     }
 
-    fn recover(
-        &self,
-        db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_engine::StrataResult<()> {
+    fn recover(&self, db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
         recover_vector_state(db)
     }
 
-    fn initialize(
-        &self,
-        db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_engine::StrataResult<()> {
+    fn initialize(&self, db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
         let state = db.extension::<super::VectorBackendState>()?;
         ensure_runtime_wiring(db, &state);
         Ok(())
@@ -628,19 +655,19 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
 
     fn cleanup_deleted_branch(
         &self,
-        db: &std::sync::Arc<strata_engine::Database>,
+        db: &std::sync::Arc<crate::Database>,
         branch_id: &BranchId,
         _branch_name: &str,
-    ) -> strata_engine::StrataResult<()> {
+    ) -> crate::StrataResult<()> {
         let store = crate::VectorStore::new(db.clone());
         store
             .purge_collections_in_branch(*branch_id)
-            .map_err(|e| strata_engine::StrataError::internal(e.to_string()))?;
+            .map_err(|e| crate::StrataError::internal(e.to_string()))?;
         purge_branch_disk_cache(db.data_dir(), *branch_id);
         Ok(())
     }
 
-    fn freeze(&self, db: &strata_engine::Database) -> strata_engine::StrataResult<()> {
+    fn freeze(&self, db: &crate::Database) -> crate::StrataResult<()> {
         db.freeze_vector_heaps()
     }
 }
@@ -649,10 +676,10 @@ impl strata_engine::recovery::Subsystem for VectorSubsystem {
 // Vector Commit Observer
 // =============================================================================
 
-use strata_engine::database::observers::{CommitInfo, CommitObserver, ObserverError};
+use crate::database::observers::{CommitInfo, CommitObserver, ObserverError};
 
 pub(crate) fn ensure_runtime_wiring(
-    db: &std::sync::Arc<strata_engine::Database>,
+    db: &std::sync::Arc<crate::Database>,
     state: &std::sync::Arc<super::VectorBackendState>,
 ) {
     use std::sync::atomic::Ordering;
@@ -663,8 +690,8 @@ pub(crate) fn ensure_runtime_wiring(
     }
 
     db.merge_registry().register_vector(
-        crate::merge_handler::vector_precheck_fn,
-        crate::merge_handler::vector_post_commit_fn,
+        crate::vector::merge_handler::vector_precheck_fn,
+        crate::vector::merge_handler::vector_post_commit_fn,
     );
 
     let commit_observer = Arc::new(VectorCommitObserver {
@@ -680,15 +707,11 @@ pub(crate) fn ensure_runtime_wiring(
 
 /// Observer that applies pending HNSW backend operations after commit.
 ///
-/// Vector write methods queue `StagedVectorOp`s in `VectorBackendState` during
-/// transactions. This observer applies them after successful commit, updating
-/// the in-memory HNSW indices.
-///
-/// This moves vector backend maintenance ownership from executor-local deferred
-/// work to subsystem-owned observers (VectorSubsystem), fulfilling the T2-E2
-/// requirement.
+/// Vector write methods queue backend work in `VectorBackendState` during
+/// transactions. This observer applies it after successful commit, updating the
+/// in-memory HNSW indices.
 struct VectorCommitObserver {
-    db: std::sync::Weak<strata_engine::Database>,
+    db: std::sync::Weak<crate::Database>,
 }
 
 impl CommitObserver for VectorCommitObserver {
@@ -721,7 +744,7 @@ impl CommitObserver for VectorCommitObserver {
 }
 
 struct VectorAbortObserver {
-    db: std::sync::Weak<strata_engine::Database>,
+    db: std::sync::Weak<crate::Database>,
 }
 
 impl AbortObserver for VectorAbortObserver {
@@ -760,7 +783,7 @@ fn register_vector_lifecycle_hook(db: &std::sync::Arc<Database>) {
         db: Arc::downgrade(db),
     });
 
-    if let Ok(hooks) = db.extension::<strata_engine::RefreshHooks>() {
+    if let Ok(hooks) = db.extension::<crate::RefreshHooks>() {
         hooks.register(hook);
     }
 }
@@ -768,30 +791,30 @@ fn register_vector_lifecycle_hook(db: &std::sync::Arc<Database>) {
 /// Lifecycle hook implementation for vector backends.
 struct VectorLifecycleHook {
     state: std::sync::Arc<super::VectorBackendState>,
-    db: std::sync::Weak<strata_engine::Database>,
+    db: std::sync::Weak<crate::Database>,
 }
 
 enum PendingVectorOp {
     CreateCollection {
-        collection_id: crate::CollectionId,
-        backend_type: crate::IndexBackendType,
-        config: crate::VectorConfig,
+        collection_id: CollectionId,
+        backend_type: IndexBackendType,
+        config: VectorConfig,
     },
     UpsertVector {
-        collection_id: crate::CollectionId,
-        vector_id: crate::VectorId,
+        collection_id: CollectionId,
+        vector_id: VectorId,
         vector_key: String,
         embedding: Vec<f32>,
         created_at: u64,
         source_ref: Option<strata_core::EntityRef>,
     },
     DeleteVector {
-        collection_id: crate::CollectionId,
-        vector_id: crate::VectorId,
+        collection_id: CollectionId,
+        vector_id: VectorId,
         deleted_at: u64,
     },
     DropCollection {
-        collection_id: crate::CollectionId,
+        collection_id: CollectionId,
     },
 }
 
@@ -800,7 +823,7 @@ struct PendingVectorRefresh {
     ops: Vec<PendingVectorOp>,
 }
 
-impl strata_engine::PreparedRefresh for PendingVectorRefresh {
+impl crate::PreparedRefresh for PendingVectorRefresh {
     fn publish(self: Box<Self>) {
         use dashmap::mapref::entry::Entry;
 
@@ -813,9 +836,7 @@ impl strata_engine::PreparedRefresh for PendingVectorRefresh {
                 } => match self.state.backends.entry(collection_id) {
                     Entry::Occupied(_) => {}
                     Entry::Vacant(entry) => {
-                        entry.insert(
-                            crate::IndexBackendFactory::from_type(backend_type).create(&config),
-                        );
+                        entry.insert(IndexBackendFactory::from_type(backend_type).create(&config));
                     }
                 },
                 PendingVectorOp::UpsertVector {
@@ -835,7 +856,7 @@ impl strata_engine::PreparedRefresh for PendingVectorRefresh {
                         .expect("validated staged vector refresh insert failed during publish");
                     backend.set_inline_meta(
                         vector_id,
-                        crate::types::InlineMeta {
+                        crate::vector::types::InlineMeta {
                             key: vector_key,
                             source_ref,
                         },
@@ -865,16 +886,12 @@ impl strata_engine::PreparedRefresh for PendingVectorRefresh {
 unsafe impl Send for VectorLifecycleHook {}
 unsafe impl Sync for VectorLifecycleHook {}
 
-impl strata_engine::RefreshHook for VectorLifecycleHook {
+impl crate::RefreshHook for VectorLifecycleHook {
     fn name(&self) -> &'static str {
         "vector"
     }
 
-    fn pre_delete_read(
-        &self,
-        db: &strata_engine::Database,
-        deletes: &[Key],
-    ) -> Vec<(Key, Vec<u8>)> {
+    fn pre_delete_read(&self, db: &crate::Database, deletes: &[Key]) -> Vec<(Key, Vec<u8>)> {
         deletes
             .iter()
             .filter(|key| key.type_tag == TypeTag::Vector)
@@ -898,11 +915,9 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
         &self,
         puts: &[(Key, strata_core::Value)],
         pre_read_deletes: &[(Key, Vec<u8>)],
-    ) -> Result<Box<dyn strata_engine::PreparedRefresh>, strata_engine::RefreshHookError> {
-        use crate::{CollectionId, VectorId};
-
+    ) -> Result<Box<dyn crate::PreparedRefresh>, crate::RefreshHookError> {
         let Some(db) = self.db.upgrade() else {
-            return Ok(Box::new(strata_engine::NoopPreparedRefresh));
+            return Ok(Box::new(crate::NoopPreparedRefresh));
         };
         let store = crate::VectorStore::new(db.clone());
         let mut ops = Vec::with_capacity(puts.len() + pre_read_deletes.len());
@@ -912,7 +927,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             .filter(|(key, _)| key.type_tag == TypeTag::Vector)
         {
             let Some(user_key) = key.user_key_string() else {
-                return Err(strata_engine::RefreshHookError::new(
+                return Err(crate::RefreshHookError::new(
                     "vector",
                     "vector key is not valid UTF-8",
                 ));
@@ -922,7 +937,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                 let bytes = match value {
                     strata_core::Value::Bytes(bytes) => bytes,
                     _ => {
-                        return Err(strata_engine::RefreshHookError::new(
+                        return Err(crate::RefreshHookError::new(
                             "vector",
                             format!(
                                 "collection config {} stored non-bytes payload during refresh",
@@ -931,8 +946,8 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                         ))
                     }
                 };
-                let record = crate::CollectionRecord::from_bytes(bytes).map_err(|e| {
-                    strata_engine::RefreshHookError::new(
+                let record = CollectionRecord::from_bytes(bytes).map_err(|e| {
+                    crate::RefreshHookError::new(
                         "vector",
                         format!(
                             "failed to decode collection config {}: {}",
@@ -940,8 +955,8 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                         ),
                     )
                 })?;
-                let config = crate::VectorConfig::try_from(record.config.clone()).map_err(|e| {
-                    strata_engine::RefreshHookError::new(
+                let config = VectorConfig::try_from(record.config.clone()).map_err(|e| {
+                    crate::RefreshHookError::new(
                         "vector",
                         format!("failed to decode config {}: {}", collection_name, e),
                     )
@@ -967,7 +982,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             .filter(|(key, _)| key.type_tag == TypeTag::Vector)
         {
             let Some(user_key) = key.user_key_string() else {
-                return Err(strata_engine::RefreshHookError::new(
+                return Err(crate::RefreshHookError::new(
                     "vector",
                     "vector key is not valid UTF-8",
                 ));
@@ -977,7 +992,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             }
 
             let (collection_name, vector_key) = user_key.split_once('/').ok_or_else(|| {
-                strata_engine::RefreshHookError::new(
+                crate::RefreshHookError::new(
                     "vector",
                     format!("invalid vector key format during refresh: {}", user_key),
                 )
@@ -990,7 +1005,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                     collection_name,
                 )
                 .map_err(|e| {
-                    strata_engine::RefreshHookError::new(
+                    crate::RefreshHookError::new(
                         "vector",
                         format!(
                             "failed to load collection {} in space {}: {}",
@@ -1002,7 +1017,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             let bytes = match value {
                 strata_core::Value::Bytes(bytes) => bytes,
                 _ => {
-                    return Err(strata_engine::RefreshHookError::new(
+                    return Err(crate::RefreshHookError::new(
                         "vector",
                         format!(
                             "vector payload {} stored non-bytes value during refresh",
@@ -1011,8 +1026,8 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                     ))
                 }
             };
-            let record = crate::VectorRecord::from_bytes(bytes).map_err(|e| {
-                strata_engine::RefreshHookError::new(
+            let record = VectorRecord::from_bytes(bytes).map_err(|e| {
+                crate::RefreshHookError::new(
                     "vector",
                     format!("failed to decode vector {}: {}", user_key, e),
                 )
@@ -1029,7 +1044,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             );
             let vid = VectorId::new(record.vector_id);
             let backend = self.state.backends.get(&collection_id).ok_or_else(|| {
-                strata_engine::RefreshHookError::new(
+                crate::RefreshHookError::new(
                     "vector",
                     format!(
                         "collection {} in space {} is not loaded during refresh",
@@ -1040,7 +1055,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             let expected_dim = backend.config().dimension;
             drop(backend);
             if record.embedding.len() != expected_dim {
-                return Err(strata_engine::RefreshHookError::new(
+                return Err(crate::RefreshHookError::new(
                     "vector",
                     format!(
                         "failed to insert vector {} into {}: dimension mismatch (expected {}, got {})",
@@ -1066,7 +1081,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             .filter(|(key, _)| key.type_tag == TypeTag::Vector)
         {
             let Some(user_key) = key.user_key_string() else {
-                return Err(strata_engine::RefreshHookError::new(
+                return Err(crate::RefreshHookError::new(
                     "vector",
                     "deleted vector key is not valid UTF-8",
                 ));
@@ -1076,7 +1091,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             }
 
             let (collection_name, _) = user_key.split_once('/').ok_or_else(|| {
-                strata_engine::RefreshHookError::new(
+                crate::RefreshHookError::new(
                     "vector",
                     format!(
                         "invalid deleted vector key format during refresh: {}",
@@ -1092,7 +1107,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                     collection_name,
                 )
                 .map_err(|e| {
-                    strata_engine::RefreshHookError::new(
+                    crate::RefreshHookError::new(
                         "vector",
                         format!(
                             "failed to load collection {} in space {}: {}",
@@ -1101,8 +1116,8 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
                     )
                 })?;
 
-            let record = crate::VectorRecord::from_bytes(bytes).map_err(|e| {
-                strata_engine::RefreshHookError::new(
+            let record = VectorRecord::from_bytes(bytes).map_err(|e| {
+                crate::RefreshHookError::new(
                     "vector",
                     format!("failed to decode deleted vector {}: {}", user_key, e),
                 )
@@ -1114,7 +1129,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             );
             let vid = VectorId::new(record.vector_id);
             self.state.backends.get(&collection_id).ok_or_else(|| {
-                strata_engine::RefreshHookError::new(
+                crate::RefreshHookError::new(
                     "vector",
                     format!(
                         "collection {} in space {} is not loaded during refresh delete",
@@ -1139,7 +1154,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
             .filter(|(key, _)| key.type_tag == TypeTag::Vector)
         {
             let Some(user_key) = key.user_key_string() else {
-                return Err(strata_engine::RefreshHookError::new(
+                return Err(crate::RefreshHookError::new(
                     "vector",
                     "deleted vector key is not valid UTF-8",
                 ));
@@ -1162,7 +1177,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
         }))
     }
 
-    fn freeze_to_disk(&self, db: &strata_engine::Database) -> strata_engine::StrataResult<()> {
+    fn freeze_to_disk(&self, db: &crate::Database) -> crate::StrataResult<()> {
         let data_dir = db.data_dir();
         if data_dir.as_os_str().is_empty() {
             return Ok(()); // Ephemeral database — no mmap
@@ -1187,7 +1202,7 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
     //
     // The vector merge post-commit lifecycle moved to
     // `VectorMergeHandler::post_commit` (via `register_vector_semantic_merge`)
-    // — see crates/vector/src/merge_handler.rs. The handler does a
+    // — see crates/engine/src/vector/merge_handler.rs. The handler does a
     // *per-collection* rebuild, scoped to the collections the merge
     // actually touched, instead of the full-branch rebuild this method
     // used to do. The full-branch path also had a real bug — it only
@@ -1203,14 +1218,14 @@ impl strata_engine::RefreshHook for VectorLifecycleHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{DistanceMetric, VectorStore};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{
+    use crate::database::OpenSpec;
+    use crate::{
         Database, NoopPreparedRefresh, PreparedRefresh, RefreshHook, RefreshHookError,
         RefreshHooks, Subsystem,
     };
+    use crate::{DistanceMetric, VectorStore};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
 
     #[derive(Clone)]
     struct FailOnceRefreshSubsystem {
@@ -1250,7 +1265,7 @@ mod tests {
             Ok(Box::new(NoopPreparedRefresh))
         }
 
-        fn freeze_to_disk(&self, _db: &Database) -> strata_engine::StrataResult<()> {
+        fn freeze_to_disk(&self, _db: &Database) -> crate::StrataResult<()> {
             Ok(())
         }
     }
@@ -1260,11 +1275,11 @@ mod tests {
             "vector-test-fail-once"
         }
 
-        fn recover(&self, _db: &Arc<Database>) -> strata_engine::StrataResult<()> {
+        fn recover(&self, _db: &Arc<Database>) -> crate::StrataResult<()> {
             Ok(())
         }
 
-        fn initialize(&self, db: &Arc<Database>) -> strata_engine::StrataResult<()> {
+        fn initialize(&self, db: &Arc<Database>) -> crate::StrataResult<()> {
             let hooks = db.extension::<RefreshHooks>()?;
             hooks.register(Arc::new(FailOnceRefreshHook {
                 fail_once: self.fail_once.clone(),
@@ -1301,13 +1316,13 @@ mod tests {
     fn test_recovery_vector_scan_failure_marks_collection_degraded_and_fails_closed() {
         let temp = tempfile::TempDir::new().unwrap();
         let branch_name = "main";
-        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+        let branch_id = crate::primitives::branch::resolve_branch_name(branch_name);
 
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(temp.path())
                     .with_subsystem(VectorSubsystem)
-                    .with_subsystem(strata_engine::SearchSubsystem),
+                    .with_subsystem(crate::SearchSubsystem),
             )
             .unwrap();
             let store = VectorStore::new(db.clone());
@@ -1318,7 +1333,7 @@ mod tests {
                     branch_id,
                     "default",
                     "embeddings",
-                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                    VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
                 )
                 .unwrap();
             store
@@ -1339,13 +1354,13 @@ mod tests {
         let db = Database::open_runtime(
             OpenSpec::primary(temp.path())
                 .with_subsystem(VectorSubsystem)
-                .with_subsystem(strata_engine::SearchSubsystem),
+                .with_subsystem(crate::SearchSubsystem),
         )
         .unwrap();
         let store = VectorStore::new(db.clone());
 
         let registry = db
-            .extension::<strata_engine::PrimitiveDegradationRegistry>()
+            .extension::<crate::PrimitiveDegradationRegistry>()
             .unwrap();
         let entry = registry
             .lookup(
@@ -1354,10 +1369,7 @@ mod tests {
                 "embeddings",
             )
             .expect("scan failure must mark the collection degraded");
-        assert_eq!(
-            entry.reason,
-            strata_engine::PrimitiveDegradedReason::ConfigMismatch
-        );
+        assert_eq!(entry.reason, crate::PrimitiveDegradedReason::ConfigMismatch);
 
         let err = store
             .search(
@@ -1369,8 +1381,8 @@ mod tests {
                 None,
             )
             .expect_err("degraded collection must fail closed after reopen");
-        match strata_engine::StrataError::from(err) {
-            strata_engine::StrataError::PrimitiveDegraded {
+        match crate::StrataError::from(err) {
+            crate::StrataError::PrimitiveDegraded {
                 primitive, name, ..
             } => {
                 assert_eq!(primitive, strata_core::contract::PrimitiveType::Vector);
@@ -1386,14 +1398,14 @@ mod tests {
     fn test_branch_delete_purges_vector_caches_and_prevents_recovery_resurrection() {
         let temp = tempfile::TempDir::new().unwrap();
         let branch_name = "feature";
-        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+        let branch_id = crate::primitives::branch::resolve_branch_name(branch_name);
         let vec_path = mmap_path(temp.path(), branch_id, "default", "embeddings");
 
         {
             let db = Database::open_runtime(
                 OpenSpec::primary(temp.path())
                     .with_subsystem(VectorSubsystem)
-                    .with_subsystem(strata_engine::SearchSubsystem),
+                    .with_subsystem(crate::SearchSubsystem),
             )
             .unwrap();
             let store = VectorStore::new(db.clone());
@@ -1404,7 +1416,7 @@ mod tests {
                     branch_id,
                     "default",
                     "embeddings",
-                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                    VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
                 )
                 .unwrap();
             store
@@ -1436,7 +1448,7 @@ mod tests {
             let db = Database::open_runtime(
                 OpenSpec::primary(temp.path())
                     .with_subsystem(VectorSubsystem)
-                    .with_subsystem(strata_engine::SearchSubsystem),
+                    .with_subsystem(crate::SearchSubsystem),
             )
             .unwrap();
             let store = VectorStore::new(db.clone());
@@ -1447,7 +1459,7 @@ mod tests {
                     branch_id,
                     "default",
                     "embeddings",
-                    crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                    VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
                 )
                 .unwrap();
             db.flush().unwrap();
@@ -1456,7 +1468,7 @@ mod tests {
         let reopened = Database::open_runtime(
             OpenSpec::primary(temp.path())
                 .with_subsystem(VectorSubsystem)
-                .with_subsystem(strata_engine::SearchSubsystem),
+                .with_subsystem(crate::SearchSubsystem),
         )
         .unwrap();
         let store = VectorStore::new(reopened);
@@ -1480,7 +1492,7 @@ mod tests {
     fn test_branch_delete_purges_orphan_branch_cache_dir() {
         let temp = tempfile::TempDir::new().unwrap();
         let branch_name = "feature";
-        let branch_id = strata_engine::primitives::branch::resolve_branch_name(branch_name);
+        let branch_id = crate::primitives::branch::resolve_branch_name(branch_name);
         let branch_dir = branch_cache_dir(temp.path(), branch_id);
         let orphan_file = branch_dir.join("default").join("orphan.vec");
         let orphan_graph = branch_dir
@@ -1491,7 +1503,7 @@ mod tests {
         let db = Database::open_runtime(
             OpenSpec::primary(temp.path())
                 .with_subsystem(VectorSubsystem)
-                .with_subsystem(strata_engine::SearchSubsystem),
+                .with_subsystem(crate::SearchSubsystem),
         )
         .unwrap();
 
@@ -1531,7 +1543,7 @@ mod tests {
                 branch_id,
                 "default",
                 "embeddings",
-                crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
             )
             .unwrap();
         primary_store
@@ -1622,7 +1634,7 @@ mod tests {
                 branch_id,
                 "default",
                 "embeddings",
-                crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
             )
             .unwrap();
         primary_store
@@ -1673,7 +1685,7 @@ mod tests {
 
         let outcome = follower.refresh();
         assert!(
-            matches!(outcome, strata_engine::RefreshOutcome::Stuck { .. }),
+            matches!(outcome, crate::RefreshOutcome::Stuck { .. }),
             "vector refresh should block after staging backend updates"
         );
 
@@ -1717,7 +1729,7 @@ mod tests {
                 branch_id,
                 "default",
                 "embeddings",
-                crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
             )
             .unwrap();
         primary_store
@@ -1753,10 +1765,7 @@ mod tests {
         primary.flush().unwrap();
 
         assert!(
-            matches!(
-                follower.refresh(),
-                strata_engine::RefreshOutcome::Stuck { .. }
-            ),
+            matches!(follower.refresh(), crate::RefreshOutcome::Stuck { .. }),
             "refresh should block before making the new vector visible"
         );
 
@@ -1811,7 +1820,7 @@ mod tests {
                 branch_id,
                 "default",
                 "embeddings",
-                crate::VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
+                VectorConfig::new(3, DistanceMetric::Cosine).unwrap(),
             )
             .unwrap();
         primary_store
@@ -1847,10 +1856,7 @@ mod tests {
         primary.flush().unwrap();
 
         assert!(
-            matches!(
-                follower.refresh(),
-                strata_engine::RefreshOutcome::Stuck { .. }
-            ),
+            matches!(follower.refresh(), crate::RefreshOutcome::Stuck { .. }),
             "refresh should block before making the new vector visible"
         );
 

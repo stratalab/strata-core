@@ -227,7 +227,7 @@ impl Database {
     /// Collect all primitive data from storage for checkpointing.
     pub(super) fn collect_checkpoint_data(&self) -> CheckpointData {
         /// Lightweight deserialization shim for vector records in checkpoint.
-        /// The full `VectorRecord` type lives in strata-vector.
+        /// The full `VectorRecord` type lives in the engine-owned vector module.
         #[allow(dead_code)]
         #[derive(serde::Deserialize)]
         struct VectorRecord {

@@ -6,8 +6,8 @@
 //! Session's `dispatch_in_txn` can share one implementation.
 //!
 //! HNSW backend updates cannot participate in OCC (they're in-memory and not
-//! rollback-safe), so write methods return a `StagedVectorOp` that the caller
-//! applies post-commit.
+//! rollback-safe), so write methods queue staged backend work for the
+//! engine-owned commit observer to apply after successful commit.
 
 use std::sync::Arc;
 
@@ -15,9 +15,9 @@ use strata_core::Value;
 use strata_core::{BranchId, EntityRef, Version};
 use strata_storage::{Key, Namespace, TransactionContext};
 
-use crate::error::{VectorError, VectorResult};
-use crate::store::VectorBackendState;
-use crate::types::{InlineMeta, VectorRecord};
+use crate::vector::error::{VectorError, VectorResult};
+use crate::vector::store::VectorBackendState;
+use crate::vector::types::{InlineMeta, VectorRecord};
 use crate::{CollectionId, VectorId};
 
 // ============================================================================
@@ -27,10 +27,10 @@ use crate::{CollectionId, VectorId};
 /// A vector backend operation deferred until after transaction commit.
 ///
 /// HNSW index updates cannot participate in OCC (they're in-memory and
-/// not rollback-safe). These ops are buffered during the transaction and
-/// applied to the backend after successful commit.
+/// not rollback-safe). These ops are buffered by transaction id and applied to
+/// the backend by the engine-owned commit observer after successful commit.
 #[derive(Debug, Clone)]
-pub enum StagedVectorOp {
+pub(crate) enum StagedVectorOp {
     Insert {
         collection_id: CollectionId,
         vector_id: VectorId,
@@ -42,12 +42,11 @@ pub enum StagedVectorOp {
     Delete {
         collection_id: CollectionId,
         vector_id: VectorId,
-        key: String,
     },
 }
 
 /// Apply a staged vector op to the HNSW backend (best-effort, non-fatal).
-pub fn apply_staged_vector_op(state: &VectorBackendState, op: StagedVectorOp) {
+pub(crate) fn apply_staged_vector_op(state: &VectorBackendState, op: StagedVectorOp) {
     match op {
         StagedVectorOp::Insert {
             collection_id,
@@ -72,10 +71,9 @@ pub fn apply_staged_vector_op(state: &VectorBackendState, op: StagedVectorOp) {
         StagedVectorOp::Delete {
             collection_id,
             vector_id,
-            key: _,
         } => {
             if let Some(mut backend) = state.backends.get_mut(&collection_id) {
-                match backend.delete_with_timestamp(vector_id, crate::types::now_micros()) {
+                match backend.delete_with_timestamp(vector_id, crate::vector::types::now_micros()) {
                     Ok(_) => {
                         backend.remove_inline_meta(vector_id);
                     }
@@ -98,14 +96,13 @@ pub fn apply_staged_vector_op(state: &VectorBackendState, op: StagedVectorOp) {
 
 /// Extension trait providing vector operations on `TransactionContext`.
 ///
-/// Write methods return a `StagedVectorOp` for post-commit HNSW backend
-/// updates. The caller is responsible for applying these ops after a
-/// successful commit (and discarding them on rollback).
-pub trait VectorStoreExt {
+/// Write methods queue staged backend work for post-commit HNSW backend
+/// updates. Backend maintenance is owned by the engine commit/abort observers.
+pub(crate) trait VectorStoreExt {
     /// Upsert a vector inside a transaction.
     ///
-    /// The KV write participates in OCC. The HNSW backend update is returned
-    /// as a `StagedVectorOp` for the caller to apply post-commit.
+    /// The KV write participates in OCC. The HNSW backend update is queued for
+    /// the engine-owned commit observer.
     ///
     /// `source_ref` is an optional back-reference to the source entity (e.g.,
     /// a JSON document) used by auto-embed infrastructure.
@@ -120,12 +117,11 @@ pub trait VectorStoreExt {
         metadata: Option<serde_json::Value>,
         source_ref: Option<EntityRef>,
         backend_state: &VectorBackendState,
-    ) -> VectorResult<(Version, StagedVectorOp)>;
+    ) -> VectorResult<Version>;
 
     /// Delete a vector inside a transaction.
     ///
-    /// Returns `(existed, optional staged op)`. If the vector didn't exist,
-    /// returns `(false, None)`.
+    /// Returns `true` if the vector existed.
     fn vector_delete(
         &mut self,
         branch_id: BranchId,
@@ -133,7 +129,7 @@ pub trait VectorStoreExt {
         collection: &str,
         key: &str,
         backend_state: &VectorBackendState,
-    ) -> VectorResult<(bool, Option<StagedVectorOp>)>;
+    ) -> VectorResult<bool>;
 
     /// Get a vector inside a transaction (read-your-writes).
     ///
@@ -163,9 +159,9 @@ impl VectorStoreExt for TransactionContext {
         metadata: Option<serde_json::Value>,
         source_ref: Option<EntityRef>,
         backend_state: &VectorBackendState,
-    ) -> VectorResult<(Version, StagedVectorOp)> {
+    ) -> VectorResult<Version> {
         // Validate key
-        crate::collection::validate_vector_key(key)?;
+        crate::vector::collection::validate_vector_key(key)?;
 
         // Validate embedding (NaN/Infinity)
         if embedding.iter().any(|v| v.is_nan() || v.is_infinite()) {
@@ -243,11 +239,10 @@ impl VectorStoreExt for TransactionContext {
             created_at,
         };
 
-        // Queue for VectorCommitObserver (subsystem-owned maintenance).
-        // Also return the op for backward compatibility with executor Session.
-        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
+        // Queue for VectorCommitObserver.
+        backend_state.queue_pending_op(self.txn_id, staged_op);
 
-        Ok((Version::counter(record_version), staged_op))
+        Ok(Version::counter(record_version))
     }
 
     fn vector_delete(
@@ -257,8 +252,8 @@ impl VectorStoreExt for TransactionContext {
         collection: &str,
         key: &str,
         backend_state: &VectorBackendState,
-    ) -> VectorResult<(bool, Option<StagedVectorOp>)> {
-        crate::collection::validate_vector_key(key)?;
+    ) -> VectorResult<bool> {
+        crate::vector::collection::validate_vector_key(key)?;
 
         let collection_id = CollectionId::new(branch_id, space, collection);
         let ns = Arc::new(Namespace::for_branch_space(branch_id, space));
@@ -270,7 +265,7 @@ impl VectorStoreExt for TransactionContext {
             .map_err(|e| VectorError::Storage(e.to_string()))?
         {
             Some(Value::Bytes(b)) => VectorRecord::from_bytes(&b)?,
-            _ => return Ok((false, None)),
+            _ => return Ok(false),
         };
 
         let vector_id = VectorId(record.vector_id);
@@ -289,14 +284,12 @@ impl VectorStoreExt for TransactionContext {
         let staged_op = StagedVectorOp::Delete {
             collection_id,
             vector_id,
-            key: key.to_string(),
         };
 
-        // Queue for VectorCommitObserver (subsystem-owned maintenance).
-        // Also return the op for backward compatibility with executor Session.
-        backend_state.queue_pending_op(self.txn_id, staged_op.clone());
+        // Queue for VectorCommitObserver.
+        backend_state.queue_pending_op(self.txn_id, staged_op);
 
-        Ok((true, Some(staged_op)))
+        Ok(true)
     }
 
     fn vector_get(

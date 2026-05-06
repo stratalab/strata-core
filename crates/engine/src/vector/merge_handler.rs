@@ -1,19 +1,16 @@
 //! Engine bridge for vector-aware merge.
 //!
-//! The vector crate cannot be a direct dependency of the engine crate
-//! (vector already depends on engine — adding the reverse edge would be a
-//! cycle). The engine has two callback slots for vector merge in its
-//! per-database `MergeHandlerRegistry`: `VectorMergePrecheckFn` and
-//! `VectorMergePostCommitFn`. `VectorSubsystem::initialize()` registers
-//! both via `db.merge_registry().register_vector()`. Engine's
-//! `VectorMergeHandler` then dispatches to them during `merge_branches`.
+//! The engine has two callback slots for vector merge in its per-database
+//! `MergeHandlerRegistry`: `VectorMergePrecheckFn` and
+//! `VectorMergePostCommitFn`. `VectorSubsystem::initialize()` registers both
+//! via `db.merge_registry().register_vector()`. Engine's `VectorMergeHandler`
+//! then dispatches to them during `merge_branches`.
 //!
 //! ## Why this layering
 //!
-//! Mirrors the graph semantic merge function-pointer registration pattern.
-//! Avoids exposing vector-internal types (`CollectionRecord`, `VectorConfig`)
-//! through the engine crate's public API while still letting per-primitive
-//! merge logic live in the primitive's own crate.
+//! Mirrors the graph semantic merge function-pointer registration pattern and
+//! keeps merge ownership inside the vector runtime instead of spreading
+//! collection decode details across branch planning code.
 //!
 //! ## What runs here
 //!
@@ -35,14 +32,14 @@
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use crate::semantics::vector::DistanceMetric;
+use crate::vector::{CollectionRecord, VectorStore};
+use crate::Database;
+use crate::{StrataError, StrataResult};
 use strata_core::id::CommitVersion;
 use strata_core::BranchId;
 use strata_core::Value;
-use strata_engine::Database;
-use strata_engine::{StrataError, StrataResult};
-use strata_storage::{Key, Namespace, Storage};
-
-use crate::{CollectionRecord, VectorStore};
+use strata_storage::{Key, Namespace};
 
 /// Precheck callback: refuse merges that combine collections with
 /// incompatible configurations.
@@ -60,7 +57,7 @@ pub fn vector_precheck_fn(
     source: BranchId,
     target: BranchId,
 ) -> StrataResult<()> {
-    let space_index = strata_engine::SpaceIndex::new(db.clone());
+    let space_index = crate::SpaceIndex::new(db.clone());
     let source_spaces: Vec<String> = space_index.list(source)?;
     let target_spaces: Vec<String> = space_index.list(target)?;
 
@@ -107,8 +104,8 @@ pub fn vector_precheck_fn(
             let source_metric_byte = source_record.config.metric;
             let target_metric_byte = target_record.config.metric;
             if source_metric_byte != target_metric_byte {
-                let source_metric = crate::DistanceMetric::from_byte(source_metric_byte);
-                let target_metric = crate::DistanceMetric::from_byte(target_metric_byte);
+                let source_metric = DistanceMetric::from_byte(source_metric_byte);
+                let target_metric = DistanceMetric::from_byte(target_metric_byte);
                 return Err(StrataError::invalid_input(format!(
                     "merge unsupported: vector collection '{collection_name}' in space '{space}' \
                      has incompatible distance metrics \

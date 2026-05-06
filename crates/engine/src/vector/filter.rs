@@ -5,7 +5,7 @@
 //! Complex filters (ranges, nested paths, arrays) are deferred to future versions.
 
 // Re-export canonical filter types from the engine-owned surface.
-pub use strata_engine::{FilterCondition, FilterOp, JsonScalar, MetadataFilter};
+pub use crate::semantics::vector::{FilterCondition, FilterOp, JsonScalar, MetadataFilter};
 
 #[cfg(test)]
 mod tests {

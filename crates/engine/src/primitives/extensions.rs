@@ -162,8 +162,8 @@ pub trait JsonStoreExt {
     }
 }
 
-// Note: VectorStoreExt is defined in strata-vector/src/ext.rs (not here)
-// because it needs access to vector-specific types (VectorRecord, VectorId, etc.).
+// Note: VectorStoreExt is defined in the engine-owned vector module because it
+// needs access to vector-specific runtime types (VectorRecord, VectorId, etc.).
 
 // Note: BranchIndex does not have an extension trait because run operations
 // are typically done outside of cross-primitive transactions. Run lifecycle

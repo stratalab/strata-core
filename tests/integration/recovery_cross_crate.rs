@@ -1,6 +1,6 @@
-//! Cross-Crate Recovery Tests
+//! Engine Recovery Tests
 //!
-//! Tests that span engine + vector/graph crates and require both subsystems.
+//! Tests that span engine-owned graph and vector subsystems.
 //! These tests were moved from crates/engine/tests/recovery_tests.rs to
 //! eliminate engine's dev-dependency on vector and graph shell crates
 //! per T1-E4 boundary requirements.
@@ -164,7 +164,7 @@ fn test_vector_collections_isolated_across_spaces_after_restart() {
     // Session 2 - reopen and verify isolation after recovery
     // -----------------------------------------------------------------
     {
-        use strata_vector::{CollectionId, VectorBackendState};
+        use strata_engine::{CollectionId, VectorBackendState};
 
         let db = test_db_open(&path);
 

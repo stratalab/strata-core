@@ -33,13 +33,11 @@ pub(crate) fn delete(
 
     let namespace = Arc::new(Namespace::for_branch_space(branch_id, &space));
     convert_result(primitives.db.transaction(branch_id, |txn| {
-        for type_tag in [
-            TypeTag::KV,
-            TypeTag::Event,
-            TypeTag::Json,
-            TypeTag::Vector,
-            TypeTag::Graph,
-        ] {
+        primitives
+            .vector
+            .delete_space_data_in_transaction(txn, branch_id, &space)
+            .map_err(|error| error.into_strata_error(branch_id))?;
+        for type_tag in [TypeTag::KV, TypeTag::Event, TypeTag::Json, TypeTag::Graph] {
             let prefix = Key::new(namespace.clone(), type_tag, vec![]);
             let entries = txn.scan_prefix(&prefix)?;
             for (key, _) in entries {

@@ -7,10 +7,12 @@ use crate::common::*;
 use strata_core::Value;
 use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 use strata_engine::system_space::SYSTEM_SPACE;
+use strata_engine::{
+    DistanceMetric as VectorDistanceMetric, VectorConfig, VectorStore, VectorSubsystem,
+};
 use strata_executor::{
     BranchId, Command, DistanceMetric, Error, Executor, Output, ScanDirection, SearchQuery,
 };
-use strata_vector::{DistanceMetric as VectorDistanceMetric, VectorConfig, VectorStore};
 
 // ============================================================================
 // Database Commands
@@ -719,7 +721,6 @@ fn vector_writes_register_space_and_require_existing_branch() {
 fn vector_query_sees_latest_overwrite_on_disk_backed_executor() {
     use strata_engine::database::OpenSpec;
     use strata_engine::{Database, SearchSubsystem};
-    use strata_vector::VectorSubsystem;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vector_overwrite_executor.strata");
@@ -814,7 +815,6 @@ fn vector_query_sees_latest_overwrite_on_disk_backed_executor() {
 fn vector_query_keeps_overwritten_key_visible_after_batch_upsert() {
     use strata_engine::database::OpenSpec;
     use strata_engine::{Database, SearchSubsystem};
-    use strata_vector::VectorSubsystem;
 
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("vector_overwrite_batch_executor.strata");
@@ -1278,7 +1278,7 @@ fn branch_power_commands_round_trip_and_bundle_portability() {
     let source_db = strata_engine::Database::open_runtime(
         strata_engine::database::OpenSpec::primary(&source_path)
             .with_subsystem(strata_engine::GraphSubsystem)
-            .with_subsystem(strata_vector::VectorSubsystem)
+            .with_subsystem(VectorSubsystem)
             .with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();
@@ -1292,7 +1292,7 @@ fn branch_power_commands_round_trip_and_bundle_portability() {
     let imported_db = strata_engine::Database::open_runtime(
         strata_engine::database::OpenSpec::primary(&imported_path)
             .with_subsystem(strata_engine::GraphSubsystem)
-            .with_subsystem(strata_vector::VectorSubsystem)
+            .with_subsystem(VectorSubsystem)
             .with_subsystem(strata_engine::SearchSubsystem),
     )
     .unwrap();

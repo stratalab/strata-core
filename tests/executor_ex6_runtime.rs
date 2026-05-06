@@ -8,12 +8,12 @@ use tempfile::tempdir;
 use strata_core::id::CommitVersion;
 use strata_core::{BranchId, Value};
 use strata_engine::database::{OpenSpec, OPEN_DATABASES};
+use strata_engine::VectorSubsystem;
 use strata_engine::{Database, SearchSubsystem};
 use strata_executor::{
     AccessMode, Command, Error, IpcServer, OpenOptions, Output, Session, Strata,
 };
 use strata_storage::{Key, Namespace};
-use strata_vector::VectorSubsystem;
 
 static PRODUCT_OPEN_TEST_LOCK: Mutex<()> = Mutex::new(());
 const LOCKED_WITHOUT_SOCKET_MESSAGE: &str = "Database is locked by another process. Run `strata up` to enable shared access, or use --follower for read-only access.";
