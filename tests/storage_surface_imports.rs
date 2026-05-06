@@ -795,7 +795,7 @@ fn is_rust_identifier_continue(ch: char) -> bool {
 }
 
 fn push_spaces(code: &mut String, count: usize) {
-    code.extend(std::iter::repeat(' ').take(count));
+    code.extend(std::iter::repeat_n(' ', count));
 }
 
 fn push_spaces_for_remaining(code: &mut String, bytes: &[u8], index: usize) {
