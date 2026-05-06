@@ -316,10 +316,10 @@ fn default_branch_always_works() {
 
 #[test]
 fn dag_records_via_executor_api() {
+    use strata_engine::graph::types::{Direction, NodeData};
+    use strata_engine::GraphStore;
     use strata_engine::SYSTEM_BRANCH;
     use strata_executor::{MergeStrategy, Session, Strata};
-    use strata_graph::types::{Direction, NodeData};
-    use strata_graph::GraphStore;
 
     // fork_branch / merge_branches need a disk-backed database (storage
     // requires segment files). The executor's `Strata::open` registers the
@@ -374,7 +374,7 @@ fn dag_records_via_executor_api() {
             .control_record(name)
             .unwrap()
             .expect("branch has an active control record");
-        strata_graph::branch_dag::dag_branch_node_id_for_ref(rec.branch)
+        strata_engine::graph::branch_dag::dag_branch_node_id_for_ref(rec.branch)
     };
 
     let read_node = |node_id: &str| -> Option<NodeData> {

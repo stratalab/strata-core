@@ -946,8 +946,8 @@ impl Database {
 
     /// Install a DAG hook for this database.
     ///
-    /// Called by `GraphSubsystem::initialize()` to install the graph crate's
-    /// implementation. Returns an error if a hook is already installed.
+    /// Called by `GraphSubsystem::initialize()` to install the engine graph
+    /// module's implementation. Returns an error if a hook is already installed.
     ///
     /// ## Usage
     ///

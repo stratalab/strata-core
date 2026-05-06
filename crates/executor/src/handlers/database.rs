@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use strata_engine::graph::types::GraphStats;
 use tracing::warn;
 
 use crate::bridge::{
@@ -117,7 +118,7 @@ pub(crate) fn describe(primitives: &Arc<Primitives>, branch: BranchId) -> Result
                 .snapshot_stats(branch_id, default_space, &name)
                 .unwrap_or_else(|error| {
                     warn!("describe: failed to read graph stats for '{name}': {error}");
-                    strata_graph::types::GraphStats {
+                    GraphStats {
                         node_count: 0,
                         edge_count: 0,
                     }

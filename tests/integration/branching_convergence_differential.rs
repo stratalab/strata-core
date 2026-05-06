@@ -23,7 +23,8 @@
 //!   branch read path, while the actual blocked-refresh / reopen proofs
 //!   remain in the crate-local hook-failure suites in
 //!   `crates/engine/tests/follower_tests.rs`,
-//!   `crates/vector/src/recovery.rs`, and `crates/graph/src/store.rs`.
+//!   `crates/vector/src/recovery.rs`, and
+//!   `crates/engine/src/graph/store.rs`.
 //! - Search / vector on-disk caches: `ReopenHealed` — valid
 //!   caches fast-path reload and reconcile; invalid / missing caches
 //!   trigger rebuild from KV truth.
@@ -41,12 +42,12 @@ use crate::common::*;
 use std::sync::Arc;
 use strata_core::BranchId;
 use strata_core::Value;
+use strata_engine::graph::branch_status_cache::BranchStatusCache;
+use strata_engine::graph::types::NodeData;
 use strata_engine::StrataError;
 use strata_engine::{
     BranchLifecycleStatus, DagBranchStatus, SearchSubsystem, Searchable, Subsystem,
 };
-use strata_graph::branch_status_cache::BranchStatusCache;
-use strata_graph::types::NodeData;
 
 fn resolve(name: &str) -> BranchId {
     BranchId::from_user_name(name)
@@ -576,7 +577,7 @@ fn json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost() {
 // §4 — Follower publish-clamp branch-layer smoke check.
 //
 // Crate-local hook-failure tests cover the actual blocked-refresh and reopen
-// semantics (see `follower_tests.rs`, `crates/graph/src/store.rs`,
+// semantics (see `follower_tests.rs`, `crates/engine/src/graph/store.rs`,
 // `crates/vector/src/recovery.rs`). This integration section only locks the
 // branch-layer consequence that the canonical query guard is reachable from
 // the read path.

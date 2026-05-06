@@ -115,7 +115,6 @@ The internal incoming graph today is:
 
 - `strata-engine`
 - `strata-executor`
-- `strata-graph`
 - `strata-search`
 - `strata-vector`
 
@@ -125,6 +124,9 @@ This confirms that storage is already the effective substrate node of the
 workspace. The direct upper-crate storage edges are current transitional
 workspace shape, not permission for upper layers to drive database recovery,
 checkpoint, open, retention, or product policy below engine.
+
+`EG4` removed `strata-graph` as a separate storage consumer by moving the graph
+implementation into `strata-engine`.
 
 ## What Storage Already Owns
 

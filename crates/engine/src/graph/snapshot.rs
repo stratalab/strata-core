@@ -7,10 +7,10 @@ mod tests {
 
     use strata_core::BranchId;
 
-    use crate::types::*;
-    use crate::GraphStore;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
+    use crate::database::OpenSpec;
+    use crate::graph::types::*;
+    use crate::graph::GraphStore;
+    use crate::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

@@ -38,7 +38,7 @@ use strata_storage::{Key, Namespace};
 
 // Primitive facades
 use strata_engine::primitives::{EventLog, JsonStore, KVStore};
-use strata_graph::GraphStore;
+use strata_engine::GraphStore;
 use strata_vector::VectorStore;
 
 // ============================================================================
@@ -1207,7 +1207,7 @@ mod tests {
         node_id: &str,
         text: &str,
     ) -> u64 {
-        use strata_graph::types::NodeData;
+        use strata_engine::graph::types::NodeData;
         let graph_store = GraphStore::new(db.clone());
         let data = NodeData {
             entity_ref: None,
@@ -1218,10 +1218,10 @@ mod tests {
             .add_node(*branch_id, space, graph, node_id, data)
             .expect("add_node");
         db.flush().expect("flush");
-        // Use the graph crate's own key helper rather than hardcoding the
+        // Use the engine graph key helper rather than hardcoding the
         // "{graph}/n/{node_id}" format — protects against future format
-        // changes in the graph crate.
-        let user_key = strata_graph::keys::node_key(graph, node_id);
+        // changes in the graph module.
+        let user_key = strata_engine::graph::keys::node_key(graph, node_id);
         let storage_key = Key::new_graph(
             Arc::new(Namespace::new(*branch_id, space.to_string())),
             user_key.as_bytes(),

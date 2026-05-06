@@ -14,10 +14,10 @@
 //! call. It is **not** consulted for `merge_base`: that authority lives in
 //! `BranchControlStore::find_merge_base`.
 //!
-//! The graph crate implements the actual DAG storage, but the engine cannot
-//! depend on the graph crate (cycle: graph depends on engine). This trait
-//! lets the graph crate install its implementation during subsystem
-//! `initialize()`, and the engine calls through the trait from `BranchService`.
+//! The engine-owned graph module implements the actual DAG storage. This trait
+//! lets `GraphSubsystem` install that implementation during subsystem
+//! `initialize()`, and the rest of the engine calls through the trait from
+//! `BranchService`.
 //!
 //! ## Failure Model
 //!

@@ -1,10 +1,10 @@
 //! Engine-owned product open policy, outcome, and lock fallback classification.
 //!
-//! Until graph/vector/search are all engine-owned, product callers provide the
-//! current subsystem instances as a narrow transitional bridge. Engine owns
-//! product default-branch policy, built-in recipe seeding, open outcome, and
-//! IPC fallback classification; executor remains responsible for IPC transport
-//! and session construction.
+//! Product callers may still provide temporary external runtime subsystems while
+//! consolidation is in progress. Engine owns graph/search composition, product
+//! default-branch policy, built-in recipe seeding, open outcome, and IPC
+//! fallback classification; executor remains responsible for IPC transport and
+//! session construction.
 
 use std::error::Error as StdError;
 use std::fmt;
@@ -136,17 +136,22 @@ impl StdError for ProductOpenError {
 
 /// Open a disk-backed product database and classify primary lock failures.
 ///
-/// `subsystems` is the temporary bridge used until engine can build the full
-/// product runtime internally.
+/// `external_subsystems` is the temporary vector-only bridge used until `EG5`
+/// absorbs vector into engine.
 pub fn open_product_database<P: AsRef<Path>>(
     path: P,
     options: OpenOptions,
-    subsystems: Vec<Box<dyn Subsystem>>,
+    external_subsystems: Vec<Box<dyn Subsystem>>,
 ) -> ProductOpenResult<ProductOpenOutcome> {
     let data_dir = path.as_ref().to_path_buf();
 
     if options.follower {
-        let spec = product_follower_spec(&data_dir, subsystems);
+        let spec = product_follower_spec(&data_dir, external_subsystems).map_err(|source| {
+            ProductOpenError::Open {
+                data_dir: data_dir.clone(),
+                source,
+            }
+        })?;
         let db = Database::open_runtime(spec).map_err(|source| ProductOpenError::Open {
             data_dir: data_dir.clone(),
             source,
@@ -158,7 +163,14 @@ pub fn open_product_database<P: AsRef<Path>>(
     }
 
     let access_mode = options.access_mode;
-    let spec = product_primary_spec(&data_dir, subsystems);
+    let default_branch = product_default_branch(&options);
+    let spec =
+        product_primary_spec(&data_dir, external_subsystems, default_branch).map_err(|source| {
+            ProductOpenError::Open {
+                data_dir: data_dir.clone(),
+                source,
+            }
+        })?;
     match Database::open_runtime(spec) {
         Ok(db) => {
             seed_builtin_recipes_warning_only(&db);
@@ -185,12 +197,13 @@ pub fn open_product_database<P: AsRef<Path>>(
 
 /// Open an ephemeral product cache database.
 ///
-/// `subsystems` is the temporary bridge used until engine can build the full
-/// product runtime internally.
+/// `external_subsystems` is the temporary vector-only bridge used until `EG5`
+/// absorbs vector into engine.
 pub fn open_product_cache(
-    subsystems: Vec<Box<dyn Subsystem>>,
+    external_subsystems: Vec<Box<dyn Subsystem>>,
 ) -> ProductOpenResult<ProductOpenOutcome> {
-    let spec = product_cache_spec(subsystems);
+    let spec = product_cache_spec(external_subsystems)
+        .map_err(|source| ProductOpenError::CacheOpen { source })?;
     let db =
         Database::open_runtime(spec).map_err(|source| ProductOpenError::CacheOpen { source })?;
     seed_builtin_recipes_warning_only(&db);
@@ -200,20 +213,65 @@ pub fn open_product_cache(
     })
 }
 
-fn product_primary_spec(path: &Path, subsystems: Vec<Box<dyn Subsystem>>) -> OpenSpec {
-    OpenSpec::primary(path)
-        .with_subsystems(subsystems)
-        .with_default_branch(DEFAULT_PRODUCT_BRANCH)
+fn product_primary_spec(
+    path: &Path,
+    subsystems: Vec<Box<dyn Subsystem>>,
+    default_branch: &str,
+) -> crate::StrataResult<OpenSpec> {
+    Ok(OpenSpec::primary(path)
+        .with_subsystems(product_runtime_subsystems(subsystems)?)
+        .with_default_branch(default_branch))
 }
 
-fn product_follower_spec(path: &Path, subsystems: Vec<Box<dyn Subsystem>>) -> OpenSpec {
-    OpenSpec::follower(path).with_subsystems(subsystems)
+fn product_follower_spec(
+    path: &Path,
+    subsystems: Vec<Box<dyn Subsystem>>,
+) -> crate::StrataResult<OpenSpec> {
+    Ok(OpenSpec::follower(path).with_subsystems(product_runtime_subsystems(subsystems)?))
 }
 
-fn product_cache_spec(subsystems: Vec<Box<dyn Subsystem>>) -> OpenSpec {
-    OpenSpec::cache()
-        .with_subsystems(subsystems)
-        .with_default_branch(DEFAULT_PRODUCT_BRANCH)
+fn product_cache_spec(subsystems: Vec<Box<dyn Subsystem>>) -> crate::StrataResult<OpenSpec> {
+    Ok(OpenSpec::cache()
+        .with_subsystems(product_runtime_subsystems(subsystems)?)
+        .with_default_branch(DEFAULT_PRODUCT_BRANCH))
+}
+
+fn product_default_branch(options: &OpenOptions) -> &str {
+    options
+        .default_branch
+        .as_deref()
+        .unwrap_or(DEFAULT_PRODUCT_BRANCH)
+}
+
+fn product_runtime_subsystems(
+    external_subsystems: Vec<Box<dyn Subsystem>>,
+) -> crate::StrataResult<Vec<Box<dyn Subsystem>>> {
+    validate_external_product_subsystems(&external_subsystems)?;
+    let mut subsystems: Vec<Box<dyn Subsystem>> = Vec::with_capacity(external_subsystems.len() + 2);
+    subsystems.push(Box::new(crate::GraphSubsystem));
+    subsystems.extend(external_subsystems);
+    subsystems.push(Box::new(crate::SearchSubsystem));
+    Ok(subsystems)
+}
+
+fn validate_external_product_subsystems(
+    external_subsystems: &[Box<dyn Subsystem>],
+) -> crate::StrataResult<()> {
+    if external_subsystems.len() > 1 {
+        return Err(StrataError::invalid_input(
+            "product open external subsystem bridge accepts at most one temporary vector subsystem",
+        ));
+    }
+
+    for subsystem in external_subsystems {
+        if subsystem.name() != "vector" {
+            return Err(StrataError::invalid_input(format!(
+                "product open external subsystem bridge only accepts the temporary vector subsystem; got '{}'",
+                subsystem.name()
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn seed_builtin_recipes_warning_only(db: &Arc<Database>) {
@@ -222,7 +280,6 @@ fn seed_builtin_recipes_warning_only(db: &Arc<Database>) {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 fn is_primary_lock_in_use(error: &StrataError) -> bool {
     error
         .to_string()
@@ -232,12 +289,15 @@ fn is_primary_lock_in_use(error: &StrataError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::SearchSubsystem;
     use strata_core::BranchId;
     use tempfile::tempdir;
 
-    fn search_subsystems() -> Vec<Box<dyn Subsystem>> {
-        vec![Box::new(SearchSubsystem)]
+    fn no_external_subsystems() -> Vec<Box<dyn Subsystem>> {
+        Vec::new()
+    }
+
+    fn vector_bridge_subsystems() -> Vec<Box<dyn Subsystem>> {
+        vec![Box::new(NamedSubsystem("vector"))]
     }
 
     struct NamedSubsystem(&'static str);
@@ -297,11 +357,11 @@ mod tests {
         );
     }
 
-    struct FailingRecoverSubsystem;
+    struct FailingVectorBridgeSubsystem;
 
-    impl Subsystem for FailingRecoverSubsystem {
+    impl Subsystem for FailingVectorBridgeSubsystem {
         fn name(&self) -> &'static str {
-            "failing-recover"
+            "vector"
         }
 
         fn recover(&self, _db: &Arc<Database>) -> crate::StrataResult<()> {
@@ -318,7 +378,7 @@ mod tests {
         let outcome = open_product_database(
             dir.path(),
             OpenOptions::default().access_mode(AccessMode::ReadOnly),
-            search_subsystems(),
+            no_external_subsystems(),
         )
         .expect("product database should open");
 
@@ -326,7 +386,7 @@ mod tests {
             ProductOpenOutcome::Local { db, access_mode } => {
                 assert_eq!(access_mode, AccessMode::ReadOnly);
                 assert!(!db.is_follower());
-                assert_eq!(db.installed_subsystem_names(), vec!["search"]);
+                assert_eq!(db.installed_subsystem_names(), vec!["graph", "search"]);
                 assert_default_branch_bootstrapped(&db);
                 assert_builtin_recipes_seeded(&db);
                 db.shutdown().expect("database should shut down");
@@ -340,7 +400,7 @@ mod tests {
         let dir = tempdir().expect("tempdir should succeed");
 
         let primary =
-            open_product_database(dir.path(), OpenOptions::default(), search_subsystems())
+            open_product_database(dir.path(), OpenOptions::default(), no_external_subsystems())
                 .expect("primary product database should open");
         let primary_db = match primary {
             ProductOpenOutcome::Local { db, .. } => db,
@@ -352,7 +412,7 @@ mod tests {
             OpenOptions::default()
                 .access_mode(AccessMode::ReadWrite)
                 .follower(true),
-            search_subsystems(),
+            no_external_subsystems(),
         )
         .expect("follower product database should open");
 
@@ -360,7 +420,7 @@ mod tests {
             ProductOpenOutcome::Local { db, access_mode } => {
                 assert_eq!(access_mode, AccessMode::ReadOnly);
                 assert!(db.is_follower());
-                assert_eq!(db.installed_subsystem_names(), vec!["search"]);
+                assert_eq!(db.installed_subsystem_names(), vec!["graph", "search"]);
                 db.shutdown().expect("follower should shut down");
             }
             other => panic!("expected local follower outcome, got {other:?}"),
@@ -372,15 +432,19 @@ mod tests {
     #[test]
     fn follower_product_open_does_not_create_default_branch_state() {
         let dir = tempdir().expect("tempdir should succeed");
-        let primary =
-            Database::open_runtime(OpenSpec::primary(dir.path()).with_subsystem(SearchSubsystem))
-                .expect("setup primary should open without product default branch");
+        let primary = Database::open_runtime(
+            OpenSpec::primary(dir.path()).with_subsystems(
+                product_runtime_subsystems(no_external_subsystems())
+                    .expect("product runtime subsystem composition should succeed"),
+            ),
+        )
+        .expect("setup primary should open without product default branch");
         assert!(primary.default_branch_name().is_none());
 
         let follower = open_product_database(
             dir.path(),
             OpenOptions::default().follower(true),
-            search_subsystems(),
+            no_external_subsystems(),
         )
         .expect("follower product database should open");
 
@@ -399,15 +463,41 @@ mod tests {
     }
 
     #[test]
+    fn disk_product_open_uses_requested_default_branch() {
+        let dir = tempdir().expect("tempdir should succeed");
+
+        let outcome = open_product_database(
+            dir.path(),
+            OpenOptions::default().default_branch("main"),
+            no_external_subsystems(),
+        )
+        .expect("product database should open");
+
+        match outcome {
+            ProductOpenOutcome::Local { db, .. } => {
+                assert_eq!(db.default_branch_name().as_deref(), Some("main"));
+                assert!(
+                    db.branches()
+                        .exists("main")
+                        .expect("default branch existence check should succeed"),
+                    "product open should create the requested default branch"
+                );
+                db.shutdown().expect("database should shut down");
+            }
+            other => panic!("expected local product open outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn cache_product_open_returns_local_read_write_database() {
-        let outcome =
-            open_product_cache(search_subsystems()).expect("cache product database should open");
+        let outcome = open_product_cache(no_external_subsystems())
+            .expect("cache product database should open");
 
         match outcome {
             ProductOpenOutcome::Local { db, access_mode } => {
                 assert_eq!(access_mode, AccessMode::ReadWrite);
                 assert!(!db.is_follower());
-                assert_eq!(db.installed_subsystem_names(), vec!["search"]);
+                assert_eq!(db.installed_subsystem_names(), vec!["graph", "search"]);
                 assert_default_branch_bootstrapped(&db);
                 assert_builtin_recipes_seeded(&db);
                 db.shutdown().expect("cache should shut down");
@@ -417,19 +507,110 @@ mod tests {
     }
 
     #[test]
-    fn product_open_preserves_subsystem_bridge_order() {
-        let outcome = open_product_cache(vec![
-            Box::new(NamedSubsystem("first")),
-            Box::new(NamedSubsystem("second")),
-        ])
-        .expect("cache product database should open");
+    fn product_open_wraps_vector_bridge_in_engine_owned_runtime_order() {
+        let outcome = open_product_cache(vector_bridge_subsystems())
+            .expect("cache product database should open");
 
         match outcome {
             ProductOpenOutcome::Local { db, .. } => {
-                assert_eq!(db.installed_subsystem_names(), vec!["first", "second"]);
+                assert_eq!(
+                    db.installed_subsystem_names(),
+                    vec!["graph", "vector", "search"]
+                );
                 db.shutdown().expect("database should shut down");
             }
             other => panic!("expected local cache outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_open_installs_engine_owned_graph_runtime_hooks() {
+        let outcome = open_product_cache(no_external_subsystems())
+            .expect("cache product database should open");
+
+        match outcome {
+            ProductOpenOutcome::Local { db, .. } => {
+                assert!(
+                    db.dag_hook().is_installed(),
+                    "product open should install graph DAG hook"
+                );
+                assert!(
+                    db.merge_registry().has_graph(),
+                    "product open should register graph merge planning"
+                );
+                db.shutdown().expect("database should shut down");
+            }
+            other => panic!("expected local cache outcome, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_open_rejects_non_vector_subsystems_in_external_bridge() {
+        let err = open_product_cache(vec![Box::new(NamedSubsystem("graph"))])
+            .expect_err("external graph subsystem should be rejected");
+        match &err {
+            ProductOpenError::CacheOpen { source } => {
+                assert!(
+                    source
+                        .to_string()
+                        .contains("only accepts the temporary vector subsystem; got 'graph'"),
+                    "unexpected source: {source}"
+                );
+            }
+            other => panic!("expected cache-open validation error, got {other:?}"),
+        }
+
+        let dir = tempdir().expect("tempdir should succeed");
+        let err = open_product_database(
+            dir.path(),
+            OpenOptions::default(),
+            vec![Box::new(NamedSubsystem("search"))],
+        )
+        .expect_err("external search subsystem should be rejected");
+        match &err {
+            ProductOpenError::Open { source, .. } => {
+                assert!(
+                    source
+                        .to_string()
+                        .contains("only accepts the temporary vector subsystem; got 'search'"),
+                    "unexpected source: {source}"
+                );
+            }
+            other => panic!("expected disk-open validation error, got {other:?}"),
+        }
+
+        let err = open_product_cache(vec![Box::new(NamedSubsystem("metrics"))])
+            .expect_err("arbitrary external subsystem should be rejected");
+        match &err {
+            ProductOpenError::CacheOpen { source } => {
+                assert!(
+                    source
+                        .to_string()
+                        .contains("only accepts the temporary vector subsystem; got 'metrics'"),
+                    "unexpected source: {source}"
+                );
+            }
+            other => panic!("expected cache-open validation error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn product_open_rejects_duplicate_vector_bridge_subsystems() {
+        let err = open_product_cache(vec![
+            Box::new(NamedSubsystem("vector")),
+            Box::new(NamedSubsystem("vector")),
+        ])
+        .expect_err("duplicate vector bridge subsystems should be rejected");
+        match &err {
+            ProductOpenError::CacheOpen { source } => {
+                assert!(
+                    source
+                        .to_string()
+                        .contains("accepts at most one temporary vector subsystem"),
+                    "unexpected source: {source}"
+                );
+            }
+            other => panic!("expected cache-open validation error, got {other:?}"),
         }
     }
 
@@ -444,7 +625,7 @@ mod tests {
         );
 
         let outcome =
-            open_product_database(dir.path(), OpenOptions::default(), search_subsystems())
+            open_product_database(dir.path(), OpenOptions::default(), no_external_subsystems())
                 .expect("recipe seed failure should not fail product open");
 
         match outcome {
@@ -462,7 +643,7 @@ mod tests {
 
     #[test]
     fn disk_product_open_wraps_ordinary_open_error() {
-        let err = open_product_database("", OpenOptions::default(), search_subsystems())
+        let err = open_product_database("", OpenOptions::default(), no_external_subsystems())
             .expect_err("empty primary path should fail as an ordinary open error");
 
         match &err {
@@ -483,7 +664,7 @@ mod tests {
 
     #[test]
     fn cache_product_open_wraps_cache_open_error() {
-        let err = open_product_cache(vec![Box::new(FailingRecoverSubsystem)])
+        let err = open_product_cache(vec![Box::new(FailingVectorBridgeSubsystem)])
             .expect_err("failing cache subsystem recovery should be wrapped");
 
         match &err {
@@ -506,8 +687,9 @@ mod tests {
     fn locked_primary_without_socket_returns_typed_error() {
         let dir = tempdir().expect("tempdir should succeed");
         let _lock_file = hold_database_lock(dir.path());
-        let err = open_product_database(dir.path(), OpenOptions::default(), search_subsystems())
-            .expect_err("locked primary without socket should fail");
+        let err =
+            open_product_database(dir.path(), OpenOptions::default(), no_external_subsystems())
+                .expect_err("locked primary without socket should fail");
 
         let err_message = err.to_string();
         match &err {
@@ -534,7 +716,7 @@ mod tests {
         let outcome = open_product_database(
             dir.path(),
             OpenOptions::default().access_mode(AccessMode::ReadOnly),
-            search_subsystems(),
+            no_external_subsystems(),
         )
         .expect("locked primary with socket should classify as IPC fallback");
 

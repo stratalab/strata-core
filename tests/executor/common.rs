@@ -9,7 +9,7 @@ use strata_vector::VectorSubsystem;
 fn test_cache_db() -> Arc<Database> {
     Database::open_runtime(
         OpenSpec::cache()
-            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_engine::GraphSubsystem)
             .with_subsystem(VectorSubsystem)
             .with_subsystem(SearchSubsystem),
     )

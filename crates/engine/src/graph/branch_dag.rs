@@ -50,7 +50,7 @@
 //! base queries go through `BranchControlStore` instead** — readers
 //! must never use this DAG to compute a merge base.
 
-pub use strata_engine::{
+pub use crate::{
     is_system_branch, CherryPickRecord, DagBranchInfo, DagBranchStatus, DagEventId, ForkRecord,
     MergeRecord, RevertRecord, BRANCH_DAG_GRAPH, SYSTEM_BRANCH,
 };
@@ -58,17 +58,17 @@ pub use strata_engine::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::BranchRef;
+use crate::{StrataError, StrataResult};
 use strata_core::contract::Timestamp;
 use strata_core::BranchId;
-use strata_engine::BranchRef;
-use strata_engine::{StrataError, StrataResult};
 use tracing::warn;
 
-use crate::keys::{validate_node_id, GRAPH_SPACE};
-use crate::types::{Direction, EdgeData, NodeData};
-use crate::GraphStore;
-use strata_engine::primitives::branch::resolve_branch_name;
-use strata_engine::{CherryPickInfo, Database, MergeInfo, MergeStrategy, RevertInfo};
+use crate::graph::keys::{validate_node_id, GRAPH_SPACE};
+use crate::graph::types::{Direction, EdgeData, NodeData};
+use crate::graph::GraphStore;
+use crate::primitives::branch::resolve_branch_name;
+use crate::{CherryPickInfo, Database, MergeInfo, MergeStrategy, RevertInfo};
 
 const BRANCH_NODE_ID_PREFIX: &str = "_branch_";
 
@@ -189,7 +189,7 @@ pub fn load_status_cache_readonly(db: &Arc<Database>) {
     // generation, not raw lexical node-id order. Otherwise `_...__gen__10`
     // sorts before `_...__gen__2`, and an older deleted lifecycle can
     // overwrite the newer active lifecycle on reopen.
-    if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
+    if let Ok(cache) = db.extension::<crate::graph::branch_status_cache::BranchStatusCache>() {
         if let Ok(nodes) = graph_store.list_nodes(branch_id, GRAPH_SPACE, BRANCH_DAG_GRAPH) {
             let mut hydrated: HashMap<String, (Option<u64>, DagBranchStatus)> = HashMap::new();
             for node_id in nodes {
@@ -1210,28 +1210,22 @@ fn status_from_node_props(node: &NodeData) -> DagBranchStatus {
 /// - Installing the per-database BranchDagHook
 pub struct GraphSubsystem;
 
-impl strata_engine::Subsystem for GraphSubsystem {
+impl crate::Subsystem for GraphSubsystem {
     fn name(&self) -> &'static str {
         "graph"
     }
 
-    fn recover(
-        &self,
-        db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_engine::StrataResult<()> {
+    fn recover(&self, db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
         // Read-only phase: hydrate branch status cache from existing DAG state.
         load_status_cache_readonly(db);
         Ok(())
     }
 
-    fn initialize(
-        &self,
-        db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_engine::StrataResult<()> {
+    fn initialize(&self, db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
         // Register graph semantic merge handler with the per-database registry.
         // This replaces the old global `register_graph_merge_plan()` pattern.
         db.merge_registry()
-            .register_graph(crate::merge_handler::graph_plan_fn);
+            .register_graph(crate::graph::merge_handler::graph_plan_fn);
 
         // Install the per-database BranchDagHook. This replaces the old global
         // `register_branch_dag_hooks()` pattern. The hook is fail-fast: errors
@@ -1252,17 +1246,14 @@ impl strata_engine::Subsystem for GraphSubsystem {
         // graph index maintenance. T2-E5/E3 move graph index maintenance into
         // subsystem-owned lifecycle wiring.
         let state = db
-            .extension::<crate::GraphBackendState>()
+            .extension::<crate::graph::GraphBackendState>()
             .map_err(|e| StrataError::internal(format!("failed to get GraphBackendState: {e}")))?;
-        crate::store::ensure_runtime_wiring(db, &state);
+        crate::graph::store::ensure_runtime_wiring(db, &state);
 
         Ok(())
     }
 
-    fn bootstrap(
-        &self,
-        db: &std::sync::Arc<strata_engine::Database>,
-    ) -> strata_engine::StrataResult<()> {
+    fn bootstrap(&self, db: &std::sync::Arc<crate::Database>) -> crate::StrataResult<()> {
         bootstrap_system_branch(db)
     }
 
@@ -1295,11 +1286,11 @@ impl strata_engine::Subsystem for GraphSubsystem {
     /// this hook after partial cleanup is safe.
     fn cleanup_deleted_branch(
         &self,
-        db: &std::sync::Arc<strata_engine::Database>,
+        db: &std::sync::Arc<crate::Database>,
         _branch_id: &strata_core::BranchId,
         branch_name: &str,
-    ) -> strata_engine::StrataResult<()> {
-        if let Ok(cache) = db.extension::<crate::branch_status_cache::BranchStatusCache>() {
+    ) -> crate::StrataResult<()> {
+        if let Ok(cache) = db.extension::<crate::graph::branch_status_cache::BranchStatusCache>() {
             cache.remove(branch_name);
         }
         Ok(())
@@ -1310,11 +1301,9 @@ impl strata_engine::Subsystem for GraphSubsystem {
 // Audit Branch Operation Observer
 // =============================================================================
 
+use crate::database::observers::{BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError};
+use crate::primitives::event::EventLog;
 use std::sync::Weak;
-use strata_engine::database::observers::{
-    BranchOpEvent, BranchOpKind, BranchOpObserver, ObserverError,
-};
-use strata_engine::primitives::event::EventLog;
 
 /// Observer that emits audit events to the `_system_` branch event log.
 ///
@@ -1324,7 +1313,7 @@ use strata_engine::primitives::event::EventLog;
 ///
 /// Best-effort: failures are logged but never propagate to the caller.
 struct AuditBranchOpObserver {
-    db: Weak<strata_engine::Database>,
+    db: Weak<crate::Database>,
 }
 
 impl BranchOpObserver for AuditBranchOpObserver {
@@ -1350,8 +1339,6 @@ impl BranchOpObserver for AuditBranchOpObserver {
             BranchOpKind::CherryPick => "branch.cherry_pick",
             BranchOpKind::Tag => "branch.tag",
             BranchOpKind::Untag => "branch.untag",
-            // BranchOpKind is #[non_exhaustive] - handle future variants
-            _ => "branch.unknown",
         };
 
         let mut payload = serde_json::Map::new();
@@ -1488,11 +1475,11 @@ impl BranchOpObserver for AuditBranchOpObserver {
 // Per-Database BranchDagHook Implementation
 // =============================================================================
 
-use strata_core::id::CommitVersion;
-use strata_engine::database::dag_hook::{
+use crate::database::dag_hook::{
     AncestryEntry, BranchDagError, BranchDagErrorKind, BranchDagHook, DagEvent, DagEventKind,
     MergeBaseResult,
 };
+use strata_core::id::CommitVersion;
 
 fn node_props<'a>(
     node: &'a NodeData,
@@ -1605,7 +1592,7 @@ fn single_neighbor(
     graph_store: &GraphStore,
     system_id: BranchId,
     node_id: &str,
-    direction: crate::types::Direction,
+    direction: crate::graph::types::Direction,
     edge_type: &str,
 ) -> Result<String, BranchDagError> {
     let neighbors = graph_store
@@ -1633,7 +1620,7 @@ fn branch_name_from_neighbor(
     graph_store: &GraphStore,
     system_id: BranchId,
     node_id: &str,
-    direction: crate::types::Direction,
+    direction: crate::graph::types::Direction,
     edge_type: &str,
 ) -> Result<String, BranchDagError> {
     let neighbor_id = single_neighbor(graph_store, system_id, node_id, direction, edge_type)?;
@@ -1672,7 +1659,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Incoming,
+                    crate::graph::types::Direction::Incoming,
                     "parent",
                 )?);
             let child =
@@ -1680,7 +1667,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Outgoing,
+                    crate::graph::types::Direction::Outgoing,
                     "child",
                 )?);
             let child_ref = deserialize_prop::<BranchRef>(props, "branch_ref")?
@@ -1703,7 +1690,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Incoming,
+                    crate::graph::types::Direction::Incoming,
                     "source",
                 )?);
             let target =
@@ -1711,7 +1698,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Outgoing,
+                    crate::graph::types::Direction::Outgoing,
                     "target",
                 )?);
             let info = deserialize_prop::<MergeInfo>(props, "merge_info")?.unwrap_or(MergeInfo {
@@ -1805,7 +1792,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Incoming,
+                    crate::graph::types::Direction::Incoming,
                     "cherry_pick_source",
                 )?);
             let target =
@@ -1813,7 +1800,7 @@ fn event_node_to_dag_event(
                     graph_store,
                     system_id,
                     node_id,
-                    crate::types::Direction::Outgoing,
+                    crate::graph::types::Direction::Outgoing,
                     "cherry_pick_target",
                 )?);
             let info = deserialize_prop::<CherryPickInfo>(props, "cherry_pick_info")?.unwrap_or(
@@ -1929,7 +1916,7 @@ impl BranchDagHook for GraphBranchDagHook {
     }
 
     fn record_event(&self, event: &DagEvent) -> Result<(), BranchDagError> {
-        use strata_engine::is_system_branch;
+        use crate::is_system_branch;
 
         let db = self.upgrade_db()?;
 
@@ -2082,14 +2069,6 @@ impl BranchDagHook for GraphBranchDagHook {
                 }
                 .map_err(Self::map_write_error)?;
             }
-            // DagEventKind is non-exhaustive; handle future variants gracefully.
-            _ => {
-                tracing::debug!(
-                    target: "strata::branch_dag",
-                    kind = ?event.kind,
-                    "unknown DAG event kind, skipping"
-                );
-            }
         }
 
         Ok(())
@@ -2146,8 +2125,8 @@ impl BranchDagHook for GraphBranchDagHook {
 
         let mut event_ids = std::collections::BTreeSet::new();
         for direction in [
-            crate::types::Direction::Incoming,
-            crate::types::Direction::Outgoing,
+            crate::graph::types::Direction::Incoming,
+            crate::graph::types::Direction::Outgoing,
         ] {
             let neighbors = graph_store
                 .neighbors(
@@ -2228,8 +2207,8 @@ impl BranchDagHook for GraphBranchDagHook {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_engine::database::{BranchDagHook, DagEventKind, OpenSpec};
-    use strata_engine::SearchSubsystem;
+    use crate::database::{BranchDagHook, DagEventKind, OpenSpec};
+    use crate::SearchSubsystem;
 
     fn setup() -> Arc<Database> {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

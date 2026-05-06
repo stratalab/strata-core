@@ -12,15 +12,15 @@
 
 use std::collections::HashMap;
 
+use crate::{StrataError, StrataResult};
 use strata_core::BranchId;
 use strata_core::Value;
-use strata_engine::{StrataError, StrataResult};
 use strata_storage::{Key, TransactionContext};
 
-use crate::keys;
-use crate::packed;
-use crate::store::{GraphBackendState, StagedGraphOp};
-use crate::types::*;
+use crate::graph::keys;
+use crate::graph::packed;
+use crate::graph::store::{GraphBackendState, StagedGraphOp};
+use crate::graph::types::*;
 
 // ============================================================================
 // Helpers (module-level, not associated with a struct)
@@ -200,7 +200,7 @@ impl GraphStoreExt for TransactionContext {
         meta: GraphMeta,
     ) -> StrataResult<()> {
         keys::validate_graph_name(graph)?;
-        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
+        crate::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let meta_json =
             serde_json::to_string(&meta).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::meta_key(graph);
@@ -294,7 +294,7 @@ impl GraphStoreExt for TransactionContext {
     ) -> StrataResult<bool> {
         keys::validate_graph_name(graph)?;
         keys::validate_node_id(node_id)?;
-        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
+        crate::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let node_json =
             serde_json::to_string(data).map_err(|e| StrataError::serialization(e.to_string()))?;
         let user_key = keys::node_key(graph, node_id);
@@ -529,7 +529,7 @@ impl GraphStoreExt for TransactionContext {
         keys::validate_node_id(src)?;
         keys::validate_node_id(dst)?;
         keys::validate_edge_type(edge_type)?;
-        strata_engine::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
+        crate::primitives::space::ensure_space_registered_in_txn(self, &branch_id, space)?;
         let src_node_uk = keys::node_key(graph, src);
         let dst_node_uk = keys::node_key(graph, dst);
         let src_node_key = keys::storage_key(branch_id, space, &src_node_uk);

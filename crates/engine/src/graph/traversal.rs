@@ -2,8 +2,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
+use crate::StrataResult;
 use strata_core::BranchId;
-use strata_engine::StrataResult;
 
 use super::adjacency::AdjacencyIndex;
 use super::types::*;
@@ -297,9 +297,9 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::OpenSpec;
+    use crate::{Database, SearchSubsystem};
     use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

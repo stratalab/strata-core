@@ -1,6 +1,6 @@
 //! System space: hidden, internal-only namespace on every branch.
 //!
-//! Follows the `_graph_` pattern in `crates/graph/src/keys.rs`. Used to store
+//! Follows the `_graph_` pattern in `crates/engine/src/graph/keys.rs`. Used to store
 //! recipes, semantic profiles, and other internal metadata per-branch.
 //!
 //! - Users cannot write to `_system_` (validation rejects the name)

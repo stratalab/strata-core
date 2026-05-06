@@ -16,7 +16,6 @@ members = [
     "crates/core",
     "crates/storage",
     "crates/engine",
-    "crates/graph",
     "crates/inference",
     "crates/intelligence",
     "crates/cli",
@@ -189,7 +188,6 @@ proptest = { workspace = true }
 strata-core = { package = "strata-core", path = "crates/core" }
 strata-storage = { path = "crates/storage" }
 strata-engine = { path = "crates/engine", features = ["test-support"] }
-strata-graph = { path = "crates/graph" }
 strata-vector = { path = "crates/vector" }
 strata-intelligence = { path = "crates/intelligence" }
 strata-search = { path = "crates/search" }

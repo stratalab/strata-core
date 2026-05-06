@@ -35,7 +35,7 @@ impl Strata {
         let outcome = open_product_database(
             &data_dir,
             options,
-            legacy_product_subsystems_until_graph_vector_absorption(),
+            transitional_product_subsystems_until_vector_absorption(),
         )
         .map_err(product_open_error)?;
 
@@ -63,7 +63,7 @@ impl Strata {
 
     /// Open an ephemeral in-memory database.
     pub fn cache() -> Result<Self> {
-        let outcome = open_product_cache(legacy_product_subsystems_until_graph_vector_absorption())
+        let outcome = open_product_cache(transitional_product_subsystems_until_vector_absorption())
             .map_err(product_open_error)?;
 
         match outcome {
@@ -374,13 +374,9 @@ impl Strata {
     }
 }
 
-fn legacy_product_subsystems_until_graph_vector_absorption(
+fn transitional_product_subsystems_until_vector_absorption(
 ) -> Vec<Box<dyn strata_engine::Subsystem>> {
-    vec![
-        Box::new(strata_graph::GraphSubsystem),
-        Box::new(strata_vector::VectorSubsystem),
-        Box::new(strata_engine::SearchSubsystem),
-    ]
+    vec![Box::new(strata_vector::VectorSubsystem)]
 }
 
 fn product_open_error(error: ProductOpenError) -> Error {
@@ -412,9 +408,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use strata_core::Value;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
-    use strata_vector::VectorSubsystem;
+    use strata_engine::{Database, OpenOptions, ProductOpenOutcome};
 
     use crate::{
         AccessMode, BranchId, Command, Error, Executor, IpcServer, Output, Session, Strata,
@@ -430,14 +424,16 @@ mod tests {
 
     fn disk_db_with_default_branch(default_branch: &str) -> (tempfile::TempDir, Arc<Database>) {
         let dir = tempfile::tempdir().expect("tempdir should succeed");
-        let db = Database::open_runtime(
-            OpenSpec::primary(dir.path())
-                .with_subsystem(strata_graph::GraphSubsystem)
-                .with_subsystem(VectorSubsystem)
-                .with_subsystem(SearchSubsystem)
-                .with_default_branch(default_branch),
+        let outcome = strata_engine::open_product_database(
+            dir.path(),
+            OpenOptions::default().default_branch(default_branch),
+            super::transitional_product_subsystems_until_vector_absorption(),
         )
-        .expect("disk database should open");
+        .expect("disk database should open through product open");
+        let db = match outcome {
+            ProductOpenOutcome::Local { db, .. } => db,
+            other => panic!("expected local database, got {other:?}"),
+        };
         (dir, db)
     }
 

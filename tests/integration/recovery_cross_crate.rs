@@ -2,7 +2,7 @@
 //!
 //! Tests that span engine + vector/graph crates and require both subsystems.
 //! These tests were moved from crates/engine/tests/recovery_tests.rs to
-//! eliminate engine's dev-dependency on strata-vector and strata-graph
+//! eliminate engine's dev-dependency on vector and graph shell crates
 //! per T1-E4 boundary requirements.
 
 use crate::common::*;
@@ -336,7 +336,7 @@ fn test_vector_insert_registers_space_at_engine_layer() {
 
 #[test]
 fn test_graph_create_registers_space_at_engine_layer() {
-    use strata_graph::types::NodeData;
+    use strata_engine::graph::types::NodeData;
 
     let (db, _temp, branch_id) = setup();
     let graph = GraphStore::new(db.clone());

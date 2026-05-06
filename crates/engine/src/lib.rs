@@ -32,6 +32,7 @@ pub mod branch_domain;
 mod coordinator;
 pub mod database;
 pub mod error;
+pub mod graph;
 pub mod instrumentation;
 pub mod limits;
 pub mod recovery;
@@ -66,6 +67,7 @@ pub use error::{
     ConstraintReason, DetailValue, ErrorCode, ErrorDetails, PrimitiveDegradedReason, StrataError,
     StrataResult,
 };
+pub use graph::{GraphStore, GraphSubsystem, PrimitiveGraphStore};
 pub use instrumentation::PerfTrace;
 pub use limits::{LimitError, Limits};
 pub use recovery::Subsystem;

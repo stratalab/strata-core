@@ -1,7 +1,7 @@
 //! Graph lifecycle operations: create, delete, list, metadata.
 
 use super::*;
-use crate::ext::GraphStoreExt;
+use crate::graph::ext::GraphStoreExt;
 
 impl GraphStore {
     /// Create a new graph with the given name and optional metadata.
@@ -178,8 +178,8 @@ impl GraphStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::SearchSubsystem;
+    use crate::database::OpenSpec;
+    use crate::SearchSubsystem;
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

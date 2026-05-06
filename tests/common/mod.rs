@@ -18,10 +18,10 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, Value, Version};
 pub use strata_engine::database::OpenSpec;
+pub use strata_engine::GraphStore;
 pub use strata_engine::{
     Database, EventLog, JsonPath, JsonStore, JsonValue, KVStore, SearchSubsystem, StrataConfig,
 };
-pub use strata_graph::GraphStore;
 pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
@@ -34,14 +34,14 @@ use tempfile::TempDir;
 /// registers the per-database graph merge handler and DAG hook.
 fn test_open_spec_primary(path: &std::path::Path) -> OpenSpec {
     OpenSpec::primary(path)
-        .with_subsystem(strata_graph::GraphSubsystem)
+        .with_subsystem(strata_engine::GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
 }
 
 fn test_open_spec_cache() -> OpenSpec {
     OpenSpec::cache()
-        .with_subsystem(strata_graph::GraphSubsystem)
+        .with_subsystem(strata_engine::GraphSubsystem)
         .with_subsystem(VectorSubsystem)
         .with_subsystem(SearchSubsystem)
 }

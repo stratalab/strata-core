@@ -1,30 +1,27 @@
 //! Engine bridge for the graph semantic merge.
 //!
-//! The graph crate's `merge` module is pure (no engine dispatch). This
-//! module wires the algorithm into the engine's `PrimitiveMergeHandler`
-//! dispatch via per-database registration. `GraphSubsystem::initialize()`
-//! calls `db.merge_registry().register_graph(graph_plan_fn)` to populate
-//! the per-database slot. Engine's `GraphMergeHandler::plan` then dispatches
-//! to it when called.
+//! The graph `merge` module is pure (no engine dispatch). This module wires
+//! the algorithm into the engine's `PrimitiveMergeHandler` dispatch via
+//! per-database registration. `GraphSubsystem::initialize()` calls
+//! `db.merge_registry().register_graph(graph_plan_fn)` to populate the
+//! per-database slot. Engine's `GraphMergeHandler::plan` then dispatches to it
+//! when called.
 //!
 //! ## Why this layering
 //!
-//! The engine crate cannot depend on `strata-graph` (graph already
-//! depends on engine — adding the reverse edge would be a cycle). The
-//! function-pointer registration pattern keeps graph-internal types out
-//! of the engine crate's public API.
+//! The function-pointer registration pattern keeps graph merge planning
+//! decoupled from the primitive merge dispatcher and avoids widening the
+//! dispatcher's public API around graph-internal types.
 
 use std::collections::HashMap;
 
+use crate::{ConflictEntry, MergeAction, MergeActionKind, MergePlanCtx, PrimitiveMergePlan};
+use crate::{StrataError, StrataResult};
 use strata_core::Value;
-use strata_engine::{
-    ConflictEntry, MergeAction, MergeActionKind, MergePlanCtx, PrimitiveMergePlan,
-};
-use strata_engine::{StrataError, StrataResult};
 use strata_storage::TypeTag;
 
-use crate::merge::{self, GraphMergeConflict};
-use crate::types::{EdgeData, NodeData};
+use crate::graph::merge::{self, GraphMergeConflict};
+use crate::graph::types::{EdgeData, NodeData};
 
 /// The function the engine's `GraphMergeHandler::plan` dispatches to.
 ///

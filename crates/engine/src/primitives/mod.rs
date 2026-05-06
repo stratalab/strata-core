@@ -6,8 +6,8 @@
 //! - **Branch metadata**: branch names, status, and branch-scoped handles
 //! - **JsonStore**: JSON document storage with path-based operations
 //!
-//! Vector storage is provided by the `strata-vector` crate.
-//! Graph storage is provided by the `strata-graph` crate.
+//! Graph storage is provided by the engine-owned graph module.
+//! Vector storage is still provided by the transitional `strata-vector` crate.
 //!
 //! ## Design Principle: Stateless Facades
 //!

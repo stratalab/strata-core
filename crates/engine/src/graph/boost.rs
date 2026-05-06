@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 
+use crate::StrataResult;
 use strata_core::BranchId;
-use strata_engine::StrataResult;
 
 use super::types::{BfsOptions, Direction};
 use super::GraphStore;
@@ -100,10 +100,10 @@ pub fn apply_boost(score: f32, weight: f64, proximity: f64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::*;
+    use crate::database::OpenSpec;
+    use crate::graph::types::*;
+    use crate::{Database, SearchSubsystem};
     use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();

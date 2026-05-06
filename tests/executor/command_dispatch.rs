@@ -1174,7 +1174,7 @@ fn branch_list_returns_branches() {
 #[test]
 fn branch_list_excludes_system_branch() {
     let db = create_db();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let executor = Executor::new(db);
 
     executor
@@ -1277,7 +1277,7 @@ fn branch_power_commands_round_trip_and_bundle_portability() {
     let source_path = source_dir.path().join("branch_power_source.strata");
     let source_db = strata_engine::Database::open_runtime(
         strata_engine::database::OpenSpec::primary(&source_path)
-            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_engine::GraphSubsystem)
             .with_subsystem(strata_vector::VectorSubsystem)
             .with_subsystem(strata_engine::SearchSubsystem),
     )
@@ -1291,7 +1291,7 @@ fn branch_power_commands_round_trip_and_bundle_portability() {
     let imported_path = imported_dir.path().join("branch_power_imported.strata");
     let imported_db = strata_engine::Database::open_runtime(
         strata_engine::database::OpenSpec::primary(&imported_path)
-            .with_subsystem(strata_graph::GraphSubsystem)
+            .with_subsystem(strata_engine::GraphSubsystem)
             .with_subsystem(strata_vector::VectorSubsystem)
             .with_subsystem(strata_engine::SearchSubsystem),
     )
@@ -1530,7 +1530,7 @@ fn branch_power_commands_round_trip_and_bundle_portability() {
 #[test]
 fn reserved_system_branch_is_rejected_by_public_executor() {
     let db = create_db();
-    strata_graph::branch_dag::init_system_branch(&db);
+    strata_engine::graph::branch_dag::init_system_branch(&db);
     let executor = Executor::new(db);
 
     let error = executor

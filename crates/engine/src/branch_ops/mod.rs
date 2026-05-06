@@ -328,12 +328,12 @@ fn check_event_merge_divergence(
 // Graph merge safety: tactical divergence refusal
 // =============================================================================
 //
-// The graph crate ships a real semantic merge that handles divergent
+// The engine-owned graph module ships a real semantic merge that handles divergent
 // branches correctly (decoded edge diffing, additive merging of disjoint
 // edges, referential integrity validation). Production builds register it
 // via `db.merge_registry().register_graph()` in `GraphSubsystem::initialize()`.
 // The fallback in this file is the tactical "refuse any divergent graph
-// merge" rule, used only by engine unit tests that don't load the graph crate.
+// merge" rule, used only by engine unit tests that do not initialize graph.
 //
 // Without the semantic merge, the generic three-way merge would treat
 // `(space, TypeTag::Graph)` cells as opaque KV, producing two distinct
@@ -412,7 +412,7 @@ fn graph_side_modified(
 ///
 /// This helper is only reachable from `GraphMergeHandler::precheck`'s
 /// fallback when no semantic merge is registered (engine-only unit
-/// tests). In production the graph crate's semantic merge runs instead.
+/// tests). In production the engine-owned graph semantic merge runs instead.
 ///
 /// Single-sided graph merges (only one of source/target has graph writes
 /// since the merge base) intentionally pass through this check unchanged.

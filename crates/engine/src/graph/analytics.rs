@@ -6,8 +6,8 @@
 use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet};
 
+use crate::{StrataError, StrataResult};
 use strata_core::BranchId;
-use strata_engine::{StrataError, StrataResult};
 
 use super::adjacency::AdjacencyIndex;
 use super::types::*;
@@ -758,7 +758,7 @@ impl Ord for OrdF64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::EdgeData;
+    use crate::graph::types::EdgeData;
 
     fn make_index(edges: &[(&str, &str, f64)]) -> AdjacencyIndex {
         let mut idx = AdjacencyIndex::new();
@@ -1516,9 +1516,9 @@ mod tests {
     // Integration: GraphStore-level tests
     // =========================================================================
 
+    use crate::database::OpenSpec;
+    use crate::{Database, SearchSubsystem};
     use std::sync::Arc;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::{Database, SearchSubsystem};
 
     fn setup() -> (Arc<Database>, GraphStore) {
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem)).unwrap();
