@@ -40,6 +40,7 @@ pub mod semantics;
 mod sensitive;
 pub mod transaction;
 pub mod transaction_ops; // TransactionOps Trait Definition
+pub mod vector;
 
 pub use background::{BackgroundScheduler, BackpressureError, SchedulerStats, TaskPriority};
 pub use branch_domain::{
@@ -90,6 +91,14 @@ pub use strata_storage::VersionedEntry;
 pub use strata_storage::{DegradationClass, RecoveryHealth, TransactionContext};
 pub use transaction::{ScopedTransaction, Transaction, TransactionPool, MAX_POOL_SIZE};
 pub use transaction_ops::TransactionOps;
+pub use vector::{
+    validate_collection_name, validate_system_collection_name, validate_vector_key,
+    BruteForceBackend, CollectionRecord, HnswBackend, HnswConfig, IndexBackendFactory,
+    IndexBackendType, InlineMetaCapable, MmapCapable, QuantizationParams, RaBitQParams,
+    RecoveryStats, SearchOptions, SegmentCapable, SegmentedHnswBackend, SegmentedHnswConfig,
+    VectorBackendState, VectorConfigSerde, VectorError, VectorHeap, VectorIndexBackend,
+    VectorMatchWithSource, VectorRecord, VectorResult, VectorStore, VectorSubsystem,
+};
 
 mod branch_ops;
 pub(crate) mod branch_retention;

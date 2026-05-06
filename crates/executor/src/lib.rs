@@ -28,7 +28,7 @@ pub use compat::Strata;
 pub use error::{Error, ErrorSeverity};
 pub use executor::Executor;
 pub use ipc::IpcServer;
-pub use output::Output;
+pub use output::{EmbedStatusInfo, Output};
 pub use session::Session;
 pub use types::*;
 

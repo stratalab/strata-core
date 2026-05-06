@@ -14,8 +14,8 @@
 //! ## Runtime Composition
 //!
 //! The engine crate declares the trait and owns the product-open policy.
-//! Product open composes engine-owned graph/search subsystems internally and
-//! accepts only the temporary external vector bridge until vector is absorbed.
+//! Product open composes engine-owned graph, vector, and search subsystems
+//! internally.
 //! Engine-internal tests and utilities that do not need product behavior can
 //! still install explicit low-level subsystem lists via `OpenSpec`.
 //!

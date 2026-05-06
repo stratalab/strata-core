@@ -7,7 +7,7 @@
 //! - **JsonStore**: JSON document storage with path-based operations
 //!
 //! Graph storage is provided by the engine-owned graph module.
-//! Vector storage is still provided by the transitional `strata-vector` crate.
+//! Vector storage is provided by the engine-owned vector module.
 //!
 //! ## Design Principle: Stateless Facades
 //!

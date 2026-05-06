@@ -8,7 +8,7 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use strata_engine::JsonPath;
+use strata_engine::{JsonPath, VectorError};
 
 use crate::bridge::{extract_version, Primitives};
 use crate::convert::convert_result;
@@ -16,7 +16,7 @@ use crate::{Error, Result};
 
 /// Convert a VectorResult to an executor Result.
 fn convert_vector_result<T>(
-    r: std::result::Result<T, strata_vector::VectorError>,
+    r: std::result::Result<T, VectorError>,
     branch_id: strata_core::BranchId,
 ) -> Result<T> {
     convert_result(r.map_err(|e| e.into_strata_error(branch_id)))

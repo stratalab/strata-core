@@ -38,8 +38,7 @@ use strata_storage::{Key, Namespace};
 
 // Primitive facades
 use strata_engine::primitives::{EventLog, JsonStore, KVStore};
-use strata_engine::GraphStore;
-use strata_vector::VectorStore;
+use strata_engine::{GraphStore, VectorMatchWithSource, VectorResult, VectorStore};
 
 // ============================================================================
 // Types
@@ -341,10 +340,7 @@ pub fn retrieve(db: &Arc<Database>, request: &RetrievalRequest) -> StrataResult<
             // Drops orphans and cross-space matches; builds SearchHit with
             // snippet. Centralised here so the as_of, time_range, and current
             // branches all enforce the same Phase 1 isolation guarantees.
-            let to_hits = |result: strata_vector::VectorResult<
-                Vec<strata_vector::VectorMatchWithSource>,
-            >|
-             -> Vec<SearchHit> {
+            let to_hits = |result: VectorResult<Vec<VectorMatchWithSource>>| -> Vec<SearchHit> {
                 result
                     .into_iter()
                     .flat_map(|matches| matches.into_iter())
@@ -609,7 +605,7 @@ mod tests {
         BM25Config, FusionConfig, RetrieveConfig, TransformConfig, VectorRetrieveConfig,
     };
     use strata_engine::search::Recipe;
-    use strata_engine::SearchSubsystem;
+    use strata_engine::{DistanceMetric, SearchSubsystem, VectorConfig};
 
     /// Simple keyword recipe for tests (BM25 + RRF + limit 10).
     fn test_recipe() -> Recipe {
@@ -819,9 +815,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -1757,9 +1752,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -1860,9 +1854,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -1951,9 +1944,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -2001,9 +1993,8 @@ mod tests {
         let t0 = strata_core::Timestamp::now().as_micros();
         std::thread::sleep(std::time::Duration::from_millis(10));
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -2063,9 +2054,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();
@@ -2209,9 +2199,8 @@ mod tests {
             .expect("create db");
         let branch_id = BranchId::new();
 
-        let vector_store = strata_vector::VectorStore::new(db.clone());
-        let config =
-            strata_vector::VectorConfig::new(3, strata_vector::DistanceMetric::Cosine).unwrap();
+        let vector_store = VectorStore::new(db.clone());
+        let config = VectorConfig::new(3, DistanceMetric::Cosine).unwrap();
         vector_store
             .create_system_collection(branch_id, "_system_embed_kv", config)
             .unwrap();

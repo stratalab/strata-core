@@ -26,10 +26,10 @@ use std::collections::{BTreeMap, BinaryHeap};
 use once_cell::sync::Lazy;
 use rayon::prelude::*;
 
-use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::heap::VectorHeap;
-use crate::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
-use crate::types::InlineMeta;
+use crate::vector::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
+use crate::vector::heap::VectorHeap;
+use crate::vector::hnsw::{CompactHnswGraph, HnswConfig, HnswGraph};
+use crate::vector::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 /// Scored entry for top-k selection in active buffer search.
@@ -806,7 +806,7 @@ impl MmapCapable for SegmentedHnswBackend {
     }
 
     fn freeze_graphs_to_disk(&self, dir: &std::path::Path) -> Result<(), VectorError> {
-        use crate::mmap_graph;
+        use crate::vector::mmap_graph;
 
         // Always write every segment — even previously mmap-backed ones may
         // have in-memory deletions (deleted_at updates) that must be persisted.
@@ -837,7 +837,7 @@ impl MmapCapable for SegmentedHnswBackend {
     }
 
     fn load_graphs_from_disk(&mut self, dir: &std::path::Path) -> Result<bool, VectorError> {
-        use crate::mmap_graph;
+        use crate::vector::mmap_graph;
 
         let manifest_path = dir.join("segments.manifest");
         if !manifest_path.exists() {
@@ -3090,7 +3090,7 @@ mod profiling_tests {
     #[test]
     #[ignore] // profiling test — run explicitly with `cargo test -- --ignored`
     fn profile_segment_fanout_vs_compact() {
-        use crate::brute_force::BruteForceBackend;
+        use crate::vector::brute_force::BruteForceBackend;
 
         let n = 100_000;
         let dim = 128;

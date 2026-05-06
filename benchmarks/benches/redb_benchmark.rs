@@ -10,7 +10,6 @@ use std::env::current_dir;
 use std::{fs, process};
 use tempfile::{NamedTempFile, TempDir};
 
-#[expect(dead_code)]
 #[path = "redb_common.rs"]
 mod common;
 use common::*;

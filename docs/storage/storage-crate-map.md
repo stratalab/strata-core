@@ -116,7 +116,6 @@ The internal incoming graph today is:
 - `strata-engine`
 - `strata-executor`
 - `strata-search`
-- `strata-vector`
 
 The root `stratadb` package also depends on storage in dev/test paths.
 
@@ -126,7 +125,9 @@ workspace shape, not permission for upper layers to drive database recovery,
 checkpoint, open, retention, or product policy below engine.
 
 `EG4` removed `strata-graph` as a separate storage consumer by moving the graph
-implementation into `strata-engine`.
+implementation into `strata-engine`. `EG5` removed `strata-vector` as a separate
+storage consumer by moving vector implementation into `strata-engine` and
+deleting the retired vector crate.
 
 ## What Storage Already Owns
 

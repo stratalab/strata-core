@@ -5,10 +5,10 @@ use strata_engine::database::{SHADOW_JSON, SHADOW_KV};
 #[cfg(feature = "embed")]
 use strata_engine::system_space::SYSTEM_SPACE;
 #[cfg(feature = "embed")]
+use strata_engine::VectorStore;
+#[cfg(feature = "embed")]
 use strata_executor::Error;
 use strata_executor::{Command, Executor, Output, SearchQuery, Session};
-#[cfg(feature = "embed")]
-use strata_vector::VectorStore;
 
 #[test]
 fn primitive_writes_register_non_default_spaces() {

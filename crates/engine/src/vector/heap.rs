@@ -16,13 +16,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use std::cell::RefCell;
 
-use crate::distance::{
+use crate::vector::distance::{
     compute_asymmetric_similarity, compute_binary_similarity, compute_similarity_cached,
 };
-use crate::error::{VectorError, VectorResult};
-use crate::mmap::{self, MmapVectorData};
-use crate::quantize::{self, QuantizationParams, RaBitQParams};
-use crate::types::{DistanceMetric, InlineMeta, StorageDtype, VectorConfig, VectorId};
+use crate::vector::error::{VectorError, VectorResult};
+use crate::vector::mmap::{self, MmapVectorData};
+use crate::vector::quantize::{self, QuantizationParams, RaBitQParams};
+use crate::vector::types::{DistanceMetric, InlineMeta, StorageDtype, VectorConfig, VectorId};
 
 /// Backing storage for vector embeddings.
 ///
@@ -1339,15 +1339,15 @@ impl VectorHeap {
                         if offset < vec.len() {
                             let ptr = vec[offset..].as_ptr() as *const u8;
                             let embedding_bytes = self.config.dimension * 4; // f32 = 4 bytes
-                            crate::distance::prefetch_read(ptr);
+                            crate::vector::distance::prefetch_read(ptr);
                             if embedding_bytes > 64 {
                                 unsafe {
-                                    crate::distance::prefetch_read(ptr.add(64));
+                                    crate::vector::distance::prefetch_read(ptr.add(64));
                                     if embedding_bytes > 128 {
-                                        crate::distance::prefetch_read(ptr.add(128));
+                                        crate::vector::distance::prefetch_read(ptr.add(128));
                                     }
                                     if embedding_bytes > 192 {
-                                        crate::distance::prefetch_read(ptr.add(192));
+                                        crate::vector::distance::prefetch_read(ptr.add(192));
                                     }
                                 }
                             }
@@ -1357,16 +1357,16 @@ impl VectorHeap {
                         // Quantized: dimension bytes (not dimension*4)
                         if offset < vec.len() {
                             let ptr = vec[offset..].as_ptr();
-                            crate::distance::prefetch_read(ptr);
+                            crate::vector::distance::prefetch_read(ptr);
                             let embedding_bytes = self.config.dimension; // u8 = 1 byte
                             if embedding_bytes > 64 {
                                 unsafe {
-                                    crate::distance::prefetch_read(ptr.add(64));
+                                    crate::vector::distance::prefetch_read(ptr.add(64));
                                     if embedding_bytes > 128 {
-                                        crate::distance::prefetch_read(ptr.add(128));
+                                        crate::vector::distance::prefetch_read(ptr.add(128));
                                     }
                                     if embedding_bytes > 192 {
-                                        crate::distance::prefetch_read(ptr.add(192));
+                                        crate::vector::distance::prefetch_read(ptr.add(192));
                                     }
                                 }
                             }
@@ -1377,7 +1377,7 @@ impl VectorHeap {
                         let byte_offset = slot as usize * code_size;
                         if byte_offset < codes.len() {
                             let ptr = codes[byte_offset..].as_ptr();
-                            crate::distance::prefetch_read(ptr);
+                            crate::vector::distance::prefetch_read(ptr);
                         }
                     }
                     _ => {} // Mmap/Tiered: no prefetch from dense path

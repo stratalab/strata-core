@@ -2,7 +2,7 @@
 //!
 //! This module provides `GraphBackendState` which is stored as a Database
 //! extension. This follows the same pattern as `VectorBackendState` in the
-//! vector crate.
+//! engine-owned vector module.
 //!
 //! ## Design
 //!

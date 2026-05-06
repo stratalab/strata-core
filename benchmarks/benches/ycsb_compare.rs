@@ -16,7 +16,7 @@ mod workloads;
 
 use harness::{create_db, print_hardware_info, DurabilityConfig};
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tempfile::{NamedTempFile, TempDir};
 use workloads::{workload_by_label, ycsb_key, FastRng, KeyChooser, Operation, WorkloadSpec};
 
@@ -408,8 +408,6 @@ fn main() {
     );
 
     let mut all_results = Vec::new();
-    let mut engine_names: Vec<&str> = Vec::new();
-
     for &label in &config.workloads {
         let workload = match workload_by_label(label) {
             Some(w) => w,
@@ -428,7 +426,10 @@ fn main() {
             let mut db = StrataYcsb::new();
             eprint!("  strata...");
             let r = run_workload(&mut db, workload, config.records, config.ops);
-            eprintln!(" {:.0} ops/s, p99={:.1}us", r.run_ops_sec, r.p99_us);
+            eprintln!(
+                " load={:.0} ops/s, run={:.0} ops/s, p50={:.1}us, p99={:.1}us",
+                r.load_ops_sec, r.run_ops_sec, r.p50_us, r.p99_us
+            );
             all_results.push(r);
         }
 
@@ -437,7 +438,10 @@ fn main() {
             let mut db = RocksYcsb::new(&tmpdir);
             eprint!("  rocksdb...");
             let r = run_workload(&mut db, workload, config.records, config.ops);
-            eprintln!(" {:.0} ops/s, p99={:.1}us", r.run_ops_sec, r.p99_us);
+            eprintln!(
+                " load={:.0} ops/s, run={:.0} ops/s, p50={:.1}us, p99={:.1}us",
+                r.load_ops_sec, r.run_ops_sec, r.p50_us, r.p99_us
+            );
             all_results.push(r);
         }
 
@@ -446,14 +450,17 @@ fn main() {
             let mut db = SqliteYcsb::new(&tmpdir);
             eprint!("  sqlite...");
             let r = run_workload(&mut db, workload, config.records, config.ops);
-            eprintln!(" {:.0} ops/s, p99={:.1}us", r.run_ops_sec, r.p99_us);
+            eprintln!(
+                " load={:.0} ops/s, run={:.0} ops/s, p50={:.1}us, p99={:.1}us",
+                r.load_ops_sec, r.run_ops_sec, r.p50_us, r.p99_us
+            );
             all_results.push(r);
         }
 
         eprintln!();
     }
 
-    engine_names = vec!["strata", "rocksdb"];
+    let mut engine_names = vec!["strata", "rocksdb"];
     if all_results.iter().any(|r| r.engine == "sqlite") {
         engine_names.push("sqlite");
     }

@@ -7,10 +7,9 @@ use strata_core::Value;
 pub use strata_engine::database::{SHADOW_EVENT, SHADOW_JSON, SHADOW_KV};
 use strata_engine::{
     Database, EventLog, JsonPath, JsonStore, JsonValue, KVStore, SpaceIndex, TaskPriority,
-    VectorConfig,
+    VectorConfig, VectorError, VectorStore,
 };
 use strata_engine::{StrataError, StrataResult};
-use strata_vector::VectorStore;
 
 use super::{resolve_api_key_for_model, EmbedModelState};
 
@@ -638,7 +637,7 @@ fn ensure_shadow_collection(db: &Arc<Database>, branch_id: BranchId, name: &str)
 
     match vector.create_system_collection(branch_id, name, config) {
         Ok(_) => state.insert(cache_key),
-        Err(strata_vector::VectorError::CollectionAlreadyExists { .. }) => {
+        Err(VectorError::CollectionAlreadyExists { .. }) => {
             match vector.system_collection_dimension(branch_id, name) {
                 Ok(Some(existing_dim)) if existing_dim != dim => {
                     tracing::error!(
@@ -696,8 +695,7 @@ fn serde_json_to_value(json: SerdeValue) -> StrataResult<Value> {
 mod tests {
     use super::*;
     use strata_engine::database::OpenSpec;
-    use strata_engine::SearchSubsystem;
-    use strata_vector::VectorSubsystem;
+    use strata_engine::{SearchSubsystem, VectorSubsystem};
 
     fn test_db() -> Arc<Database> {
         let db = Database::open_runtime(

@@ -31,9 +31,9 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 
-use crate::error::VectorError;
-use crate::quantize::QuantizationParams;
-use crate::types::VectorId;
+use crate::vector::error::VectorError;
+use crate::vector::quantize::QuantizationParams;
+use crate::vector::types::VectorId;
 
 /// Magic bytes identifying a Strata vector mmap file
 const MAGIC: &[u8; 4] = b"SVEC";

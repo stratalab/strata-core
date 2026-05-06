@@ -2,12 +2,15 @@ use std::sync::Arc;
 
 use strata_core::{Value, VersionedValue as CoreVersionedValue};
 use strata_engine::{
-    AccessMode, BranchStatus as EngineBranchStatus, Database, EventLog as PrimitiveEventLog,
-    JsonPath, JsonStore as PrimitiveJsonStore, JsonValue, KVStore as PrimitiveKVStore, Limits,
+    AccessMode, BranchStatus as EngineBranchStatus, Database,
+    DistanceMetric as EngineDistanceMetric, EventLog as PrimitiveEventLog,
+    FilterCondition as EngineFilterCondition, FilterOp as EngineFilterOp, JsonPath,
+    JsonScalar as EngineJsonScalar, JsonStore as PrimitiveJsonStore, JsonValue,
+    KVStore as PrimitiveKVStore, Limits, MetadataFilter as EngineMetadataFilter,
     PrimitiveGraphStore, SpaceIndex as PrimitiveSpaceIndex, StrataError, StrataResult,
+    VectorStore as PrimitiveVectorStore,
 };
 use strata_storage::validate_space_name;
-use strata_vector::VectorStore as PrimitiveVectorStore;
 
 use crate::{
     BranchId, BranchStatus, Command, DatabaseInfo, DistanceMetric, Error, FilterOp, MetadataFilter,
@@ -332,30 +335,28 @@ pub(crate) fn serde_json_to_value_public(json: serde_json::Value) -> StrataResul
     serde_json_to_value(json)
 }
 
-pub(crate) fn to_engine_metric(metric: DistanceMetric) -> strata_vector::DistanceMetric {
+pub(crate) fn to_engine_metric(metric: DistanceMetric) -> EngineDistanceMetric {
     match metric {
-        DistanceMetric::Cosine => strata_vector::DistanceMetric::Cosine,
-        DistanceMetric::Euclidean => strata_vector::DistanceMetric::Euclidean,
-        DistanceMetric::DotProduct => strata_vector::DistanceMetric::DotProduct,
+        DistanceMetric::Cosine => EngineDistanceMetric::Cosine,
+        DistanceMetric::Euclidean => EngineDistanceMetric::Euclidean,
+        DistanceMetric::DotProduct => EngineDistanceMetric::DotProduct,
     }
 }
 
-pub(crate) fn from_engine_metric(metric: strata_vector::DistanceMetric) -> DistanceMetric {
+pub(crate) fn from_engine_metric(metric: EngineDistanceMetric) -> DistanceMetric {
     match metric {
-        strata_vector::DistanceMetric::Cosine => DistanceMetric::Cosine,
-        strata_vector::DistanceMetric::Euclidean => DistanceMetric::Euclidean,
-        strata_vector::DistanceMetric::DotProduct => DistanceMetric::DotProduct,
+        EngineDistanceMetric::Cosine => DistanceMetric::Cosine,
+        EngineDistanceMetric::Euclidean => DistanceMetric::Euclidean,
+        EngineDistanceMetric::DotProduct => DistanceMetric::DotProduct,
     }
 }
 
-pub(crate) fn to_engine_filter(
-    filters: &[MetadataFilter],
-) -> Option<strata_vector::MetadataFilter> {
+pub(crate) fn to_engine_filter(filters: &[MetadataFilter]) -> Option<EngineMetadataFilter> {
     if filters.is_empty() {
         return None;
     }
 
-    let mut engine_filter = strata_vector::MetadataFilter::new();
+    let mut engine_filter = EngineMetadataFilter::new();
     for filter in filters {
         let scalar = value_to_json_scalar(&filter.value);
         match filter.op {
@@ -364,22 +365,20 @@ pub(crate) fn to_engine_filter(
             }
             _ => {
                 let op = match filter.op {
-                    FilterOp::Eq => strata_vector::FilterOp::Eq,
-                    FilterOp::Ne => strata_vector::FilterOp::Ne,
-                    FilterOp::Gt => strata_vector::FilterOp::Gt,
-                    FilterOp::Gte => strata_vector::FilterOp::Gte,
-                    FilterOp::Lt => strata_vector::FilterOp::Lt,
-                    FilterOp::Lte => strata_vector::FilterOp::Lte,
-                    FilterOp::In => strata_vector::FilterOp::In,
-                    FilterOp::Contains => strata_vector::FilterOp::Contains,
+                    FilterOp::Eq => EngineFilterOp::Eq,
+                    FilterOp::Ne => EngineFilterOp::Ne,
+                    FilterOp::Gt => EngineFilterOp::Gt,
+                    FilterOp::Gte => EngineFilterOp::Gte,
+                    FilterOp::Lt => EngineFilterOp::Lt,
+                    FilterOp::Lte => EngineFilterOp::Lte,
+                    FilterOp::In => EngineFilterOp::In,
+                    FilterOp::Contains => EngineFilterOp::Contains,
                 };
-                engine_filter
-                    .conditions
-                    .push(strata_vector::FilterCondition {
-                        field: filter.field.clone(),
-                        op,
-                        value: scalar,
-                    });
+                engine_filter.conditions.push(EngineFilterCondition {
+                    field: filter.field.clone(),
+                    op,
+                    value: scalar,
+                });
             }
         }
     }
@@ -391,14 +390,14 @@ pub(crate) fn to_engine_filter(
     }
 }
 
-fn value_to_json_scalar(value: &Value) -> strata_vector::JsonScalar {
+fn value_to_json_scalar(value: &Value) -> EngineJsonScalar {
     match value {
-        Value::Null => strata_vector::JsonScalar::Null,
-        Value::Bool(boolean) => strata_vector::JsonScalar::Bool(*boolean),
-        Value::Int(integer) => strata_vector::JsonScalar::Number(*integer as f64),
-        Value::Float(float) => strata_vector::JsonScalar::Number(*float),
-        Value::String(string) => strata_vector::JsonScalar::String(string.clone()),
-        _ => strata_vector::JsonScalar::Null,
+        Value::Null => EngineJsonScalar::Null,
+        Value::Bool(boolean) => EngineJsonScalar::Bool(*boolean),
+        Value::Int(integer) => EngineJsonScalar::Number(*integer as f64),
+        Value::Float(float) => EngineJsonScalar::Number(*float),
+        Value::String(string) => EngineJsonScalar::String(string.clone()),
+        _ => EngineJsonScalar::Null,
     }
 }
 

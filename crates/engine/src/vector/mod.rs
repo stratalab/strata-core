@@ -16,15 +16,19 @@
 //! ## Recovery
 //!
 //! VectorStore participates in Database recovery via `VectorSubsystem`.
-//! Register it with `OpenSpec::with_subsystem(VectorSubsystem)` to
-//! enable vector state recovery after database restart.
+//! Product database opens compose the vector subsystem internally through
+//! `open_product_database()` and `open_product_cache()`. Direct
+//! `OpenSpec::with_subsystem(VectorSubsystem)` registration remains available
+//! for engine internals, tests, and specialized low-level runtimes.
+
+#![allow(missing_docs)]
 
 pub mod backend;
 pub mod brute_force;
 pub mod collection;
 pub mod distance;
 pub mod error;
-pub mod ext;
+pub(crate) mod ext;
 pub mod filter;
 pub mod heap;
 pub mod hnsw;

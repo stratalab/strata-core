@@ -18,11 +18,11 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 pub use strata_core::{BranchId, Value, Version};
 pub use strata_engine::database::OpenSpec;
-pub use strata_engine::GraphStore;
 pub use strata_engine::{
-    Database, EventLog, JsonPath, JsonStore, JsonValue, KVStore, SearchSubsystem, StrataConfig,
+    Database, DistanceMetric, EventLog, GraphStore, JsonPath, JsonStore, JsonValue, KVStore,
+    SearchSubsystem, StorageDtype, StrataConfig, VectorConfig, VectorId, VectorStore,
+    VectorSubsystem,
 };
-pub use strata_vector::{DistanceMetric, StorageDtype, VectorConfig, VectorStore, VectorSubsystem};
 use tempfile::TempDir;
 
 /// Create an OpenSpec with the production subsystems
@@ -774,7 +774,7 @@ impl CapturedState {
 /// Captured state of a vector collection for comparison.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapturedVectorState {
-    pub vectors: BTreeMap<String, (strata_vector::VectorId, Vec<f32>, Option<serde_json::Value>)>,
+    pub vectors: BTreeMap<String, (VectorId, Vec<f32>, Option<serde_json::Value>)>,
     pub count: usize,
     pub max_id: u64,
 }

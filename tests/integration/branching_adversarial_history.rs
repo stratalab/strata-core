@@ -53,9 +53,9 @@ use std::sync::Arc;
 use strata_core::contract::PrimitiveType;
 use strata_core::Value;
 use strata_engine::GraphSubsystem;
+use strata_engine::VectorSubsystem;
 use strata_engine::{BranchRef, PrimitiveDegradationRegistry, ReclaimStatus};
 use strata_engine::{PrimitiveDegradedReason, StrataError};
-use strata_vector::VectorSubsystem;
 
 const BRANCH_NAMES: [&str; 3] = ["main", "feature", "hotfix"];
 

@@ -24,12 +24,15 @@
 //! All VectorStore instances for the same Database share backend state
 //! through `Database::extension::<VectorBackendState>()`.
 
-use crate::collection::{validate_collection_name, validate_vector_key};
-use crate::{
-    CollectionId, CollectionInfo, CollectionRecord, IndexBackendFactory, MetadataFilter,
-    SearchOptions, VectorConfig, VectorEntry, VectorError, VectorId, VectorIndexBackend,
-    VectorMatch, VectorMatchWithSource, VectorRecord, VectorResult,
+use crate::semantics::vector::{
+    CollectionId, CollectionInfo, MetadataFilter, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
+use crate::vector::collection::{validate_collection_name, validate_vector_key};
+use crate::vector::{
+    CollectionRecord, IndexBackendFactory, IndexBackendType, SearchOptions, VectorError,
+    VectorIndexBackend, VectorMatchWithSource, VectorRecord, VectorResult,
+};
+use crate::Database;
 use dashmap::DashMap;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
@@ -40,9 +43,7 @@ use strata_core::id::{CommitVersion, TxnId};
 use strata_core::BranchId;
 use strata_core::EntityRef;
 use strata_core::Value;
-use strata_engine::database::OpenSpec;
-use strata_engine::{Database, SearchSubsystem};
-use strata_storage::{Key, Namespace};
+use strata_storage::{Key, Namespace, TransactionContext, TypeTag};
 use tracing::{debug, info, warn};
 
 /// Statistics from vector recovery
@@ -86,9 +87,10 @@ pub struct VectorBackendState {
     /// observers clear that transaction's queued ops without touching other
     /// in-flight writers.
     ///
-    /// This moves vector backend maintenance ownership from executor (Session)
-    /// to subsystem (VectorSubsystem), fulfilling the T2-E2 requirement.
-    pending_ops: DashMap<TxnId, Vec<crate::ext::StagedVectorOp>>,
+    /// Vector backend maintenance is engine-owned: transaction writes queue
+    /// these operations, and database observers apply or clear them when the
+    /// transaction finishes.
+    pending_ops: DashMap<TxnId, Vec<crate::vector::ext::StagedVectorOp>>,
 
     /// Tracks whether runtime-only hooks have been registered for this
     /// database instance.
@@ -108,9 +110,9 @@ impl Default for VectorBackendState {
 impl VectorBackendState {
     /// Queue a staged vector operation for post-commit application.
     ///
-    /// Called by VectorStoreExt during transactions. The operation will be
-    /// applied by VectorCommitObserver after the transaction commits.
-    pub fn queue_pending_op(&self, txn_id: TxnId, op: crate::ext::StagedVectorOp) {
+    /// Called by the engine transaction extension during transactions. The
+    /// operation will be applied by VectorCommitObserver after commit.
+    pub(crate) fn queue_pending_op(&self, txn_id: TxnId, op: crate::vector::ext::StagedVectorOp) {
         self.pending_ops.entry(txn_id).or_default().push(op);
     }
 
@@ -118,11 +120,11 @@ impl VectorBackendState {
     ///
     /// Called by VectorCommitObserver after transaction commit.
     /// Returns the number of operations applied.
-    pub fn apply_pending_ops(&self, txn_id: TxnId) -> usize {
+    pub(crate) fn apply_pending_ops(&self, txn_id: TxnId) -> usize {
         if let Some((_, ops)) = self.pending_ops.remove(&txn_id) {
             let count = ops.len();
             for op in ops {
-                crate::ext::apply_staged_vector_op(self, op);
+                crate::vector::ext::apply_staged_vector_op(self, op);
             }
             count
         } else {
@@ -134,7 +136,7 @@ impl VectorBackendState {
     ///
     /// Called by engine-owned abort observers on transaction abort or commit
     /// failure to clean up uncommitted ops.
-    pub fn clear_pending_ops(&self, txn_id: TxnId) {
+    pub(crate) fn clear_pending_ops(&self, txn_id: TxnId) {
         self.pending_ops.remove(&txn_id);
     }
 }
@@ -161,19 +163,17 @@ fn validate_query_values(values: &[f32]) -> VectorResult<()> {
 /// # Example
 ///
 /// ```text
-/// use strata_engine::{Database, OpenSpec};
-/// use strata_vector::{VectorConfig, VectorStore, VectorSubsystem};
 /// use strata_core::BranchId;
+/// use strata_engine::{
+///     open_product_database, OpenOptions, ProductOpenOutcome, VectorConfig, VectorStore,
+/// };
 ///
-/// // Open via OpenSpec with VectorSubsystem so vector recovery
-/// // and drop-time freeze are installed. `Database::open` alone does
-/// // NOT install VectorSubsystem — always use `OpenSpec::with_subsystem`
-/// // (or `strata_executor::Strata::open`, which wraps this pattern) for
-/// // disk-backed vector stores, otherwise vector state will not
-/// // survive drop+reopen.
-/// let db = Database::open_runtime(
-///     OpenSpec::primary("/path/to/data").with_subsystem(VectorSubsystem)
-/// )?;
+/// // Product open installs graph, vector, and search runtime behavior,
+/// // including vector recovery and drop-time freeze hooks.
+/// let outcome = open_product_database("/path/to/data", OpenOptions::default())?;
+/// let ProductOpenOutcome::Local { db, .. } = outcome else {
+///     panic!("expected a local product database");
+/// };
 ///
 /// let store = VectorStore::new(db.clone());
 /// let branch_id = BranchId::new();
@@ -221,7 +221,7 @@ impl VectorStore {
             .db
             .extension::<VectorBackendState>()
             .map_err(|e| VectorError::Storage(e.to_string()))?;
-        crate::recovery::ensure_runtime_wiring(&self.db, &state);
+        crate::vector::recovery::ensure_runtime_wiring(&self.db, &state);
         Ok(state)
     }
 
@@ -231,7 +231,7 @@ impl VectorStore {
     }
 
     /// Get a backend factory for a specific backend type (Issue #1964).
-    fn backend_factory_for(&self, backend_type: crate::IndexBackendType) -> IndexBackendFactory {
+    fn backend_factory_for(&self, backend_type: IndexBackendType) -> IndexBackendFactory {
         IndexBackendFactory::from_type(backend_type)
     }
 
@@ -241,7 +241,7 @@ impl VectorStore {
 
     /// Initialize the index backend for a collection (uses default backend type).
     fn init_backend(&self, id: &CollectionId, config: &VectorConfig) -> Result<(), VectorError> {
-        self.init_backend_with_type(id, config, crate::IndexBackendType::default())
+        self.init_backend_with_type(id, config, IndexBackendType::default())
     }
 
     /// Initialize the index backend for a collection with explicit backend type.
@@ -249,7 +249,7 @@ impl VectorStore {
         &self,
         id: &CollectionId,
         config: &VectorConfig,
-        backend_type: crate::IndexBackendType,
+        backend_type: IndexBackendType,
     ) -> Result<(), VectorError> {
         let backend = self.create_backend_with_type(id, config, backend_type)?;
         let state = self.state()?;
@@ -262,7 +262,7 @@ impl VectorStore {
         &self,
         id: &CollectionId,
         config: &VectorConfig,
-        backend_type: crate::IndexBackendType,
+        backend_type: IndexBackendType,
     ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
         let mut backend = self.backend_factory_for(backend_type).create(config);
 
@@ -302,10 +302,8 @@ impl VectorStore {
         id: &CollectionId,
         config: &VectorConfig,
         space: &str,
-        backend_type: crate::IndexBackendType,
+        backend_type: IndexBackendType,
     ) -> Result<Box<dyn VectorIndexBackend>, VectorError> {
-        use strata_storage::Storage;
-
         let mut backend = self.create_backend_with_type(id, config, backend_type)?;
 
         let data_dir = self.db.data_dir();
@@ -367,21 +365,20 @@ impl VectorStore {
                         error = %e,
                         "Failed to decode vector record during reload; marking collection degraded"
                     );
-                    let err =
-                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
-                            &self.db,
-                            id.branch_id,
-                            strata_core::contract::PrimitiveType::Vector,
-                            &id.name,
-                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
-                            format!("{e}"),
-                        )
-                        .map(|entry| entry.to_error())
-                        .unwrap_or_else(|| {
-                            strata_engine::StrataError::serialization(format!(
-                                "corrupt vector record during reload: {e}"
-                            ))
-                        });
+                    let err = crate::database::primitive_degradation::mark_primitive_degraded(
+                        &self.db,
+                        id.branch_id,
+                        strata_core::contract::PrimitiveType::Vector,
+                        &id.name,
+                        crate::PrimitiveDegradedReason::ConfigMismatch,
+                        format!("{e}"),
+                    )
+                    .map(|entry| entry.to_error())
+                    .unwrap_or_else(|| {
+                        crate::StrataError::serialization(format!(
+                            "corrupt vector record during reload: {e}"
+                        ))
+                    });
                     return Err(VectorError::Degraded(Box::new(err)));
                 }
             };
@@ -405,21 +402,20 @@ impl VectorStore {
                         error = %e,
                         "Failed to insert vector during reload; marking collection degraded"
                     );
-                    let err =
-                        strata_engine::database::primitive_degradation::mark_primitive_degraded(
-                            &self.db,
-                            id.branch_id,
-                            strata_core::contract::PrimitiveType::Vector,
-                            &id.name,
-                            strata_engine::PrimitiveDegradedReason::ConfigMismatch,
-                            format!("{e}"),
-                        )
-                        .map(|entry| entry.to_error())
-                        .unwrap_or_else(|| {
-                            strata_engine::StrataError::serialization(format!(
-                                "failed to insert vector during reload: {e}"
-                            ))
-                        });
+                    let err = crate::database::primitive_degradation::mark_primitive_degraded(
+                        &self.db,
+                        id.branch_id,
+                        strata_core::contract::PrimitiveType::Vector,
+                        &id.name,
+                        crate::PrimitiveDegradedReason::ConfigMismatch,
+                        format!("{e}"),
+                    )
+                    .map(|entry| entry.to_error())
+                    .unwrap_or_else(|| {
+                        crate::StrataError::serialization(format!(
+                            "failed to insert vector during reload: {e}"
+                        ))
+                    });
                     return Err(VectorError::Degraded(Box::new(err)));
                 }
             }
@@ -431,7 +427,7 @@ impl VectorStore {
                 .unwrap_or_default();
             backend.set_inline_meta(
                 vid,
-                crate::types::InlineMeta {
+                crate::vector::types::InlineMeta {
                     key: vector_key,
                     source_ref: vec_record.source_ref.clone(),
                 },
@@ -477,8 +473,6 @@ impl VectorStore {
 
     /// Get a vector record by KV key
     fn get_vector_record_by_key(&self, key: &Key) -> VectorResult<Option<VectorRecord>> {
-        use strata_storage::Storage;
-
         let version = CommitVersion(self.db.storage().version());
         let Some(versioned) = self
             .db
@@ -510,8 +504,6 @@ impl VectorStore {
         collection: &str,
         target_id: VectorId,
     ) -> VectorResult<(String, Option<JsonValue>)> {
-        use strata_storage::Storage;
-
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, collection);
 
@@ -570,7 +562,6 @@ impl VectorStore {
         }
 
         // Backend not loaded - count from KV
-        use strata_storage::Storage;
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
@@ -589,8 +580,6 @@ impl VectorStore {
     /// All deletes are performed in a single transaction to guarantee
     /// atomicity — either all vectors are deleted or none are.
     fn delete_all_vectors(&self, branch_id: BranchId, space: &str, name: &str) -> VectorResult<()> {
-        use strata_storage::Storage;
-
         let namespace = self.namespace_for(branch_id, space);
         let prefix = Key::vector_collection_prefix(namespace, name);
 
@@ -637,8 +626,6 @@ impl VectorStore {
         space: &str,
         name: &str,
     ) -> VectorResult<Option<(VectorConfig, CollectionRecord)>> {
-        use strata_storage::Storage;
-
         let config_key = Key::new_vector_config(self.namespace_for(branch_id, space), name);
         let version = CommitVersion(self.db.storage().version());
 
@@ -687,7 +674,7 @@ impl VectorStore {
         // convergence contract matrix row "vector in-memory / HNSW
         // state": config mismatch or rebuild failure must fail closed,
         // not silently fall back to wrong data.
-        if let Some(err) = strata_engine::database::primitive_degradation::primitive_degraded_error(
+        if let Some(err) = crate::database::primitive_degradation::primitive_degraded_error(
             &self.db,
             branch_id,
             strata_core::contract::PrimitiveType::Vector,
@@ -734,7 +721,7 @@ impl VectorStore {
 
 // ========== Searchable Trait Implementation ==========
 
-impl strata_engine::search::Searchable for VectorStore {
+impl crate::search::Searchable for VectorStore {
     /// Vector search via search interface
     ///
     /// NOTE: Per architecture documentation:
@@ -747,15 +734,10 @@ impl strata_engine::search::Searchable for VectorStore {
     /// 1. Embedding the text query (using an external model)
     /// 2. Calling `vector.search_by_embedding()` with the embedding
     /// 3. Fusing results via RRF
-    fn search(
-        &self,
-        req: &strata_engine::SearchRequest,
-    ) -> strata_engine::StrataResult<strata_engine::SearchResponse> {
+    fn search(&self, req: &crate::SearchRequest) -> crate::StrataResult<crate::SearchResponse> {
+        use crate::search::{truncate_text, SearchHit, SearchMode, SearchResponse, SearchStats};
+        use crate::system_space::SYSTEM_SPACE;
         use std::time::Instant;
-        use strata_engine::search::{
-            truncate_text, SearchHit, SearchMode, SearchResponse, SearchStats,
-        };
-        use strata_engine::system_space::SYSTEM_SPACE;
 
         let start = Instant::now();
 
@@ -855,15 +837,17 @@ impl strata_engine::search::Searchable for VectorStore {
 }
 
 // Re-export now_micros from types for use in store submodules (via `use super::*`).
-use crate::types::now_micros;
+use crate::vector::types::now_micros;
 
-// VectorStoreExt implementation lives in crate::ext (ext.rs).
+// VectorStoreExt implementation lives in crate::vector::ext (ext.rs).
 // It implements vector operations directly on TransactionContext for OCC support.
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ext::VectorStoreExt;
+    use crate::database::OpenSpec;
+    use crate::vector::ext::VectorStoreExt;
+    use crate::SearchSubsystem;
     use crate::{DistanceMetric, VectorConfig};
     use tempfile::TempDir;
 
@@ -1158,7 +1142,7 @@ mod tests {
         let config = VectorConfig {
             dimension: 0,
             metric: DistanceMetric::Cosine,
-            storage_dtype: crate::StorageDtype::F32,
+            storage_dtype: crate::semantics::vector::StorageDtype::F32,
         };
 
         let result = store.create_collection(branch_id, "default", "test", config);
@@ -3014,7 +2998,7 @@ mod tests {
                 "default",
                 "small_collection",
                 config,
-                crate::IndexBackendType::BruteForce,
+                IndexBackendType::BruteForce,
             )
             .unwrap();
 
@@ -3062,7 +3046,7 @@ mod tests {
 
     #[test]
     fn test_backend_type_persisted_in_collection_record() {
-        use crate::types::IndexBackendType;
+        use crate::vector::types::IndexBackendType;
 
         let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
         let record = CollectionRecord::with_backend_type(&config, IndexBackendType::BruteForce);
@@ -3074,7 +3058,7 @@ mod tests {
 
     #[test]
     fn test_backend_type_all_variants_roundtrip() {
-        use crate::types::IndexBackendType;
+        use crate::vector::types::IndexBackendType;
 
         let config = VectorConfig::new(4, DistanceMetric::Cosine).unwrap();
         for bt in [
@@ -3785,8 +3769,8 @@ mod tests {
 
     #[test]
     fn test_searchable_vector_mode_with_embedding() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -3843,8 +3827,8 @@ mod tests {
     /// no source_ref entirely.
     #[test]
     fn test_searchable_vector_filters_cross_space_sources() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -3937,8 +3921,8 @@ mod tests {
 
     #[test]
     fn test_searchable_keyword_mode_returns_empty() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -3970,8 +3954,8 @@ mod tests {
 
     #[test]
     fn test_searchable_no_embedding_returns_empty() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -4001,8 +3985,8 @@ mod tests {
 
     #[test]
     fn test_searchable_multi_collection_merge() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -4073,8 +4057,8 @@ mod tests {
 
     #[test]
     fn test_searchable_source_ref_propagation() {
-        use strata_engine::search::{SearchMode, Searchable};
-        use strata_engine::SearchRequest;
+        use crate::search::{SearchMode, Searchable};
+        use crate::SearchRequest;
 
         let (_temp, _db, store) = setup();
         let branch_id = BranchId::new();
@@ -4128,7 +4112,7 @@ mod tests {
 
         let state = store.state().unwrap();
         let mut txn = db.begin_transaction(branch_id).unwrap();
-        let (_version, _op) = txn
+        let _version = txn
             .vector_upsert(
                 branch_id,
                 "default",

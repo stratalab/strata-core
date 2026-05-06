@@ -23,7 +23,7 @@
 //!   branch read path, while the actual blocked-refresh / reopen proofs
 //!   remain in the crate-local hook-failure suites in
 //!   `crates/engine/tests/follower_tests.rs`,
-//!   `crates/vector/src/recovery.rs`, and
+//!   `crates/engine/src/vector/recovery.rs`, and
 //!   `crates/engine/src/graph/store.rs`.
 //! - Search / vector on-disk caches: `ReopenHealed` — valid
 //!   caches fast-path reload and reconcile; invalid / missing caches
@@ -578,7 +578,7 @@ fn json_bm25_reopens_from_kv_truth_when_on_disk_cache_is_lost() {
 //
 // Crate-local hook-failure tests cover the actual blocked-refresh and reopen
 // semantics (see `follower_tests.rs`, `crates/engine/src/graph/store.rs`,
-// `crates/vector/src/recovery.rs`). This integration section only locks the
+// `crates/engine/src/vector/recovery.rs`). This integration section only locks the
 // branch-layer consequence that the canonical query guard is reachable from
 // the read path.
 // =============================================================================

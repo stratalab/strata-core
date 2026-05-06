@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use std::{fs, mem, thread};
-use stratadb::{Key, Namespace, StorageIterator, Strata, Value};
+use stratadb::{Strata, Value};
 
 #[allow(dead_code)]
 const X: TableDefinition<&[u8], &[u8]> = TableDefinition::new("x");
@@ -1405,7 +1405,7 @@ impl BenchReader for FjallBenchReader<'_> {
 }
 
 pub struct FjallBenchIterator {
-    iter: Box<(dyn DoubleEndedIterator<Item = fjall::Result<fjall::KvPair>> + 'static)>,
+    iter: Box<dyn DoubleEndedIterator<Item = fjall::Result<fjall::KvPair>> + 'static>,
 }
 
 impl BenchIterator for FjallBenchIterator {

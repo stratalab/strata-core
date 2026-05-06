@@ -3,13 +3,13 @@
 //! This module re-exports canonical helper types from the engine-owned surface and defines
 //! implementation-specific types for vector storage and search.
 
-use serde_json::Value as JsonValue;
-
 // Re-export canonical vector helper types from the engine-owned surface.
-pub use strata_engine::{
+pub use crate::semantics::vector::{
     CollectionId, CollectionInfo, DistanceMetric, FilterCondition, FilterOp, JsonScalar,
     MetadataFilter, StorageDtype, VectorConfig, VectorEntry, VectorId, VectorMatch,
 };
+use crate::vector::VectorError;
+use serde_json::Value as JsonValue;
 
 // Re-export EntityRef for source reference linking
 pub use strata_core::EntityRef;
@@ -165,13 +165,13 @@ impl VectorRecord {
     }
 
     /// Serialize to bytes (MessagePack)
-    pub fn to_bytes(&self) -> Result<Vec<u8>, crate::VectorError> {
-        rmp_serde::to_vec(self).map_err(|e| crate::VectorError::Serialization(e.to_string()))
+    pub fn to_bytes(&self) -> Result<Vec<u8>, VectorError> {
+        rmp_serde::to_vec(self).map_err(|e| VectorError::Serialization(e.to_string()))
     }
 
     /// Deserialize from bytes (MessagePack)
-    pub fn from_bytes(data: &[u8]) -> Result<Self, crate::VectorError> {
-        rmp_serde::from_slice(data).map_err(|e| crate::VectorError::Serialization(e.to_string()))
+    pub fn from_bytes(data: &[u8]) -> Result<Self, VectorError> {
+        rmp_serde::from_slice(data).map_err(|e| VectorError::Serialization(e.to_string()))
     }
 }
 
@@ -356,13 +356,13 @@ impl CollectionRecord {
     }
 
     /// Serialize to bytes (MessagePack)
-    pub fn to_bytes(&self) -> Result<Vec<u8>, crate::VectorError> {
-        rmp_serde::to_vec(self).map_err(|e| crate::VectorError::Serialization(e.to_string()))
+    pub fn to_bytes(&self) -> Result<Vec<u8>, VectorError> {
+        rmp_serde::to_vec(self).map_err(|e| VectorError::Serialization(e.to_string()))
     }
 
     /// Deserialize from bytes (MessagePack)
-    pub fn from_bytes(data: &[u8]) -> Result<Self, crate::VectorError> {
-        rmp_serde::from_slice(data).map_err(|e| crate::VectorError::Serialization(e.to_string()))
+    pub fn from_bytes(data: &[u8]) -> Result<Self, VectorError> {
+        rmp_serde::from_slice(data).map_err(|e| VectorError::Serialization(e.to_string()))
     }
 }
 
@@ -388,11 +388,11 @@ impl From<&VectorConfig> for VectorConfigSerde {
 }
 
 impl TryFrom<VectorConfigSerde> for VectorConfig {
-    type Error = crate::VectorError;
+    type Error = VectorError;
 
     fn try_from(serde: VectorConfigSerde) -> Result<Self, Self::Error> {
         let metric = DistanceMetric::from_byte(serde.metric).ok_or_else(|| {
-            crate::VectorError::Serialization(format!("Invalid metric byte: {}", serde.metric))
+            VectorError::Serialization(format!("Invalid metric byte: {}", serde.metric))
         })?;
 
         // Default to F32 for forward compatibility with old WAL entries
@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn test_vector_config_zero_dimension() {
-        use strata_engine::StrataError;
+        use crate::StrataError;
         let result = VectorConfig::new(0, DistanceMetric::Cosine);
         assert!(matches!(result, Err(StrataError::InvalidInput { .. })));
     }

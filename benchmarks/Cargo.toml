@@ -7,16 +7,19 @@ license = "Apache-2.0"
 publish = false
 autobins = false
 
+[features]
+default = []
+embed = ["stratadb/embed"]
+
 [dependencies]
-stratadb = { path = "..", features = ["embed"] }
-strata-core = { package = "strata-core-legacy", path = "../crates/core-legacy" }
+stratadb = { path = ".." }
+strata-core = { path = "../crates/core" }
 strata-engine = { path = "../crates/engine" }
 # Required only for the B6 materialize smoke in `src/bin/regression.rs`:
-# `branches().fork()` installs a DAG hook via `GraphSubsystem::initialize`,
-# and the benchmark opens a fresh engine `Database` rather than reusing
-# the `Strata` executor (which does not expose `storage().materialize_layer`).
-strata-graph = { path = "../crates/graph" }
-strata-vector = { path = "../crates/vector" }
+# the benchmark opens a fresh engine `Database` rather than reusing the
+# `Strata` executor, which does not expose `storage().materialize_layer`.
+# The engine-owned graph/vector/search subsystems preserve the product runtime
+# hooks needed by that direct engine open.
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.8"

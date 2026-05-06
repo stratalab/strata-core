@@ -3,7 +3,7 @@
 //! Invariant R4: Backend sorts by (score desc, VectorId asc).
 
 use crate::common::*;
-use strata_vector::DistanceMetric;
+use strata_engine::DistanceMetric;
 
 /// Test that backend breaks ties by VectorId (ascending)
 #[test]

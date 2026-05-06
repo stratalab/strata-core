@@ -22,7 +22,6 @@ use strata_engine::database::OpenSpec;
 use strata_engine::extensions::*;
 use strata_engine::*;
 use strata_engine::{Database, JsonPath};
-// VectorStore is in strata-vector; see root integration tests
 
 /// Helper to create an empty object payload for EventLog
 fn empty_payload() -> Value {

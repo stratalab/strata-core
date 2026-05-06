@@ -4,7 +4,7 @@
 //! BruteForceBackend (O(n) search)
 //! HnswBackend (O(log n) search) - reserved
 
-use crate::types::InlineMeta;
+use crate::vector::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorId};
 
 // ============================================================================
@@ -385,7 +385,7 @@ impl IndexBackendFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::InlineMeta;
+    use crate::vector::types::InlineMeta;
 
     /// Issue #1960: Extension trait methods are accessible through dyn VectorIndexBackend.
     /// This test validates that the trait split preserves full dynamic dispatch.
@@ -396,8 +396,10 @@ mod tests {
         // Create each backend type through the factory (returns Box<dyn VectorIndexBackend>)
         let factories = [
             IndexBackendFactory::BruteForce,
-            IndexBackendFactory::Hnsw(crate::hnsw::HnswConfig::default()),
-            IndexBackendFactory::SegmentedHnsw(crate::segmented::SegmentedHnswConfig::default()),
+            IndexBackendFactory::Hnsw(crate::vector::hnsw::HnswConfig::default()),
+            IndexBackendFactory::SegmentedHnsw(
+                crate::vector::segmented::SegmentedHnswConfig::default(),
+            ),
         ];
 
         for factory in &factories {

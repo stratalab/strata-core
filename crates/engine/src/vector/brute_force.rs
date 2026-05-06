@@ -8,8 +8,8 @@
 
 use std::cmp::Ordering;
 
-use crate::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
-use crate::types::InlineMeta;
+use crate::vector::backend::{InlineMetaCapable, MmapCapable, SegmentCapable, VectorIndexBackend};
+use crate::vector::types::InlineMeta;
 use crate::{DistanceMetric, VectorConfig, VectorError, VectorHeap, VectorId};
 
 /// Brute-force vector search backend

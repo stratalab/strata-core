@@ -30,7 +30,7 @@
 //!   `plan` and dispatches to the per-database `MergeHandlerRegistry` for
 //!   the dimension/metric mismatch precheck and the per-collection HNSW
 //!   rebuild in `post_commit`. If unset (engine-only unit tests that don't
-//!   load the vector crate), the handler is a pure pass-through and HNSW
+//!   initialize the vector subsystem), the handler is a pure pass-through and HNSW
 //!   backends only catch up to the merged KV state on the next full recovery.
 //! - `GraphMergeHandler::plan` dispatches to the per-database
 //!   `MergeHandlerRegistry`, which the engine-owned graph module populates via
@@ -71,11 +71,10 @@ use crate::primitives::json::{JsonDoc, JsonStore};
 /// handler that needs to validate the merge shape (e.g. Event divergence)
 /// can do so without re-reading from storage.
 ///
-/// `db` is provided so handlers whose validation requires decoding logic
-/// that lives in a downstream crate (e.g. `VectorMergeHandler` decoding
-/// `CollectionRecord` rows in the vector crate) can dispatch to a
-/// callback that re-reads from storage rather than threading internal
-/// types through the engine.
+/// `db` is provided so handlers whose validation requires primitive-specific
+/// decoding logic (e.g. `VectorMergeHandler` decoding `CollectionRecord` rows)
+/// can dispatch to a callback that re-reads from storage rather than threading
+/// internal types through the generic merge planner.
 #[allow(dead_code)] // contract for future handlers
 pub(crate) struct MergePrecheckCtx<'a> {
     pub db: &'a Arc<Database>,
@@ -905,13 +904,13 @@ impl PrimitiveMergeHandler for EventMergeHandler {
 
 /// Function pointer type for the vector merge precheck.
 ///
-/// The vector crate provides this implementation and registers it via
+/// The engine-owned vector runtime provides this implementation and registers it via
 /// `db.merge_registry().register_vector()` during `VectorSubsystem::initialize()`.
 /// Called from `VectorMergeHandler::precheck` to reject merges that would
 /// combine collections with incompatible configurations (dimension or metric
 /// mismatch). The check requires decoding `CollectionRecord` rows, which
-/// lives in the vector crate, so the engine dispatches to it via this
-/// callback rather than rolling its own decoder.
+/// lives in the vector runtime, so the generic merge planner dispatches to it
+/// via this callback rather than rolling its own decoder.
 ///
 /// Returns `Err` to abort the entire merge (no writes happen).
 pub type VectorMergePrecheckFn =
@@ -919,11 +918,11 @@ pub type VectorMergePrecheckFn =
 
 /// Function pointer type for the vector merge post-commit rebuild.
 ///
-/// The vector crate provides this implementation and registers it via
+/// The engine-owned vector runtime provides this implementation and registers it via
 /// `db.merge_registry().register_vector()` during `VectorSubsystem::initialize()`.
 /// Called from `VectorMergeHandler::post_commit` once per merge with the set
 /// of `(space, collection)` pairs that the merge actually touched on either
-/// side. The vector crate rebuilds only those collections' HNSW backends,
+/// side. The vector runtime rebuilds only those collections' HNSW backends,
 /// leaving untouched collections alone.
 ///
 /// Per-collection failures inside the callback are typically logged and
@@ -943,7 +942,7 @@ pub type VectorMergePostCommitFn = fn(
 /// Vector merge handler.
 ///
 /// Tracks the set of `(space, collection)` pairs touched on either side
-/// of the merge in `plan`, then dispatches to the registered vector-crate
+/// of the merge in `plan`, then dispatches to the registered vector-runtime
 /// callbacks in `precheck` (dimension/metric mismatch detection) and
 /// `post_commit` (per-collection HNSW rebuild). The plan itself uses the
 /// trait default (KV-shaped 14-case classification) — vectors are stored
@@ -993,7 +992,7 @@ impl PrimitiveMergeHandler for VectorMergeHandler {
     }
 
     fn precheck(&self, ctx: &MergePrecheckCtx<'_>) -> StrataResult<()> {
-        // Dimension/metric mismatch detection lives in the vector crate
+        // Dimension/metric mismatch detection lives in the vector runtime
         // (it requires decoding CollectionRecord). If no callback is
         // registered, fall through — the engine has nothing to validate
         // on its own.

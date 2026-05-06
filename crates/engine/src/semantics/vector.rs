@@ -1,7 +1,8 @@
 //! Vector types for the VectorStore primitive
 //!
 //! These types define the structure of vector embeddings and search results.
-//! Implementation logic (distance calculations, indexing, ANN) remains in primitives.
+//! Implementation logic (distance calculations, indexing, ANN) lives in the
+//! engine-owned vector runtime.
 
 use crate::StrataError;
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,7 @@ use strata_core::{BranchId, EntityRef, Version};
 /// All metrics are normalized to "higher = more similar".
 /// This normalization is part of the interface contract.
 ///
-/// Note: The actual distance calculation logic is in the primitives crate.
+/// Note: The actual distance calculation logic is in the engine vector runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DistanceMetric {
     /// Cosine similarity: dot(a,b) / (||a|| * ||b||)
