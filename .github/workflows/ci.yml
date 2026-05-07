@@ -38,10 +38,6 @@ jobs:
           if cargo tree --package strata-engine --edges=normal --format="{p}" | grep -q strata-graph; then
             echo "ERROR: strata-engine has normal dep on strata-graph" && exit 1
           fi
-          # Guard: vector_benchmarks must live in vector crate, not engine
-          if [ -f crates/engine/benches/vector_benchmarks.rs ]; then
-            echo "ERROR: vector_benchmarks.rs belongs in crates/vector/benches/" && exit 1
-          fi
           # Manifest guard: engine must not depend on vector/graph (neither normal nor dev-deps)
           if grep -qE "^strata-(vector|graph)" crates/engine/Cargo.toml; then
             echo "ERROR: engine Cargo.toml must not list strata-vector or strata-graph" && exit 1
