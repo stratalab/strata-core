@@ -76,7 +76,6 @@ struct AllowedEngineConsolidationStorageUse {
 
 const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
     "src",
-    "crates/search",
     "crates/executor",
     "crates/intelligence",
     "crates/cli",
@@ -84,7 +83,6 @@ const ENGINE_CONSOLIDATION_PRODUCTION_SCAN_ROOTS: &[&str] = &[
 
 const ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS: &[&str] = &[
     "src",
-    "crates/search/src",
     "crates/executor/src",
     "crates/intelligence/src",
     "crates/cli/src",
@@ -93,21 +91,12 @@ const ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS: &[&str] = &[
 const ENGINE_CONSOLIDATION_VECTOR_CONSUMER_SCAN_ROOTS: &[&str] = &[
     "src",
     "benchmarks",
-    "crates/search",
     "crates/executor",
     "crates/intelligence",
     "crates/cli",
 ];
 
 const ALLOWED_ENGINE_CONSOLIDATION_STORAGE_USES: &[AllowedEngineConsolidationStorageUse] = &[
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/search/Cargo.toml",
-        removal_epic: "EG6",
-    },
-    AllowedEngineConsolidationStorageUse {
-        path: "crates/search/src/substrate.rs",
-        removal_epic: "EG6",
-    },
     AllowedEngineConsolidationStorageUse {
         path: "crates/executor/Cargo.toml",
         removal_epic: "EG7",
@@ -168,6 +157,10 @@ const RETIRED_VECTOR_PACKAGE: &str = concat!("strata", "-", "vector");
 const RETIRED_VECTOR_IMPORT: &str = concat!("strata", "_", "vector");
 const RETIRED_VECTOR_RELATIVE_PATHS: &[&str] =
     &[concat!("../", "vector"), concat!("crates/", "vector")];
+const RETIRED_SEARCH_PACKAGE: &str = concat!("strata", "-", "search");
+const RETIRED_SEARCH_IMPORT: &str = concat!("strata", "_", "search");
+const RETIRED_SEARCH_RELATIVE_PATHS: &[&str] =
+    &[concat!("../", "search"), concat!("crates/", "search")];
 
 #[test]
 fn storage_facing_types_are_not_imported_from_strata_core() {
@@ -352,6 +345,40 @@ fn engine_consolidation_vector_subsystem_is_engine_product_owned() {
 }
 
 #[test]
+fn engine_consolidation_search_subsystem_is_engine_product_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut files = Vec::new();
+    for root in ENGINE_CONSOLIDATION_UPPER_PRODUCTION_SOURCE_ROOTS {
+        collect_rust_files(&repo_root.join(root), &mut files);
+    }
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        if is_test_source_path(&rel) {
+            continue;
+        }
+
+        let contents = fs::read_to_string(&file).expect("read production source file");
+        violations.extend(find_upper_subsystem_violations(
+            &rel,
+            &contents,
+            "SearchSubsystem",
+        ));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "production crates above engine must not assemble `SearchSubsystem`; search product runtime registration is engine-owned:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn engine_consolidation_vector_crate_is_retired() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let retired_dir = repo_root.join(RETIRED_VECTOR_RELATIVE_PATHS[1]);
@@ -383,6 +410,42 @@ fn engine_consolidation_vector_crate_is_retired() {
     assert!(
         violations.is_empty(),
         "vector behavior must be consumed from `strata_engine`; retired vector crate references found:\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
+fn engine_consolidation_search_crate_is_retired() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let retired_dir = repo_root.join(RETIRED_SEARCH_RELATIVE_PATHS[1]);
+    assert!(
+        !retired_dir.exists(),
+        "search implementation must live in `strata_engine`; retired search crate directory still exists at {}",
+        retired_dir.display()
+    );
+
+    let mut files = vec![repo_root.join("Cargo.toml")];
+    collect_rust_files(&repo_root.join("src"), &mut files);
+    collect_manifest_files(&repo_root.join("src"), &mut files);
+    collect_rust_files(&repo_root.join("benchmarks"), &mut files);
+    collect_manifest_files(&repo_root.join("benchmarks"), &mut files);
+    collect_rust_files(&repo_root.join("crates"), &mut files);
+    collect_manifest_files(&repo_root.join("crates"), &mut files);
+
+    let mut violations = Vec::new();
+    for file in files {
+        if should_skip(&file) || should_skip_manifest(&file) {
+            continue;
+        }
+
+        let rel = repo_relative_path(&repo_root, &file);
+        let contents = fs::read_to_string(&file).expect("read production file");
+        violations.extend(find_retired_search_violations(&rel, &contents));
+    }
+
+    assert!(
+        violations.is_empty(),
+        "search behavior must be consumed from `strata_engine`; retired search crate references found:\n{}",
         violations.join("\n")
     );
 }
@@ -722,6 +785,28 @@ fn find_retired_vector_violations(rel: &str, contents: &str) -> Vec<String> {
     violations
 }
 
+fn find_retired_search_violations(rel: &str, contents: &str) -> Vec<String> {
+    let mut violations = Vec::new();
+
+    for (line_no, line) in contents.lines().enumerate() {
+        if line.contains(RETIRED_SEARCH_PACKAGE)
+            || line.contains(RETIRED_SEARCH_IMPORT)
+            || RETIRED_SEARCH_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: retired search crate reference: {}",
+                rel,
+                line_no + 1,
+                line.trim()
+            ));
+        }
+    }
+
+    violations
+}
+
 const VECTOR_STORAGE_KEY_LAYOUT_MARKERS: &[&str] = &[
     "TypeTag::Vector",
     "Key::new_vector",
@@ -843,7 +928,29 @@ fn is_cfg_test_attr(trimmed_code: &str) -> bool {
         .filter(|ch| !ch.is_whitespace())
         .collect::<String>();
 
-    compact.starts_with("#[cfg(") && compact.contains("test") && !compact.contains("not(test)")
+    compact.starts_with("#[cfg(")
+        && !compact.contains("not(test)")
+        && contains_cfg_atom(&compact, "test")
+}
+
+fn contains_cfg_atom(compact_cfg_attr: &str, atom: &str) -> bool {
+    let mut offset = 0usize;
+    while let Some(relative) = compact_cfg_attr[offset..].find(atom) {
+        let start = offset + relative;
+        let end = start + atom.len();
+        let before = compact_cfg_attr[..start].chars().next_back();
+        let after = compact_cfg_attr[end..].chars().next();
+
+        let before_is_boundary = before.is_none_or(|ch| !is_rust_identifier_continue(ch));
+        let after_is_boundary = after.is_none_or(|ch| !is_rust_identifier_continue(ch));
+        if before_is_boundary && after_is_boundary {
+            return true;
+        }
+
+        offset = end;
+    }
+
+    false
 }
 
 fn line_declares_inline_module(trimmed_code: &str) -> bool {
@@ -1213,6 +1320,19 @@ fn find_manifest_violations(path: &Path, contents: &str) -> Vec<String> {
             ));
         }
 
+        if line.contains(RETIRED_SEARCH_PACKAGE)
+            || RETIRED_SEARCH_RELATIVE_PATHS
+                .iter()
+                .any(|path| line.contains(path))
+        {
+            violations.push(format!(
+                "{}:{}: manifest references retired `{}` crate",
+                rel,
+                line_no + 1,
+                RETIRED_SEARCH_PACKAGE
+            ));
+        }
+
         if line.contains("strata-core-legacy") || line.contains("core-legacy") {
             violations.push(format!(
                 "{}:{}: manifest references retired `strata-core-legacy` crate",
@@ -1565,6 +1685,22 @@ pub(crate) mod graph_tests {
 fn graph_subsystem_guard_does_not_ignore_not_test_cfg_modules() {
     let contents = r#"
 #[cfg(not(test))]
+mod runtime {
+    fn product_runtime() {
+        let _subsystem = strata_engine::GraphSubsystem;
+    }
+}
+"#;
+
+    let violations =
+        find_upper_subsystem_violations("crates/example/src/lib.rs", contents, "GraphSubsystem");
+    assert_eq!(violations.len(), 1, "{violations:?}");
+}
+
+#[test]
+fn graph_subsystem_guard_does_not_treat_test_substrings_as_test_cfg() {
+    let contents = r#"
+#[cfg(test_support)]
 mod runtime {
     fn product_runtime() {
         let _subsystem = strata_engine::GraphSubsystem;

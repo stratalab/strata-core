@@ -9,10 +9,9 @@
 
 use strata_engine::database::search_only_primary_spec;
 use strata_engine::primitives::branch::resolve_branch_name;
-use strata_engine::Database;
-use strata_engine::GraphSubsystem;
+use strata_engine::search::expand::{ExpandedQuery, QueryType};
+use strata_engine::{Database, GraphSubsystem};
 use strata_intelligence::expand_cache;
-use strata_search::expand::{ExpandedQuery, QueryType};
 use tempfile::TempDir;
 
 fn lex(text: &str) -> ExpandedQuery {

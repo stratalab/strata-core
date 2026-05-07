@@ -960,16 +960,18 @@ The current codebase still has storage exposure that should be tightened during
 engine consolidation:
 
 - `Database::storage()` exposes `Arc<SegmentedStore>` and is still used by some
-  upper-layer migration code. After search/executor storage bypasses are
-  removed, this should be narrowed or documented as an engine-internal/testing
-  escape hatch. Graph moved into engine during `EG4`; vector moved into engine
-  and the peer crate was deleted during `EG5`.
+  upper-layer migration code. After the executor storage bypass is removed,
+  this should be narrowed or documented as an engine-internal/testing escape
+  hatch. Graph moved into engine during `EG4`; vector moved into engine and the
+  peer crate was deleted during `EG5`; search moved into engine and the peer
+  crate was deleted during `EG6`.
 - Engine currently re-exports a small number of storage types. Each re-export
   should either become an engine-owned type or remain documented as an explicit
   public engine contract.
-- Search and executor currently import storage directly. Those imports are
-  migration debt, not an extension of this contract. Graph storage use moved into
-  engine during `EG4`; vector storage use moved into engine during `EG5`.
+- Executor currently imports storage directly. Those imports are migration
+  debt, not an extension of this contract. Graph storage use moved into engine
+  during `EG4`; vector storage use moved into engine during `EG5`; search
+  storage use moved into engine during `EG6`.
 - Engine tests may inspect storage format details. That is acceptable when the
   test is explicitly characterizing recovery, checkpoint, manifest, snapshot,
   WAL, or storage-runtime behavior.
@@ -979,9 +981,18 @@ engine consolidation:
 Final upper-crate storage bypass guard:
 
 ```bash
-rg -n "strata_storage::|use strata_storage|strata-storage" \
-  crates/{search,executor,intelligence,cli} \
-  -g 'Cargo.toml' -g '*.rs'
+rg -n "strata_storage::|use strata_storage" \
+  src crates/{executor,intelligence,cli} \
+  -g '*.rs'
+
+rg -n "strata-storage" crates/{executor,intelligence,cli}/Cargo.toml
+
+cargo metadata --format-version 1 --no-deps \
+  | jq -e '.packages[]
+      | select(.name == "stratadb")
+      | [.dependencies[]
+          | select(.kind == null and .name == "strata-storage")]
+      | length == 0'
 ```
 
 At engine-consolidation closeout this should return no production matches.

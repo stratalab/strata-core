@@ -24,7 +24,6 @@ google = ["embed", "strata-inference/google"]
 [dependencies]
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
-strata-search = { path = "../search" }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }

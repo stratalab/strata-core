@@ -1146,9 +1146,9 @@ pub mod search {
     use std::sync::Arc;
     use strata_core::PrimitiveType;
     use strata_engine::search::recipe::get_builtin_recipe;
+    use strata_engine::search::substrate::{self, RetrievalRequest, RetrievalResponse};
     use strata_engine::search::SearchHit;
     use strata_engine::{Database, SearchRequest, SearchResponse};
-    use strata_search::substrate::{self, RetrievalRequest, RetrievalResponse};
 
     /// Search via the unified retrieval substrate.
     ///

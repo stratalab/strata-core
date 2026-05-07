@@ -50,10 +50,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use strata_core::BranchId;
 use strata_core::Value;
+use strata_engine::search::expand::{ExpandedQuery, QueryType};
 use strata_engine::system_space::system_kv_key;
 use strata_engine::Database;
 use strata_engine::StrataResult;
-use strata_search::expand::{ExpandedQuery, QueryType};
 
 const KEY_PREFIX: &str = "expand_cache:";
 const FIFO_KEY: &str = "expand_cache_fifo";
@@ -185,8 +185,9 @@ struct FifoIndex {
     hashes: Vec<String>,
 }
 
-/// Serializable bridge for `ExpandedQuery` (which lives in `strata-search`
-/// and does not derive serde). The `query_type` field is a string so future
+/// Serializable bridge for engine-owned `ExpandedQuery`.
+///
+/// The `query_type` field is a string so future
 /// schema additions don't break old caches.
 #[derive(Serialize, Deserialize)]
 struct ExpandedQueryDto {

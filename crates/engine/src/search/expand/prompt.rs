@@ -1,8 +1,8 @@
-//! Prompt template for query expansion
+//! Prompt template for query expansion.
 
-/// System prompt for query expansion via an LLM.
+/// System prompt for query expansion via a model provider.
 ///
-/// Instructs the model to output `lex:`, `vec:`, and `hyde:` prefixed lines.
+/// Instructs the provider to output `lex:`, `vec:`, and `hyde:` prefixed lines.
 pub const SYSTEM_PROMPT: &str = "\
 You are a search query expander for a multi-primitive database that stores \
 key-value pairs, JSON documents, events, state cells, and vector embeddings.
@@ -22,12 +22,25 @@ Rules:
 - Do NOT include any explanation, numbering, or markdown
 - Output ONLY lines starting with lex:, vec:, or hyde:";
 
-/// Build the messages array for an OpenAI-compatible chat completions request.
-pub fn build_messages(query: &str) -> serde_json::Value {
-    serde_json::json!([
-        {"role": "system", "content": SYSTEM_PROMPT},
-        {"role": "user", "content": query}
-    ])
+/// Provider-neutral prompt parts for query expansion.
+///
+/// Provider adapters above engine decide how to map these parts into their
+/// request format.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpansionPrompt {
+    /// Instruction text for the model.
+    pub system: &'static str,
+    /// User query to expand.
+    pub user: String,
+}
+
+/// Build provider-neutral prompt parts for query expansion.
+pub fn build_prompt(query: &str) -> ExpansionPrompt {
+    ExpansionPrompt {
+        system: SYSTEM_PROMPT,
+        user: query.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -35,7 +48,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_system_prompt_not_empty() {
+    fn system_prompt_not_empty() {
         assert!(!SYSTEM_PROMPT.is_empty());
         assert!(SYSTEM_PROMPT.contains("lex:"));
         assert!(SYSTEM_PROMPT.contains("vec:"));
@@ -43,12 +56,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_messages_structure() {
-        let messages = build_messages("test query");
-        let arr = messages.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        assert_eq!(arr[0]["role"], "system");
-        assert_eq!(arr[1]["role"], "user");
-        assert_eq!(arr[1]["content"], "test query");
+    fn build_prompt_structure() {
+        let prompt = build_prompt("test query");
+        assert_eq!(prompt.system, SYSTEM_PROMPT);
+        assert_eq!(prompt.user, "test query");
     }
 }

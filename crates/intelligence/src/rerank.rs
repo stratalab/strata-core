@@ -5,8 +5,7 @@
 //! from the recipe.
 
 use strata_engine::search::recipe::RerankConfig;
-use strata_engine::search::SearchHit;
-use strata_search::rerank::{BlendWeights, RerankScore};
+use strata_engine::search::{blend_scores, BlendWeights, RerankScore, SearchHit};
 
 /// Rerank hits using a cross-encoder model and blend with fusion scores.
 ///
@@ -50,7 +49,7 @@ pub fn rerank_hits(
         rank_11_plus: b.rank_11_plus.unwrap_or(0.40),
     });
 
-    let blended = strata_search::rerank::blend_scores(hits, &scores, weights.as_ref());
+    let blended = blend_scores(hits, &scores, weights.as_ref());
     (blended, true)
 }
 

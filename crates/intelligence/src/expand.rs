@@ -6,9 +6,10 @@
 //! substrate retrieval pass.
 
 use strata_core::BranchId;
+use strata_engine::search::expand::parser::parse_expansion_with_filter;
+use strata_engine::search::expand::{ExpandedQuery, QueryType};
 use strata_engine::search::recipe::ExpansionConfig;
 use strata_engine::search::tokenize_unique;
-use strata_search::expand::{ExpandedQuery, QueryType};
 
 use crate::expand_cache;
 
@@ -132,10 +133,7 @@ fn generate_expansions(
 
     match result {
         Ok(Ok(response)) => {
-            let parsed = strata_search::expand::parser::parse_expansion_with_filter(
-                &response.text,
-                Some(query),
-            );
+            let parsed = parse_expansion_with_filter(&response.text, Some(query));
             tracing::debug!(
                 target: "strata::expand",
                 query = %query,

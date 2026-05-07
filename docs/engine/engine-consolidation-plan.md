@@ -11,11 +11,11 @@ manifest, checkpoint, recovery bootstrap, and storage-only runtime config
 application. Engine now sits on top as the database semantics and orchestration
 layer.
 
-The next problem is above that boundary. Several crates are already engine
-concepts in practice, but at least one still exists as a peer crate and reaches
-directly into storage:
-
-- `strata-search`
+The next problem is above that boundary. Several crates were engine concepts in
+practice but still existed as peer crates and, in some cases, reached directly
+into storage. `EG2` through `EG6` have now collapsed security, product open,
+graph, vector, and search ownership into engine. The remaining production
+storage bypass above engine is executor.
 
 `EG2` has already absorbed and deleted `strata-security`; it remains in this
 plan only as a completed phase record.
@@ -24,6 +24,8 @@ plan only as a completed phase record.
 `EG4` has absorbed and deleted `strata-graph`; it remains in this plan only as
 a completed phase record.
 `EG5` has absorbed and deleted `strata-vector`; it remains in this plan only as
+a completed phase record.
+`EG6` has absorbed and deleted `strata-search`; it remains in this plan only as
 a completed phase record.
 
 This plan consolidates those responsibilities into `strata-engine` so the
@@ -57,25 +59,20 @@ is:
 ```text
 strata-storage         -> strata-core
 strata-engine          -> strata-core, strata-storage
-strata-search          -> strata-core, strata-engine, strata-storage
-strata-intelligence    -> strata-core, strata-engine, strata-inference,
-                          strata-search
+strata-intelligence    -> strata-core, strata-engine, strata-inference
 strata-executor        -> strata-core, strata-engine, strata-intelligence,
-                          strata-search,
                           strata-storage
 strata-cli             -> strata-executor, strata-intelligence
 stratadb               -> strata-executor
 ```
 
-The direct storage bypasses above engine are:
+The direct storage bypass above engine is:
 
-- `strata-search`
-  - storage keys and namespaces in retrieval substrate code
 - `strata-executor`
   - storage keys, namespaces, type tags, validation helpers, and storage errors
 
 `strata-intelligence` does not currently have direct normal storage imports,
-but it depends on crates that do.
+and it no longer depends on a search peer crate after `EG6`.
 
 `EG4` removed graph from this list by moving graph runtime, storage-key mapping,
 transaction extension behavior, merge behavior, and branch DAG behavior into
@@ -83,6 +80,9 @@ engine.
 `EG5` removed vector from this list by moving vector runtime, storage-key
 mapping, transaction extension behavior, recovery, merge behavior, and sidecar
 cache policy into engine.
+`EG6` removed search from this list by moving model-free search runtime,
+retrieval substrate, fusion, expansion/rerank contracts, and search subsystem
+behavior into engine.
 
 ## Direct Storage Rule
 
@@ -102,10 +102,10 @@ edge:
   or build the storage substrate
 - temporary migration shims named in this plan and deleted by closeout
 
-Executor, intelligence, CLI, search, and product code are not storage
+Executor, intelligence, CLI, and product code are not storage
 tests. If they need a storage fact, engine must expose a semantic API or a
 narrow runtime API for that fact. Graph is now engine-owned after `EG4`; vector
-is now engine-owned after `EG5`.
+is now engine-owned after `EG5`; search is now engine-owned after `EG6`.
 
 This rule is the main acceptance condition for the plan.
 
@@ -117,6 +117,7 @@ paths for hypothetical external users.
 That means:
 
 - deleting `strata-vector` and `strata-search` is allowed
+- `strata-search` has already been absorbed and deleted by `EG6`
 - `strata-vector` has already been absorbed and deleted by `EG5`
 - `strata-graph` has already been absorbed and deleted by `EG4`
 - `strata-security` has already been absorbed and deleted by `EG2`
@@ -874,6 +875,9 @@ normal dependency trees, and remaining direct storage bypasses belong to
 
 Move search runtime and model-free retrieval orchestration into engine.
 
+Detailed implementation plan:
+[eg6-implementation-plan.md](./eg6-implementation-plan.md).
+
 **Scope:**
 
 Move the `strata-search` implementation into engine, including:
@@ -883,7 +887,8 @@ Move the `strata-search` implementation into engine, including:
 - query expansion interfaces
 - rerank interfaces and blend logic
 - prompt/parser support where it is part of search orchestration
-- `QueryEmbedder` trait or its engine-owned replacement
+- an engine-owned embedding adapter contract if later phases prove one is
+  needed
 - search integration with graph, vector, text, and engine primitives
 
 **Intelligence boundary:**
@@ -893,15 +898,15 @@ Engine may own search orchestration and model-independent search APIs.
 `strata-intelligence` should continue to own model/provider/inference
 implementation and depend on engine, not the other way around.
 
-The `QueryEmbedder`-style boundary is the right direction: engine can accept an
-embedding provider trait object or adapter, while intelligence supplies the
-implementation.
+The adapter boundary is the right direction: engine can accept model-free
+contracts or adapter objects, while intelligence supplies provider-backed
+implementations.
 
 **Design notes:**
 
-Search currently depends on graph, vector, storage, and engine. Once graph and
-vector are engine modules, search should be moved into engine to avoid keeping a
-peer crate that is mostly a facade over engine internals.
+Before `EG6`, search depended on graph, vector, storage, and engine. Once graph
+and vector became engine modules, search moved into engine to avoid keeping a
+peer crate that was mostly a facade over engine internals.
 
 Feature flags such as `expand` and `rerank` should be reviewed during this
 move. If they remain optional, they should be engine feature flags or
@@ -909,10 +914,10 @@ intelligence feature flags with a clear ownership rule.
 
 **Acceptance:**
 
-- `strata-search` has no normal storage dependency, or the crate is deleted
+- `strata-search` is deleted
 - intelligence imports search traits/types from engine
 - executor imports search surfaces from engine
-- search tests either move with the module or become engine tests
+- search tests moved with the module or became engine tests
 - no production search code outside engine imports `strata_storage`
 
 **Non-goals:**
@@ -941,8 +946,12 @@ on `strata-inference`.
 ### EG6D - Cut Over Search Consumers And Retire Search
 
 Update intelligence and executor imports to engine-owned search surfaces. Delete
-`strata-search` when no normal dependents remain, or leave only a documented
-temporary shell with an `EG9` deletion criterion.
+`strata-search` when no normal dependents remain.
+
+Current status: complete. Search runtime, retrieval substrate, fusion,
+expansion/rerank contracts, and `SearchSubsystem` behavior are engine-owned.
+`strata-search` is deleted from the workspace and guarded against
+reintroduction. Intelligence and executor no longer depend on `strata-search`.
 
 ## EG7 - Executor Storage Bypass Removal
 
@@ -1022,18 +1031,19 @@ model execution, with no remaining peer primitive/runtime crate dependencies.
 
 **Scope:**
 
-Remove the remaining direct dependency from intelligence to `strata-search`.
-`EG5G` already removed the old `strata-vector` dependency; `EG8` must preserve
-that state while cutting over search imports to engine-owned surfaces.
+`EG6` removed the direct dependency from intelligence to `strata-search`, and
+`EG5G` removed the old `strata-vector` dependency. `EG8` should rebaseline that
+state and tighten any remaining intelligence dependency policy without
+reintroducing peer primitive/runtime crates.
 
 The old dev-only graph dependency was removed during `EG4` when intelligence
 tests were rewritten to use engine-owned graph imports.
 
 **Design notes:**
 
-Intelligence should not learn storage. It should also not need graph/vector peer
-crates after those domains are engine-owned; vector already satisfies that rule
-after `EG5G`.
+Intelligence should not learn storage. It should also not need graph/vector/search
+peer crates after those domains are engine-owned; vector satisfies that rule
+after `EG5G`, and search satisfies it after `EG6`.
 
 The intended shape is:
 
@@ -1058,14 +1068,14 @@ model-backed expansion/rerank implementations, and inference/provider wiring.
 
 ### EG8A - Intelligence Dependency Rebaseline
 
-Re-run intelligence dependency and import inventories after vector absorption and
-before search cutover. Confirm no direct storage access exists and identify the
-remaining search peer-crate imports.
+Re-run intelligence dependency and import inventories after vector and search
+absorption. Confirm no direct storage access exists and no graph, vector,
+search, security, or storage peer-crate imports remain.
 
 ### EG8B - Cut Over Search Imports And Preserve Vector Cutover
 
-Update intelligence to use engine-owned search traits, DTOs, and runtime
-surfaces while confirming vector imports still come from engine.
+Confirm intelligence uses engine-owned search traits, DTOs, and runtime surfaces
+while vector imports still come from engine.
 
 ### EG8C - Preserve The Inference Boundary
 
@@ -1074,8 +1084,9 @@ intelligence/inference. Confirm engine still has no inference dependency.
 
 ### EG8D - Tighten Intelligence Dependency Guard
 
-Remove intelligence dependencies on search and storage from manifests and guard
-allowlists. Keep the existing graph/vector/security absence enforced.
+Rebaseline intelligence manifest/import guards for the already-removed search
+and storage edges. Remove stale allowlist entries if any remain, and keep the
+existing graph/vector/security absence enforced.
 
 ## EG9 - Crate Deletion And Workspace Closeout
 
@@ -1085,13 +1096,12 @@ Delete or retire the peer crates absorbed by engine and enforce the final graph.
 
 **Scope:**
 
-Remove from the workspace when no normal dependents remain:
-
-- `crates/search`
+No additional peer primitive/runtime crates remain after `EG6`; `EG9` should
+verify the deleted state and final guards.
 
 `crates/security` was deleted by `EG2D`. `crates/executor-legacy` was deleted
 by `EG3D`. `crates/graph` was deleted by `EG4G`. `crates/vector` was deleted by
-`EG5G`.
+`EG5G`. `crates/search` was deleted by `EG6F`.
 
 Remove workspace dependency entries and feature plumbing for deleted crates.
 
@@ -1120,10 +1130,8 @@ There should be no normal production dependency on:
 - `strata-vector`
 - `strata-search`
 
-`strata-search` may only survive closeout if it is intentionally retained as a
-compatibility shell with a documented removal date and no storage access. The
-other retired crates above are already deleted and guarded against
-reintroduction.
+The retired crates above are already deleted and guarded against
+reintroduction. No compatibility shell remains for search.
 
 `strata-security` is no longer a workspace crate and is guarded against
 reintroduction.
@@ -1171,7 +1179,7 @@ Current production direct storage bypass inventory:
 
 ```bash
 rg -n "strata_storage::|use strata_storage|strata-storage|strata_storage" \
-  src crates/{search,executor,intelligence,cli} \
+  src crates/{executor,intelligence,cli} \
   -g 'Cargo.toml' -g '*.rs'
 ```
 

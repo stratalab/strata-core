@@ -5,9 +5,10 @@
 
 use std::sync::Arc;
 
+use strata_engine::search::expand::{ExpandedQuery, QueryType};
 use strata_engine::search::recipe::TransformConfig;
-use strata_engine::search::Recipe;
-use strata_search::substrate::{self, RetrievalRequest};
+use strata_engine::search::substrate::{self, RetrievalRequest};
+use strata_engine::search::{PrimitiveType, Recipe, SearchHit};
 
 use crate::bridge::{to_core_branch_id, Primitives};
 use crate::types::{
@@ -316,9 +317,7 @@ fn try_expand_query(
     _embed_model: &str,
     branch_id: strata_core::BranchId,
     space: &str,
-) -> (Vec<strata_search::expand::ExpandedQuery>, bool) {
-    use strata_search::expand::{ExpandedQuery, QueryType};
-
+) -> (Vec<ExpandedQuery>, bool) {
     let expansion_cfg = match recipe.expansion.as_ref() {
         Some(c) => c,
         None => {
@@ -407,8 +406,7 @@ fn try_expand_query(
     _embed_model: &str,
     _branch_id: strata_core::BranchId,
     _space: &str,
-) -> (Vec<strata_search::expand::ExpandedQuery>, bool) {
-    use strata_search::expand::{ExpandedQuery, QueryType};
+) -> (Vec<ExpandedQuery>, bool) {
     (
         vec![ExpandedQuery {
             query_type: QueryType::Lex,
@@ -431,18 +429,16 @@ fn try_expand_query(
 fn multi_pass_retrieve(
     p: &Arc<Primitives>,
     _original_query: &str,
-    expanded_queries: &[strata_search::expand::ExpandedQuery],
+    expanded_queries: &[ExpandedQuery],
     recipe: &Recipe,
     original_embedding: Option<&[f32]>,
     embed_model: &str,
     branch_id: strata_core::BranchId,
     space: &str,
     time_range: Option<(u64, u64)>,
-    primitive_filter: Option<&[strata_engine::search::PrimitiveType]>,
+    primitive_filter: Option<&[PrimitiveType]>,
     as_of: Option<u64>,
-) -> Vec<(String, Vec<strata_engine::search::SearchHit>)> {
-    use strata_search::expand::QueryType;
-
+) -> Vec<(String, Vec<SearchHit>)> {
     let mut candidate_lists = Vec::new();
 
     for (i, eq) in expanded_queries.iter().enumerate() {
@@ -501,10 +497,10 @@ fn multi_pass_retrieve(
 
 /// Fuse multi-pass results via weighted RRF (original gets higher weight).
 fn fuse_multi_pass(
-    candidate_lists: &[(String, Vec<strata_engine::search::SearchHit>)],
+    candidate_lists: &[(String, Vec<SearchHit>)],
     original_weight: f32,
     recipe: &Recipe,
-) -> Vec<strata_engine::search::SearchHit> {
+) -> Vec<SearchHit> {
     use strata_engine::search::recipe::FusionConfig;
 
     if candidate_lists.len() <= 1 {
@@ -554,20 +550,20 @@ fn fuse_multi_pass(
 #[cfg(feature = "embed")]
 fn rerank_hits(
     query: &str,
-    hits: Vec<strata_engine::search::SearchHit>,
+    hits: Vec<SearchHit>,
     config: &strata_engine::search::recipe::RerankConfig,
     model_spec: &str,
-) -> (Vec<strata_engine::search::SearchHit>, bool) {
+) -> (Vec<SearchHit>, bool) {
     strata_intelligence::rerank::rerank_hits(query, hits, config, model_spec)
 }
 
 #[cfg(not(feature = "embed"))]
 fn rerank_hits(
     _query: &str,
-    hits: Vec<strata_engine::search::SearchHit>,
+    hits: Vec<SearchHit>,
     _config: &strata_engine::search::recipe::RerankConfig,
     _model_spec: &str,
-) -> (Vec<strata_engine::search::SearchHit>, bool) {
+) -> (Vec<SearchHit>, bool) {
     (hits, false)
 }
 
@@ -585,7 +581,7 @@ fn rerank_hits(
 fn generate_rag_answer(
     p: &Arc<Primitives>,
     query: &str,
-    hits: &[strata_engine::search::SearchHit],
+    hits: &[SearchHit],
     recipe: &Recipe,
 ) -> Option<strata_intelligence::rag::RagAnswer> {
     strata_intelligence::rag::generate_answer(&p.db, query, hits, recipe)
@@ -595,7 +591,7 @@ fn generate_rag_answer(
 fn generate_rag_answer(
     _p: &Arc<Primitives>,
     _query: &str,
-    _hits: &[strata_engine::search::SearchHit],
+    _hits: &[SearchHit],
     _recipe: &Recipe,
 ) -> Option<RagAnswerStub> {
     None
@@ -728,7 +724,7 @@ fn enrich_versions(
     p: &Arc<Primitives>,
     branch_id: strata_core::BranchId,
     _request_space: &str,
-    hit_refs: &[strata_engine::search::SearchHit],
+    hit_refs: &[SearchHit],
     hits: &mut [SearchResultHit],
     depth: usize,
 ) {

@@ -1,18 +1,19 @@
-//! Output parser for LLM query expansion responses
+//! Output parser for query expansion responses.
 //!
 //! Parses `lex:`, `vec:`, and `hyde:` prefixed lines from model output.
-//! Tolerant: ignores invalid lines, falls back gracefully.
+//! Invalid lines are ignored.
 
 use super::{ExpandedQueries, ExpandedQuery, QueryType};
 
-/// Parse LLM output, filtering out expansions that share no terms with the original query.
+/// Parse expansion output, filtering expansions that share no terms with the
+/// original query.
 ///
-/// When `original_query` is provided, each expansion must contain at least one
-/// word from the original query (case-insensitive). This prevents semantic drift
-/// where the LLM generates completely unrelated expansions.
+/// When `original_query` is provided, each `lex:` and `vec:` expansion must
+/// contain at least one word from the original query, case-insensitively. This
+/// prevents semantic drift where a provider generates unrelated expansions.
 ///
-/// `hyde:` lines are exempt from this check since they are hypothetical documents
-/// that may describe the topic without using the exact query terms.
+/// `hyde:` lines are exempt because hypothetical documents may describe the
+/// topic without using the exact query terms.
 pub fn parse_expansion_with_filter(text: &str, original_query: Option<&str>) -> ExpandedQueries {
     let query_terms: Vec<String> = original_query
         .map(|q| q.split_whitespace().map(|t| t.to_lowercase()).collect())
@@ -33,15 +34,13 @@ pub fn parse_expansion_with_filter(text: &str, original_query: Option<&str>) -> 
         } else if let Some(text) = trimmed.strip_prefix("hyde:") {
             (QueryType::Hyde, text.trim())
         } else {
-            continue; // Lines without valid prefix are silently ignored
+            continue;
         };
 
         if expansion_text.is_empty() {
             continue;
         }
 
-        // Drift guard: lex/vec must share at least one term with original query.
-        // Hyde is exempt (hypothetical docs may use different vocabulary).
         if !query_terms.is_empty() && query_type != QueryType::Hyde {
             let expansion_lower = expansion_text.to_lowercase();
             let has_overlap = query_terms
@@ -66,7 +65,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_valid_output() {
+    fn parse_valid_output() {
         let text = "\
 lex: user authentication login
 vec: how does user authentication work in the system
@@ -81,7 +80,7 @@ hyde: The authentication module handles user login via OAuth2 tokens.";
     }
 
     #[test]
-    fn test_parse_multiple_lex() {
+    fn parse_multiple_lex() {
         let text = "\
 lex: auth login
 lex: oauth2 token
@@ -95,11 +94,11 @@ vec: authentication system overview";
     }
 
     #[test]
-    fn test_parse_ignores_invalid_lines() {
+    fn parse_ignores_invalid_lines() {
         let text = "\
-This is some preamble the model shouldn't output
+This is some preamble the model should not output
 lex: valid keyword query
-Here's another invalid line
+Here is another invalid line
 vec: valid semantic query
 1. numbered list item
 hyde: valid hypothetical document";
@@ -109,20 +108,20 @@ hyde: valid hypothetical document";
     }
 
     #[test]
-    fn test_parse_empty_input() {
+    fn parse_empty_input() {
         let result = parse_expansion_with_filter("", None);
         assert!(result.queries.is_empty());
     }
 
     #[test]
-    fn test_parse_all_invalid() {
+    fn parse_all_invalid() {
         let text = "no valid prefixes here\njust garbage\n";
         let result = parse_expansion_with_filter(text, None);
         assert!(result.queries.is_empty());
     }
 
     #[test]
-    fn test_parse_strips_whitespace() {
+    fn parse_strips_whitespace() {
         let text = "  lex:  spaced out query  \n  vec:  another query  ";
         let result = parse_expansion_with_filter(text, None);
         assert_eq!(result.queries.len(), 2);
@@ -131,7 +130,7 @@ hyde: valid hypothetical document";
     }
 
     #[test]
-    fn test_parse_skips_empty_text_after_prefix() {
+    fn parse_skips_empty_text_after_prefix() {
         let text = "lex:\nvec: valid\nlex:   \nhyde: also valid";
         let result = parse_expansion_with_filter(text, None);
         assert_eq!(result.queries.len(), 2);
@@ -139,50 +138,43 @@ hyde: valid hypothetical document";
         assert_eq!(result.queries[1].query_type, QueryType::Hyde);
     }
 
-    // ==============================
-    // Drift guard tests
-    // ==============================
-
     #[test]
-    fn test_filter_keeps_expansions_with_overlap() {
+    fn filter_keeps_expansions_with_overlap() {
         let text = "\
 lex: user authentication login
 vec: how does user login work
 hyde: hypothetical doc about something else entirely";
         let result = parse_expansion_with_filter(text, Some("user authentication"));
-        // lex and vec share "user"/"authentication", hyde is exempt
         assert_eq!(result.queries.len(), 3);
     }
 
     #[test]
-    fn test_filter_removes_drifted_lex_and_vec() {
+    fn filter_removes_drifted_lex_and_vec() {
         let text = "\
 lex: completely unrelated topic
 vec: nothing to do with query
 hyde: hypothetical about deployment";
         let result = parse_expansion_with_filter(text, Some("user authentication"));
-        // lex and vec share no terms → filtered out; hyde exempt → kept
         assert_eq!(result.queries.len(), 1);
         assert_eq!(result.queries[0].query_type, QueryType::Hyde);
     }
 
     #[test]
-    fn test_filter_case_insensitive() {
+    fn filter_case_insensitive() {
         let text = "lex: USER login methods";
         let result = parse_expansion_with_filter(text, Some("user authentication"));
         assert_eq!(result.queries.len(), 1);
     }
 
     #[test]
-    fn test_no_filter_when_query_is_none() {
+    fn no_filter_when_query_is_none() {
         let text = "lex: anything goes here";
         let result = parse_expansion_with_filter(text, None);
         assert_eq!(result.queries.len(), 1);
     }
 
     #[test]
-    fn test_filter_partial_term_match() {
-        // "auth" is a substring of the expansion "authentication" — should match
+    fn filter_partial_term_match() {
         let text = "lex: authentication flow";
         let result = parse_expansion_with_filter(text, Some("auth token"));
         assert_eq!(result.queries.len(), 1);

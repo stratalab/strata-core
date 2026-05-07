@@ -11,8 +11,8 @@ boundary.
 For the broader engine cleanup ledger, see
 [engine-pending-items.md](./archive/engine-pending-items.md).
 
-For the planned consolidation of graph, vector, search, and legacy bootstrap
-into engine, see
+For the consolidation record for security/open options, product bootstrap,
+graph, vector, and search ownership into engine, see
 [engine-consolidation-plan.md](./engine-consolidation-plan.md).
 
 For the cross-boundary audit with storage, see
@@ -155,7 +155,6 @@ all.
 The direct normal incoming graph today is:
 
 - `strata-executor`
-- `strata-search`
 - `strata-intelligence`
 
 And then, above those:
@@ -166,61 +165,58 @@ And then, above those:
 `strata-intelligence` also depends on `strata-inference`, which is currently
 outside the engine stack and supplies model/inference support.
 
-This confirms that engine is already the main semantic/runtime hub of the
-workspace, but it is not yet the only runtime owner above storage.
+This confirms that engine is now the main semantic/runtime hub of the
+workspace. The remaining direct storage bypass above engine is in executor.
 
 ### Current Normal Workspace Graph
 
 The verified normal dependency graph for engine-adjacent crates is below.
-`EG5H` re-verified this graph on 2026-05-06 after deleting the
-`strata-vector` crate and closing out vector absorption. The phase tracking
+`EG6G` re-verified this graph on 2026-05-07 after deleting the
+`strata-search` crate and closing out search absorption. The phase tracking
 plans are
 [eg1-implementation-plan.md](./eg1-implementation-plan.md),
 [eg3-implementation-plan.md](./eg3-implementation-plan.md), and
-[eg5-implementation-plan.md](./eg5-implementation-plan.md).
+[eg6-implementation-plan.md](./eg6-implementation-plan.md).
 
 ```text
 strata-storage       -> strata-core
 strata-engine        -> strata-core, strata-storage
-strata-search        -> strata-core, strata-engine, strata-storage
-strata-intelligence  -> strata-core, strata-engine, strata-inference, strata-search
+strata-intelligence  -> strata-core, strata-engine, strata-inference
 strata-executor      -> strata-core, strata-engine,
-                        strata-intelligence, strata-search,
-                        strata-storage
+                        strata-intelligence, strata-storage
 strata-cli           -> strata-executor, strata-intelligence
 stratadb             -> strata-executor
 ```
 
-This graph is the reason engine consolidation should finish vector and search
-absorption before designing `storage-next`. Security/open options are already
-engine-owned after `EG2`, product open/bootstrap is engine-owned after `EG3`,
-graph is engine-owned after `EG4`, and vector is engine-owned after `EG5`.
-Today the remaining peer crates are direct engine consumers, but several of them
-also still bypass engine and reach storage directly.
+Security/open options are engine-owned after `EG2`, product open/bootstrap is
+engine-owned after `EG3`, graph is engine-owned after `EG4`, vector is
+engine-owned after `EG5`, and search is engine-owned after `EG6`. Today the
+remaining production direct storage bypass above engine is executor.
 
 The current inverse normal storage graph is:
 
 ```text
 strata-storage
 |-- strata-engine
-|-- strata-executor
-`-- strata-search
+|   |-- strata-executor
+|   `-- strata-intelligence
+`-- strata-executor
 ```
 
-`strata-engine` is the intended permanent dependent. `strata-executor`
-and `strata-search` are transitional direct storage bypasses that the engine
-consolidation plan removes. `EG4` removed `strata-graph` by
-moving graph implementation, storage-key mapping, transaction extension,
-runtime hooks, and branch DAG behavior into engine. `EG5` moved vector
-implementation, storage-key mapping, transaction extension, recovery hooks,
-merge behavior, and sidecar-cache policy into engine, then deleted the retired
-`strata-vector` package after search, intelligence, executor, benchmarks, and
-root tests moved to `strata_engine::vector`.
+`strata-engine` is the intended permanent dependent. `strata-executor` is the
+remaining transitional direct storage bypass that the engine consolidation plan
+removes. `EG4` removed `strata-graph` by moving graph implementation,
+storage-key mapping, transaction extension, runtime hooks, and branch DAG
+behavior into engine. `EG5` moved vector implementation, storage-key mapping,
+transaction extension, recovery hooks, merge behavior, and sidecar-cache policy
+into engine, then deleted the retired `strata-vector` package. `EG6` moved
+search runtime, retrieval substrate, manifest behavior, and subsystem assembly
+into engine, then deleted the retired `strata-search` package.
 
 Because most upper crates also depend on engine, the full inverse tree shows
-executor, intelligence, and search under the engine branch as ordinary engine
-consumers. That is not itself a storage bypass; the bypasses that matter here
-are the direct normal storage edges above engine.
+executor and intelligence under the engine branch as ordinary engine consumers.
+That is not itself a storage bypass; the bypasses that matter here are the
+direct normal storage edges above engine.
 
 ### Direct Storage Bypasses Above Engine
 
@@ -228,7 +224,6 @@ These normal production direct storage dependencies are accurate today and
 should be treated as consolidation inputs. The source-level inventory is
 tracked in [eg1-implementation-plan.md](./eg1-implementation-plan.md):
 
-- `strata-search` uses storage keys/namespaces in retrieval substrate code.
 - `strata-executor` uses storage keys, namespaces, type tags, validation, and
   storage errors directly.
 
@@ -369,7 +364,7 @@ whether code in the crate is:
   `storage`
 
 After the storage-boundary closeout, the semantic side of engine is real and
-the targeted lower storage mechanics have sunk into storage. The remaining
-cleanup is above this boundary: engine can absorb graph, vector, and search
-responsibilities only if the substrate/mechanics boundary documented here stays
-explicit.
+the targeted lower storage mechanics have sunk into storage. Graph, vector, and
+search now live inside engine. The remaining cleanup above this boundary is to
+remove executor's direct storage bypass while keeping the substrate/mechanics
+boundary documented here explicit.

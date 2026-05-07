@@ -20,7 +20,6 @@ members = [
     "crates/intelligence",
     "crates/cli",
     "crates/executor",
-    "crates/search",
 ]
 
 [workspace.package]
@@ -180,6 +179,7 @@ criterion = { workspace = true }
 tempfile = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true }
+rmp-serde = { workspace = true }
 rustc-hash = { workspace = true }
 parking_lot = { workspace = true }
 proptest = { workspace = true }
@@ -188,7 +188,6 @@ strata-core = { package = "strata-core", path = "crates/core" }
 strata-storage = { path = "crates/storage" }
 strata-engine = { path = "crates/engine", features = ["test-support"] }
 strata-intelligence = { path = "crates/intelligence" }
-strata-search = { path = "crates/search" }
 uuid = { workspace = true }
 crc32fast = { workspace = true }
 base64 = { workspace = true }

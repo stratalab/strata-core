@@ -7,11 +7,11 @@
 //!
 //! See `docs/architecture/M6_ARCHITECTURE.md` for authoritative specification.
 
+use crate::search::{EntityRef, SearchHit, SearchResponse};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use strata_core::PrimitiveType;
-use strata_engine::search::{EntityRef, SearchHit, SearchResponse};
 
 // ============================================================================
 // FusedResult
@@ -309,8 +309,8 @@ pub fn weighted_rrf_fuse(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::search::{EntityRef, SearchStats};
     use strata_core::BranchId;
-    use strata_engine::search::{EntityRef, SearchStats};
 
     fn make_hit(doc_ref: EntityRef, score: f32, rank: u32) -> SearchHit {
         SearchHit {
@@ -488,6 +488,38 @@ mod tests {
     }
 
     #[test]
+    fn test_rrf_fuser_ties_order_by_entity_hash() {
+        let fuser = RRFFuser::default();
+
+        let branch_id = BranchId::from_bytes([7u8; 16]);
+        let doc_a = make_kv_doc_ref(&branch_id, "tie_a");
+        let doc_b = make_kv_doc_ref(&branch_id, "tie_b");
+
+        let list_a = vec![make_hit(doc_a.clone(), 0.5, 1)];
+        let list_b = vec![make_hit(doc_b.clone(), 0.5, 1)];
+        let result = fuser.fuse(
+            vec![
+                (PrimitiveType::Kv, make_response(list_a)),
+                (PrimitiveType::Json, make_response(list_b)),
+            ],
+            10,
+        );
+
+        let mut expected = [doc_a, doc_b];
+        expected.sort_by_key(|doc_ref| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            doc_ref.hash(&mut hasher);
+            hasher.finish()
+        });
+
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.hits[0].doc_ref, expected[0]);
+        assert_eq!(result.hits[1].doc_ref, expected[1]);
+        assert_eq!(result.hits[0].rank, 1);
+        assert_eq!(result.hits[1].rank, 2);
+    }
+
+    #[test]
     fn test_rrf_fuser_custom_k() {
         let fuser = RRFFuser::new(10);
         assert_eq!(fuser.k_rrf(), 10);
@@ -561,6 +593,30 @@ mod tests {
         // doc_b: 1.0/(60+1) + 0.05 = 0.0164 + 0.05
         assert_eq!(fused.hits[0].doc_ref, doc_a);
         assert!(fused.hits[0].score > fused.hits[1].score);
+    }
+
+    #[test]
+    fn test_weighted_rrf_ties_order_by_entity_hash() {
+        let branch_id = BranchId::from_bytes([9u8; 16]);
+        let doc_a = make_kv_doc_ref(&branch_id, "weighted_tie_a");
+        let doc_b = make_kv_doc_ref(&branch_id, "weighted_tie_b");
+
+        let list_a = make_response(vec![make_hit(doc_a.clone(), 0.5, 1)]);
+        let list_b = make_response(vec![make_hit(doc_b.clone(), 0.5, 1)]);
+        let fused = weighted_rrf_fuse(vec![(list_a, 1.0), (list_b, 1.0)], 60, 10);
+
+        let mut expected = [doc_a, doc_b];
+        expected.sort_by_key(|doc_ref| {
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            doc_ref.hash(&mut hasher);
+            hasher.finish()
+        });
+
+        assert_eq!(fused.hits.len(), 2);
+        assert_eq!(fused.hits[0].doc_ref, expected[0]);
+        assert_eq!(fused.hits[1].doc_ref, expected[1]);
+        assert_eq!(fused.hits[0].rank, 1);
+        assert_eq!(fused.hits[1].rank, 2);
     }
 
     #[test]
