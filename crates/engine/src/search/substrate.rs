@@ -24,21 +24,21 @@ use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::search::recipe::FusionConfig;
+use crate::search::{
+    EntityRef, PrimitiveType, Recipe, SearchHit, SearchMode, SearchRequest, Searchable,
+};
+use crate::system_space::SYSTEM_SPACE;
+use crate::Database;
+use crate::StrataResult;
 use rayon::prelude::*;
 use strata_core::id::CommitVersion;
 use strata_core::BranchId;
-use strata_engine::search::recipe::FusionConfig;
-use strata_engine::search::{
-    EntityRef, PrimitiveType, Recipe, SearchHit, SearchMode, SearchRequest, Searchable,
-};
-use strata_engine::system_space::SYSTEM_SPACE;
-use strata_engine::Database;
-use strata_engine::StrataResult;
 use strata_storage::{Key, Namespace};
 
 // Primitive facades
-use strata_engine::primitives::{EventLog, JsonStore, KVStore};
-use strata_engine::{GraphStore, VectorMatchWithSource, VectorResult, VectorStore};
+use crate::primitives::{EventLog, JsonStore, KVStore};
+use crate::{GraphStore, VectorMatchWithSource, VectorResult, VectorStore};
 
 // ============================================================================
 // Types
@@ -599,13 +599,13 @@ fn hash_entity(e: &EntityRef) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use strata_core::Value;
-    use strata_engine::database::OpenSpec;
-    use strata_engine::search::recipe::{
+    use crate::database::OpenSpec;
+    use crate::search::recipe::{
         BM25Config, FusionConfig, RetrieveConfig, TransformConfig, VectorRetrieveConfig,
     };
-    use strata_engine::search::Recipe;
-    use strata_engine::{DistanceMetric, SearchSubsystem, VectorConfig};
+    use crate::search::Recipe;
+    use crate::{DistanceMetric, SearchSubsystem, VectorConfig};
+    use strata_core::Value;
 
     /// Simple keyword recipe for tests (BM25 + RRF + limit 10).
     fn test_recipe() -> Recipe {
@@ -779,7 +779,7 @@ mod tests {
         let (db, branch_id) = setup_db_with_kv(&[("doc", "some text")]);
         // Recipe with only vector config but no embedding — should return empty.
         let recipe = Recipe {
-            retrieve: Some(strata_engine::search::recipe::RetrieveConfig {
+            retrieve: Some(crate::search::recipe::RetrieveConfig {
                 vector: Some(VectorRetrieveConfig::default()),
                 ..Default::default()
             }),
@@ -807,7 +807,7 @@ mod tests {
     /// with no `source_ref` entirely.
     #[test]
     fn test_substrate_vector_filters_cross_space_sources() {
-        use strata_engine::search::recipe::VectorRetrieveConfig;
+        use crate::search::recipe::VectorRetrieveConfig;
 
         // Create a fresh DB and a shadow vector collection with three records:
         // one in tenant_a, one in tenant_b, one with no source_ref.
@@ -855,7 +855,7 @@ mod tests {
         // Hybrid recipe: BM25 + vector. BM25 finds nothing because there's
         // no KV data — only the vector stage produces hits.
         let recipe = Recipe {
-            retrieve: Some(strata_engine::search::recipe::RetrieveConfig {
+            retrieve: Some(crate::search::recipe::RetrieveConfig {
                 bm25: Some(BM25Config {
                     k: Some(50),
                     ..Default::default()
@@ -1174,7 +1174,7 @@ mod tests {
         doc_id: &str,
         json_str: &str,
     ) -> u64 {
-        use strata_engine::JsonValue;
+        use crate::JsonValue;
         let json_store = JsonStore::new(db.clone());
         let value: JsonValue = json_str.parse().expect("parse json");
         json_store
@@ -1202,7 +1202,7 @@ mod tests {
         node_id: &str,
         text: &str,
     ) -> u64 {
-        use strata_engine::graph::types::NodeData;
+        use crate::graph::types::NodeData;
         let graph_store = GraphStore::new(db.clone());
         let data = NodeData {
             entity_ref: None,
@@ -1216,7 +1216,7 @@ mod tests {
         // Use the engine graph key helper rather than hardcoding the
         // "{graph}/n/{node_id}" format — protects against future format
         // changes in the graph module.
-        let user_key = strata_engine::graph::keys::node_key(graph, node_id);
+        let user_key = crate::graph::keys::node_key(graph, node_id);
         let storage_key = Key::new_graph(
             Arc::new(Namespace::new(*branch_id, space.to_string())),
             user_key.as_bytes(),
@@ -1540,7 +1540,7 @@ mod tests {
     /// landed. It is the canonical regression guard for that filter.
     #[test]
     fn test_bm25_fan_out_no_cross_primitive_duplicates() {
-        use strata_engine::JsonValue;
+        use crate::JsonValue;
 
         let db = Database::open_runtime(OpenSpec::cache().with_subsystem(SearchSubsystem))
             .expect("create db");

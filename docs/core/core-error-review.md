@@ -80,8 +80,10 @@ Representative examples:
   - `VectorResult<T>`
 - [crates/executor/src/error.rs](../../crates/executor/src/error.rs)
   - executor-facing `Error`
-- [crates/search/src/llm_client.rs](../../crates/search/src/llm_client.rs)
-  - `LlmClientError`
+- [crates/engine/src/search/expand/error.rs](../../crates/engine/src/search/expand/error.rs)
+  - `ExpandError`
+- [crates/engine/src/search/rerank/error.rs](../../crates/engine/src/search/rerank/error.rs)
+  - `RerankError`
 - [crates/inference/src/error.rs](../../crates/inference/src/error.rs)
   - `InferenceError`
 

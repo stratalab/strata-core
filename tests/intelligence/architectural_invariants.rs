@@ -5,10 +5,9 @@
 
 use crate::common::*;
 use crate::common::search::substrate_search;
-use strata_engine::search::{BM25LiteScorer, Scorer};
 use strata_core::{BranchId, EntityRef as DocRef, PrimitiveType, Value};
+use strata_engine::search::{BM25LiteScorer, Fuser, RRFFuser, Scorer};
 use strata_engine::{KVStore, SearchRequest, SearchResponse};
-use strata_search::RRFFuser;
 use std::collections::HashSet;
 use std::sync::Arc;
 

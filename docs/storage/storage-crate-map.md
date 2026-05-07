@@ -19,10 +19,10 @@ For the cross-boundary ownership question with engine, see
 [storage-engine-ownership-audit.md](./storage-engine-ownership-audit.md).
 
 The important takeaway is that `strata-storage` is the real lower runtime
-anchor of the system. The remaining work is above storage: future engine
-consolidation may absorb graph, vector, and search responsibilities; security
-and executor-legacy have already been absorbed. Storage should remain the
-generic persistence substrate.
+anchor of the system. Engine consolidation has absorbed security/open options,
+product open/bootstrap, graph, vector, and search. Storage should remain the
+generic persistence substrate while the remaining upper-layer cleanup removes
+executor's direct storage bypass.
 
 ## High-Level Shape
 
@@ -115,7 +115,6 @@ The internal incoming graph today is:
 
 - `strata-engine`
 - `strata-executor`
-- `strata-search`
 
 The root `stratadb` package also depends on storage in dev/test paths.
 
@@ -127,7 +126,9 @@ checkpoint, open, retention, or product policy below engine.
 `EG4` removed `strata-graph` as a separate storage consumer by moving the graph
 implementation into `strata-engine`. `EG5` removed `strata-vector` as a separate
 storage consumer by moving vector implementation into `strata-engine` and
-deleting the retired vector crate.
+deleting the retired vector crate. `EG6` removed `strata-search` as a separate
+storage consumer by moving search implementation into `strata-engine` and
+deleting the retired search crate.
 
 ## What Storage Already Owns
 

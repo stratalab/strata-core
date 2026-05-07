@@ -4,7 +4,7 @@
 
 use strata_core::{BranchId, EntityRef as DocRef, PrimitiveType};
 use strata_engine::{SearchHit, SearchResponse, SearchStats};
-use strata_search::{Fuser, RRFFuser};
+use strata_engine::search::{Fuser, RRFFuser};
 
 const DEFAULT_SPACE: &str = "default";
 

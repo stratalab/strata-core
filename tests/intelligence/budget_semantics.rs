@@ -149,7 +149,7 @@ fn test_tier3_scores_decreasing_with_budget() {
 #[test]
 fn test_tier3_budget_no_duplicates() {
     use strata_engine::search::recipe::get_builtin_recipe;
-    use strata_search::substrate::{self, RetrievalRequest};
+    use strata_engine::search::substrate::{self, RetrievalRequest};
 
     let db = create_test_db();
     let branch_id = test_branch_id();

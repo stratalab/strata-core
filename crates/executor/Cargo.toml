@@ -15,8 +15,6 @@ workspace = true
 [features]
 default = []
 embed = ["strata-intelligence/embed", "strata-engine/embed"]
-expand = ["strata-search/expand"]
-rerank = ["strata-search/rerank"]
 anthropic = ["embed", "strata-intelligence/anthropic"]
 openai = ["embed", "strata-intelligence/openai"]
 google = ["embed", "strata-intelligence/google"]
@@ -26,7 +24,6 @@ arrow = ["dep:arrow", "dep:parquet"]
 strata-core = { package = "strata-core", path = "../core" }
 strata-engine = { path = "../engine" }
 strata-intelligence = { path = "../intelligence" }
-strata-search = { path = "../search" }
 strata-storage = { path = "../storage" }
 rmp-serde = { workspace = true }
 serde = { workspace = true }

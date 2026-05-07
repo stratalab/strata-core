@@ -2,14 +2,15 @@
 
 ## Project Overview
 
-Strata is an **embedded** database (like SQLite/DuckDB, not a server). It is a Rust workspace
-with 13 crates in a strict dependency DAG:
+Strata is an **embedded** database (like SQLite/DuckDB, not a server). The
+active production stack is a strict dependency DAG. The major normal edges are:
 
 ```
-core → storage → concurrency → durability → engine
-engine → graph, vector, search, intelligence, inference
-engine → executor → cli
-security (leaf, used by engine)
+core -> storage -> engine
+engine -> intelligence -> executor -> cli
+inference -> intelligence
+engine -> executor -> stratadb
+storage -> executor (temporary EG7 bypass)
 ```
 
 The `engine` crate is the authority layer. The `executor` crate is a thin transport/session
@@ -29,7 +30,8 @@ reviewer approval — not just a code change.
 3. **No process-global semantic state.** Use per-Database registries, not global merge
    handlers, DAG hooks, or first-caller-wins patterns.
 4. **Engine never depends on intelligence or inference.** Engine owns adapter traits
-   (`QueryEmbedder`, `QueryExpander`, `ResultReranker`, `RagGenerator`);
+   (`QueryExpander`, `ResultReranker`, `RagGenerator`, and any future embedding
+   adapter contract);
    `IntelligenceSubsystem` installs implementations via per-Database slots.
 
 ### Runtime Rules
@@ -115,8 +117,12 @@ current allowed surface:
 
 **Search/Retrieval:** `RetrievalService`, `SearchRequest`, `SearchResponse`,
 `DiffSearchRequest`, `DiffSearchResponse`, `ResolvedRecipe`, `RecipeInfo`,
-`RetrievalCapabilities`, `QueryEmbedder`, `QueryExpander`, `ResultReranker`,
-`RagGenerator`, `AutoEmbedPipeline`, `AutoEmbedConfig`
+`RetrievalCapabilities`, `QueryExpander`, `ResultReranker`, `RagGenerator`,
+`AutoEmbedPipeline`, `AutoEmbedConfig`, `QueryType`, `ExpandedQuery`,
+`ExpandedQueries`, `ExpandError`, `ExpansionPrompt`, `RerankScore`, `Reranker`,
+`RerankError`, `RerankPrompt`, `BlendWeights`, `blend_scores`,
+`parse_expansion_with_filter`, `parse_rerank_response`, search expansion/rerank
+prompt builders
 
 **Errors:** `StrataError`, `executor::Error`, `ErrorSeverity`, `BranchDagError`/`Kind`,
 `ObserverError`/`Kind`, `RefreshHookError`, `AdvanceError`, `UnblockError`,

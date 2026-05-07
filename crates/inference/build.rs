@@ -5,6 +5,17 @@ fn main() {
 
 #[cfg(feature = "local")]
 fn build_llama_cpp() {
+    // Check-only escape hatch for workspace refactors that need to typecheck
+    // `local`/`embed` consumers when the optional native vendor tree is absent.
+    if std::env::var_os("STRATA_INFERENCE_SKIP_LLAMA_CPP_BUILD_FOR_CHECK").is_some() {
+        println!(
+            "cargo:warning=skipping llama.cpp native build because \
+             STRATA_INFERENCE_SKIP_LLAMA_CPP_BUILD_FOR_CHECK is set; use only for cargo check"
+        );
+        println!("cargo:rerun-if-env-changed=STRATA_INFERENCE_SKIP_LLAMA_CPP_BUILD_FOR_CHECK");
+        return;
+    }
+
     let mut config = cmake::Config::new("vendor/llama.cpp");
 
     config
