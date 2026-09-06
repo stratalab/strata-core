@@ -100,6 +100,7 @@ pub struct JsonHistoryRow {
     version: CommitVersion,
     timestamp: Timestamp,
     document_version: Option<u64>,
+    committed_at: Option<Timestamp>,
 }
 
 impl JsonHistoryRow {
@@ -116,7 +117,25 @@ impl JsonHistoryRow {
             version,
             timestamp,
             document_version,
+            committed_at: None,
         }
+    }
+
+    /// The commit's wall-clock instant (#3112 S4), or `None` when unknown —
+    /// a commit predating `committed_at`, or one whose dates the branch
+    /// cannot vouch for. Unknown is a first-class answer here: the history
+    /// row itself is still exact, only its date is missing.
+    #[must_use]
+    pub const fn committed_at(&self) -> Option<Timestamp> {
+        self.committed_at
+    }
+
+    /// Attaches the commit's wall-clock instant. A builder so `new`'s call
+    /// sites stay put (#3112 S4).
+    #[must_use]
+    pub(crate) const fn with_committed_at(mut self, committed_at: Option<Timestamp>) -> Self {
+        self.committed_at = committed_at;
+        self
     }
 
     #[must_use]

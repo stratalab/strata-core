@@ -2,12 +2,14 @@
   "data": {
     "items": [
       {
+        "committed_at": null,
         "timestamp": 4,
         "tombstone": false,
         "value": "dHdv",
         "version": 4
       },
       {
+        "committed_at": null,
         "timestamp": 3,
         "tombstone": false,
         "value": "b25l",

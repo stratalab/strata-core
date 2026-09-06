@@ -84,7 +84,7 @@ pub use outcome::{
     StorageRuntimeState,
 };
 pub use read::{
-    HistoryReadOutcome, HistoryReadRequest, ImmutableSourceScanReadOutcome,
+    CommitInstantsRequest, HistoryReadOutcome, HistoryReadRequest, ImmutableSourceScanReadOutcome,
     ImmutableSourceScanReadRequest, PointReadOutcome, PointReadRequest, PrefixScanReadRequest,
     ReadBound, ScanReadOutcome, ScanReadRequest, StorageImmutableSource, StorageReadRow,
     TimelineBoundsOutcome, TimelineBoundsRequest, TimestampLookupMiss, TimestampLookupOutcome,

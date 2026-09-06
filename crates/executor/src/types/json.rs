@@ -193,10 +193,24 @@ impl MaybeJsonVersionedValue {
 #[cfg_attr(feature = "idl-tooling", derive(schemars::JsonSchema))]
 pub struct JsonHistoryItem {
     value: Option<Value>,
+    /// The commit version this change was written at — the commit's identity,
+    /// distinct from its position in time.
     version: u64,
+    /// This change's position on the logical commit timeline: a monotonic
+    /// counter assigned per commit, so a fresh database starts small (near 1)
+    /// and it is never a calendar date. Pass it to `as_of` to read this exact
+    /// point; do not format it as a Unix/epoch timestamp. For when the change
+    /// actually happened, use `committed_at`.
     timestamp: u64,
     document_version: Option<u64>,
     tombstone: bool,
+    /// The commit's wall-clock instant in microseconds since the Unix epoch
+    /// (UTC), or absent when unknown — a commit written before the database
+    /// recorded instants, or one whose date the branch cannot vouch for.
+    /// Distinct from `timestamp`, which is a commit-timeline position, not a
+    /// date.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    committed_at: Option<u64>,
 }
 
 impl JsonHistoryItem {
@@ -214,7 +228,21 @@ impl JsonHistoryItem {
             timestamp,
             document_version,
             tombstone,
+            committed_at: None,
         }
+    }
+
+    /// Returns the commit's wall-clock instant (UTC epoch micros), when known.
+    pub const fn committed_at(&self) -> Option<u64> {
+        self.committed_at
+    }
+
+    /// Attaches the commit's wall-clock instant. A builder so `new`'s call
+    /// sites stay put (#3112 S4).
+    #[must_use]
+    pub fn with_committed_at(mut self, committed_at: Option<u64>) -> Self {
+        self.committed_at = committed_at;
+        self
     }
 
     /// Returns the full document value when this row is not a tombstone.

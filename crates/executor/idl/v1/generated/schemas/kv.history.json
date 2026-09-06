@@ -8,7 +8,17 @@
     "HistoryItem": {
       "description": "Version-history item.",
       "properties": {
+        "committed_at": {
+          "description": "The commit's wall-clock instant in microseconds since the Unix epoch\n(UTC), or absent when unknown — a commit written before the database\nrecorded instants, or one whose date the branch cannot vouch for.\nDistinct from `timestamp`, which is a commit-timeline position, not a\ndate.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
         "timestamp": {
+          "description": "This change's position on the logical commit timeline: a monotonic\ncounter assigned per commit, so a fresh database starts small (near 1)\nand it is never a calendar date. Pass it to `as_of` to read this exact\npoint; do not format it as a Unix/epoch timestamp. For when the change\nactually happened, use `committed_at`.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"
@@ -27,6 +37,7 @@
           ]
         },
         "version": {
+          "description": "The commit version this change was written at — the commit's identity,\ndistinct from its position in time.",
           "format": "uint64",
           "minimum": 0,
           "type": "integer"

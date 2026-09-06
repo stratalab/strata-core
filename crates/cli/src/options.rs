@@ -552,8 +552,9 @@ pub(crate) enum BranchCommand {
         branch_a: String,
         /// The second branch (the `B` side).
         branch_b: String,
-        /// Compare each branch as of a commit timestamp: the `timestamp` from
-        /// `history` output (a commit-timeline position, not the `version`).
+        /// Compare each branch as of a position on the logical commit
+        /// timeline: the `timestamp` from `history` output, not the
+        /// `version`. This is a per-commit counter, never a calendar date.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -644,8 +645,10 @@ pub(crate) enum KvCommand {
     Get {
         /// Key.
         key: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -666,8 +669,10 @@ pub(crate) enum KvCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -739,8 +744,10 @@ pub(crate) enum JsonCommand {
         key: String,
         /// JSON path.
         path: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -763,8 +770,10 @@ pub(crate) enum JsonCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -897,8 +906,10 @@ pub(crate) enum VectorCommand {
         collection: String,
         /// Vector key.
         key: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -998,8 +1009,10 @@ pub(crate) enum VectorCommand {
         /// Read filter JSON from a file.
         #[arg(long)]
         filter_file: Option<PathBuf>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
         /// Include vector index diagnostics.
@@ -1113,8 +1126,10 @@ pub(crate) enum EventCommand {
     Get {
         /// Event sequence.
         sequence: u64,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1125,8 +1140,10 @@ pub(crate) enum EventCommand {
     },
     /// Count visible events.
     Count {
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1141,15 +1158,19 @@ pub(crate) enum EventCommand {
         /// Optional exclusive sequence cursor.
         #[arg(long, alias = "cursor")]
         after_sequence: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
     /// List event types.
     Types {
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1163,8 +1184,10 @@ pub(crate) enum EventCommand {
         /// Optional exclusive sequence cursor.
         #[arg(long)]
         after_sequence: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1254,8 +1277,10 @@ pub(crate) enum GraphCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1263,8 +1288,10 @@ pub(crate) enum GraphCommand {
     Meta {
         /// Graph name.
         graph: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1290,8 +1317,10 @@ pub(crate) enum GraphCommand {
         graph: String,
         /// Node id.
         node_id: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1315,8 +1344,10 @@ pub(crate) enum GraphCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1358,8 +1389,10 @@ pub(crate) enum GraphCommand {
         edge_type: String,
         /// Destination node id.
         dst: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1392,8 +1425,10 @@ pub(crate) enum GraphCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1409,8 +1444,10 @@ pub(crate) enum GraphCommand {
         /// Optional item limit.
         #[arg(long)]
         limit: Option<u64>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1420,8 +1457,10 @@ pub(crate) enum GraphCommand {
     Wcc {
         /// Graph name.
         graph: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1429,8 +1468,10 @@ pub(crate) enum GraphCommand {
     Lcc {
         /// Graph name.
         graph: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1443,8 +1484,10 @@ pub(crate) enum GraphCommand {
         /// Traversal direction.
         #[arg(long, value_enum, default_value_t = CliGraphDirection::Outgoing)]
         direction: CliGraphDirection,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1464,8 +1507,10 @@ pub(crate) enum GraphCommand {
         /// Optional seed weights as JSON, e.g. '{"node": 1.0}'.
         #[arg(long)]
         personalization: Option<String>,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1479,8 +1524,10 @@ pub(crate) enum GraphCommand {
         /// Propagation direction.
         #[arg(long, value_enum, default_value_t = CliGraphDirection::Both)]
         direction: CliGraphDirection,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1516,8 +1563,10 @@ pub(crate) enum GraphCommand {
         /// Traversal direction.
         #[arg(long, value_enum, default_value_t = CliGraphDirection::Outgoing)]
         direction: CliGraphDirection,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1590,8 +1639,10 @@ pub(crate) enum GraphOntologyCommand {
     Get {
         /// Graph name.
         graph: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },
@@ -1599,8 +1650,10 @@ pub(crate) enum GraphOntologyCommand {
     Summary {
         /// Graph name.
         graph: String,
-        /// Read as of a commit timestamp: the `timestamp` from `history` output
-        /// (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline: the
+        /// `timestamp` from `history` output, not the `version`. This is a
+        /// per-commit counter, never a calendar date — for when a change
+        /// actually happened, see `committed_at` in `history` output.
         #[arg(long)]
         as_of: Option<u64>,
     },

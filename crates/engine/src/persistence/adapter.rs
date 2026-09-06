@@ -8,13 +8,14 @@ use strata_storage::api::{
     BranchAction, BranchCleanupSummary as StorageBranchCleanupSummary,
     BranchGeneration as StorageBranchGeneration, BranchOutcome as StorageBranchOutcome,
     BranchRequest, BranchStatus as StorageBranchStatus, BranchSummary as StorageBranchSummary,
-    CommitBatch, CommitDurabilitySummary, CommitMutation, CommitOptions, HistoryReadRequest,
-    ImmutableSourceScanReadRequest, PointReadRequest, PrefixScanReadRequest, ReadBound, ReadLimit,
-    ScanRange, ScanReadRequest, StorageApiError, StorageApiErrorClass, StorageBudgetPolicy,
-    StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary, StorageDurabilityPolicy,
-    StorageImmutableSource, StorageKey, StorageMemoryBudget, StorageOpenDisposition,
-    StorageOpenOptions, StorageReadRow, StorageRuntime, StorageRuntimeState, StorageSpaceId,
-    StorageValue, TimelineBoundsRequest, WallClockLookupRequest,
+    CommitBatch, CommitDurabilitySummary, CommitInstantsRequest, CommitMutation, CommitOptions,
+    HistoryReadRequest, ImmutableSourceScanReadRequest, PointReadRequest, PrefixScanReadRequest,
+    ReadBound, ReadLimit, ScanRange, ScanReadRequest, StorageApiError, StorageApiErrorClass,
+    StorageBudgetPolicy, StorageBudgetSource, StorageCachePreheatPolicy, StorageCloseSummary,
+    StorageDurabilityPolicy, StorageImmutableSource, StorageKey, StorageMemoryBudget,
+    StorageOpenDisposition, StorageOpenOptions, StorageReadRow, StorageRuntime,
+    StorageRuntimeState, StorageSpaceId, StorageValue, TimelineBoundsRequest,
+    WallClockLookupRequest,
 };
 use strata_storage::api::{
     MaintenanceRequest, MaintenanceScope,
@@ -590,6 +591,26 @@ impl StoragePersistence {
             .resolve_wall_clock(WallClockLookupRequest::new(branch_id, instant))
             .map_err(map_storage_error)?;
         Ok(outcome.timestamp())
+    }
+
+    /// #3112 S4: the wall-clock instants for a batch of commit versions, in
+    /// the order asked.
+    ///
+    /// Instants are commit-scoped, so a row cannot carry its own — history
+    /// joins them here instead. An unknown instant is reported as `None`
+    /// rather than failing: the history row is exact either way, and a date
+    /// the branch cannot vouch for is better shown as absent than guessed.
+    pub(crate) fn committed_at_for_versions(
+        &mut self,
+        branch_id: BranchId,
+        versions: &[CommitVersion],
+    ) -> EngineResult<Vec<Option<Timestamp>>> {
+        if versions.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.runtime
+            .commit_instants(&CommitInstantsRequest::new(branch_id, versions.to_vec()))
+            .map_err(map_storage_error)
     }
 
     pub(crate) fn fork_branch_current(

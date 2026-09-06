@@ -1118,6 +1118,75 @@ fn committed_at_survives_a_durable_reopen_through_the_checkpoint_section() {
     );
 }
 
+/// #3112 S4: the batch instant lookup through the real API.
+///
+/// History joins these onto rows by commit version, so order fidelity is the
+/// contract — and an unknown instant must come back as `None` rather than as
+/// an error. That is the deliberate contrast with a wall-clock `as_of`, which
+/// refuses when it cannot vouch for dates: "when did this happen" answering
+/// "unknown" is useful, but "what did it look like then" answering with the
+/// wrong commit is not.
+#[cfg(feature = "localfs")]
+#[test]
+fn commit_instants_answers_in_order_and_reports_unknown_without_failing() {
+    let root = temp_dir_for_api_test("read-commit-instants");
+    let mut runtime = open_durable_runtime(root);
+    let first_instant = Timestamp::from_micros(1_788_000_000_000_000);
+    let second_instant = Timestamp::from_micros(1_788_000_000_000_500);
+
+    // An undated commit first (the pre-epic shape), then two dated ones.
+    let undated = commit_put(&mut runtime, b"k", b"v0", 10);
+    let first = commit_put_with_committed_at(&mut runtime, b"k", b"v1", 20, first_instant);
+    let second = commit_put_with_committed_at(&mut runtime, b"k", b"v2", 30, second_instant);
+
+    // Prove coverage, so `None` below means "undated", not "unproven".
+    runtime
+        .read_point(&point_request(
+            b"k",
+            ReadBound::AtTimestamp(Timestamp::from_micros(20)),
+        ))
+        .expect("seeding read");
+    assert!(runtime
+        .retained_timeline_complete_for_test(branch())
+        .expect("index is complete"));
+
+    // Newest-first, the order a history view asks in.
+    let asked = vec![
+        second.commit_version(),
+        first.commit_version(),
+        undated.commit_version(),
+    ];
+    assert_eq!(
+        runtime
+            .commit_instants(&CommitInstantsRequest::new(branch(), asked))
+            .expect("instants resolve"),
+        vec![Some(second_instant), Some(first_instant), None],
+        "answers follow the order asked, and the undated commit reports unknown"
+    );
+
+    // An empty request is an empty answer, not a round trip.
+    assert!(runtime
+        .commit_instants(&CommitInstantsRequest::new(branch(), Vec::new()))
+        .expect("empty request succeeds")
+        .is_empty());
+
+    // An unproven index yields all-unknown rather than an error: history is
+    // still exact, only its dates are unavailable.
+    runtime
+        .mark_retained_timeline_incomplete_for_test(branch())
+        .expect("mark unproven");
+    assert_eq!(
+        runtime
+            .commit_instants(&CommitInstantsRequest::new(
+                branch(),
+                vec![first.commit_version(), second.commit_version()]
+            ))
+            .expect("an unproven index still answers"),
+        vec![None, None],
+        "unknown dates are a usable answer; a refusal here would be wrong"
+    );
+}
+
 /// #3112 S3a: the shape every database created before this epic has — an
 /// undated prefix followed by dated commits. Resolution must work over the
 /// dated part while refusing, DISTINGUISHABLY, for a target that falls before

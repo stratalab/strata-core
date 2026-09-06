@@ -468,6 +468,27 @@ pub(super) fn timeline_resolve_wall_clock(
     }
 }
 
+/// #3112 S4: the wall-clock instants for a batch of commit versions.
+///
+/// Instants live only in the retained-timeline index, so an unproven index
+/// yields all-unknown rather than an error: history itself is still perfectly
+/// readable, only its dates are missing. That is a weaker failure than a
+/// wall-clock `as_of`, which refuses — asking "when did this happen" and
+/// getting "unknown" is a usable answer; asking "what did it look like then"
+/// and getting the wrong commit is not.
+pub(super) fn timeline_committed_at_for_versions(
+    view: &BranchReadView,
+    versions: &[CommitVersion],
+) -> Vec<Option<Timestamp>> {
+    let unknown = || vec![None; versions.len()];
+    let Some((index, live_active)) = view.retained_timeline() else {
+        return unknown();
+    };
+    index
+        .committed_at_for_versions(versions, pinned_view_bound(view, live_active))
+        .unwrap_or_else(unknown)
+}
+
 /// W3.1a: `timestamp_for_version` with the same index-or-scan-and-seed shape.
 pub(super) fn timeline_timestamp_for_version(
     view: &BranchReadView,

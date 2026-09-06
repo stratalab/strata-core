@@ -50,19 +50,20 @@ use super::{
     BranchAction, BranchCleanupSummary, BranchGeneration, BranchOperation, BranchOutcome,
     BranchParentSummary, BranchRequest, BranchStatus, BranchSummary, CommitAdmissionPressureReason,
     CommitAdmissionPressureSeverity, CommitAdmissionSummary, CommitBatch, CommitDurability,
-    CommitDurabilitySummary, CommitExpectedVersion, CommitSummary, DiagnosticsBranchCatalogReport,
-    DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool, DiagnosticsBudgetPressure,
-    DiagnosticsBudgetReport, DiagnosticsBudgetUsage, DiagnosticsCheckpointReport,
-    DiagnosticsOutcome, DiagnosticsQuarantineReport, DiagnosticsReadActivityReport,
-    DiagnosticsRecoveryClass, DiagnosticsRecoveryFault, DiagnosticsRecoveryFaultKind,
-    DiagnosticsRecoveryReport, DiagnosticsRequest, DiagnosticsRetentionReport, DiagnosticsScope,
-    DiagnosticsSourceLayoutReport, DiagnosticsSourceLevelTableCount,
-    DiagnosticsStoragePressureReason, DiagnosticsStoragePressureReport,
-    DiagnosticsStoragePressureSeverity, DiagnosticsTableReachabilityReport,
-    DiagnosticsTimelineReport, DiagnosticsWalGrowthReport, HistoryReadOutcome, HistoryReadRequest,
-    ImmutableSourceScanReadOutcome, ImmutableSourceScanReadRequest, MaintenanceDrainSummary,
-    MaintenanceQueueSummary, MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope,
-    MaintenanceSummary, MaintenanceSummaryStatus, MaintenanceTask, MaintenanceWalGrowthStatus,
+    CommitDurabilitySummary, CommitExpectedVersion, CommitInstantsRequest, CommitSummary,
+    DiagnosticsBranchCatalogReport, DiagnosticsBudgetAccuracy, DiagnosticsBudgetPool,
+    DiagnosticsBudgetPressure, DiagnosticsBudgetReport, DiagnosticsBudgetUsage,
+    DiagnosticsCheckpointReport, DiagnosticsOutcome, DiagnosticsQuarantineReport,
+    DiagnosticsReadActivityReport, DiagnosticsRecoveryClass, DiagnosticsRecoveryFault,
+    DiagnosticsRecoveryFaultKind, DiagnosticsRecoveryReport, DiagnosticsRequest,
+    DiagnosticsRetentionReport, DiagnosticsScope, DiagnosticsSourceLayoutReport,
+    DiagnosticsSourceLevelTableCount, DiagnosticsStoragePressureReason,
+    DiagnosticsStoragePressureReport, DiagnosticsStoragePressureSeverity,
+    DiagnosticsTableReachabilityReport, DiagnosticsTimelineReport, DiagnosticsWalGrowthReport,
+    HistoryReadOutcome, HistoryReadRequest, ImmutableSourceScanReadOutcome,
+    ImmutableSourceScanReadRequest, MaintenanceDrainSummary, MaintenanceQueueSummary,
+    MaintenanceReasonClass, MaintenanceRequest, MaintenanceScope, MaintenanceSummary,
+    MaintenanceSummaryStatus, MaintenanceTask, MaintenanceWalGrowthStatus,
     MaintenanceWalGrowthSummary, MaintenanceWalGrowthTrigger, PointReadOutcome, PointReadRequest,
     PrefixScanReadRequest, ReadBound, ReadLimit, RecoveryHealthSummary, ScanReadOutcome,
     ScanReadRequest, StorageApiError, StorageApiErrorClass, StorageApiLowerLayer, StorageApiResult,
@@ -100,8 +101,8 @@ use data::{
     cap_bound_at_visible, flush_request_for_boundary, map_api_commit_batch, map_commit_summary,
     map_immutable_sources, map_scan_rows, map_storage_space, physical_key,
     point_read_row_from_storage_owned, read_row_from_storage, require_version_retained,
-    resolve_read_bound, row_is_expired_at_selected_frontier, timeline_resolve_wall_clock,
-    timeline_view_or_index, visible_tombstone_at_bound,
+    resolve_read_bound, row_is_expired_at_selected_frontier, timeline_committed_at_for_versions,
+    timeline_resolve_wall_clock, timeline_view_or_index, visible_tombstone_at_bound,
 };
 use diagnostics::{
     branch_for_diagnostics_scope, branch_generation_or_default, current_visible,
@@ -1508,6 +1509,21 @@ impl<'a> StorageRuntime<'a> {
     ) -> StorageApiResult<WallClockLookupOutcome> {
         let view = self.read_view_for_branch(request.branch_id())?;
         timeline_resolve_wall_clock(&view, request.instant())
+    }
+
+    /// #3112 S4: the wall-clock instants recorded for a batch of commit
+    /// versions, in the order asked. A version with no recorded instant — one
+    /// predating `committed_at`, or outside retained history — reports `None`
+    /// rather than failing the batch.
+    pub fn commit_instants(
+        &self,
+        request: &CommitInstantsRequest,
+    ) -> StorageApiResult<Vec<Option<Timestamp>>> {
+        let view = self.read_view_for_branch(request.branch_id())?;
+        Ok(timeline_committed_at_for_versions(
+            &view,
+            request.versions(),
+        ))
     }
 
     pub fn timeline_bounds(

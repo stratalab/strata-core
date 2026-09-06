@@ -1,6 +1,7 @@
 {
   "data": [
     {
+      "committed_at": null,
       "document_version": 2,
       "timestamp": 4,
       "tombstone": false,
@@ -11,6 +12,7 @@
       "version": 4
     },
     {
+      "committed_at": null,
       "document_version": 1,
       "timestamp": 3,
       "tombstone": false,

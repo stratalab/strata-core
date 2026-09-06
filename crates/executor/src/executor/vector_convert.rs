@@ -7,7 +7,7 @@ use super::{
     EngineVectorKeyPage, EngineVectorMetadata, EngineVectorMetadataPatch, EngineVectorScalar,
     EngineVectorSearchMatch, EngineVectorUpsertEntry, EngineVectorVersionedEntry, ExecutorError,
     ExecutorResult, MutationEffect, Output, OutputVectorCollectionInfo,
-    OutputVectorIndexArtifactSource, OutputVectorIndexDiagnostics, PageInfo,
+    OutputVectorIndexArtifactSource, OutputVectorIndexDiagnostics, PageInfo, Timestamp,
     VectorBatchGetItemResult, VectorBatchItemResult, VectorData, VectorDistanceMetric,
     VectorFilterOp, VectorHistoryItem, VectorHistoryResult, VectorMatch, VectorMetadataFilter,
     VectorScalar, VectorService, VectorVersionedData,
@@ -186,6 +186,7 @@ pub(super) fn vector_history_item(
         row.vector_revision(),
         row.is_tombstone(),
     )
+    .with_committed_at(row.committed_at().map(Timestamp::as_micros))
 }
 
 pub(super) fn vector_match(value: &EngineVectorSearchMatch) -> VectorMatch {

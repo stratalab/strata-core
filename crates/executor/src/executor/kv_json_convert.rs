@@ -251,6 +251,7 @@ pub(super) fn history_item(row: &KvHistoryRow) -> HistoryItem {
         row.version().as_u64(),
         row.timestamp().as_micros(),
     )
+    .with_committed_at(row.committed_at().map(Timestamp::as_micros))
 }
 
 pub(super) fn scan_item(row: &KvScanRow) -> ScanItem {
@@ -328,6 +329,7 @@ pub(super) fn json_history_item(row: &JsonHistoryRow) -> JsonHistoryItem {
         row.document_version(),
         row.is_tombstone(),
     )
+    .with_committed_at(row.committed_at().map(Timestamp::as_micros))
 }
 
 pub(super) fn json_batch_item_result(

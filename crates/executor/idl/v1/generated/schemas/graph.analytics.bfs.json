@@ -123,7 +123,7 @@
     "description": "Runs a bounded breadth-first traversal from a start node.",
     "properties": {
       "as_of": {
-        "description": "Optional read-as-of commit timestamp: the `timestamp` from `history`\noutput (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.",
+        "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. Reads the graph state visible at that timeline\nposition. To read as of a real time, use `as_of_time` instead.",
         "format": "uint64",
         "minimum": 0,
         "type": [
@@ -132,7 +132,7 @@
         ]
       },
       "as_of_time": {
-        "description": "Optional read-as-of wall-clock instant, in microseconds since the\nUnix epoch (UTC): the `committed_at` from a write ack. Resolves to\nthe commit at or before that instant. Mutually exclusive with\n`as_of`.",
+        "description": "Read as of a real time: a wall-clock instant in microseconds since\nthe Unix epoch (UTC), as reported by `committed_at` on a write ack\nor on any `history` row. Resolves to the commit at or before that\ninstant, and fails rather than guessing if the instant falls\noutside the branch's recorded history. Mutually exclusive with\n`as_of`.",
         "format": "uint64",
         "minimum": 0,
         "type": [

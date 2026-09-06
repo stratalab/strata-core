@@ -305,13 +305,16 @@ pub enum Command {
         space: Option<String>,
         /// Key bytes.
         key: Bytes,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -344,13 +347,16 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -447,13 +453,16 @@ pub enum Command {
         /// Optional key prefix.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix: Option<Bytes>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -500,13 +509,16 @@ pub enum Command {
         key: String,
         /// JSON path.
         path: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -624,13 +636,16 @@ pub enum Command {
         /// Optional item limit.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -661,13 +676,16 @@ pub enum Command {
         /// Optional document key prefix.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prefix: Option<String>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -778,13 +796,16 @@ pub enum Command {
         space: Option<String>,
         /// Collection name.
         collection: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -834,13 +855,16 @@ pub enum Command {
         collection: String,
         /// Vector key.
         key: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -903,13 +927,16 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1001,13 +1028,16 @@ pub enum Command {
         /// Optional metadata filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<VectorMetadataFilter>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1030,13 +1060,16 @@ pub enum Command {
         /// Optional metadata filter.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         filter: Option<VectorMetadataFilter>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1114,13 +1147,16 @@ pub enum Command {
         space: Option<String>,
         /// Event sequence.
         sequence: u64,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1144,13 +1180,16 @@ pub enum Command {
         /// Target product space. Defaults to `"default"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1208,13 +1247,16 @@ pub enum Command {
         /// Target product space. Defaults to `"default"`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         space: Option<String>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1236,13 +1278,16 @@ pub enum Command {
         /// Optional exclusive sequence cursor.
         #[serde(default, alias = "cursor", skip_serializing_if = "Option::is_none")]
         after_sequence: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`).
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1292,13 +1337,17 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1313,13 +1362,17 @@ pub enum Command {
         space: Option<String>,
         /// Graph name.
         graph: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1358,13 +1411,17 @@ pub enum Command {
         graph: String,
         /// Node id.
         node_id: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1401,13 +1458,17 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1465,13 +1526,17 @@ pub enum Command {
         edge_type: String,
         /// Destination node id.
         dst: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1516,13 +1581,17 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1543,13 +1612,17 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1654,13 +1727,17 @@ pub enum Command {
         space: Option<String>,
         /// Graph name.
         graph: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1675,13 +1752,17 @@ pub enum Command {
         space: Option<String>,
         /// Graph name.
         graph: String,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1704,13 +1785,17 @@ pub enum Command {
         /// Optional item limit. Defaults to 100.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         limit: Option<u64>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1728,13 +1813,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1752,13 +1841,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1781,13 +1874,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1818,13 +1915,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1848,13 +1949,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,
@@ -1886,13 +1991,17 @@ pub enum Command {
         /// Optional snapshot size bounds. Defaults to the engine limits.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         budget: Option<GraphAnalyticsBudget>,
-        /// Optional read-as-of commit timestamp: the `timestamp` from `history`
-        /// output (a commit-timeline position, not the `version`). Reads the graph state visible at that instant.
+        /// Read as of a position on the logical commit timeline — the
+        /// `timestamp` from `history` output, not the `version`, and never a
+        /// calendar date. Reads the graph state visible at that timeline
+        /// position. To read as of a real time, use `as_of_time` instead.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of: Option<u64>,
-        /// Optional read-as-of wall-clock instant, in microseconds since the
-        /// Unix epoch (UTC): the `committed_at` from a write ack. Resolves to
-        /// the commit at or before that instant. Mutually exclusive with
+        /// Read as of a real time: a wall-clock instant in microseconds since
+        /// the Unix epoch (UTC), as reported by `committed_at` on a write ack
+        /// or on any `history` row. Resolves to the commit at or before that
+        /// instant, and fails rather than guessing if the instant falls
+        /// outside the branch's recorded history. Mutually exclusive with
         /// `as_of`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         as_of_time: Option<u64>,

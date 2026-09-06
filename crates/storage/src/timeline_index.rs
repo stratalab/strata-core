@@ -411,6 +411,44 @@ impl RetainedCommitTimeline {
         ))
     }
 
+    /// #3112 S4: the wall-clock instants for a batch of commit versions, in
+    /// the order asked.
+    ///
+    /// Batched because the caller's question is always plural — a key's
+    /// history is a list of commits — and one lock acquisition beats one per
+    /// row.
+    ///
+    /// Two levels of absence, deliberately not collapsed: the outer `None`
+    /// means the index cannot prove coverage, so no instant can be trusted at
+    /// all. A per-version `None` means that commit genuinely has no recorded
+    /// instant — either it predates `committed_at` or it is outside retained
+    /// history. Both render as "unknown" to a client, but only the outer case
+    /// says the whole answer is unreliable.
+    pub(crate) fn committed_at_for_versions(
+        &self,
+        versions: &[CommitVersion],
+        version_bound: Option<CommitVersion>,
+    ) -> Option<Vec<Option<Timestamp>>> {
+        let state = self.inner.read();
+        if !state.complete {
+            return None;
+        }
+        let prefix = bounded_prefix(&state.entries, version_bound);
+        Some(
+            versions
+                .iter()
+                .map(|version| {
+                    prefix
+                        .binary_search_by_key(&version.as_u64(), |entry| {
+                            entry.commit_version().as_u64()
+                        })
+                        .ok()
+                        .and_then(|at| prefix[at].committed_at())
+                })
+                .collect(),
+        )
+    }
+
     /// The timestamp recorded for `version` among entries with version ≤
     /// `version_bound`. Outer `None` = fall back to the scan; inner `None` =
     /// proven absent from retained history.
@@ -656,6 +694,106 @@ mod tests {
 
     fn resolve(entries: &[RetainedTimelineEntry], target: u64) -> WallClockResolution {
         resolve_wall_clock(entries, Timestamp::from_micros(target))
+    }
+
+    /// #3112 S4: the batch instant lookup. Order and per-version absence are
+    /// the whole contract here — a history view zips these onto rows, so a
+    /// shifted or reordered result would silently date every row wrongly.
+    #[test]
+    fn committed_at_for_versions_answers_in_the_order_asked() {
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        for (version, timestamp, instant) in [(1, 10, 100), (2, 20, 200), (3, 30, 300)] {
+            index.observe(
+                CommitVersion::new(version),
+                Timestamp::from_micros(timestamp),
+            );
+            index
+                .observe_committed_at(CommitVersion::new(version), Timestamp::from_micros(instant));
+        }
+
+        // Newest-first, the order a history view asks in — not sorted order.
+        let asked = [
+            CommitVersion::new(3),
+            CommitVersion::new(1),
+            CommitVersion::new(2),
+        ];
+        assert_eq!(
+            index.committed_at_for_versions(&asked, None),
+            Some(vec![
+                Some(Timestamp::from_micros(300)),
+                Some(Timestamp::from_micros(100)),
+                Some(Timestamp::from_micros(200)),
+            ]),
+            "answers must follow the order asked, not the index order"
+        );
+    }
+
+    /// An undated or unretained commit reports `None` in its own slot without
+    /// disturbing its neighbours — history stays exact even where dates are
+    /// missing.
+    #[test]
+    fn committed_at_for_versions_reports_per_version_absence() {
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        index.observe(CommitVersion::new(1), Timestamp::from_micros(10));
+        index.observe(CommitVersion::new(2), Timestamp::from_micros(20));
+        index.observe_committed_at(CommitVersion::new(2), Timestamp::from_micros(200));
+
+        let asked = [
+            CommitVersion::new(1), // observed, never dated
+            CommitVersion::new(2), // dated
+            CommitVersion::new(9), // never observed at all
+        ];
+        assert_eq!(
+            index.committed_at_for_versions(&asked, None),
+            Some(vec![None, Some(Timestamp::from_micros(200)), None])
+        );
+    }
+
+    /// An unproven index cannot vouch for any instant, so the caller is told
+    /// so once rather than being handed a partially-trustworthy list.
+    #[test]
+    fn committed_at_for_versions_is_unproven_while_the_index_is_incomplete() {
+        let index = RetainedCommitTimeline::new();
+        index.observe(CommitVersion::new(1), Timestamp::from_micros(10));
+        index.observe_committed_at(CommitVersion::new(1), Timestamp::from_micros(100));
+
+        assert_eq!(
+            index.committed_at_for_versions(&[CommitVersion::new(1)], None),
+            None
+        );
+
+        index.seed_from_scan(&[entry(1, 10)]);
+        assert_eq!(
+            index.committed_at_for_versions(&[CommitVersion::new(1)], None),
+            Some(vec![Some(Timestamp::from_micros(100))])
+        );
+    }
+
+    /// The version bound applies here as everywhere else: a pinned view must
+    /// not learn dates for commits past its own frontier.
+    #[test]
+    fn committed_at_for_versions_honors_the_version_bound() {
+        let index = RetainedCommitTimeline::new();
+        index.mark_complete_from_birth();
+        for (version, timestamp, instant) in [(1, 10, 100), (2, 20, 200)] {
+            index.observe(
+                CommitVersion::new(version),
+                Timestamp::from_micros(timestamp),
+            );
+            index
+                .observe_committed_at(CommitVersion::new(version), Timestamp::from_micros(instant));
+        }
+
+        assert_eq!(
+            index.committed_at_for_versions(
+                &[CommitVersion::new(1), CommitVersion::new(2)],
+                Some(CommitVersion::new(1))
+            ),
+            Some(vec![Some(Timestamp::from_micros(100)), None]),
+            "version 2 is past the bound, so its date is not visible"
+        );
     }
 
     /// #3112 S3a: the resolution rule's truth table. Each arm is pinned

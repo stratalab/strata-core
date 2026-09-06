@@ -2,6 +2,7 @@
   "data": {
     "items": [
       {
+        "committed_at": null,
         "data": {
           "embedding": [
             1.0,

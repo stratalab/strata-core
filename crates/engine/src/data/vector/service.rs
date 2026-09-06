@@ -364,6 +364,28 @@ impl<'a> VectorService<'a> {
         Self::versioned_entry_from_row(collection, key, &row)
     }
 
+    /// #3112 S4: joins each history row to its commit's wall-clock instant.
+    ///
+    /// One batched lookup for the whole history rather than one per row: the
+    /// question is inherently plural, and the index answers it under a single
+    /// lock. Rows keep their order, and a row whose instant is unknown keeps
+    /// `None` — history stays exact even when its dates are not available.
+    fn attach_committed_at(
+        &mut self,
+        record: &BranchCatalogRecord,
+        rows: Vec<VectorHistoryRow>,
+    ) -> EngineResult<Vec<VectorHistoryRow>> {
+        let versions: Vec<_> = rows.iter().map(VectorHistoryRow::version).collect();
+        let instants = self
+            .persistence
+            .committed_at_for_versions(record.storage_branch_id(), &versions)?;
+        Ok(rows
+            .into_iter()
+            .zip(instants)
+            .map(|(row, instant)| row.with_committed_at(instant))
+            .collect())
+    }
+
     /// Reads full vector history newest-first.
     pub fn history(
         &mut self,
@@ -379,6 +401,9 @@ impl<'a> VectorService<'a> {
             .into_iter()
             .map(|row| Self::history_row_from_row(collection, key, &row))
             .collect::<EngineResult<Vec<_>>>()?;
+        // #3112 S4: instants are commit-scoped, so they cannot ride on the
+        // rows — join them by commit version after the read.
+        let rows = self.attach_committed_at(&record, rows)?;
         Ok((!rows.is_empty()).then(|| VectorHistory::new(rows)))
     }
 

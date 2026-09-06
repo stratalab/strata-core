@@ -7,7 +7,7 @@
     "description": "Lists JSON document keys.\n\n# Guaranteed semantics\n\n- **Ordering.** Keys are returned in ascending byte-lexicographic\n  order, stable across calls for unchanged data.\n- **Cursor.** The returned cursor is the last key of a non-terminal\n  page; resuming lists strictly *after* that key. Cursors are plain\n  positions: they stay valid indefinitely, across interleaved writes,\n  and even if the cursor document itself is deleted. A key is never\n  returned twice for the same cursor chain.\n- **Interleaved writes.** Each page reads the latest committed state\n  unless `as_of` is set: documents created behind the cursor position\n  do not appear; documents created or deleted ahead of it are\n  reflected in later pages. For a snapshot-stable enumeration across\n  pages, pass the same `as_of` timestamp on every page.\n- **Termination.** The terminal page reports `has_more: false` and\n  `cursor: null`. A `limit` of zero returns an empty terminal page.",
     "properties": {
       "as_of": {
-        "description": "Optional read-as-of commit timestamp: the `timestamp` from `history`\noutput (a commit-timeline position, not the `version`).",
+        "description": "Read as of a position on the logical commit timeline — the\n`timestamp` from `history` output, not the `version`, and never a\ncalendar date. To read as of a real time, use `as_of_time` instead.",
         "format": "uint64",
         "minimum": 0,
         "type": [
@@ -16,7 +16,7 @@
         ]
       },
       "as_of_time": {
-        "description": "Optional read-as-of wall-clock instant, in microseconds since the\nUnix epoch (UTC): the `committed_at` from a write ack. Resolves to\nthe commit at or before that instant. Mutually exclusive with\n`as_of`.",
+        "description": "Read as of a real time: a wall-clock instant in microseconds since\nthe Unix epoch (UTC), as reported by `committed_at` on a write ack\nor on any `history` row. Resolves to the commit at or before that\ninstant, and fails rather than guessing if the instant falls\noutside the branch's recorded history. Mutually exclusive with\n`as_of`.",
         "format": "uint64",
         "minimum": 0,
         "type": [

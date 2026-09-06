@@ -631,6 +631,33 @@ impl TimestampLookupOutcome {
     }
 }
 
+/// #3112 S4: the wall-clock instants recorded for a batch of commit versions.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CommitInstantsRequest {
+    branch_id: BranchId,
+    versions: Vec<CommitVersion>,
+}
+
+impl CommitInstantsRequest {
+    #[must_use]
+    pub const fn new(branch_id: BranchId, versions: Vec<CommitVersion>) -> Self {
+        Self {
+            branch_id,
+            versions,
+        }
+    }
+
+    #[must_use]
+    pub const fn branch_id(&self) -> BranchId {
+        self.branch_id
+    }
+
+    #[must_use]
+    pub fn versions(&self) -> &[CommitVersion] {
+        &self.versions
+    }
+}
+
 /// #3112 S3a: resolve a wall-clock instant to a commit boundary on a branch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WallClockLookupRequest {
