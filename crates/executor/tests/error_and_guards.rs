@@ -237,7 +237,7 @@ fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
         "commit_outcome": "maybe_committed",
         "message": "lock unavailable",
         "suggested_fix": "site text that must not survive",
-        "docs_url": "https://stratadb.org/e/unavailable.executor.ipc_transport",
+        "docs_url": "https://docs.example.test/e/unavailable.executor.ipc_transport",
         "reference_id": "err-test-000001",
         "trace_id": "trace-000001",
         "details": [{"key": "path", "value": "db"}],
@@ -253,9 +253,11 @@ fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
     assert_eq!(error.message(), "lock unavailable");
     assert_eq!(error.reference_id(), "err-test-000001");
     assert_eq!(error.status().trace_id(), Some("trace-000001"));
+    // A canonical per-code page from the sender's docs base is kept as-is,
+    // not re-based onto this process's default.
     assert_eq!(
         error.docs_url(),
-        "https://stratadb.org/e/unavailable.executor.ipc_transport"
+        "https://docs.example.test/e/unavailable.executor.ipc_transport"
     );
     assert!(error
         .status()

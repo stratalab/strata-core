@@ -560,6 +560,18 @@ fn test_executor_errors_carry_the_whole_registry_row() {
         }
         assert_eq!(error.code(), entry.code);
         assert_eq!(error.message(), "probe");
+        // `retryable` is derived from the row's policy, so it must agree with
+        // it for every row — the registry has rows on both sides of the split.
+        let wire = serde_json::to_value(error.status()).expect("status serializes");
+        let expected_retryable = RETRYABLE_POLICIES.contains(&field(&wire, "retry_policy"));
+        if error.retryable() != expected_retryable {
+            violations.push(format!(
+                "{}: retryable={} incoherent with retry_policy {:?}",
+                entry.code,
+                error.retryable(),
+                entry.retry_policy
+            ));
+        }
     }
     assert!(
         violations.is_empty(),
