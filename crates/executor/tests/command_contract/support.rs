@@ -1,15 +1,17 @@
+use std::sync::Arc;
+
 pub(super) use serde_json::{json, Value};
-pub(super) use strata_engine::{CommitOutcomeStatus, ErrorClass, ErrorDetail, RetryPolicy};
 pub(super) use strata_executor::{
-    AdminCapabilities, AdminConfig, AdminControlStatus, AdminDatabaseInfo, AdminDescribe,
-    AdminGraph, AdminHealth, AdminHealthStatus, AdminMetrics, AdminOpenTarget, AdminPrimitives,
-    AdminVectorCollection, ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat,
-    ArrowImportResult, ArrowImportTarget, BatchEventEntry, BatchExistsItemResult,
-    BatchExistsPresence, BatchGetItemResult, BatchItem, BatchItemResult, BatchItemStatus,
-    BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry, BatchKvEntry, BatchMode, BatchResult,
-    BatchStatus, BatchVectorEntry, BranchCleanupItem, BranchItem, BranchParentItem, BranchStatus,
-    Bytes, Command, CommitDurability, CommitReceipt, ErrorStatus, EventBatchAppendItemResult,
-    EventChainVerification, EventData, EventRangeDirection, EventVersionedData,
+    public_error_code_entry, with_error_render_config, AdminCapabilities, AdminConfig,
+    AdminControlStatus, AdminDatabaseInfo, AdminDescribe, AdminGraph, AdminHealth,
+    AdminHealthStatus, AdminMetrics, AdminOpenTarget, AdminPrimitives, AdminVectorCollection,
+    ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat, ArrowImportResult, ArrowImportTarget,
+    BatchEventEntry, BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem,
+    BatchItemResult, BatchItemStatus, BatchJsonDeleteEntry, BatchJsonEntry, BatchJsonGetEntry,
+    BatchKvEntry, BatchMode, BatchResult, BatchStatus, BatchVectorEntry, BranchCleanupItem,
+    BranchItem, BranchParentItem, BranchStatus, Bytes, Command, CommitDurability, CommitReceipt,
+    ErrorReferenceIdSource, ErrorRenderConfig, ErrorStatus, EventBatchAppendItemResult,
+    EventChainVerification, EventData, EventRangeDirection, EventVersionedData, ExecutorError,
     GraphAnalyticsBudget, GraphBatchItemResult, GraphBatchOperation, GraphBfsData,
     GraphBfsEdgeData, GraphBindingHit, GraphBindingPrimitive, GraphBindingTarget, GraphBulkEdge,
     GraphBulkNode, GraphCdlpData, GraphDeletePolicy, GraphDirection, GraphEdgeData,
@@ -101,20 +103,14 @@ pub(super) fn response_fixture_texts() -> Vec<&'static str> {
     }
 }
 
+/// The shared error-status golden, read back through the wire DTO so the
+/// golden test round-trips it; `error_status_fixture_matches_the_registry_row`
+/// pins its row fields to the registry.
 pub(super) fn error_status_fixture() -> ErrorStatus {
-    ErrorStatus::new_with_docs_url(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.batch_item",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        "invalid key",
-        "Check the batch item input and retry with a valid key.",
-        "https://stratadb.org/e/invalid_argument.executor.batch_item",
-        "err-test-000001",
-        None,
-        vec![ErrorDetail::new("field", "key")],
-        vec!["Batch item keys must be non-empty.".to_owned()],
-    )
+    serde_json::from_str(include_str!(
+        "../fixtures/responses/v1/shared/error_status_invalid_argument.json"
+    ))
+    .expect("error status fixture deserializes")
 }
 
 pub(super) fn bytes(value: &str) -> Bytes {
@@ -179,23 +175,26 @@ pub(super) fn graph_batch(
     BatchResult::from_items(BatchMode::Atomic, items)
 }
 
-/// Builds a normalized item error for failed batch fixtures. The
-/// [`BatchItem`](strata_executor::BatchItem) wrapper carries the error now that
-/// the inner item DTOs no longer restate it.
+#[derive(Debug)]
+struct FixtureReferenceIdSource;
+
+impl ErrorReferenceIdSource for FixtureReferenceIdSource {
+    fn next_reference_id(&self) -> String {
+        "err-test-000001".to_owned()
+    }
+}
+
+/// Builds a normalized item error for failed batch fixtures through the real
+/// boundary constructor (the registry row supplies everything but the message)
+/// under a fixed reference id. The [`BatchItem`](strata_executor::BatchItem)
+/// wrapper carries the error now that the inner item DTOs no longer restate it.
 pub(super) fn item_error(message: &str) -> ErrorStatus {
-    ErrorStatus::new_with_docs_url(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.batch_item",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        message,
-        "Correct the batch item input and retry.",
-        "https://stratadb.org/e/invalid_argument.executor.batch_item",
-        "err-test-000001",
-        None,
-        Vec::new(),
-        Vec::new(),
-    )
+    let config = ErrorRenderConfig::new("https://stratadb.org", Arc::new(FixtureReferenceIdSource));
+    with_error_render_config(config, || {
+        ExecutorError::new("invalid_argument.executor.batch_item", message)
+    })
+    .status()
+    .clone()
 }
 
 pub(super) fn commit_receipt(

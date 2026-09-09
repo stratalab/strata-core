@@ -529,34 +529,86 @@ fn test_engine_errors_reach_the_wire_with_the_registry_suggested_fix() {
     );
 }
 
-/// Control for the executor's own codes: every non-engine code constructed
-/// through `ExecutorError::new` already carries the registry hint, so the
-/// engine-side fix is the only gap. The class argument cannot affect the
-/// hint — `new` always supplies its class default, which `render_status`
-/// recognises and replaces with the registry entry.
+/// #3244: the registry row is the whole authority for a code's class, retry
+/// policy, commit outcome and suggested fix. `ExecutorError::new` takes only
+/// the code and the message, so no construction site can restate any of the
+/// four — the old `(class, retryable)` arguments were per-site copies of the
+/// row, and three live sites had drifted from it. Swept over every registered
+/// code, engine codes included, because `new` is code-driven.
 #[test]
-fn test_executor_errors_carry_the_registry_suggested_fix() {
+fn test_executor_errors_carry_the_whole_registry_row() {
     let mut violations = Vec::new();
-    for entry in public_error_code_entries().filter(|entry| !entry.code.contains(".engine.")) {
-        let error = ExecutorError::new(
-            strata_executor::ExecutorErrorClass::Internal,
-            entry.code,
-            false,
-            "probe",
+    for entry in public_error_code_entries() {
+        let error = ExecutorError::new(entry.code, "probe");
+        let observed = (
+            error.public_class(),
+            error.retry_policy(),
+            error.commit_outcome(),
+            error.suggested_fix(),
         );
-        if error.suggested_fix() != entry.suggested_fix {
+        let row = (
+            entry.class,
+            entry.retry_policy,
+            entry.commit_outcome,
+            entry.suggested_fix,
+        );
+        if observed != row {
             violations.push(format!(
-                "{}: runtime `{}` != registry `{}`",
-                entry.code,
-                error.suggested_fix(),
-                entry.suggested_fix
+                "{}: runtime {observed:?} != registry {row:?}",
+                entry.code
             ));
         }
+        assert_eq!(error.code(), entry.code);
+        assert_eq!(error.message(), "probe");
     }
     assert!(
         violations.is_empty(),
-        "executor suggested_fix diverges from the registry:\n  {}",
+        "executor errors diverge from the registry row:\n  {}",
         violations.join("\n  ")
+    );
+}
+
+/// #3244, engine half of the boundary: an engine error crosses with the
+/// registry row for all four fields even when its construction site supplied
+/// its own `suggested_fix` (the persistence adapter does, and its text for a
+/// held writer lock differs from the row), while the site's `hints` — the one
+/// channel a site owns — survive. Driven through the wire on the held-lock
+/// open, the adapter arm that carries both.
+#[test]
+fn test_engine_site_fix_yields_to_the_row_while_site_hints_survive() {
+    let dir = tempfile::tempdir().expect("tmp");
+    let root = dir.path().join("db");
+    let holder = Executor::open_durable_local(&root).expect("first open holds the writer lock");
+    let status = open_error(&root);
+    drop(holder);
+    let code = "unavailable.engine.persistence";
+    let entry = public_error_code_entries()
+        .find(|entry| entry.code == code)
+        .expect("unavailable.engine.persistence is registered");
+    assert_eq!(field(&status, "code"), code);
+    assert_eq!(
+        field(&status, "suggested_fix"),
+        entry.suggested_fix,
+        "held lock: {status}"
+    );
+    assert_eq!(
+        status["retry_policy"],
+        serde_json::to_value(entry.retry_policy).expect("policy serializes"),
+        "held lock: {status}"
+    );
+    assert_eq!(
+        status["commit_outcome"],
+        serde_json::to_value(entry.commit_outcome).expect("outcome serializes"),
+        "held lock: {status}"
+    );
+    let hints = status["hints"]
+        .as_array()
+        .expect("site hints survive the boundary");
+    assert!(
+        hints.iter().any(|hint| hint
+            .as_str()
+            .is_some_and(|hint| hint.contains("persistence layer"))),
+        "the adapter's site hint reaches the wire: {status}"
     );
 }
 

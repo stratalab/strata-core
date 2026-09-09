@@ -374,3 +374,28 @@ fn wire_convert_error(error: &serde_json::Error) -> crate::ExecutorError {
         ),
     )
 }
+
+#[cfg(all(test, feature = "hub"))]
+mod tests {
+    use super::{wire_convert, HubRefList};
+    use crate::public_error_code_entry;
+
+    /// #3244: `wire_convert_error` restated the row's retry flag and had
+    /// drifted from it (`after_state_change` at the site, `same_request` in the
+    /// registry). The row is the authority; whether `hub_transport` is the
+    /// right code for a schema mismatch is a separate question.
+    #[test]
+    fn a_schema_mismatch_carries_the_hub_transport_registry_row() {
+        let error = wire_convert::<serde_json::Value, HubRefList>(serde_json::json!({
+            "unexpected": true
+        }))
+        .expect_err("an unknown shape does not convert");
+        let entry = public_error_code_entry("unavailable.executor.hub_transport")
+            .expect("hub_transport is registered");
+        assert_eq!(error.code(), entry.code);
+        assert_eq!(error.public_class(), entry.class);
+        assert_eq!(error.retry_policy(), entry.retry_policy);
+        assert_eq!(error.commit_outcome(), entry.commit_outcome);
+        assert_eq!(error.suggested_fix(), entry.suggested_fix);
+    }
+}

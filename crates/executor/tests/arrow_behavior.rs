@@ -12,10 +12,10 @@ use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use serde_json::{json, Value};
 use strata_executor::{
-    ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat, ArrowImportResult, ArrowImportTarget,
-    BatchEventEntry, Bytes, Command, EventRangeDirection, Executor, ExecutorErrorClass,
-    GraphBindingPrimitive, GraphBindingTarget, GraphDirection, GraphEntityBinding, Output,
-    VectorDistanceMetric, DEFAULT_BRANCH,
+    public_error_code_entry, ArrowExportPrimitive, ArrowExportResult, ArrowFileFormat,
+    ArrowImportResult, ArrowImportTarget, BatchEventEntry, Bytes, Command, EventRangeDirection,
+    Executor, ExecutorErrorClass, GraphBindingPrimitive, GraphBindingTarget, GraphDirection,
+    GraphEntityBinding, Output, VectorDistanceMetric, DEFAULT_BRANCH,
 };
 use tempfile::TempDir;
 
@@ -1360,6 +1360,38 @@ fn missing_input_is_reported_before_arrow_feature_work() {
         error.code(),
         "invalid_argument.executor.arrow_input_missing"
     );
+}
+
+/// #3244: the `arrow_io` construction site restated the row's retry flag and
+/// had drifted from it (`same_request` at the site, `after_state_change` in the
+/// registry). Driven end to end through `ArrowImport` so the assertion observes
+/// what the boundary hands the caller, not the site.
+#[test]
+fn malformed_input_carries_the_arrow_io_registry_row() {
+    let dir = TempDir::new().expect("temp dir");
+    let path = dir.path().join("bad.parquet");
+    fs::write(&path, b"not parquet").expect("write malformed");
+    let mut executor = Executor::open_cache().expect("cache executor opens");
+    let error = executor
+        .execute(Command::ArrowImport {
+            branch: None,
+            space: None,
+            file_path: path.display().to_string(),
+            format: Some(ArrowFileFormat::Parquet),
+            target: ArrowImportTarget::Kv,
+            key_column: None,
+            value_column: None,
+            collection: None,
+            graph: None,
+        })
+        .expect_err("malformed input fails");
+    let entry =
+        public_error_code_entry("unavailable.executor.arrow_io").expect("arrow_io is registered");
+    assert_eq!(error.code(), entry.code);
+    assert_eq!(error.public_class(), entry.class);
+    assert_eq!(error.retry_policy(), entry.retry_policy);
+    assert_eq!(error.commit_outcome(), entry.commit_outcome);
+    assert_eq!(error.suggested_fix(), entry.suggested_fix);
 }
 
 /// #3078: a Parquet Float64 column holding NaN must fail the import with a typed
