@@ -110,7 +110,6 @@ const ALLOWED_UNASSERTED: &[(&str, &str)] = &[
     ("invalid_argument.executor.hub_dataset", "asserted by TCP3.8 error-envelope replay fixtures"),
     ("invalid_argument.executor.limit", "asserted by TCP3.8 error-envelope replay fixtures"),
     ("invalid_argument.executor.vector_limit", "asserted by TCP3.8 error-envelope replay fixtures"),
-    ("internal.executor.wire_response", "unreachable serialize-failure fallback (IPC): `serde_json::to_value` of a plain-data `Output`/`ErrorStatus` cannot fail, so the IPC dispatch/client/server fallback arms that emit this code are dead paths — sibling `unavailable.executor.ipc_transport` (the reachable transport failure) is asserted by `ipc::connection` tests, and `invalid_argument.executor.wire_request` by `ipc::dispatch`/`ipc::server`"),
     ("internal.hub.import", "unreachable defensive guard (#3070): `materialize` re-opens the staging directory after importing every branch artifact, then rejects the result if `outcome.summary().created()` — but a successful import loop always writes durable state, so the re-open recovers rather than creating. Kept as a structured code so an operator sees a named failure if that invariant ever breaks; the reachable staging failures propagate the engine's own code via `engine_stage_failure` and are asserted by `import_bundle`'s `multi_branch_import_failure_names_the_branch_and_reason`"),
 ];
 
