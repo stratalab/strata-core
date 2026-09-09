@@ -227,8 +227,8 @@ fn from_status_normalizes_unregistered_codes_and_docs_urls() {
 /// sender owns only the message, ids, details and hints.
 #[test]
 fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
-    let code = "unavailable.executor.lock_unavailable";
-    let entry = public_error_code_entry(code).expect("lock_unavailable is registered");
+    let code = "unavailable.executor.ipc_transport";
+    let entry = public_error_code_entry(code).expect("ipc_transport is registered");
     let error = ExecutorError::from_status(status_from_json(serde_json::json!({
         "class": "internal",
         "code": code,
@@ -237,7 +237,7 @@ fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
         "commit_outcome": "maybe_committed",
         "message": "lock unavailable",
         "suggested_fix": "site text that must not survive",
-        "docs_url": "https://stratadb.org/e/unavailable.executor.lock_unavailable",
+        "docs_url": "https://stratadb.org/e/unavailable.executor.ipc_transport",
         "reference_id": "err-test-000001",
         "trace_id": "trace-000001",
         "details": [{"key": "path", "value": "db"}],
@@ -255,7 +255,7 @@ fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
     assert_eq!(error.status().trace_id(), Some("trace-000001"));
     assert_eq!(
         error.docs_url(),
-        "https://stratadb.org/e/unavailable.executor.lock_unavailable"
+        "https://stratadb.org/e/unavailable.executor.ipc_transport"
     );
     assert!(error
         .status()

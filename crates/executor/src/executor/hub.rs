@@ -63,13 +63,13 @@ impl Executor {
     ) -> ExecutorResult<Output> {
         let transport = hub_transport(hub_url)?;
         let dataset = DatasetName::parse(dataset).map_err(|error| {
-            ExecutorError::invalid_input(
+            ExecutorError::new(
                 "invalid_argument.executor.hub_dataset",
                 format!("dataset name is invalid: {error}"),
             )
         })?;
         let branch = branch.map(BranchName::parse).transpose().map_err(|error| {
-            ExecutorError::invalid_input(
+            ExecutorError::new(
                 "invalid_argument.executor.hub_branch",
                 format!("branch name is invalid: {error}"),
             )
@@ -213,7 +213,7 @@ fn hub_transport(hub_url: Option<String>) -> ExecutorResult<ClientTransport> {
 #[cfg(feature = "hub")]
 fn parse_dataset(dataset: &str) -> ExecutorResult<DatasetName> {
     DatasetName::parse(dataset).map_err(|error| {
-        ExecutorError::invalid_input(
+        ExecutorError::new(
             "invalid_argument.executor.hub_dataset",
             format!("dataset name is invalid: {error}"),
         )
@@ -223,7 +223,7 @@ fn parse_dataset(dataset: &str) -> ExecutorResult<DatasetName> {
 #[cfg(feature = "hub")]
 fn parse_since(since: &str) -> ExecutorResult<OffsetDateTime> {
     OffsetDateTime::parse(since, &Rfc3339).map_err(|error| {
-        ExecutorError::invalid_input(
+        ExecutorError::new(
             "invalid_argument.executor.hub_since",
             format!("since timestamp must be RFC 3339: {error}"),
         )
@@ -237,14 +237,14 @@ fn validate_dataset_list_query(
     limit: Option<u32>,
 ) -> ExecutorResult<()> {
     if matches!(limit, Some(0 | 201..)) {
-        return Err(ExecutorError::invalid_input(
+        return Err(ExecutorError::new(
             "invalid_argument.executor.hub_filter",
             "hub dataset list limit must be in the range 1..=200",
         ));
     }
     if let (Some(min), Some(max)) = (size_min_bytes, size_max_bytes) {
         if min > max {
-            return Err(ExecutorError::invalid_input(
+            return Err(ExecutorError::new(
                 "invalid_argument.executor.hub_filter",
                 "hub dataset size_min_bytes must be less than or equal to size_max_bytes",
             ));
@@ -307,22 +307,18 @@ fn clone_progress_output(dataset: &str, progress: CloneProgress) -> Output {
 fn hub_url_error(error: &HubUrlError) -> ExecutorError {
     // The only reachable HubUrlError is a malformed URL string — caller
     // input, not a precondition on well-formed input, so invalid_argument.
-    ExecutorError::invalid_input("invalid_argument.executor.hub_url", error.to_string())
+    ExecutorError::new("invalid_argument.executor.hub_url", error.to_string())
 }
 
 #[cfg(feature = "hub")]
 fn clone_error(error: &CloneError) -> ExecutorError {
     match error {
         CloneError::Transport { .. } => ExecutorError::new(
-            crate::ExecutorErrorClass::Unavailable,
             "unavailable.executor.hub_transport",
-            true,
             error.to_string(),
         ),
         _ => ExecutorError::new(
-            crate::ExecutorErrorClass::Unavailable,
             "failed_precondition.executor.hub_clone",
-            false,
             error.to_string(),
         ),
     }
@@ -336,16 +332,14 @@ fn hub_client_error(
 ) -> ExecutorError {
     match error {
         ClientError::BadRequest { problem } => {
-            ExecutorError::invalid_input(bad_request_code, hub_problem_message(problem))
+            ExecutorError::new(bad_request_code, hub_problem_message(problem))
         }
-        ClientError::NotFound { problem } => ExecutorError::not_found(
+        ClientError::NotFound { problem } => ExecutorError::new(
             not_found_code.unwrap_or("not_found.executor.hub_resource"),
             hub_problem_message(problem),
         ),
         _ => ExecutorError::new(
-            crate::ExecutorErrorClass::Unavailable,
             "unavailable.executor.hub_transport",
-            error.is_retryable(),
             error.to_string(),
         ),
     }

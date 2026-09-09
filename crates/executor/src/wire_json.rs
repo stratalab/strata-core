@@ -28,7 +28,7 @@ use crate::error::{ExecutorError, ExecutorResult};
 /// parsing it to a `Value`.
 pub fn guard_json_integers(json: &str) -> ExecutorResult<()> {
     if has_unrepresentable_integer(json) {
-        return Err(ExecutorError::invalid_input(
+        return Err(ExecutorError::new(
             "invalid_argument.executor.json_number",
             "a JSON integer is outside the supported i64/u64 range",
         ));

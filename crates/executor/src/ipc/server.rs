@@ -305,11 +305,7 @@ fn reject_at_capacity(stream: UnixStream) {
     // learns nothing extra before the close it was getting anyway.
     let _ = stream.set_write_timeout(Some(REJECT_WRITE_TIMEOUT));
     let error = crate::ExecutorError::new(
-        // The wire class derives from the code's `resource_exhausted.` prefix;
-        // retryable=true renders the SameRequest retry policy.
-        crate::error::ExecutorErrorClass::Unavailable,
         "resource_exhausted.executor.ipc_connections",
-        true,
         format!(
             "the store owner is at its IPC connection capacity ({MAX_CONNECTIONS}); \
              retry once another client disconnects"
@@ -610,9 +606,7 @@ fn serve_hello(frame: &[u8]) -> Result<HelloOutcome, String> {
 /// path's serialize fallback.
 fn serialize_hello_failure(error: &serde_json::Error) -> String {
     let status = crate::ExecutorError::new(
-        crate::error::ExecutorErrorClass::Internal,
         "internal.executor.wire_response",
-        false,
         format!("hello response serialization failed: {error}"),
     );
     serde_json::to_string(&serde_json::json!({ "error": status }))
@@ -620,7 +614,7 @@ fn serialize_hello_failure(error: &serde_json::Error) -> String {
 }
 
 fn ipc_hello_error(detail: &str) -> String {
-    let error = crate::ExecutorError::invalid_input(
+    let error = crate::ExecutorError::new(
         "invalid_argument.executor.ipc_hello",
         format!("IPC hello refused: {detail}"),
     );
@@ -764,7 +758,7 @@ fn is_read_retry_error(kind: io::ErrorKind) -> bool {
 }
 
 fn wire_request_error(detail: &str) -> String {
-    let error = crate::ExecutorError::invalid_input(
+    let error = crate::ExecutorError::new(
         "invalid_argument.executor.wire_request",
         format!("malformed IPC request envelope: {detail}"),
     );
@@ -777,20 +771,14 @@ fn wire_request_error(detail: &str) -> String {
 /// succeed once the lane is less busy.
 fn deadline_shed(budget_ms: u64) -> crate::ExecutorError {
     crate::ExecutorError::new(
-        // The wire class derives from the code's `unavailable.` prefix;
-        // retryable=true renders the SameRequest retry policy.
-        crate::error::ExecutorErrorClass::Unavailable,
         "unavailable.executor.ipc_deadline",
-        true,
         format!("the request's {budget_ms}ms deadline expired before dispatch"),
     )
 }
 
 fn internal_panic_error() -> String {
     let error = crate::ExecutorError::new(
-        crate::error::ExecutorErrorClass::Internal,
         "internal.executor.wire_response",
-        false,
         "the IPC handler panicked while serving a command",
     );
     serde_json::to_string(&serde_json::json!({ "error": error }))

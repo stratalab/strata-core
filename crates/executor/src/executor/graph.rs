@@ -90,7 +90,7 @@ impl Executor {
         // an Option is an engine quirk the wire boundary must not leak as a
         // null "success".
         let info = info.ok_or_else(|| {
-            ExecutorError::not_found("not_found.engine.graph", "graph does not exist")
+            ExecutorError::new("not_found.engine.graph", "graph does not exist")
         })?;
         Ok(Output::GraphInfoResult(Some(graph_info_data(&info))))
     }

@@ -349,8 +349,10 @@ impl TryFrom<strata_hub::stratahub_protocol::wire::YankedList> for HubYankedList
 /// Converts a `stratahub_protocol` wire value into this build's executor
 /// DTO. Fallible BY DESIGN: a hub running a newer protocol revision can
 /// serve shapes (a new enum variant, a reworked field) that this build's
-/// DTOs cannot represent — that must surface as a typed, non-retryable
-/// refusal telling the user to upgrade, never as an executor panic.
+/// DTOs cannot represent — that must surface as a typed refusal telling
+/// the user to upgrade, never as an executor panic. It currently rides
+/// the transport code, whose registry row says retry; a protocol code
+/// with a `Never` row is #3277.
 #[cfg(feature = "hub")]
 fn wire_convert<T, U>(value: T) -> Result<U, crate::ExecutorError>
 where
@@ -365,9 +367,7 @@ where
 #[cfg(feature = "hub")]
 fn wire_convert_error(error: &serde_json::Error) -> crate::ExecutorError {
     crate::ExecutorError::new(
-        crate::ExecutorErrorClass::Unavailable,
         "unavailable.executor.hub_transport",
-        false,
         format!(
             "the hub response does not match this build's schema (a newer \
              hub protocol revision?) — upgrade strata: {error}"

@@ -1,7 +1,7 @@
 use super::{
     BTreeSet, BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem,
     BatchItemResult, BatchMode, BatchResult, Bytes, EventBatchAppendItemResult, ExecutorError,
-    ExecutorErrorClass, ExecutorResult, GraphBatchItemResult, JsonBatchGetItemResult,
+    ExecutorResult, GraphBatchItemResult, JsonBatchGetItemResult,
     JsonBatchItemResult, VectorBatchGetItemResult, VectorBatchItemResult,
 };
 
@@ -217,9 +217,7 @@ fn reject_duplicates<T: Ord>(
     for key in keys {
         if !seen.insert(key) {
             return Err(ExecutorError::new(
-                ExecutorErrorClass::InvalidInput,
                 code,
-                false,
                 message,
             ));
         }

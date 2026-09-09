@@ -93,7 +93,7 @@ impl Executor {
 }
 
 pub(super) fn hub_feature_disabled() -> ExecutorError {
-    ExecutorError::invalid_input(
+    ExecutorError::new(
         "unsupported.executor.hub_feature_disabled",
         "hub commands require the executor hub feature",
     )

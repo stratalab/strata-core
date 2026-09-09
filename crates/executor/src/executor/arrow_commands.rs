@@ -54,7 +54,7 @@ impl Executor {
         _graph: Option<&str>,
     ) -> ExecutorResult<Output> {
         if !std::path::Path::new(&file_path).exists() {
-            return Err(ExecutorError::invalid_input(
+            return Err(ExecutorError::new(
                 "invalid_argument.executor.arrow_input_missing",
                 format!("file not found: '{file_path}'"),
             ));

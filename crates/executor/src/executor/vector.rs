@@ -115,7 +115,7 @@ impl Executor {
         let collection = vector_collection(collection)?;
         let mut service = self.vector_service(branch, space)?;
         let Some(info) = service.collection_info(&collection)? else {
-            return Err(ExecutorError::not_found(
+            return Err(ExecutorError::new(
                 "not_found.engine.vector_collection",
                 "vector collection does not exist",
             ));
@@ -260,7 +260,7 @@ impl Executor {
             };
             let response = self.inference.embeddings(model, &request)?;
             let item = response.data.into_iter().next().ok_or_else(|| {
-                ExecutorError::invalid_input(
+                ExecutorError::new(
                     "inference.provider_malformed_response",
                     "the embedding provider returned no vector for the text",
                 )
@@ -272,7 +272,7 @@ impl Executor {
             // The parameters exist so both builds have one signature; without
             // an inference runtime there is nothing to hand them to.
             let _ = (model, text, purpose);
-            Err(ExecutorError::invalid_input(
+            Err(ExecutorError::new(
                 "inference.unsupported_operation",
                 "this build has no inference support, so `text` cannot be \
                  embedded; pass a vector directly",

@@ -156,9 +156,7 @@ impl IpcClient {
     ) -> ExecutorResult<Output> {
         let command_json = serde_json::to_string(command).map_err(|error| {
             ExecutorError::new(
-                crate::error::ExecutorErrorClass::Internal,
                 "internal.executor.wire_response",
-                false,
                 format!("could not serialize command for IPC: {error}"),
             )
         })?;
@@ -209,9 +207,7 @@ fn decode_wire_response(bytes: &[u8]) -> ExecutorResult<Output> {
 
 fn transport_error(error: impl std::fmt::Display) -> ExecutorError {
     ExecutorError::new(
-        crate::error::ExecutorErrorClass::Unavailable,
         "unavailable.executor.ipc_transport",
-        false,
         format!("IPC transport failure: {error}"),
     )
 }
@@ -327,9 +323,7 @@ mod tests {
             // Built with the real constructor so this fake cannot drift from
             // the envelope the listener's reject_at_capacity actually writes.
             let error = crate::ExecutorError::new(
-                crate::error::ExecutorErrorClass::Unavailable,
                 "resource_exhausted.executor.ipc_connections",
-                true,
                 "the store owner is at its IPC connection capacity",
             );
             let rejection =
