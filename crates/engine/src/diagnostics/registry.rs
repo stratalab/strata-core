@@ -494,8 +494,11 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
         "already_exists.engine.vector_collection" => {
             "Use the existing collection, or choose a different collection name."
         }
+        // Fires only for a storage branch the control plane does not know
+        // (`BranchAlreadyExists` is storage's sole `AlreadyExists` variant);
+        // retrying cannot help under `Never`, so the remedy is the resource one.
         "already_exists.engine.persistence" => {
-            "Reload current state and retry against the latest version."
+            "Use the existing branch or choose a different branch name."
         }
         _ => return None,
     })
@@ -866,6 +869,18 @@ mod tests {
             history,
             suggested_fix_for_code("not_found.engine.persistence", EngineErrorClass::NotFound)
         );
+    }
+
+    /// `already_exists.engine.persistence` is an `already_exists` row under
+    /// `Never`: its remedy names the existing resource, not a retry (#3278).
+    #[test]
+    fn persistence_already_exists_row_carries_the_resource_remedy_not_a_retry() {
+        let code = "already_exists.engine.persistence";
+        let class = class_for_code(code).expect("registered");
+        assert_eq!(retry_policy_for_code(code, class), RetryPolicy::Never);
+        let fix = suggested_fix_for_code(code, class);
+        assert!(!fix.contains("retry"), "a retry remedy under Never: {fix}");
+        assert!(fix.contains("name"), "names the existing resource: {fix}");
     }
 
     #[test]
