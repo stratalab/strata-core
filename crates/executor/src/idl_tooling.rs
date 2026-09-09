@@ -495,6 +495,26 @@ struct ErrorsSource {
     errors: Vec<String>,
 }
 
+/// `error-sets.yaml`: named error sets (#3250). The reuse layers run
+/// defaults → family → kind → command, so a fact that crosses families or
+/// kinds ("everything the embeddings runtime can fail with") had no layer to
+/// live in and was copied into each command. A set names it once; any error
+/// list — a layer's `errors`, a command's `errors+`/`errors-`, or a set
+/// declared below it — refers to it as `set:<id>` and the reference expands
+/// in place, so generated surfaces keep their shape.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ErrorSetsSource {
+    sets: Vec<ErrorSetSource>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ErrorSetSource {
+    id: String,
+    errors: Vec<String>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DtoInventorySource {
@@ -738,17 +758,29 @@ pub fn resolve_default_schemas() -> Result<BTreeMap<String, serde_json::Value>> 
 pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
     let idl_root = repo_root.join(IDL_DIR);
     let manifest: ManifestSource = read_yaml(&idl_root.join("manifest.yaml"))?;
-    let defaults: DefaultsSource = read_yaml(&idl_root.join("defaults.yaml"))?;
+    let mut defaults: DefaultsSource = read_yaml(&idl_root.join("defaults.yaml"))?;
     let families: FamiliesSource = read_yaml(&idl_root.join("families.yaml"))?;
     let kinds: KindsSource = read_yaml(&idl_root.join("kinds.yaml"))?;
     let overlay_errors: ErrorsSource = read_yaml(&idl_root.join("errors.yaml"))?;
     let dto_inventory: DtoInventorySource = read_yaml(&idl_root.join("dto-inventory.yaml"))?;
 
-    let family_layers = named_layers(families.families, "family")?;
-    let kind_layers = named_layers(kinds.kinds, "kind")?;
+    let mut family_layers = named_layers(families.families, "family")?;
+    let mut kind_layers = named_layers(kinds.kinds, "kind")?;
     let registered_errors = registered_error_map();
     validate_error_overlay(&overlay_errors.errors, &registered_errors)?;
     enforce_error_code_exhaustiveness(&idl_root, &overlay_errors.errors, &registered_errors)?;
+
+    // Named error sets expand before layering, so `ResolvedLayer` only ever
+    // sees codes and every `set:` reference is resolved in exactly one place.
+    let error_sets: ErrorSetsSource = read_yaml(&idl_root.join("error-sets.yaml"))?;
+    let mut error_sets = ErrorSets::resolve(error_sets.sets, &overlay_errors.errors)?;
+    error_sets.expand_in_place("defaults", &mut defaults.fields.errors)?;
+    for (id, layer) in &mut family_layers {
+        error_sets.expand_in_place(&format!("family `{id}`"), &mut layer.errors)?;
+    }
+    for (id, layer) in &mut kind_layers {
+        error_sets.expand_in_place(&format!("kind `{id}`"), &mut layer.errors)?;
+    }
 
     let command_refs = enum_variants(&repo_root.join("crates/executor/src/command.rs"))?;
     let output_refs = enum_variants(&repo_root.join("crates/executor/src/output.rs"))?;
@@ -771,10 +803,14 @@ pub fn resolve_index(repo_root: &Path) -> Result<CommandIndex> {
         let command_path = idl_root.join("commands").join(file_name);
         validate_command_source_text(&command_path)?;
         let command_file: CommandsFileSource = read_yaml(&command_path)?;
-        for command in command_file.commands {
+        for mut command in command_file.commands {
+            let site = format!("command `{}`", command.id);
+            error_sets.expand_in_place(&site, &mut command.errors_add)?;
+            error_sets.expand_in_place(&site, &mut command.errors_remove)?;
             command_entries.push((command_path.clone(), command));
         }
     }
+    error_sets.reject_unreferenced()?;
 
     let mut seen_ids = BTreeSet::new();
     let mut seen_cli_paths = BTreeMap::new();
@@ -1739,6 +1775,145 @@ fn enforce_error_code_lists(
         }
     }
     Ok(())
+}
+
+/// The `set:<id>` reference prefix inside an authored error list.
+const ERROR_SET_REF: &str = "set:";
+
+/// The named error sets of `error-sets.yaml`, expanded (#3250).
+///
+/// Every authored error list — a layer's `errors`, a command's `errors+` /
+/// `errors-`, or a set declared below — may hold `set:<id>` entries, which
+/// [`ErrorSets::expand_in_place`] replaces with the set's codes. Three rules
+/// keep the file honest: a set nobody references is rejected (dead authored
+/// data), a set may only reference sets declared above it (acyclic by
+/// construction, and the reader can expand it top-down), and a list that
+/// spells out every code of a set is a hand copy and must reference the set
+/// instead — the exact defect the sets exist to end.
+struct ErrorSets {
+    /// Expanded, deduplicated codes per set, in declaration order.
+    sets: Vec<(String, Vec<String>)>,
+    /// Sets any list has referenced so far.
+    referenced: BTreeSet<String>,
+}
+
+impl ErrorSets {
+    fn resolve(sources: Vec<ErrorSetSource>, overlay_errors: &[String]) -> Result<Self> {
+        let declared: BTreeSet<&str> = overlay_errors.iter().map(String::as_str).collect();
+        let mut resolved = Self {
+            sets: Vec::new(),
+            referenced: BTreeSet::new(),
+        };
+        for source in sources {
+            validate_error_set_id(&source.id)?;
+            if resolved.lookup(&source.id).is_some() {
+                return Err(invalid(format!("duplicate error set id `{}`", source.id)));
+            }
+            let mut seen = BTreeSet::new();
+            for entry in &source.errors {
+                if entry.starts_with(ERROR_SET_REF) {
+                    continue;
+                }
+                if !declared.contains(entry.as_str()) {
+                    return Err(invalid(format!(
+                        "error set `{}` lists `{entry}` which is not declared in errors.yaml",
+                        source.id
+                    )));
+                }
+                if !seen.insert(entry.as_str()) {
+                    return Err(invalid(format!(
+                        "error set `{}` lists `{entry}` twice",
+                        source.id
+                    )));
+                }
+            }
+            let site = format!("error set `{}`", source.id);
+            let mut codes = source.errors;
+            resolved.expand_in_place(&site, &mut codes)?;
+            let mut expanded = Vec::new();
+            append_unique(&mut expanded, &codes);
+            if expanded.len() < 2 {
+                return Err(invalid(format!(
+                    "error set `{}` expands to fewer than two codes; a set names a group, list a single code directly",
+                    source.id
+                )));
+            }
+            resolved.sets.push((source.id, expanded));
+        }
+        Ok(resolved)
+    }
+
+    fn lookup(&self, id: &str) -> Option<&[String]> {
+        self.sets
+            .iter()
+            .find(|(set_id, _)| set_id == id)
+            .map(|(_, codes)| codes.as_slice())
+    }
+
+    /// Replaces every `set:<id>` entry of `list` with that set's codes, in
+    /// place. `site` names the list in rejections, e.g. "command `kv.put`".
+    fn expand_in_place(&mut self, site: &str, list: &mut Vec<String>) -> Result<()> {
+        // `set:` entries never equal a code, so they cannot complete a copy.
+        let literal: BTreeSet<&str> = list.iter().map(String::as_str).collect();
+        for (id, codes) in &self.sets {
+            if codes.iter().all(|code| literal.contains(code.as_str())) {
+                return Err(invalid(format!(
+                    "{site} lists every code of error set `{id}`; reference `{ERROR_SET_REF}{id}` instead"
+                )));
+            }
+        }
+        let mut expanded = Vec::with_capacity(list.len());
+        for entry in list.drain(..) {
+            match entry.strip_prefix(ERROR_SET_REF) {
+                Some(id) => {
+                    let codes = self.lookup(id).ok_or_else(|| {
+                        invalid(format!(
+                            "{site} references error set `{id}` which is not declared above it in error-sets.yaml"
+                        ))
+                    })?;
+                    expanded.extend(codes.iter().cloned());
+                    self.referenced.insert(id.to_owned());
+                }
+                None => expanded.push(entry),
+            }
+        }
+        *list = expanded;
+        Ok(())
+    }
+
+    /// Every declared set must be referenced somewhere, or it is dead
+    /// authored data that will drift from the runtime unnoticed.
+    fn reject_unreferenced(&self) -> Result<()> {
+        for (id, _) in &self.sets {
+            if !self.referenced.contains(id) {
+                return Err(invalid(format!(
+                    "error set `{id}` is never referenced; reference it as `{ERROR_SET_REF}{id}` or delete it"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Set ids read like command ids: dotted lowercase segments. An empty id or
+/// an empty segment fails the first-character rule, so nothing else is needed.
+fn validate_error_set_id(id: &str) -> Result<()> {
+    let well_formed = id.split('.').all(|segment| {
+        segment
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_lowercase())
+            && segment
+                .chars()
+                .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    });
+    if well_formed {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "error set id `{id}` must be dotted lowercase segments (`family.name`)"
+        )))
+    }
 }
 
 /// Enforce error-envelope replay coverage (TCP3.8b). Given the set of codes an

@@ -46,10 +46,12 @@ Runs a text-generation request against a local or cloud model and returns the co
 
 - [`failed_precondition.engine.runtime_closed`](https://stratadb.org/e/failed_precondition.engine.runtime_closed)
 - [`not_found.engine.branch`](https://stratadb.org/e/not_found.engine.branch)
+- [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
 - [`inference.unsupported_operation`](https://stratadb.org/e/inference.unsupported_operation)
 - [`inference.missing_model`](https://stratadb.org/e/inference.missing_model)
 - [`inference.model_load_failed`](https://stratadb.org/e/inference.model_load_failed)
 - [`inference.local_runtime_failed`](https://stratadb.org/e/inference.local_runtime_failed)
+- [`inference.registry_corrupt`](https://stratadb.org/e/inference.registry_corrupt)
 - [`inference.missing_api_key`](https://stratadb.org/e/inference.missing_api_key)
 - [`inference.provider_auth_failed`](https://stratadb.org/e/inference.provider_auth_failed)
 - [`inference.provider_unavailable`](https://stratadb.org/e/inference.provider_unavailable)
@@ -57,11 +59,9 @@ Runs a text-generation request against a local or cloud model and returns the co
 - [`inference.provider_rate_limited`](https://stratadb.org/e/inference.provider_rate_limited)
 - [`inference.provider_quota_exhausted`](https://stratadb.org/e/inference.provider_quota_exhausted)
 - [`inference.provider_model_not_found`](https://stratadb.org/e/inference.provider_model_not_found)
-- [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
 - [`inference.provider_malformed_response`](https://stratadb.org/e/inference.provider_malformed_response)
 - [`inference.unsupported_provider`](https://stratadb.org/e/inference.unsupported_provider)
 - [`inference.unsupported_parameter`](https://stratadb.org/e/inference.unsupported_parameter)
-- [`inference.registry_corrupt`](https://stratadb.org/e/inference.registry_corrupt)
 
 ## Invocation
 

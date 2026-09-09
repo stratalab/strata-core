@@ -426,10 +426,11 @@ fn test_commands_that_reach_a_cloud_provider_declare_every_provider_failure_code
 /// only the engine's missing-model precondition and no `inference.*` code at
 /// all (#3247). The rule: a command on the text-embedding path declares
 /// exactly the `inference.*` codes `inference.embed` declares — no fewer, and
-/// no extra ones either, since it has no inference path `embed` lacks. The
-/// list is copied by hand into each command's YAML because the IDL has no
-/// named error set to reference (#3250); this test is what keeps the copies
-/// aligned until it does.
+/// no extra ones either, since it has no inference path `embed` lacks. Each
+/// such command references the `inference.model_runtime` error set
+/// (`error-sets.yaml`, #3250), so the authored lists cannot drift apart; this
+/// test is what keeps the set itself aligned with the runtime, and what
+/// catches a text-embedding command that stops referencing it.
 ///
 /// `failed_precondition.engine.embedding_model_missing` is the marker: it is
 /// raised only when a command resolves a collection's recorded model in order

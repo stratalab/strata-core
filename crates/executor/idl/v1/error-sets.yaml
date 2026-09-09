@@ -1,0 +1,54 @@
+# Named error sets (#3250).
+#
+# A set names a group of error codes that recurs across commands, families,
+# or kinds — the reason it exists is that no single overlay layer can hold a
+# group that crosses those boundaries (the embeddings runtime set is raised by
+# `inference.*` and `vector.*` commands of three different kinds).
+#
+# Reference a set from any error list as `set:<id>`: a layer's `errors:`, a
+# command's `errors+:` / `errors-:`, or a set declared below it. The resolver
+# expands every reference in place before layering, so generated artifacts
+# only ever see codes.
+#
+# Rules the resolver enforces:
+#   - ids are dotted lowercase segments (`family.name`); no duplicates
+#   - every member is declared in errors.yaml
+#   - a set may only reference sets declared ABOVE it (acyclic by construction)
+#   - a set expands to at least two distinct codes
+#   - every set is referenced at least once
+#   - a list that spells out every code of a set is rejected: reference the
+#     set instead. That is the hand-copy this file exists to end.
+#
+# Runtime truth for the inference sets is `crates/inference/src/error.rs`;
+# `crates/executor/tests/inference_behavior.rs` keeps the sets aligned with it.
+sets:
+  # What a local-model operation can raise: the model is missing, cannot be
+  # loaded, fails at runtime, or the registry that names it is corrupt.
+  - id: inference.local_model
+    errors:
+      - inference.invalid_request
+      - inference.unsupported_operation
+      - inference.missing_model
+      - inference.model_load_failed
+      - inference.local_runtime_failed
+      - inference.registry_corrupt
+  # What a hosted-provider call can raise (#3239).
+  - id: inference.provider_failure
+    errors:
+      - inference.missing_api_key
+      - inference.provider_auth_failed
+      - inference.provider_unavailable
+      - inference.provider_timeout
+      - inference.provider_rate_limited
+      - inference.provider_quota_exhausted
+      - inference.provider_model_not_found
+      - inference.invalid_request
+      - inference.provider_malformed_response
+  # Everything a model-backed operation can raise: generate, embed, and the
+  # vector commands that embed text on the caller's behalf.
+  - id: inference.model_runtime
+    errors:
+      - set:inference.local_model
+      - set:inference.provider_failure
+      - inference.unsupported_provider
+      - inference.unsupported_parameter

@@ -61,22 +61,7 @@ commands:
     response_model: ChatResponse
     prose: commands/inference.generate.md
     errors+:
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.missing_api_key
-      - inference.provider_auth_failed
-      - inference.provider_unavailable
-      - inference.provider_timeout
-      - inference.provider_rate_limited
-      - inference.provider_quota_exhausted
-      - inference.provider_model_not_found
-      - inference.invalid_request
-      - inference.provider_malformed_response
-      - inference.unsupported_provider
-      - inference.unsupported_parameter
-      - inference.registry_corrupt
+      - set:inference.model_runtime
     fixtures:
       request: requests/v1/inference/generate.json
       response: responses/v1/inference/generate.json
@@ -89,12 +74,7 @@ commands:
     response_model: TokenIds
     prose: commands/inference.tokenize.md
     errors+:
-      - inference.invalid_request
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.registry_corrupt
+      - set:inference.local_model
     fixtures:
       request: requests/v1/inference/tokenize.json
       response: responses/v1/inference/tokenize.json
@@ -107,12 +87,7 @@ commands:
     response_model: DetokenizedText
     prose: commands/inference.detokenize.md
     errors+:
-      - inference.invalid_request
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.registry_corrupt
+      - set:inference.local_model
     fixtures:
       request: requests/v1/inference/detokenize.json
       response: responses/v1/inference/text.json
@@ -125,22 +100,7 @@ commands:
     response_model: EmbeddingsResponse
     prose: commands/inference.embed.md
     errors+:
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.missing_api_key
-      - inference.provider_auth_failed
-      - inference.provider_unavailable
-      - inference.provider_timeout
-      - inference.provider_rate_limited
-      - inference.provider_quota_exhausted
-      - inference.provider_model_not_found
-      - inference.invalid_request
-      - inference.provider_malformed_response
-      - inference.unsupported_provider
-      - inference.unsupported_parameter
-      - inference.registry_corrupt
+      - set:inference.model_runtime
     fixtures:
       request: requests/v1/inference/embed.json
       response: responses/v1/inference/embed.json
@@ -153,12 +113,7 @@ commands:
     response_model: RankResponse
     prose: commands/inference.rank.md
     errors+:
-      - inference.invalid_request
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.registry_corrupt
+      - set:inference.local_model
     fixtures:
       request: requests/v1/inference/rank.json
       response: responses/v1/inference/rank.json

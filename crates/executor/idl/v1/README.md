@@ -24,6 +24,7 @@ allowlist may *only shrink*. If you skip a step, a guard tells you which one.
 | `defaults.yaml` | Global defaults applied to every command. |
 | `dto-inventory.yaml` | The registry of allowed `response_model` shapes. |
 | `errors.yaml` | The registry of public error codes surfaced to SDK docs. |
+| `error-sets.yaml` | Named error sets, referenced as `set:<id>` from any error list (a group that crosses families or kinds lives here, not in copies). |
 | `examples/<id>.yaml` | Optional canonical example (drives docs + SDK doctests). |
 | `manifest.yaml` | Schema + generator version stamps. |
 | `*uncovered*.yaml`, `missing-examples.yaml` | Shrink-only coverage allowlists. |
@@ -74,7 +75,11 @@ Notes:
   resolution fails.
 - **Errors**: family-wide codes go in `families.yaml`; command-specific ones via
   `errors+: [<code>]` (and `errors-:` to drop an inherited one). Every code must
-  be registered in `errors.yaml`.
+  be registered in `errors.yaml`. A group of codes that recurs across commands,
+  families, or kinds is a named set in `error-sets.yaml`, referenced as
+  `set:<id>` from any error list (a set may reference sets declared above it).
+  Do not copy a set's codes out by hand: `check` rejects any list that spells
+  out every code of a defined set and tells you which `set:<id>` to reference.
 - **CLI**: `cli_surface: verb` (default) mints a clap verb; `wire` means
   SDK/`command run`/MCP only. Override `cli_path:` if the default
   (`<family> <op>`) is wrong.

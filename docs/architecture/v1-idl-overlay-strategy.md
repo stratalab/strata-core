@@ -497,6 +497,27 @@ The overlay should define explicit merge rules:
 6. Generated artifacts must fail when two commands resolve to the same CLI path
    or MCP name unless an explicit alias is declared.
 
+### Named Error Sets (Decided 2026-09-09, #3250)
+
+The four reuse layers hold what is common to a family or a kind. A group of
+error codes that crosses those boundaries — the model-runtime set is raised by
+`inference.*` commands of one kind and `vector.*` commands of two others —
+has no layer to live in, and was being copied by hand into every command that
+raised it. That is the "error bundle association" the Decision section lists
+(item 10) with no file behind it.
+
+`error-sets.yaml` is that file. It declares named sets, and any error list
+(`errors`, `errors+`, `errors-`, or a set declared later) references one as
+`set:<id>`. The resolver expands references in place before layering, so
+the resolved form and every generated artifact still see only codes. Rules:
+
+1. A set may reference only sets declared above it (acyclic by construction).
+2. A set expands to at least two distinct codes and is referenced at least
+   once; every member is registered in `errors.yaml`.
+3. A list that spells out every code of a defined set is rejected with the
+   `set:<id>` to reference instead. Once a set exists, copying it is a
+   `check` failure, not a review comment.
+
 ## Command ID Convention
 
 Stable command IDs should follow:

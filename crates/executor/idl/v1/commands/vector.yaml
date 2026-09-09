@@ -112,22 +112,7 @@ commands:
       - invalid_argument.executor.vector_dimension
       - invalid_argument.executor.vector_input
       - failed_precondition.engine.embedding_model_missing
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.missing_api_key
-      - inference.provider_auth_failed
-      - inference.provider_unavailable
-      - inference.provider_timeout
-      - inference.provider_rate_limited
-      - inference.provider_quota_exhausted
-      - inference.provider_model_not_found
-      - inference.invalid_request
-      - inference.provider_malformed_response
-      - inference.unsupported_provider
-      - inference.unsupported_parameter
-      - inference.registry_corrupt
+      - set:inference.model_runtime
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json
@@ -322,22 +307,7 @@ commands:
       - invalid_argument.executor.vector_limit
       - invalid_argument.executor.vector_input
       - failed_precondition.engine.embedding_model_missing
-      - inference.unsupported_operation
-      - inference.missing_model
-      - inference.model_load_failed
-      - inference.local_runtime_failed
-      - inference.missing_api_key
-      - inference.provider_auth_failed
-      - inference.provider_unavailable
-      - inference.provider_timeout
-      - inference.provider_rate_limited
-      - inference.provider_quota_exhausted
-      - inference.provider_model_not_found
-      - inference.invalid_request
-      - inference.provider_malformed_response
-      - inference.unsupported_provider
-      - inference.unsupported_parameter
-      - inference.registry_corrupt
+      - set:inference.model_runtime
     fixtures:
       setup:
         - requests/v1/vector/collection_create.json

@@ -61,10 +61,12 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`invalid_argument.executor.vector_limit`](https://stratadb.org/e/invalid_argument.executor.vector_limit)
 - [`invalid_argument.executor.vector_input`](https://stratadb.org/e/invalid_argument.executor.vector_input)
 - [`failed_precondition.engine.embedding_model_missing`](https://stratadb.org/e/failed_precondition.engine.embedding_model_missing)
+- [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
 - [`inference.unsupported_operation`](https://stratadb.org/e/inference.unsupported_operation)
 - [`inference.missing_model`](https://stratadb.org/e/inference.missing_model)
 - [`inference.model_load_failed`](https://stratadb.org/e/inference.model_load_failed)
 - [`inference.local_runtime_failed`](https://stratadb.org/e/inference.local_runtime_failed)
+- [`inference.registry_corrupt`](https://stratadb.org/e/inference.registry_corrupt)
 - [`inference.missing_api_key`](https://stratadb.org/e/inference.missing_api_key)
 - [`inference.provider_auth_failed`](https://stratadb.org/e/inference.provider_auth_failed)
 - [`inference.provider_unavailable`](https://stratadb.org/e/inference.provider_unavailable)
@@ -72,11 +74,9 @@ Plus the optional scope: `branch` and `space` (default to the session branch and
 - [`inference.provider_rate_limited`](https://stratadb.org/e/inference.provider_rate_limited)
 - [`inference.provider_quota_exhausted`](https://stratadb.org/e/inference.provider_quota_exhausted)
 - [`inference.provider_model_not_found`](https://stratadb.org/e/inference.provider_model_not_found)
-- [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
 - [`inference.provider_malformed_response`](https://stratadb.org/e/inference.provider_malformed_response)
 - [`inference.unsupported_provider`](https://stratadb.org/e/inference.unsupported_provider)
 - [`inference.unsupported_parameter`](https://stratadb.org/e/inference.unsupported_parameter)
-- [`inference.registry_corrupt`](https://stratadb.org/e/inference.registry_corrupt)
 
 ## Invocation
 
