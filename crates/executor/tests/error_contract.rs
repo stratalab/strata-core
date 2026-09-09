@@ -622,6 +622,18 @@ fn test_engine_site_fix_yields_to_the_row_while_site_hints_survive() {
             .is_some_and(|hint| hint.contains("persistence layer"))),
         "the adapter's site hint reaches the wire: {status}"
     );
+    // The adapter's structured details (`layer`, `reason` for a lower-layer
+    // failure) are site-owned too and cross the boundary alongside the hints.
+    let detail_keys: Vec<&str> = status["details"]
+        .as_array()
+        .expect("site details survive the boundary")
+        .iter()
+        .map(|detail| field(detail, "key"))
+        .collect();
+    assert!(
+        detail_keys.contains(&"layer") && detail_keys.contains(&"reason"),
+        "the adapter's site details reach the wire: {status}"
+    );
 }
 
 // ---------------------------------------------------------------------------
