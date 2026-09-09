@@ -470,6 +470,15 @@ fn class_prefixed_suggested_fix(code: &str) -> Option<&'static str> {
         "not_found.engine.persistence" => {
             "List the requested resource type, then retry with an existing resource id."
         }
+        // #3275: a pre-V1 directory is rejected, never migrated (hard rule 41),
+        // so this row must not share the compatible-version arm below.
+        "failed_precondition.engine.layout_version" => {
+            "Point Strata at an empty directory or an existing V1 database; pre-V1 databases \
+             are not migrated."
+        }
+        "history_unavailable.engine.persistence_history" => {
+            "Request history inside the retained window."
+        }
         "already_exists.engine.branch" => {
             "Choose a different branch name or delete the existing branch first."
         }
@@ -816,6 +825,46 @@ mod tests {
                 EngineErrorClass::Unavailable
             ),
             suggested_fix_for_code("internal.engine.persistence", EngineErrorClass::Internal),
+        );
+    }
+
+    /// #3275: two rows were hidden behind adapter site text and carried the
+    /// wrong remedy. `layout_version` rejects a pre-V1 directory, which is never
+    /// migrated (hard rule 41), so its row must not share the "run the required
+    /// migration" arm of the control-plane registry codes; `persistence_history`
+    /// is a retained-window error, not the `NotFound` class fallback.
+    #[test]
+    fn pre_v1_layout_and_history_window_rows_carry_their_own_remedy() {
+        let layout = suggested_fix_for_code(
+            "failed_precondition.engine.layout_version",
+            EngineErrorClass::IncompatibleLayout,
+        );
+        assert!(
+            !layout.contains("migration"),
+            "pre-V1 databases are not migrated: {layout}"
+        );
+        assert!(
+            layout.contains("pre-V1"),
+            "names the pre-V1 rejection: {layout}"
+        );
+        // The control-plane registry codes keep the compatible-version arm.
+        assert!(suggested_fix_for_code(
+            "failed_precondition.engine.migration_registry",
+            EngineErrorClass::IncompatibleLayout,
+        )
+        .contains("compatible Strata version"));
+
+        let history = suggested_fix_for_code(
+            "history_unavailable.engine.persistence_history",
+            EngineErrorClass::NotFound,
+        );
+        assert!(
+            history.contains("retained"),
+            "a history-window remedy, not the NotFound fallback: {history}"
+        );
+        assert_ne!(
+            history,
+            suggested_fix_for_code("not_found.engine.persistence", EngineErrorClass::NotFound)
         );
     }
 
