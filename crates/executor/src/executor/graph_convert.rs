@@ -650,9 +650,8 @@ pub(super) fn graph_ontology_freeze_output(outcome: &EngineGraphOntologyFreezeOu
 }
 
 fn analytics_bound(value: u64, field: &'static str) -> ExecutorResult<usize> {
-    usize::try_from(value).map_err(|_| {
-        ExecutorError::new("invalid_argument.executor.graph_analytics_budget", field)
-    })
+    usize::try_from(value)
+        .map_err(|_| ExecutorError::new("invalid_argument.executor.graph_analytics_budget", field))
 }
 
 pub(super) fn engine_graph_budget(

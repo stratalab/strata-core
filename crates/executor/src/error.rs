@@ -501,14 +501,12 @@ fn resolve_row(
     requested_code: String,
     details: &mut Vec<ErrorDetail>,
 ) -> (ErrorCodeRegistryEntry, String) {
-    match public_error_code_entry(&requested_code) {
-        Some(entry) => (entry, requested_code),
-        None => {
-            let entry = unregistered_code_entry();
-            details.push(ErrorDetail::new("unregistered_code", requested_code));
-            (entry, entry.code.to_owned())
-        }
+    if let Some(entry) = public_error_code_entry(&requested_code) {
+        return (entry, requested_code);
     }
+    let entry = unregistered_code_entry();
+    details.push(ErrorDetail::new("unregistered_code", requested_code));
+    (entry, entry.code.to_owned())
 }
 
 /// The one place a registry row becomes a status: class, retry policy,

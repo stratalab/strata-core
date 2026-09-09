@@ -313,14 +313,10 @@ fn hub_url_error(error: &HubUrlError) -> ExecutorError {
 #[cfg(feature = "hub")]
 fn clone_error(error: &CloneError) -> ExecutorError {
     match error {
-        CloneError::Transport { .. } => ExecutorError::new(
-            "unavailable.executor.hub_transport",
-            error.to_string(),
-        ),
-        _ => ExecutorError::new(
-            "failed_precondition.executor.hub_clone",
-            error.to_string(),
-        ),
+        CloneError::Transport { .. } => {
+            ExecutorError::new("unavailable.executor.hub_transport", error.to_string())
+        }
+        _ => ExecutorError::new("failed_precondition.executor.hub_clone", error.to_string()),
     }
 }
 
@@ -338,10 +334,7 @@ fn hub_client_error(
             not_found_code.unwrap_or("not_found.executor.hub_resource"),
             hub_problem_message(problem),
         ),
-        _ => ExecutorError::new(
-            "unavailable.executor.hub_transport",
-            error.to_string(),
-        ),
+        _ => ExecutorError::new("unavailable.executor.hub_transport", error.to_string()),
     }
 }
 

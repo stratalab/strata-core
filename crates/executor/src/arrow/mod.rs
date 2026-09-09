@@ -18,17 +18,11 @@ fn not_found(code: &'static str, message: impl Into<String>) -> ExecutorError {
 }
 
 fn io_error(message: impl Into<String>) -> ExecutorError {
-    ExecutorError::new(
-        "unavailable.executor.arrow_io",
-        message,
-    )
+    ExecutorError::new("unavailable.executor.arrow_io", message)
 }
 
 fn internal_error(message: impl Into<String>) -> ExecutorError {
-    ExecutorError::new(
-        "internal.executor.arrow",
-        message,
-    )
+    ExecutorError::new("internal.executor.arrow", message)
 }
 
 fn unexpected_output(command: &'static str) -> ExecutorError {
