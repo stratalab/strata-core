@@ -838,6 +838,20 @@ mod tests {
     }
 
     #[test]
+    fn serialize_hello_failure_carries_the_wire_response_code() {
+        // The last-resort hello envelope is a real registry-backed error, not
+        // the static fallback string: code, class and the serde cause survive.
+        let cause = serde_json::from_str::<u32>("nope").expect_err("not a number");
+        let envelope: serde_json::Value =
+            serde_json::from_str(&super::serialize_hello_failure(&cause)).expect("decode");
+        let error = &envelope["error"];
+        assert_eq!(error["code"], "internal.executor.wire_response");
+        assert_eq!(error["class"], "internal");
+        let message = error["message"].as_str().expect("message is a string");
+        assert!(message.contains(&cause.to_string()), "{message}");
+    }
+
+    #[test]
     fn transient_accept_errors_are_exactly_would_block() {
         use std::io::ErrorKind;
         // Only a poll-timeout (WouldBlock) re-polls; every other kind ends the

@@ -131,7 +131,10 @@ const DEFAULT_GRAPH_LIST_LIMIT: usize = 100;
 
 mod admin_branch;
 mod admin_convert;
+#[cfg(feature = "arrow")]
 mod arrow_commands;
+#[cfg(not(feature = "arrow"))]
+mod arrow_disabled;
 mod batch;
 mod dispatch;
 mod event;

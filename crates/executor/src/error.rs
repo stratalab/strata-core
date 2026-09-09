@@ -698,6 +698,42 @@ mod tests {
     }
 
     #[test]
+    fn normalize_docs_url_keeps_only_the_canonical_per_code_page() {
+        use super::{normalize_docs_url, ERROR_REGISTRY_DOC_PAGE};
+
+        let slug = "not_found.engine.persistence";
+        let canonical = format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/{slug}");
+        let local = format!("/{ERROR_REGISTRY_DOC_PAGE}/{slug}");
+
+        // A foreign canonical page survives as sent, fragment stripped.
+        assert_eq!(normalize_docs_url(&canonical, slug), canonical);
+        assert_eq!(
+            normalize_docs_url(&format!("{canonical}#legacy"), slug),
+            canonical
+        );
+        // A base ending at the error segment gets the code appended.
+        assert_eq!(
+            normalize_docs_url(
+                &format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/"),
+                slug
+            ),
+            canonical
+        );
+        // Direction controls: both halves of the canonical test are
+        // load-bearing. Another code's page is not this code's page, and a
+        // path that merely ends in the code is not the error page — each is
+        // re-derived from this process's docs base instead.
+        for foreign in [
+            format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/some.other.code"),
+            format!("https://docs.example/guide/{slug}"),
+        ] {
+            let normalized = normalize_docs_url(&foreign, slug);
+            assert_ne!(normalized, foreign);
+            assert!(normalized.ends_with(&local), "{normalized}");
+        }
+    }
+
+    #[test]
     fn data_loss_error_surfaces_data_loss_public_class_but_corruption_compat_class() {
         use super::{ErrorClass, ExecutorError, ExecutorErrorClass};
 
