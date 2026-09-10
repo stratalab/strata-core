@@ -975,25 +975,33 @@ fn execute_with_download_offer(
         command,
         format,
         std::io::stdin().is_terminal(),
-        &mut ask_on_the_terminal,
+        &mut |error, pull_spec| {
+            ask_for_download(error, pull_spec, std::io::stdin().lock(), std::io::stderr())
+        },
     )
 }
 
-/// Shows the refusal and asks the question on stderr; the answer is one line
-/// of stdin. True only for an explicit `y`.
+/// Shows the refusal and asks the question on `prompt`; the answer is one
+/// line of `answers`. True only for an explicit `y`.
+///
+/// The streams are parameters so the answer logic has a test without a
+/// terminal; the process's stdin and stderr are supplied by
+/// [`execute_with_download_offer`].
 #[cfg(all(feature = "native", feature = "inference"))]
-fn ask_on_the_terminal(error: &ExecutorError, pull_spec: &str) -> bool {
-    use std::io::Write as _;
-
-    eprintln!("{error}");
-    eprint!("\nDownload {pull_spec} now? [y/N] ");
-    // Rationale: the flush only makes the prompt appear before the read
-    // blocks. If stderr cannot be flushed the prompt is lost, not the answer —
-    // the read below still decides, and reporting the flush failure would go
-    // to the same broken stream.
-    let _ = std::io::stderr().flush();
+fn ask_for_download(
+    error: &ExecutorError,
+    pull_spec: &str,
+    mut answers: impl std::io::BufRead,
+    mut prompt: impl std::io::Write,
+) -> bool {
+    // Rationale: the prompt is advisory. If it cannot be written or flushed
+    // the question is lost, not the answer — the read below still decides,
+    // and reporting the failure would go to the same broken stream.
+    let _ = writeln!(prompt, "{error}")
+        .and_then(|()| write!(prompt, "\nDownload {pull_spec} now? [y/N] "))
+        .and_then(|()| prompt.flush());
     let mut answer = String::new();
-    std::io::stdin().read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
+    answers.read_line(&mut answer).is_ok() && answer.trim().eq_ignore_ascii_case("y")
 }
 
 /// The offer loop with who-is-asking and the question as inputs, so a test
@@ -2493,7 +2501,12 @@ fn parse_tool_choice(value: &str) -> strata_executor::InferenceToolChoice {
     }
 }
 
-#[cfg(all(test, feature = "inference"))]
+// Test gates are stacked, never `all(test, …)`: cargo-mutants recognises the
+// literal `#[cfg(test)]` and skips the module, but does not look inside
+// `all(...)`, so a combined gate has it mutate the module's helper fns as
+// product code.
+#[cfg(test)]
+#[cfg(feature = "inference")]
 mod config_key_tests {
     use super::{is_user_config_key, provider_api_key_target, redact_key};
 
@@ -2527,7 +2540,9 @@ mod config_key_tests {
     }
 }
 
-#[cfg(all(test, feature = "inference"))]
+// Stacked gate: see `config_key_tests`.
+#[cfg(test)]
+#[cfg(feature = "inference")]
 mod inference_command_tests {
     use super::{inference_command, options, parse_chat_message};
     use serde_json::json;
@@ -2906,7 +2921,9 @@ impl From<ExecutorError> for CliError {
     }
 }
 
-#[cfg(all(test, feature = "native"))]
+// Stacked gate: see `config_key_tests`.
+#[cfg(test)]
+#[cfg(feature = "native")]
 mod tests {
     use super::*;
 
@@ -3251,6 +3268,57 @@ mod tests {
             run(["strata", "--db", db.as_str(), "kv", "get", "hello"]),
             0
         );
+    }
+
+    /// The answer at the terminal: an explicit `y` — either case, surrounding
+    /// whitespace tolerated — and nothing else. `n`, `yes`, an empty line and
+    /// a closed stdin all decline. The refusal and the question reach the
+    /// prompt stream first, and a prompt stream that cannot be written loses
+    /// the question, not the answer.
+    #[cfg(all(feature = "native", feature = "inference"))]
+    #[test]
+    fn only_an_explicit_yes_at_the_terminal_accepts_the_download() {
+        use super::ask_for_download;
+
+        struct Broken;
+        impl std::io::Write for Broken {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Err(std::io::ErrorKind::BrokenPipe.into())
+            }
+        }
+
+        let refusal = ExecutorError::new("inference.missing_model", "miniLM is not on disk");
+        let mut prompt = Vec::new();
+        assert!(ask_for_download(
+            &refusal,
+            "miniLM",
+            &b"y\n"[..],
+            &mut prompt
+        ));
+        let prompt = String::from_utf8(prompt).expect("the prompt is text");
+        let (shown, question) = prompt
+            .split_once("\nDownload miniLM now? [y/N] ")
+            .unwrap_or_else(|| panic!("no question in {prompt:?}"));
+        assert!(shown.contains(refusal.code()), "{shown:?}");
+        assert_eq!(question, "");
+
+        for yes in ["Y\n", "  y  \n", "y"] {
+            assert!(
+                ask_for_download(&refusal, "miniLM", yes.as_bytes(), Vec::new()),
+                "{yes:?} is a yes"
+            );
+        }
+        for no in ["n\n", "N\n", "yes\n", "\n", ""] {
+            assert!(
+                !ask_for_download(&refusal, "miniLM", no.as_bytes(), Vec::new()),
+                "{no:?} is a no"
+            );
+        }
+        assert!(ask_for_download(&refusal, "miniLM", &b"y\n"[..], Broken));
+        assert!(!ask_for_download(&refusal, "miniLM", &b"n\n"[..], Broken));
     }
 
     /// D8's truth table: every condition guards a different mistake.

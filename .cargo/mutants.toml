@@ -153,17 +153,30 @@ exclude_re = [
     "\\bdownload\\b",
     "\\bextract\\b",
     "replace <impl Drop for TempDir>::drop with \\(\\)",
-    # D8 download offer (#3124): `execute_with_download_offer` is the
-    # interactive prompt itself — print the refusal, read a line from a real
-    # terminal, re-run. A `cargo test` has no TTY to answer it and no fixtured
-    # release to pull from, so its branches survive vacuously. Same category as
-    # run_repl and run_update above.
+    # D8 download offer (#3124, #3261): `execute_with_download_offer` is the
+    # process glue — is stdin a terminal, and the closure that binds the real
+    # stdin and stderr to the question. A `cargo test` has no TTY, so its
+    # mutants survive vacuously. Same category as run_repl and run_update
+    # above.
     #
-    # Its DECISION logic is extracted and stays mutated: `should_offer_download`
-    # (truth table over terminal / output format / error code) and
-    # `missing_model_spec` (which model the command was going to load). Both
-    # gained tests because this gate found them untested.
+    # Everything it dispatches to stays mutated and has a test in this lane:
+    # `offerable_download` (the truth table over terminal / output format /
+    # the resolver's answer / not-a-pull) and `ask_for_download` (the answer
+    # logic over injected streams: an explicit `y` and nothing else).
     "execute_with_download_offer",
+    # `execute_offering_download` is the loop those two feed: refuse → ask →
+    # pull → retry. Its one operator mutant, the `!` on the answer, is
+    # killable — but only against a runtime whose refusal names a model that
+    # a pull then makes present, and that runtime is the executor's fake,
+    # behind `strata-cli/testkit`, which this lane's default-feature build
+    # compiles out (the observers are `cfg(feature = "testkit")`). The `test`
+    # job runs them: `cargo test -p strata-cli --features testkit --lib`.
+    # Planting `delete !` there reds
+    # `tests::the_offer_pulls_the_model_the_refusal_names_and_retries`
+    # (declined answer pulls anyway; accepted answer refuses), verified by
+    # hand. That is the strength mechanism this entry rests on. Same class as
+    # `inference_report` below.
+    "delete ! in execute_offering_download",
     # D2 install-local (#3124): the same self-replacing-binary glue already
     # excluded above for `strata update` — it downloads a release asset,
     # verifies its checksum and overwrites the running executable, which a test
