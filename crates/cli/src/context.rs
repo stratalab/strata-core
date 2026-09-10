@@ -13,33 +13,12 @@ pub(crate) struct Scope {
 pub(crate) struct CommandContext {
     branch: Option<String>,
     space: Option<String>,
-    /// The provider-key environment variables the CLI filled from the config
-    /// file when the process started. The bridge runs once, before any
-    /// command, so this is the only record of which keys the file supplied —
-    /// what lets `inference status` name the file, one-shot or mid-session.
-    #[cfg(feature = "inference")]
-    config_backed_keys: Vec<&'static str>,
 }
 
 #[cfg(feature = "native")]
 impl CommandContext {
     pub(crate) fn new(branch: Option<String>, space: Option<String>) -> Self {
-        Self {
-            branch,
-            space,
-            #[cfg(feature = "inference")]
-            config_backed_keys: Vec::new(),
-        }
-    }
-
-    #[cfg(feature = "inference")]
-    pub(crate) fn set_config_backed_keys(&mut self, keys: Vec<&'static str>) {
-        self.config_backed_keys = keys;
-    }
-
-    #[cfg(feature = "inference")]
-    pub(crate) fn config_backed_keys(&self) -> &[&'static str] {
-        &self.config_backed_keys
+        Self { branch, space }
     }
 
     pub(crate) fn scope_with_overrides(

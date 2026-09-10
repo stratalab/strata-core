@@ -305,26 +305,29 @@ pub fn unset_global_hub_url() -> Result<Option<PathBuf>, HubUrlError> {
 //
 // Deliberately global-only (unlike `hub.url`, which has a per-project layer): a
 // key in a project's `.strata/config.toml` risks being committed to source
-// control. Environment variables still take precedence over these (the CLI
-// resolves env first). Provider names are opaque here — the CLI validates them
-// against the known cloud providers.
+// control. Environment variables still take precedence over these: the
+// executor's provider settings ask the environment first and this file second
+// (#3221). Provider names are opaque here — the CLI validates them against the
+// known cloud providers.
+//
+// The reader takes the file's path, like `HubUrlInputs` does for `hub.url`, so
+// the executor can fix the platform path once and tests can point it at a
+// temp file; the writers below resolve the global path themselves because
+// only the CLI's `config set/unset` call them.
 // ---------------------------------------------------------------------------
 
-/// Reads `[providers.<provider>].api_key` from the global config; `Ok(None)`
-/// when the file, section, or key is absent.
+/// Reads `[providers.<provider>].api_key` from the config file at `path`;
+/// `Ok(None)` when the file, section, or key is absent.
 ///
 /// # Errors
 ///
 /// [`HubUrlError::MalformedSource`] when the file exists but is invalid.
-pub fn read_global_provider_key(provider: &str) -> Result<Option<String>, HubUrlError> {
-    let Some(path) = global_config_path() else {
-        return Ok(None);
-    };
+pub fn read_provider_key(path: &Path, provider: &str) -> Result<Option<String>, HubUrlError> {
     if !path.is_file() {
         return Ok(None);
     }
     let source = path.display().to_string();
-    let text = std::fs::read_to_string(&path).map_err(|error| HubUrlError::MalformedSource {
+    let text = std::fs::read_to_string(path).map_err(|error| HubUrlError::MalformedSource {
         source: source.clone(),
         detail: format!("unreadable: {error}"),
     })?;

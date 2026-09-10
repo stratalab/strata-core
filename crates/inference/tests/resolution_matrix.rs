@@ -622,8 +622,11 @@ fn assert_child_environment(mode: &str) {
         "no cell may reach the real hub"
     );
 
-    // The key dimension as observed today: `status` reports presence, never
-    // the key. (S3 moves this onto `capability` as an availability.)
+    // The key dimension as `status` observes it: presence and the variable
+    // that holds it, never the key. The runtime learned both from its
+    // provider settings — the environment, the source `InferenceRuntime::new`
+    // installs (#3221); the executor's env-then-config composition is pinned
+    // by its own tests and the CLI's `config_behavior`.
     let status = fixture(Dir::Empty, Net::On).runtime.status();
     for row in &status.providers {
         if row.requires_api_key {
@@ -631,6 +634,12 @@ fn assert_child_environment(mode: &str) {
                 row.key_present,
                 mode == "keys",
                 "{:?} key_present in mode {mode}",
+                row.provider
+            );
+            assert_eq!(
+                row.key_source.as_deref(),
+                (mode == "keys").then_some(row.key_env_var.as_deref().expect("a cloud variable")),
+                "{:?} key_source in mode {mode}",
                 row.provider
             );
         }

@@ -18,6 +18,10 @@ pub mod executor;
 #[cfg(feature = "idl-tooling")]
 #[doc(hidden)]
 pub mod idl_tooling;
+// Where the inference runtimes this crate builds learn provider keys from
+// (environment, then the user config file).
+#[cfg(feature = "inference")]
+mod inference_settings;
 // The multi-process access policy (Host / Client / Off). Always compiled so
 // every frontend can name it; the socket transport that acts on it is unix-only
 // (`ipc` below).
@@ -44,6 +48,8 @@ pub use error::{
 };
 pub use error_registry::{public_error_code_entries, public_error_code_entry};
 pub use executor::Executor;
+#[cfg(feature = "inference")]
+pub use inference_settings::default_inference_runtime;
 pub use ipc_host_state::{IpcClientEntry, IpcClientRegistry, IpcHostState};
 pub use ipc_mode::IpcMode;
 pub use output::{Output, RemoteOriginFrontierInfo, RemoteOriginInfo};

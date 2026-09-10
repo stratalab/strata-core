@@ -4,6 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use strata_executor::cli_metadata::{CliCommandCatalog, CliCommandEntry};
 use strata_executor::{
@@ -14,8 +15,8 @@ use strata_inference::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, EmbedInput, EmbeddingItem,
     EmbeddingsRequest, EmbeddingsResponse, FinishReason, InferenceCapability, InferenceError,
     InferenceRuntime, InferenceRuntimeConfig, ModelCacheStatus, ModelInfo, ModelTask,
-    ProviderFailure, PullModelOutput, RankRequest, RankResponse, RankRuntimeOutcome,
-    RegistryFailure, Role, Usage,
+    ProviderFailure, ProviderKey, ProviderKind, ProviderSettings, PullModelOutput, RankRequest,
+    RankResponse, RankRuntimeOutcome, RegistryFailure, Role, Usage,
 };
 
 fn output_round_trip(value: &Output) -> Output {
@@ -106,7 +107,7 @@ fn inference_outputs_round_trip_through_json() {
         hf_repo: "stratalab-org/all-MiniLM-L6-v2-GGUF".to_owned(),
     };
     let capability = InferenceCapability {
-        provider: strata_inference::ProviderKind::OpenAI,
+        provider: ProviderKind::OpenAI,
         model: "gpt-4o-mini".to_owned(),
         availability: strata_inference::AvailabilityKind::Ready,
         pull_spec: None,
@@ -641,18 +642,30 @@ fn an_unreadable_models_directory_is_an_io_failure_on_every_resolving_verb() {
     }
 }
 
+/// Provider settings that hold no key for any provider: the runtime learns
+/// keys from what it was constructed with (#3221), so the test states the
+/// world instead of editing the process environment.
+struct NoKeys;
+
+impl ProviderSettings for NoKeys {
+    fn key(&self, _provider: ProviderKind) -> Option<ProviderKey> {
+        None
+    }
+}
+
 #[test]
-fn cloud_generate_reports_missing_api_key_without_env() {
-    let runtime = InferenceRuntime::new(InferenceRuntimeConfig {
-        models_dir: None,
-        network_enabled: true,
-    });
+fn cloud_generate_reports_missing_api_key_without_a_key() {
+    let runtime = InferenceRuntime::with_settings(
+        InferenceRuntimeConfig {
+            models_dir: None,
+            network_enabled: true,
+        },
+        Arc::new(NoKeys),
+    );
     let mut executor = Executor::open_cache()
         .expect("executor opens")
         .with_inference_runtime(runtime);
 
-    let previous = std::env::var_os("OPENAI_API_KEY");
-    unsafe { std::env::remove_var("OPENAI_API_KEY") };
     let err = executor
         .execute(Command::InferenceGenerate {
             model: "openai:gpt-4o-mini".to_owned(),
@@ -663,9 +676,6 @@ fn cloud_generate_reports_missing_api_key_without_env() {
             },
         })
         .expect_err("missing API key is reported before provider call");
-    if let Some(previous) = previous {
-        unsafe { std::env::set_var("OPENAI_API_KEY", previous) };
-    }
     assert_eq!(err.code(), "inference.missing_api_key");
     assert_eq!(err.public_class(), ErrorClass::FailedPrecondition);
     assert_eq!(err.retry_policy(), RetryPolicy::AfterStateChange);

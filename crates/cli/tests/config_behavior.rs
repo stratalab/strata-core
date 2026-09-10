@@ -167,25 +167,58 @@ fn provider_api_key_is_redacted_and_never_echoed() {
     let value = json(&output);
     // Redaction keeps a short non-secret prefix (first 7 chars) plus `****`.
     assert_eq!(value["value"], "sk-tops****");
+
+    // `config get-key` reads the stored key back from the file the executor's
+    // provider settings read (#3221) — set and redacted, never raw.
+    let output = config_cli(
+        &home,
+        &["--json", "config", "get-key", "openai.api_key"],
+        &[],
+    );
+    let rendered = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !rendered.contains("sk-topsecret-xyz"),
+        "`config get-key` must never echo the raw key: {rendered}"
+    );
+    let value = json(&output);
+    assert_eq!(value["set"], true);
+    assert_eq!(value["value"], "sk-tops****");
+
+    // A provider the file does not name, and the key once unset, are unset.
+    let value = json(&config_cli(
+        &home,
+        &["--json", "config", "get-key", "anthropic.api_key"],
+        &[],
+    ));
+    assert_eq!(value["set"], false);
+    assert_eq!(value["value"], Value::Null);
+    config_cli(&home, &["config", "unset", "openai.api_key"], &[]);
+    let value = json(&config_cli(
+        &home,
+        &["--json", "config", "get-key", "openai.api_key"],
+        &[],
+    ));
+    assert_eq!(value["set"], false);
+    assert_eq!(value["value"], Value::Null);
 }
 
-/// A key set with `config set <provider>.api_key` reaches the runtime through
-/// the environment — the CLI exports it a moment before the command runs. So
-/// `inference status`, which reports the variable it found a key in, would
-/// name `OPENAI_API_KEY` for a key the user never exported. The CLI corrects
-/// the source to the file for exactly the variables it filled; this drives
-/// that through the real binary, where the pure truth table cannot reach.
+/// `inference status` names where a key actually came from. The runtime's
+/// provider settings ask the environment first and the user config file
+/// second (#3221), and `key_source` is the place that answered: the variable
+/// for an exported key, the file's path for one stored with `config set
+/// <provider>.api_key`. This drives that through the real binary against a
+/// file the test wrote.
 ///
 /// The three cases are the boundary on both sides: a config-backed key names
 /// the file, an exported key keeps its variable even when the file also has
 /// one (the environment wins), and a provider with no key has no source.
 ///
-/// The bridge runs once per process, before any command, and `inference
-/// status` inside a session runs long after it — so the session case is the
-/// one that catches a status arm bridging again and finding nothing to name.
+/// The session case guards the path an agent drives: `inference status`
+/// mid-pipe reads the same settings as the one-shot — there is no per-process
+/// bridge to have run first or to run again.
 #[cfg(feature = "inference")]
 #[test]
-fn inference_status_names_the_config_file_for_keys_it_bridged() {
+fn inference_status_names_where_a_key_came_from() {
     const SECRET: &str = "sk-from-config-file";
 
     let home = tempfile::tempdir().expect("temp home");
@@ -212,15 +245,14 @@ fn inference_status_names_the_config_file_for_keys_it_bridged() {
         !rendered.contains(SECRET),
         "status must never carry a key value: {rendered}"
     );
-    let bridged = provider(&json(&output), "openai");
-    assert_eq!(bridged["key_present"], true, "the file's key was loaded");
-    let source = bridged["key_source"]
+    let stored = provider(&json(&output), "openai");
+    assert_eq!(stored["key_present"], true, "the file's key was read");
+    let source = stored["key_source"]
         .as_str()
-        .expect("a loaded key has a source");
+        .expect("a present key has a source");
     assert!(
         source.ends_with("strata/config.toml"),
-        "a config-backed key names the file, not the variable the CLI \
-         filled: {source}"
+        "a config-backed key names the file, not a variable: {source}"
     );
 
     // Exported: the environment wins and its variable is the honest source,
@@ -235,13 +267,13 @@ fn inference_status_names_the_config_file_for_keys_it_bridged() {
     );
     assert_eq!(exported["key_source"], "OPENAI_API_KEY");
 
-    // No key anywhere: no source, whatever the bridge reports.
+    // No key anywhere: no source.
     let absent = provider(&json(&config_cli(&home, &status_args, &[])), "anthropic");
     assert_eq!(absent["key_present"], false);
     assert_eq!(absent["key_source"], Value::Null);
 
-    // Mid-session: the same command through the pipe path, run after the
-    // process-wide bridge, still names the file.
+    // Mid-session: the same command through the pipe path names the file
+    // too.
     let session = config_cli_piped(&home, &["--db", db, "--json"], "inference status\n");
     let in_session = provider(&json(&session), "openai");
     assert_eq!(in_session["key_present"], true);
@@ -255,11 +287,11 @@ fn inference_status_names_the_config_file_for_keys_it_bridged() {
     );
 }
 
-/// `doctor` reports readiness from the same environment the runtime reads,
-/// and a key set with `config set` reaches that environment once, at startup,
-/// for every command — doctor does no bridging of its own. A config-backed
-/// key therefore makes its provider ready here exactly as an exported one
-/// does (`doctor_behavior` covers the exported case).
+/// `doctor` inspects the runtime every database opens with — the executor's
+/// default, whose provider settings read the environment and then the user
+/// config file (#3221) — so a config-backed key makes its provider ready here
+/// exactly as an exported one does (`doctor_behavior` covers the exported
+/// case). Until #3221 doctor answered from an environment nobody had bridged.
 #[cfg(feature = "inference")]
 #[test]
 fn doctor_sees_a_config_file_key() {
@@ -280,6 +312,48 @@ fn doctor_sees_a_config_file_key() {
     assert!(
         ready.iter().any(|provider| provider == "openai"),
         "a config-backed key makes its provider ready: {report}"
+    );
+}
+
+/// A one-shot `inference` command needs no database (R9 of #3261): it works
+/// on models, so with no `--db`, path, or `STRATA_DB` it runs in an ephemeral
+/// cache session instead of the no-database refusal. The boundary holds on
+/// every other side: a data command with no target still refuses, and
+/// `inference install-local` still refuses a target — it changes the binary.
+#[cfg(feature = "inference")]
+#[test]
+fn an_inference_one_shot_needs_no_database() {
+    let home = tempfile::tempdir().expect("temp home");
+    let status = json(&config_cli(&home, &["--json", "inference", "status"], &[]));
+    assert!(
+        status["data"]["providers"].is_array(),
+        "a bare `inference status` answers: {status}"
+    );
+    assert!(
+        !home.path().join("wal").exists(),
+        "an implicit inference one-shot never opens the current directory"
+    );
+
+    // A data command keeps the refusal: agents never write to an implicit
+    // location.
+    let refused = config_cli(&home, &["--json", "kv", "get", "k"], &[]);
+    assert_eq!(refused.status.code(), Some(2), "bare `kv get` must refuse");
+    let stderr = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        stderr.contains("invalid_argument.cli.no_database"),
+        "the data command keeps the typed refusal: {stderr}"
+    );
+
+    // The host command keeps refusing a target, cache included.
+    let refused = config_cli(
+        &home,
+        &["--cache", "--json", "inference", "install-local"],
+        &[],
+    );
+    assert_eq!(
+        refused.status.code(),
+        Some(2),
+        "`inference install-local` with a target is a usage error"
     );
 }
 

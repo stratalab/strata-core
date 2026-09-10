@@ -4,7 +4,7 @@
   "generator_version": "strata-executor-cli-idl.1",
   "source": {
     "path": "crates/executor/idl/v1/generated/command-index.json",
-    "checksum_sha256": "42f51ec3a4ac4791646df26579f483aaf822879ee2ebd342380afdad26fe9ddb",
+    "checksum_sha256": "a822933c440d48d9165a7b2e8d4744bd301db3e51aca89737f65f8480d85a39c",
     "schema_version": "strata.idl.v1",
     "generator_version": "strata-executor-idl.1"
   },
@@ -4961,7 +4961,7 @@
       "kind": "inference.runtime_op",
       "title": "Report inference readiness",
       "summary": "Report what this binary can do before anything is attempted.",
-      "description": "Reports the inference facts that are knowable up front: whether this build can execute local models and download them, which providers are compiled in, which of those have an API key and where it was found, and how many catalogued models are already on disk.\n\nReleased binaries ship the cloud providers and leave local model execution out, so `local_execution` is false in them and every catalogued local model is unavailable until `strata inference install-local` adds it; `local_remedy` says so. Knowing that from `status` is the point: previously the only way to find out was to run an operation and read the failure.\n\n`key_source` names where a key was read from: the environment variable, or the config file's path when the key was set with `strata config set <provider>.api_key` and the CLI loaded it from there. The key itself is never returned.\n\nThe model directory is shared by every database on the machine, so a model downloaded once is available to all of them.",
+      "description": "Reports the inference facts that are knowable up front: whether this build can execute local models and download them, which providers are compiled in, which of those have an API key and where it was found, and how many catalogued models are already on disk.\n\nReleased binaries ship the cloud providers and leave local model execution out, so `local_execution` is false in them and every catalogued local model is unavailable until `strata inference install-local` adds it; `local_remedy` says so. Knowing that from `status` is the point: previously the only way to find out was to run an operation and read the failure.\n\n`key_source` names where a key was read from: the environment variable, or the config file's path when the key was set with `strata config set <provider>.api_key`. The runtime asks the environment first and the config file second, and reports the one that answered, so `key_source` is exactly what a `generate` or `embed` call would use. The key itself is never returned.\n\nThe model directory is shared by every database on the machine, so a model downloaded once is available to all of them.",
       "docs": "/docs/inference/status",
       "feature": "core",
       "access": "read",

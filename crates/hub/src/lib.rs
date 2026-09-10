@@ -49,7 +49,7 @@ pub use remote::{
     read_remote_tracking_ref, write_remote_tracking_ref, RemoteRefError, RemoteTrackingRef,
 };
 pub use resolve::{
-    global_config_path, read_global_hub_url, read_global_provider_key, resolve_hub_url,
+    global_config_path, read_global_hub_url, read_provider_key, resolve_hub_url,
     unset_global_hub_url, unset_global_provider_key, write_global_hub_url,
     write_global_provider_key, HubUrlError, HubUrlInputs, HubUrlSource, ResolvedHubUrl,
     DEFAULT_HUB_URL,

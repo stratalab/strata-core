@@ -96,7 +96,7 @@
           "type": "boolean"
         },
         "key_source": {
-          "description": "Where the key was found, when one was. Never a value. `None` when no\nkey is present.\n\nThis runtime reads only the environment, so it always names the\nvariable. The CLI copies `strata config set <provider>.api_key` keys\ninto that environment before running, and replaces this with the\nconfig file's path for the ones it copied — so a caller is told the\nfile, not a variable it never exported.",
+          "description": "Where the key was found, when one was. Never a value. `None` when no\nkey is present.\n\nThe runtime's [`ProviderSettings`] names the place: the environment\nvariable, or the config file's path for a key stored with `strata\nconfig set <provider>.api_key` — so a caller is told the file, not a\nvariable it never exported.",
           "type": [
             "string",
             "null"

@@ -79,12 +79,10 @@ pub(crate) fn run_doctor(
 /// is not a directory.
 #[cfg(all(feature = "native", feature = "inference"))]
 fn inference_report(issues: &mut Vec<Value>) -> Value {
-    use strata_executor::{InferenceRuntime, InferenceRuntimeConfig};
-
-    // Config-file keys were copied into the environment at the top of
-    // `execute`, before any command — doctor included — so the runtime already
-    // sees them here; a second bridge would only find its gaps filled.
-    let status = InferenceRuntime::new(InferenceRuntimeConfig::default()).status();
+    // The runtime every database opens with — the same provider settings
+    // (environment, then the user config file), so what doctor reports is
+    // what a command would find (#3221).
+    let status = strata_executor::default_inference_runtime().status();
 
     for provider in &status.providers {
         // A variable set but empty fails at call time with a message about the

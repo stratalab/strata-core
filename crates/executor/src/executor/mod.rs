@@ -277,7 +277,7 @@ impl Executor {
             ipc_host_state: None,
             state_version: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
             #[cfg(feature = "inference")]
-            inference: Box::new(strata_inference::InferenceRuntime::default()),
+            inference: Box::new(crate::default_inference_runtime()),
         }
     }
 

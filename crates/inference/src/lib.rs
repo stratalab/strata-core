@@ -31,6 +31,7 @@ mod grammar;
 pub mod registry;
 mod resolve;
 pub mod runtime;
+mod settings;
 #[cfg(any(test, feature = "testkit"))]
 pub mod testkit;
 // Compiled unconditionally alongside `grammar` (same rationale); only
@@ -77,6 +78,7 @@ pub use runtime::{
     InferenceRuntimeConfig, InferenceStatus, ModelCacheStatus, ProviderStatus, PullModelOutput,
     RankRequest, RankResponse, RankRuntimeOutcome, LOCAL_UNAVAILABLE_REMEDY,
 };
+pub use settings::{EnvProviderSettings, KeySource, ProviderKey, ProviderSettings};
 pub use wire::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, EmbedInput, EmbeddingItem,
     EmbeddingsRequest, EmbeddingsResponse, FinishReason, FunctionDef, InputType, JsonSchemaSpec,
@@ -480,36 +482,6 @@ pub(crate) fn embedding_provider_feature_enabled(provider: ProviderKind) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    use std::ffi::OsString;
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    use std::sync::Mutex;
-
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    /// Shared with the other test modules in this binary: every test that
-    /// touches a key variable must serialize on the same `ENV_LOCK`, or one
-    /// module's unset races another's read. Setting a key is deliberately
-    /// not offered: an engine that needs one takes it as an argument.
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    pub(crate) fn with_env_unset<T>(env_var: &str, test: impl FnOnce() -> T) -> T {
-        let _guard = ENV_LOCK.lock().expect("env lock poisoned");
-        let previous = std::env::var_os(env_var);
-        std::env::remove_var(env_var);
-        let result = test();
-        restore_env(env_var, previous);
-        result
-    }
-
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    fn restore_env(env_var: &str, previous: Option<OsString>) {
-        if let Some(previous) = previous {
-            std::env::set_var(env_var, previous);
-        } else {
-            std::env::remove_var(env_var);
-        }
-    }
 
     // --- GenerateRequest ---
 

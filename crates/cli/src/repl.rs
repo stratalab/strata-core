@@ -227,7 +227,7 @@ fn handle_line(
             let Some(command) = cli.command else {
                 return Ok(LineOutcome::Continue);
             };
-            execute_parsed_command(connection, command, context, &scope, format)?;
+            execute_parsed_command(connection, command, &scope, format)?;
             Ok(LineOutcome::Continue)
         }
     }

@@ -216,12 +216,15 @@ Accepted 2026-09-07:
 - **D5 — keys in the global config at mode 0600**, environment variables still
   winning. **Correction: this was already built** and the gap table below was
   wrong about it. `strata config set openai.api_key <key>` writes it,
-  `read_global_provider_key` reads it, and `load_provider_keys_into_env` fills
-  env gaps before any inference command runs. The original claim ("environment
+  `read_global_provider_key` read it, and `load_provider_keys_into_env` filled
+  env gaps before any inference command ran. The original claim ("environment
   variables only") came from grepping `crates/inference` alone and missing that
-  the CLI resolves config keys a layer above. What remains of D5 is surfacing
+  the CLI resolved config keys a layer above. What remained of D5 was surfacing
   it: the no-key hint now names `strata config set`, which is persistent and
-  executable by an agent, rather than only `export`.
+  executable by an agent, rather than only `export`. (The CLI-side bridge was
+  itself the gap #3221 named — only the CLI got config keys — and was replaced
+  in S3a of `inference-model-resolution.md` by `ProviderSettings` injected
+  into the runtime, so every executor caller resolves keys the same way.)
 - **D9 — a collection with no recorded model refuses `--text`** and names a
   command to declare one. Raw `--vector` keeps working. Inference-by-dimension
   was rejected: 384 and 768 are shared by several models, so it would guess,

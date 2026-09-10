@@ -689,9 +689,9 @@ pub(crate) fn missing_api_key_message(provider: ProviderKind, env_var: &str) -> 
 
 impl InferenceRuntime {
     /// Resolves a model spec against this runtime's registry, network setting
-    /// and the process environment's provider keys. See the module docs for
-    /// the order of checks; see [`ResolvedModel::require_ready`] for how an
-    /// unavailable model becomes an error.
+    /// and provider settings. See the module docs for the order of checks;
+    /// see [`ResolvedModel::require_ready`] for how an unavailable model
+    /// becomes an error.
     pub fn resolve(
         &self,
         spec: &str,
@@ -700,11 +700,7 @@ impl InferenceRuntime {
         resolve(
             self.registry(),
             self.network_enabled(),
-            &|provider| {
-                crate::runtime::env_holds_a_key(
-                    std::env::var_os(api_key_env_var(provider)).as_deref(),
-                )
-            },
+            &|provider| self.key_present(provider),
             spec,
             use_,
         )
