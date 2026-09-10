@@ -766,4 +766,45 @@ mod tests {
         assert_eq!(error.public_class(), ErrorClass::AmbiguousCommit);
         assert_eq!(error.class(), ExecutorErrorClass::AmbiguousCommit);
     }
+
+    /// #3244 / #3280: the engine-side twin of the peer-status contract. An
+    /// engine status crosses the boundary with the local registry row for
+    /// class, retry policy, commit outcome and suggested fix — whatever row
+    /// fields it arrived with — while the site-owned message, details and
+    /// hints survive untouched. Built from JSON because the engine keeps its
+    /// status constructor crate-private (#3280); a stale build over IPC is the
+    /// same shape.
+    #[test]
+    fn engine_error_status_re_derives_the_row_and_keeps_the_site_fields() {
+        use super::engine_error_status;
+        use crate::error_registry::public_error_code_entry;
+        use strata_engine::EngineErrorStatus;
+
+        let code = "unavailable.engine.persistence";
+        let entry = public_error_code_entry(code).expect("persistence row is registered");
+        let engine: EngineErrorStatus = serde_json::from_value(serde_json::json!({
+            "class": "internal",
+            "code": code,
+            "retry_policy": "never",
+            "commit_outcome": "maybe_committed",
+            "message": "writer lock is held",
+            "suggested_fix": "site text that must not survive",
+            "details": [{"key": "layer", "value": "service"}],
+            "hints": ["site hint that must survive"]
+        }))
+        .expect("engine status deserializes");
+
+        let status = engine_error_status(&engine);
+        assert_eq!(status.code(), code);
+        assert_eq!(status.class(), entry.class);
+        assert_eq!(status.retry_policy(), entry.retry_policy);
+        assert_eq!(status.commit_outcome(), entry.commit_outcome);
+        assert_eq!(status.suggested_fix(), entry.suggested_fix);
+        assert_eq!(status.message(), "writer lock is held");
+        assert!(status
+            .details()
+            .iter()
+            .any(|detail| detail.key() == "layer" && detail.value() == "service"));
+        assert_eq!(status.hints(), ["site hint that must survive"]);
+    }
 }

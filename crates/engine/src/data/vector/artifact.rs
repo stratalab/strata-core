@@ -1223,13 +1223,7 @@ fn flat_artifact_file_name(artifact_id: &VectorArtifactId) -> String {
 }
 
 fn vector_artifact_io_error(message: &'static str, error: std::io::Error) -> EngineError {
-    EngineError::with_source(
-        crate::diagnostics::EngineErrorClass::Unavailable,
-        "unavailable.engine.vector_artifacts",
-        false,
-        message,
-        error,
-    )
+    EngineError::with_source("unavailable.engine.vector_artifacts", message, error)
 }
 
 pub(crate) const fn default_flat_artifact_load_budget_bytes() -> usize {

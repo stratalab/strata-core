@@ -139,10 +139,11 @@ pub struct EngineErrorStatus {
 }
 
 impl EngineErrorStatus {
-    /// Creates engine status facts.
-    #[allow(clippy::too_many_arguments)]
+    /// Creates engine status facts. Crate-private: the row fields come from
+    /// the registry through `EngineError`'s constructors, never from a caller
+    /// (#3280).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         class: ErrorClass,
         code: impl Into<String>,
         retry_policy: RetryPolicy,
@@ -249,62 +250,65 @@ pub struct EngineError {
 }
 
 impl EngineError {
-    pub(crate) fn new(
-        class: EngineErrorClass,
-        code: &'static str,
-        retryable: bool,
-        message: impl Into<String>,
-    ) -> Self {
-        debug_assert_registered(class, code);
-        let retry_policy = if retryable {
-            RetryPolicy::SameRequest
-        } else {
-            default_retry_policy(class)
-        };
-        let message = message.into();
-        Self {
-            class,
-            status: EngineErrorStatus::new(
-                public_class_for_legacy(class, code),
-                code,
-                retry_policy,
-                default_commit_outcome(class),
-                message,
-                super::registry::suggested_fix_for_code(code, class),
-                Vec::new(),
-                Vec::new(),
-            ),
-            source: None,
-        }
+    /// Creates an engine error for a registered `code`.
+    ///
+    /// The registry row supplies the class, retry policy, commit outcome and
+    /// suggested fix; a construction site owns only the code and the message
+    /// (#3280). Sites with structured facts use [`Self::with_context`].
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self::build(code, message.into(), Vec::new(), Vec::new(), None)
     }
 
+    /// [`Self::new`] retaining the underlying error as the source.
     pub(crate) fn with_source(
-        class: EngineErrorClass,
         code: &'static str,
-        retryable: bool,
         message: impl Into<String>,
         source: impl Error + Send + Sync + 'static,
     ) -> Self {
-        debug_assert_registered(class, code);
-        let retry_policy = if retryable {
-            RetryPolicy::SameRequest
-        } else {
-            default_retry_policy(class)
-        };
-        let message = message.into();
+        Self::build(
+            code,
+            message.into(),
+            Vec::new(),
+            Vec::new(),
+            Some(Arc::new(source)),
+        )
+    }
+
+    /// Creates an engine error from everything a construction site owns: the
+    /// code, the message, structured `details`, and `hints` — the site-level
+    /// remediation the registry row cannot express. The row itself is not a
+    /// parameter: there is no channel to override it (#3244, #3280).
+    pub(crate) fn with_context(
+        code: &'static str,
+        message: impl Into<String>,
+        details: Vec<ErrorDetail>,
+        hints: Vec<String>,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self::build(code, message.into(), details, hints, Some(Arc::new(source)))
+    }
+
+    fn build(
+        code: &'static str,
+        message: String,
+        details: Vec<ErrorDetail>,
+        hints: Vec<String>,
+        source: Option<Arc<dyn Error + Send + Sync + 'static>>,
+    ) -> Self {
+        let (class, row) = super::registry::registry_row(code);
         Self {
             class,
             status: EngineErrorStatus::new(
-                public_class_for_legacy(class, code),
+                row.class,
                 code,
-                retry_policy,
-                default_commit_outcome(class),
+                row.retry_policy,
+                row.commit_outcome,
                 message,
-                super::registry::suggested_fix_for_code(code, class),
-                Vec::new(),
-                Vec::new(),
+                row.suggested_fix,
+                details,
+                hints,
             ),
-            source: Some(Arc::new(source)),
+            source,
         }
     }
 
@@ -315,6 +319,11 @@ impl EngineError {
     /// legacy class is recovered from the registered code so `class()` stays
     /// consistent with the status.
     pub(crate) fn from_status(status: EngineErrorStatus) -> Self {
+        // Rationale: a preserved status only ever carries a code the registry
+        // produced, so the fallback is unreachable; it is kept as bad input
+        // (the status came from outside this constructor) rather than the
+        // constructors' `Internal` fallback, which covers a code typed into
+        // the tree (`registry_row`).
         let legacy_class = super::registry::class_for_code(status.code())
             .unwrap_or(EngineErrorClass::InvalidInput);
         Self {
@@ -324,48 +333,47 @@ impl EngineError {
         }
     }
 
-    /// Creates an engine error from explicit V1 status facts.
-    pub(crate) fn with_status(
-        legacy_class: EngineErrorClass,
-        status: EngineErrorStatus,
-        source: impl Error + Send + Sync + 'static,
-    ) -> Self {
-        debug_assert_registered(legacy_class, status.code());
-        Self {
-            class: legacy_class,
-            status,
-            source: Some(Arc::new(source)),
-        }
+    /// The named constructors below are a readability convenience: the class
+    /// is the registry's, and the name is checked against it in debug builds
+    /// so a code typed into the wrong constructor fails at the site.
+    fn of_class(class: EngineErrorClass, code: &'static str, message: impl Into<String>) -> Self {
+        let error = Self::new(code, message);
+        debug_assert!(
+            error.class == class,
+            "engine error code `{code}` is registered under {:?}, not {class:?}",
+            error.class
+        );
+        error
     }
 
     #[must_use]
     /// Creates an invalid-input error.
     pub fn invalid_input(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::InvalidInput, code, false, message)
+        Self::of_class(EngineErrorClass::InvalidInput, code, message)
     }
 
     #[must_use]
     /// Creates a not-found error.
     pub fn not_found(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::NotFound, code, false, message)
+        Self::of_class(EngineErrorClass::NotFound, code, message)
     }
 
     #[must_use]
     /// Creates a conflict error.
     pub fn conflict(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::Conflict, code, false, message)
+        Self::of_class(EngineErrorClass::Conflict, code, message)
     }
 
     #[must_use]
     /// Creates a corruption error.
     pub fn corruption(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::Corruption, code, false, message)
+        Self::of_class(EngineErrorClass::Corruption, code, message)
     }
 
     #[must_use]
     /// Creates an incompatible-layout error.
     pub fn incompatible_layout(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::IncompatibleLayout, code, false, message)
+        Self::of_class(EngineErrorClass::IncompatibleLayout, code, message)
     }
 
     #[must_use]
@@ -375,29 +383,19 @@ impl EngineError {
     /// dedicated unsupported variant); the public V1 class is derived from the
     /// `unsupported.` code prefix and resolves to `ErrorClass::Unsupported`.
     pub(crate) fn unsupported(code: &'static str, message: impl Into<String>) -> Self {
-        Self::new(EngineErrorClass::Unavailable, code, false, message)
+        Self::of_class(EngineErrorClass::Unavailable, code, message)
     }
 
     #[must_use]
     /// Creates a control-plane-unavailable error.
     pub(crate) fn control_plane_unavailable(message: impl Into<String>) -> Self {
-        Self::new(
-            EngineErrorClass::Unavailable,
-            "unavailable.engine.control_plane",
-            false,
-            message,
-        )
+        Self::new("unavailable.engine.control_plane", message)
     }
 
     #[must_use]
     /// Creates a closed-runtime error.
     pub fn closed_runtime(message: impl Into<String>) -> Self {
-        Self::new(
-            EngineErrorClass::ClosedRuntime,
-            "failed_precondition.engine.runtime_closed",
-            false,
-            message,
-        )
+        Self::new("failed_precondition.engine.runtime_closed", message)
     }
 
     #[must_use]
@@ -490,173 +488,198 @@ impl Error for EngineError {
     }
 }
 
-/// Validates in debug builds that `code` is registered and maps to `class`.
-fn debug_assert_registered(class: EngineErrorClass, code: &str) {
-    debug_assert!(
-        super::registry::class_for_code(code) == Some(class),
-        "engine error code `{code}` is unregistered or mapped to a class other than {class:?}"
-    );
-}
-
-fn public_class_for_legacy(class: EngineErrorClass, code: &str) -> ErrorClass {
-    match code.split('.').next() {
-        Some("not_found") => ErrorClass::NotFound,
-        Some("already_exists") => ErrorClass::AlreadyExists,
-        Some("invalid_argument") => ErrorClass::InvalidArgument,
-        Some("failed_precondition") => ErrorClass::FailedPrecondition,
-        Some("access_denied") => ErrorClass::AccessDenied,
-        Some("conflict") => ErrorClass::Conflict,
-        Some("ambiguous_commit") => ErrorClass::AmbiguousCommit,
-        Some("history_unavailable") => ErrorClass::HistoryUnavailable,
-        Some("unsupported") => ErrorClass::Unsupported,
-        Some("resource_exhausted") => ErrorClass::ResourceExhausted,
-        Some("unavailable") => ErrorClass::Unavailable,
-        Some("io") => ErrorClass::Io,
-        Some("corruption") => ErrorClass::Corruption,
-        Some("data_loss") => ErrorClass::DataLoss,
-        Some("serialization") => ErrorClass::Serialization,
-        Some("internal") => ErrorClass::Internal,
-        _ => match class {
-            EngineErrorClass::InvalidInput => ErrorClass::InvalidArgument,
-            EngineErrorClass::NotFound => ErrorClass::NotFound,
-            EngineErrorClass::Conflict => ErrorClass::Conflict,
-            EngineErrorClass::Unavailable => ErrorClass::Unavailable,
-            EngineErrorClass::AmbiguousCommit => ErrorClass::AmbiguousCommit,
-            EngineErrorClass::IncompatibleLayout | EngineErrorClass::ClosedRuntime => {
-                ErrorClass::FailedPrecondition
-            }
-            EngineErrorClass::Corruption => ErrorClass::Corruption,
-            EngineErrorClass::Internal => ErrorClass::Internal,
-        },
-    }
-}
-
-const fn default_retry_policy(class: EngineErrorClass) -> RetryPolicy {
-    match class {
-        EngineErrorClass::Unavailable => RetryPolicy::AfterStateChange,
-        EngineErrorClass::AmbiguousCommit | EngineErrorClass::Internal => RetryPolicy::Unknown,
-        _ => RetryPolicy::Never,
-    }
-}
-
-const fn default_commit_outcome(class: EngineErrorClass) -> CommitOutcomeStatus {
-    match class {
-        EngineErrorClass::InvalidInput
-        | EngineErrorClass::Conflict
-        | EngineErrorClass::ClosedRuntime => CommitOutcomeStatus::NotStarted,
-        EngineErrorClass::AmbiguousCommit => CommitOutcomeStatus::MaybeCommitted,
-        _ => CommitOutcomeStatus::NotApplicable,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        public_class_for_legacy, CommitOutcomeStatus, EngineError, EngineErrorClass,
-        EngineErrorStatus, ErrorClass, RetryPolicy,
-    };
+    use super::{EngineError, EngineErrorClass, ErrorDetail};
     use crate::diagnostics::registry::{
-        class_for_code, error_code_registry_entries, suggested_fix_for_code,
+        class_for_code, error_code_registry_entries, error_code_registry_entry,
     };
 
-    /// The registry is the single authority for a code's remediation hint: the
-    /// hint `strata agents errors` documents must be the hint a live error
-    /// carries. Both generic constructors are swept over every registered code
-    /// so a code whose runtime hint regresses to class-generic wording fails
-    /// here instead of shipping (#3237: 145 of 161 codes did).
+    fn row_mismatches(error: &EngineError, code: &str) -> Vec<String> {
+        let row = error_code_registry_entry(code).expect("registered");
+        let legacy = class_for_code(code).expect("registered");
+        let mut mismatches = Vec::new();
+        if error.class() != legacy {
+            mismatches.push(format!("class {:?} != {legacy:?}", error.class()));
+        }
+        if error.public_class() != row.class {
+            mismatches.push(format!(
+                "public class {:?} != {:?}",
+                error.public_class(),
+                row.class
+            ));
+        }
+        if error.retry_policy() != row.retry_policy {
+            mismatches.push(format!(
+                "retry {:?} != {:?}",
+                error.retry_policy(),
+                row.retry_policy
+            ));
+        }
+        if error.commit_outcome() != row.commit_outcome {
+            mismatches.push(format!(
+                "commit {:?} != {:?}",
+                error.commit_outcome(),
+                row.commit_outcome
+            ));
+        }
+        if error.suggested_fix() != row.suggested_fix {
+            mismatches.push(format!(
+                "suggested_fix `{}` != `{}`",
+                error.suggested_fix(),
+                row.suggested_fix
+            ));
+        }
+        mismatches
+    }
+
+    /// The registry is the single authority for a code's row: the class,
+    /// retry policy, commit outcome and suggested fix `strata agents errors`
+    /// documents are what a live error carries. Every constructor is swept
+    /// over every registered code so a private table shadowing the row fails
+    /// here instead of shipping (#3237: 145 of 161 codes did; #3280).
     #[test]
-    fn test_constructed_errors_carry_the_registry_suggested_fix() {
+    fn test_constructed_errors_carry_the_registry_row() {
         let mut violations = Vec::new();
         for entry in error_code_registry_entries() {
-            let class = class_for_code(entry.code).expect("registry entry has a class");
-            let plain = EngineError::new(class, entry.code, false, "probe");
-            if plain.suggested_fix() != entry.suggested_fix {
-                violations.push(format!(
-                    "{} (new): runtime `{}` != registry `{}`",
-                    entry.code,
-                    plain.suggested_fix(),
-                    entry.suggested_fix
-                ));
-            }
-            let sourced = EngineError::with_source(
-                class,
-                entry.code,
-                false,
-                "probe",
-                std::io::Error::other("probe source"),
-            );
-            if sourced.suggested_fix() != entry.suggested_fix {
-                violations.push(format!(
-                    "{} (with_source): runtime `{}` != registry `{}`",
-                    entry.code,
-                    sourced.suggested_fix(),
-                    entry.suggested_fix
-                ));
+            let constructed = [
+                ("new", EngineError::new(entry.code, "probe")),
+                (
+                    "with_source",
+                    EngineError::with_source(
+                        entry.code,
+                        "probe",
+                        std::io::Error::other("probe source"),
+                    ),
+                ),
+                (
+                    "with_context",
+                    EngineError::with_context(
+                        entry.code,
+                        "probe",
+                        vec![ErrorDetail::new("probe", "detail")],
+                        vec!["probe hint".to_owned()],
+                        std::io::Error::other("probe source"),
+                    ),
+                ),
+            ];
+            for (constructor, error) in constructed {
+                let mismatches = row_mismatches(&error, entry.code);
+                if !mismatches.is_empty() {
+                    violations.push(format!(
+                        "{} ({constructor}): {}",
+                        entry.code,
+                        mismatches.join("; ")
+                    ));
+                }
+                if error.message() != "probe" {
+                    violations.push(format!("{} ({constructor}): message lost", entry.code));
+                }
             }
         }
         assert!(
             violations.is_empty(),
-            "runtime suggested_fix diverges from the registry:\n  {}",
+            "runtime status diverges from the registry row:\n  {}",
             violations.join("\n  ")
         );
     }
 
-    /// Direction control: the registry hint is the default, not a ceiling.
-    /// A site that builds its status by hand (the persistence adapter's
-    /// variant-specific hints) keeps the more specific hint it supplied.
+    /// A construction site owns its details and hints and nothing else: the
+    /// row is not a parameter, so site text lands in `hints`, never in
+    /// `suggested_fix` (the negation of the pre-#3280 `with_status` contract).
     #[test]
-    fn test_with_status_keeps_the_site_supplied_suggested_fix() {
+    fn test_with_context_keeps_site_facts_and_only_site_facts() {
         let code = "unavailable.engine.persistence";
-        let class = class_for_code(code).expect("registered");
-        let status = EngineErrorStatus::new(
-            public_class_for_legacy(class, code),
+        let error = EngineError::with_context(
             code,
-            RetryPolicy::SameRequest,
-            CommitOutcomeStatus::NotStarted,
             "probe",
-            "Site-specific remediation.",
-            Vec::new(),
-            Vec::new(),
+            vec![ErrorDetail::new("layer", "Service")],
+            vec!["Site-specific remediation.".to_owned()],
+            std::io::Error::other("probe"),
         );
-        let error = EngineError::with_status(class, status, std::io::Error::other("probe"));
-        assert_eq!(error.suggested_fix(), "Site-specific remediation.");
-        assert_ne!(error.suggested_fix(), suggested_fix_for_code(code, class));
+        assert_eq!(error.details(), [ErrorDetail::new("layer", "Service")]);
+        assert_eq!(error.hints(), ["Site-specific remediation.".to_owned()]);
+        assert!(error.source_arc().is_some());
+        assert_eq!(row_mismatches(&error, code), Vec::<String>::new());
+        assert_ne!(error.suggested_fix(), "Site-specific remediation.");
+    }
+
+    /// Direction control for the row lookup: a persistence code whose row
+    /// differs from its class fallback (per-code retry and commit arms) gets
+    /// the per-code row through the plain constructor too, not only through
+    /// the adapter — the constructor has no class table of its own.
+    #[test]
+    fn test_plain_constructor_uses_per_code_rows_not_class_defaults() {
+        let error = EngineError::new("conflict.engine.branch_generation", "probe");
+        assert_eq!(error.class(), EngineErrorClass::Conflict);
+        assert_eq!(
+            error.retry_policy(),
+            crate::diagnostics::RetryPolicy::AfterStateChange
+        );
+        assert_eq!(
+            error.commit_outcome(),
+            crate::diagnostics::CommitOutcomeStatus::DefinitelyNotCommitted
+        );
+        let sibling = EngineError::conflict("conflict.engine.branch_generation", "probe");
+        assert_eq!(sibling.status(), error.status());
+    }
+
+    /// The named constructors are aliases of the row, not a second class
+    /// table: they agree with `new` on every field.
+    #[test]
+    fn test_named_constructors_match_new() {
+        let pairs = [
+            (
+                EngineError::invalid_input("invalid_argument.engine.persistence", "probe"),
+                EngineError::new("invalid_argument.engine.persistence", "probe"),
+            ),
+            (
+                EngineError::not_found("not_found.engine.persistence", "probe"),
+                EngineError::new("not_found.engine.persistence", "probe"),
+            ),
+            (
+                EngineError::conflict("conflict.engine.persistence", "probe"),
+                EngineError::new("conflict.engine.persistence", "probe"),
+            ),
+            (
+                EngineError::corruption("corruption.engine.persistence_recovery", "probe"),
+                EngineError::new("corruption.engine.persistence_recovery", "probe"),
+            ),
+            (
+                EngineError::incompatible_layout(
+                    "failed_precondition.engine.layout_version",
+                    "probe",
+                ),
+                EngineError::new("failed_precondition.engine.layout_version", "probe"),
+            ),
+            (
+                EngineError::unsupported("unsupported.engine.persistence_capability", "probe"),
+                EngineError::new("unsupported.engine.persistence_capability", "probe"),
+            ),
+            (
+                EngineError::control_plane_unavailable("probe"),
+                EngineError::new("unavailable.engine.control_plane", "probe"),
+            ),
+            (
+                EngineError::closed_runtime("probe"),
+                EngineError::new("failed_precondition.engine.runtime_closed", "probe"),
+            ),
+        ];
+        for (named, plain) in pairs {
+            assert_eq!(named.class(), plain.class(), "{}", plain.code());
+            assert_eq!(named.status(), plain.status(), "{}", plain.code());
+        }
     }
 
     #[test]
-    fn public_class_for_legacy_splits_data_loss_from_corruption() {
-        // #2749: EngineErrorStatus surfaces the code's own class. `data_loss.*`
-        // must resolve to `DataLoss`, distinct from `corruption.*`.
-        assert_eq!(
-            public_class_for_legacy(EngineErrorClass::Corruption, "data_loss.engine.kv_value"),
-            ErrorClass::DataLoss,
-        );
-        assert_eq!(
-            public_class_for_legacy(
-                EngineErrorClass::Corruption,
-                "corruption.engine.persistence_recovery",
-            ),
-            ErrorClass::Corruption,
-        );
-        // Direction control: the prefix wins over the legacy class, so each
-        // prefix arm is load-bearing rather than shadowed by the fallback.
-        assert_eq!(
-            public_class_for_legacy(
-                EngineErrorClass::Internal,
-                "corruption.engine.persistence_recovery",
-            ),
-            ErrorClass::Corruption,
-        );
-        assert_eq!(
-            public_class_for_legacy(EngineErrorClass::Internal, "data_loss.engine.kv_value"),
-            ErrorClass::DataLoss,
-        );
-        // The `io` arm rides into the same diff hunk as the split; cover it so
-        // its deletion is caught. A `.engine.`-free string keeps it out of the
-        // source-registration scanner.
-        assert_eq!(
-            public_class_for_legacy(EngineErrorClass::Internal, "io.probe"),
-            ErrorClass::Io,
-        );
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "is registered under")]
+    fn test_named_constructor_rejects_a_code_of_another_class() {
+        // Direction control for the debug class check: a not-found code typed
+        // into the conflict constructor is caught at the site.
+        drop(EngineError::conflict(
+            "not_found.engine.persistence",
+            "probe",
+        ));
     }
 }

@@ -346,8 +346,11 @@ Layer responsibilities for the surface:
    `strata agents errors` documents is the row a live error for that code
    carries — always, not only when the site left a field at its default. A
    construction site owns the code, the message, `details` and `hints`; it
-   has no channel to override the row (#3244), so site-specific remediation
-   goes in `hints`, never in a per-code table of its own (#3237, #3243).
+   has no channel to override the row (#3244 at the executor boundary,
+   #3280 in engine: `EngineError` constructors take a code and a message,
+   and `EngineErrorStatus::new` is crate-private), so site-specific
+   remediation goes in `hints`, never in a per-code table of its own
+   (#3237, #3241, #3243).
    A wrong row is fixed in the registry (#3275), not hidden at the site.
 3. The boundary (command/IPC/SDK/CLI status renderer) resolves the code to
    its row, assigns the reference id, derives the doc link from the code, and
