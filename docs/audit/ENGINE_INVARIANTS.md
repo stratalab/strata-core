@@ -11,7 +11,7 @@
 > **Maintenance**: Update when the *architecture* changes, not when code is refactored.
 > If a new compaction strategy is added, add invariants for it. If a function is renamed, do nothing.
 >
-> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (9, one retired), SCALE (11), DUR (15) = 75 entries, 74 active
+> **Categories**: LSM (8), CMP (8), COW (9), MVCC (8), ACID (7), ARCH (10, one retired), SCALE (11), DUR (15) = 76 entries, 75 active
 >
 > **2026-08-19 V1 refresh**: a four-way audit of every entry against the post-promotion codebase
 > re-anchored the pre-V1 families (LSM/CMP/COW/MVCC/ACID/ARCH/SCALE) to V1 mechanisms, retired
@@ -739,6 +739,37 @@ objects exist.
 **Audit**: Find `manifest_frontier_pinned_objects` (`lifecycle/table_manifest.rs`) and its
 consumption in `reclaim_pinned_table_objects` (`lifecycle/durable/maintenance.rs`). Verify
 both frontier legs (confirmed + pending) pin, and no deletion path bypasses the sweep.
+
+### ARCH-010: The error-code registry is the single authority for an error's row
+
+An error's public class, retry policy, commit outcome and suggested fix are the registry
+row for its code — always, and never a per-site or per-class table beside the registry.
+In engine, every `EngineError` constructor resolves its row through one lookup
+(`diagnostics/registry.rs::registry_row`) inside one private builder, and the status
+constructor is crate-private with that builder as its sole caller (#3280). In executor, the
+row is resolved unconditionally at the boundary (`ExecutorError::new` → `resolve_row` →
+`status_from_row` in `error.rs`), and a status arriving from a peer — an engine status, an
+inference error, a status over IPC from another build — is re-resolved the same way, keeping
+only the peer's message, ids, structured `details` and `hints` (#3244). A construction site
+therefore owns exactly four things: the code, the message, `details` and site `hints`; a hint
+that would restate the row's fix is omitted rather than duplicated (#3241). The regression
+this guards against is the class that produced #3237 / #3241 / #3243: a private
+`match` on a code or a class that returns a retry policy, a commit outcome or a remedy string,
+which then drifts from the registry while `strata agents errors` keeps publishing the row.
+
+**Audit**: (1) `EngineErrorStatus::new` has no caller outside `EngineError::build`
+(`diagnostics/error.rs`). (2) No `match` on `EngineErrorClass` / `ErrorClass` / an error
+code returns a `RetryPolicy`, a `CommitOutcomeStatus` or a `&'static str` remedy outside
+`engine/diagnostics/registry.rs` and `executor/error_registry.rs`; the old names to grep for
+are `default_retry_policy`, `default_commit_outcome`, `public_class_for_legacy` and
+`suggested_fix_for_class` — all must stay absent. (3) The sweeps still cover every code and
+every storage variant: `diagnostics::error::tests::test_constructed_errors_carry_the_registry_row`
+and `persistence::adapter::tests::every_storage_error_maps_to_its_registry_row` in engine;
+`test_executor_errors_carry_the_whole_registry_row` (`tests/error_contract.rs`),
+`from_status_re_derives_the_registry_row_and_keeps_the_site_fields` (`tests/error_and_guards.rs`)
+and `error::tests::engine_error_status_re_derives_the_row_and_keeps_the_site_fields` in
+executor. A new peer path into the executor that does not go through `from_status` /
+`engine_error_status` / `From<InferenceError>` is the regression.
 
 ---
 
