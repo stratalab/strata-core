@@ -3348,7 +3348,7 @@ mod tests {
 
     /// A world where `miniLM` is catalogued but not on disk, for the offer
     /// loop's call-site tests.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     fn undownloaded_world() -> Connection {
         use strata_executor::FakeInferenceService;
 
@@ -3360,7 +3360,7 @@ mod tests {
     }
 
     /// A command that loads `model` and nothing else.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     fn tokenize_with(model: &str) -> strata_executor::Command {
         strata_executor::Command::InferenceTokenize {
             model: model.to_owned(),
@@ -3370,7 +3370,7 @@ mod tests {
     }
 
     /// The code of the executor refusal the offer loop handed back.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     fn refusal_code(error: CliError) -> String {
         match error {
             CliError::Executor(error) => error.code().to_owned(),
@@ -3380,7 +3380,7 @@ mod tests {
 
     /// The answer a test gives in place of a person at the terminal when no
     /// question may be asked.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     fn never_asked(error: &ExecutorError, _: &str) -> bool {
         panic!("asked without a terminal: {}", error.code())
     }
@@ -3388,7 +3388,7 @@ mod tests {
     /// The offer loop end to end against the fake runtime: a person at a
     /// terminal meets the refusal, one question, the pull and the retry; the
     /// answer decides; no terminal meets the refusal alone.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     #[test]
     fn the_offer_pulls_the_model_the_refusal_names_and_retries() {
         use super::execute_offering_download;
@@ -3455,7 +3455,7 @@ mod tests {
     /// The offer keys on the resolver's answer, not the command: `vector
     /// --text` loads the collection's recorded model and gets the same offer,
     /// and a name the catalog does not know gets none.
-    #[cfg(all(feature = "native", feature = "inference"))]
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
     #[test]
     fn the_offer_names_the_collection_model_and_never_an_uncatalogued_one() {
         use super::execute_offering_download;
