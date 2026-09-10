@@ -1465,6 +1465,51 @@ mod tests {
         }
     }
 
+    /// A run's resolution asks the runtime's settings for the key: with one
+    /// held, a cloud generate resolves `ready`; without, `key_missing` naming
+    /// the variable and config key that would hold it. This observes the
+    /// resolver's key check through the runtime — the resolver's own truth
+    /// table injects the answer — and it is the only offline observer of the
+    /// key-present side: a run with a key would send a request (#3270), and
+    /// the engine's own `missing_api_key` masks the key-absent side one step
+    /// later.
+    #[test]
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    fn a_run_resolves_the_key_the_settings_hold() {
+        use crate::resolve::Availability;
+
+        let models_dir = tempfile::tempdir().expect("tempdir");
+        let config = || InferenceRuntimeConfig {
+            models_dir: Some(models_dir.path().to_path_buf()),
+            network_enabled: true,
+        };
+        let with_keys =
+            InferenceRuntime::with_settings(config(), Arc::new(crate::testkit::FakeKeys));
+        let without = InferenceRuntime::with_settings(config(), Arc::new(crate::testkit::NoKeys));
+        let generate = Some(ModelUse::Run(ModelTask::Generate));
+        for provider in [
+            ProviderKind::OpenAI,
+            ProviderKind::Anthropic,
+            ProviderKind::Google,
+        ] {
+            if !generation_provider_feature_enabled(provider) {
+                continue;
+            }
+            let spec = format!("{provider}:m");
+            let held = with_keys.resolve(&spec, generate).expect("well-formed");
+            assert_eq!(held.availability, Availability::Ready, "{provider}");
+            let missing = without.resolve(&spec, generate).expect("well-formed");
+            assert_eq!(
+                missing.availability,
+                Availability::KeyMissing {
+                    env_var: api_key_env_var(provider),
+                    config_key: format!("{provider}.api_key"),
+                },
+                "{provider}"
+            );
+        }
+    }
+
     /// The local provider has no key to report, and says so as a refusal rather
     /// than as an empty string that would read like a key — whatever the
     /// settings would answer for it.
