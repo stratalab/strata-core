@@ -1197,6 +1197,66 @@ mod tests {
     }
 
     #[test]
+    fn the_fake_lists_its_own_models_with_the_embedding_dim_it_was_built_with() {
+        let service = FakeInferenceService::new().with_embedding_dim(5);
+        let listed = service.list_models();
+
+        // Every own model, once, by the name a consumer pins.
+        let names: Vec<&str> = listed.iter().map(|m| m.name.as_str()).collect();
+        let own: Vec<&str> = FAKE_MODELS.iter().map(|&(name, _)| name).collect();
+        assert_eq!(names, own);
+        assert_eq!(
+            service.status().models_catalogued,
+            FAKE_MODELS.len(),
+            "status counts the listing"
+        );
+
+        // The embedding model carries the fake's dimension; the others none.
+        for model in &listed {
+            let expected = if model.task == ModelTask::Embed { 5 } else { 0 };
+            assert_eq!(model.embedding_dim, expected, "{}", model.name);
+        }
+        assert!(
+            listed.iter().any(|m| m.task == ModelTask::Embed),
+            "the catalog holds an embedding model"
+        );
+    }
+
+    #[test]
+    fn detokenize_reverses_tokenize_on_a_located_model_and_refuses_otherwise() {
+        let service = FakeInferenceService::new().with_undownloaded("miniLM");
+
+        // Own model: the bytes come back as the text they were.
+        let ids = service
+            .tokenize("fake-embed", "hi", false)
+            .expect("own model tokenizes");
+        assert_eq!(
+            service.detokenize("fake-embed", &ids).expect("round trip"),
+            "hi"
+        );
+        // Ids that are not bytes are dropped rather than invented.
+        assert_eq!(
+            service
+                .detokenize("fake-embed", &[u32::from(b'o'), 0x1_0000, u32::from(b'k')])
+                .expect("round trip"),
+            "ok"
+        );
+
+        // Resolution first, as everywhere: an unknown name and a model not on
+        // disk refuse with the code and answer the runtime would give.
+        let unknown = service.detokenize("nope", &ids).expect_err("unknown");
+        assert_eq!(
+            refusal(&unknown),
+            ("inference.unknown_model", AvailabilityKind::NotInCatalog)
+        );
+        let absent = service.detokenize("miniLM", &ids).expect_err("not on disk");
+        assert_eq!(
+            refusal(&absent),
+            ("inference.missing_model", AvailabilityKind::NotDownloaded)
+        );
+    }
+
+    #[test]
     fn a_world_with_a_model_undownloaded_reports_refuses_then_pulls_it() {
         let service = FakeInferenceService::new().with_undownloaded("miniLM");
 

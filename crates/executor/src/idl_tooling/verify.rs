@@ -444,5 +444,87 @@ mod tests {
             false,
             "invalid_argument.engine.vector_dimension"
         ));
+
+        // This build's answer is the fake's presence applied to the same rule:
+        // an engine code always replays; an inference code replays exactly
+        // when the fake is here. (Under the replay lane's features the second
+        // line is `true` either way, so a mutant that pins `code_replayable`
+        // to `true` is an equivalent program there — only a build without the
+        // fake tells them apart.)
+        assert!(code_replayable("not_found.engine.branch"));
+        assert_eq!(
+            code_replayable("inference.unknown_model"),
+            INFERENCE_REPLAYABLE
+        );
+    }
+
+    /// An error case pinned at `expected_error` under a scratch repo root.
+    fn case_pinned_at(expected_error: &str) -> ErrorFixtureCase {
+        ErrorFixtureCase {
+            setup: vec![],
+            request: "requests/v1/kv/get.json".to_owned(),
+            expected_error: expected_error.to_owned(),
+        }
+    }
+
+    #[test]
+    fn the_pinned_code_is_read_from_the_fixture_or_absent_when_it_is_not_there_yet() {
+        let root = tempfile::tempdir().expect("scratch repo root");
+        let errors = fixture_path(root.path(), "responses/v1/errors");
+        std::fs::create_dir_all(&errors).expect("fixture directory");
+
+        // A committed fixture pins its code; a fixture that is not there yet
+        // (the first `--update` writes it) pins nothing — it is not an error.
+        std::fs::write(
+            errors.join("pinned.json"),
+            r#"{"code": "inference.unknown_model", "class": "inference"}"#,
+        )
+        .expect("write fixture");
+        assert_eq!(
+            pinned_code(
+                root.path(),
+                &case_pinned_at("responses/v1/errors/pinned.json")
+            )
+            .expect("a readable fixture"),
+            Some("inference.unknown_model".to_owned())
+        );
+        assert_eq!(
+            pinned_code(
+                root.path(),
+                &case_pinned_at("responses/v1/errors/absent.json")
+            )
+            .expect("an absent fixture is not an error"),
+            None
+        );
+
+        // A fixture without a `code` pins nothing either: the replay itself
+        // reports the mismatch.
+        std::fs::write(errors.join("codeless.json"), r#"{"class": "inference"}"#)
+            .expect("write fixture");
+        assert_eq!(
+            pinned_code(
+                root.path(),
+                &case_pinned_at("responses/v1/errors/codeless.json")
+            )
+            .expect("a readable fixture"),
+            None
+        );
+
+        // Only "not there" is absence. A fixture that cannot be parsed or
+        // cannot be read (a directory in its place) is the error it is, so a
+        // broken fixture never silently skips its case.
+        std::fs::write(errors.join("broken.json"), "{").expect("write fixture");
+        assert!(matches!(
+            pinned_code(
+                root.path(),
+                &case_pinned_at("responses/v1/errors/broken.json")
+            ),
+            Err(IdlError::Json { .. })
+        ));
+        std::fs::create_dir(errors.join("dir.json")).expect("directory in the fixture's place");
+        assert!(matches!(
+            pinned_code(root.path(), &case_pinned_at("responses/v1/errors/dir.json")),
+            Err(IdlError::Read { .. })
+        ));
     }
 }
