@@ -1,10 +1,11 @@
 //! CLI user-config write-path behavior (TCP3.10c).
 //!
 //! `strata config set/unset/path/show` run before any database opens and write
-//! the global user config (`hub.url`, `<provider>.api_key`). These drive the
-//! real binary against a hermetic `HOME` and assert the write path: the file is
-//! created 0600, secrets are redacted and never echoed, the environment wins
-//! over the stored value, and unset falls back to the built-in default.
+//! the global user config (`hub.url`, `<provider>.api_key`,
+//! `<provider>.base_url`). These drive the real binary against a hermetic
+//! `HOME` and assert the write path: the file is created 0600, secrets are
+//! redacted and never echoed, the environment wins over the stored value, and
+//! unset falls back to the built-in default.
 
 #![deny(unsafe_code)]
 
@@ -15,7 +16,8 @@ use tempfile::TempDir;
 
 /// The `strata` binary with a hermetic config home: `HOME` points at a temp
 /// dir and every config/env override that could leak from the developer's
-/// machine — including an exported provider key — is stripped.
+/// machine — including an exported provider key or base URL, named by the
+/// executor's provider table rather than a copied list — is stripped.
 fn config_command(home: &TempDir, args: &[&str], extra_env: &[(&str, &str)]) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_strata"));
     command
@@ -23,10 +25,13 @@ fn config_command(home: &TempDir, args: &[&str], extra_env: &[(&str, &str)]) -> 
         .env("HOME", home.path())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("STRATA_HUB_URL")
-        .env_remove("STRATA_DB")
-        .env_remove("OPENAI_API_KEY")
-        .env_remove("ANTHROPIC_API_KEY")
-        .env_remove("GOOGLE_API_KEY");
+        .env_remove("STRATA_DB");
+    #[cfg(feature = "inference")]
+    for info in strata_executor::INFERENCE_CLOUD_PROVIDER_KEYS {
+        command
+            .env_remove(info.env_var)
+            .env_remove(info.base_url_env_var);
+    }
     for (key, value) in extra_env {
         command.env(key, value);
     }
@@ -200,6 +205,185 @@ fn provider_api_key_is_redacted_and_never_echoed() {
     ));
     assert_eq!(value["set"], false);
     assert_eq!(value["value"], Value::Null);
+}
+
+/// `<provider>.base_url` is not a secret: it reads back as typed — no
+/// redaction, no normalization — and unsets like a key. A value that is not
+/// an `http(s)` URL is refused at `set`, where the typo is, rather than
+/// surfacing later as a provider call that cannot connect (#3270).
+#[cfg(feature = "inference")]
+#[test]
+fn provider_base_url_round_trips_as_typed_and_refuses_a_non_http_value() {
+    const URL: &str = "http://127.0.0.1:8000/v1";
+
+    let home = tempfile::tempdir().expect("temp home");
+    let set = json(&config_cli(
+        &home,
+        &["--json", "config", "set", "openai.base_url", URL],
+        &[],
+    ));
+    assert_eq!(set["value"], URL, "a base URL is echoed as typed");
+    assert!(
+        set["path"]
+            .as_str()
+            .expect("config path")
+            .ends_with("strata/config.toml"),
+        "{set}"
+    );
+
+    let got = json(&config_cli(
+        &home,
+        &["--json", "config", "get-key", "openai.base_url"],
+        &[],
+    ));
+    assert_eq!(got["set"], true);
+    assert_eq!(
+        got["value"], URL,
+        "read back as stored, no trailing slash added"
+    );
+
+    // Independent of the key: setting a base URL stored no key.
+    let key = json(&config_cli(
+        &home,
+        &["--json", "config", "get-key", "openai.api_key"],
+        &[],
+    ));
+    assert_eq!(key["set"], false);
+
+    let unset = json(&config_cli(
+        &home,
+        &["--json", "config", "unset", "openai.base_url"],
+        &[],
+    ));
+    assert_eq!(unset["unset"], true);
+    assert_eq!(
+        unset["path"], set["path"],
+        "unset names the file it edited, as set did: {unset}"
+    );
+    let got = json(&config_cli(
+        &home,
+        &["--json", "config", "get-key", "openai.base_url"],
+        &[],
+    ));
+    assert_eq!(got["set"], false);
+    assert_eq!(got["value"], Value::Null);
+
+    // Unsetting a key the file never held still names the file it went
+    // through; with no file at all there is nothing to name — both succeed.
+    let never_held = json(&config_cli(
+        &home,
+        &["--json", "config", "unset", "anthropic.base_url"],
+        &[],
+    ));
+    assert_eq!(never_held["unset"], true);
+    assert_eq!(never_held["path"], set["path"], "{never_held}");
+    let fresh = tempfile::tempdir().expect("temp home");
+    let no_file = json(&config_cli(
+        &fresh,
+        &["--json", "config", "unset", "openai.base_url"],
+        &[],
+    ));
+    assert_eq!(no_file["unset"], true);
+    assert_eq!(no_file["path"], Value::Null, "{no_file}");
+
+    // The likely typo — no scheme — and a non-http scheme are usage errors
+    // naming the key; nothing is stored.
+    for bad in ["localhost:8000", "ftp://proxy.example/v1", "not a url"] {
+        let refused = config_cli(&home, &["config", "set", "openai.base_url", bad], &[]);
+        assert_eq!(
+            refused.status.code(),
+            Some(2),
+            "`{bad}` is a usage error (exit 2)"
+        );
+        let stderr = String::from_utf8_lossy(&refused.stderr);
+        assert!(
+            stderr.contains("openai.base_url"),
+            "names the key: {stderr}"
+        );
+        let got = json(&config_cli(
+            &home,
+            &["--json", "config", "get-key", "openai.base_url"],
+            &[],
+        ));
+        assert_eq!(got["set"], false, "`{bad}` must not be stored");
+    }
+}
+
+/// `inference status` names where a request goes and what sent it there
+/// (#3270): the public endpoint with no source, the file's path for a base
+/// URL stored with `config set <provider>.base_url`, and the provider's own
+/// variable when it is exported — which wins over the file, like a key. And
+/// the stored base URL is what a call uses: with the file redirecting the
+/// provider to a closed loopback port, a generate that has a key does not
+/// reach the public endpoint — it observes `provider_unavailable` at once.
+#[cfg(feature = "inference")]
+#[test]
+fn inference_status_names_where_a_base_url_came_from_and_a_call_uses_it() {
+    const CLOSED_PORT: &str = "http://127.0.0.1:1";
+
+    let home = tempfile::tempdir().expect("temp home");
+    let status_args = ["--json", "inference", "status"];
+    let openai = |status: &Value| -> Value {
+        status["data"]["providers"]
+            .as_array()
+            .expect("providers")
+            .iter()
+            .find(|row| row["provider"] == "openai")
+            .unwrap_or_else(|| panic!("openai missing from status: {status}"))
+            .clone()
+    };
+
+    // Nothing set: the public endpoint, from nowhere in particular.
+    let default = openai(&json(&config_cli(&home, &status_args, &[])));
+    assert_eq!(default["base_url"], "https://api.openai.com/v1");
+    assert_eq!(default["base_url_source"], Value::Null);
+    assert_eq!(default["base_url_env_var"], "OPENAI_BASE_URL");
+
+    // Stored: the file supplied it, and the source is the file.
+    config_cli(
+        &home,
+        &["config", "set", "openai.base_url", CLOSED_PORT],
+        &[],
+    );
+    let stored = openai(&json(&config_cli(&home, &status_args, &[])));
+    assert_eq!(stored["base_url"], CLOSED_PORT);
+    let source = stored["base_url_source"]
+        .as_str()
+        .expect("a redirected provider has a source");
+    assert!(
+        source.ends_with("strata/config.toml"),
+        "a config-backed base URL names the file: {source}"
+    );
+
+    // Exported: the environment wins over the file and names its variable.
+    let exported = openai(&json(&config_cli(
+        &home,
+        &status_args,
+        &[("OPENAI_BASE_URL", "http://127.0.0.1:2/v1")],
+    )));
+    assert_eq!(exported["base_url"], "http://127.0.0.1:2/v1");
+    assert_eq!(exported["base_url_source"], "OPENAI_BASE_URL");
+
+    // The stored base URL is where a call goes. A fake key gets the call
+    // past the key check; the closed port proves nothing left the machine.
+    config_cli(
+        &home,
+        &["config", "set", "openai.api_key", "sk-fake-never-sent"],
+        &[],
+    );
+    let output = config_cli(
+        &home,
+        &["--json", "inference", "generate", "openai:gpt-test", "hi"],
+        &[],
+    );
+    assert!(
+        !output.status.success(),
+        "a closed port cannot answer: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let error: Value = serde_json::from_slice(&output.stderr).expect("error is JSON on stderr");
+    assert_eq!(error["error"]["code"], "inference.provider_unavailable");
+    assert_eq!(error["error"]["class"], "unavailable");
 }
 
 /// `inference status` names where a key actually came from. The runtime's

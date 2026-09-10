@@ -810,24 +810,37 @@ fn config_command(command: ConfigCommand) -> Command {
     }
 }
 
-/// The canonical provider name behind a `<provider>.api_key` config key,
-/// validated against the known cloud providers, or `None`.
+/// The settings a `[providers.<name>]` section stores, in the order the
+/// usage line lists them.
 #[cfg(all(feature = "native", feature = "inference"))]
-fn provider_api_key_target(key: &str) -> Option<&'static str> {
-    let provider = key.strip_suffix(".api_key")?;
-    strata_executor::inference_provider_key_info(provider).map(|info| info.provider)
+const PROVIDER_SETTINGS: [strata_hub::ProviderSetting; 2] = [
+    strata_hub::ProviderSetting::ApiKey,
+    strata_hub::ProviderSetting::BaseUrl,
+];
+
+/// The canonical provider name and setting behind a `<provider>.api_key` or
+/// `<provider>.base_url` config key, validated against the known cloud
+/// providers, or `None`.
+#[cfg(all(feature = "native", feature = "inference"))]
+fn provider_setting_target(key: &str) -> Option<(&'static str, strata_hub::ProviderSetting)> {
+    let (provider, field) = key.rsplit_once('.')?;
+    let setting = PROVIDER_SETTINGS
+        .into_iter()
+        .find(|setting| setting.field() == field)?;
+    let info = strata_executor::inference_provider_key_info(provider)?;
+    Some((info.provider, setting))
 }
 
 #[cfg(all(feature = "native", not(feature = "inference")))]
-fn provider_api_key_target(_key: &str) -> Option<&'static str> {
+fn provider_setting_target(_key: &str) -> Option<(&'static str, strata_hub::ProviderSetting)> {
     None
 }
 
 /// Whether `key` is a user-config key handled without opening a database
-/// (`hub.url` or a `<provider>.api_key`).
+/// (`hub.url`, a `<provider>.api_key`, or a `<provider>.base_url`).
 #[cfg(feature = "native")]
 fn is_user_config_key(key: &str) -> bool {
-    key == "hub.url" || provider_api_key_target(key).is_some()
+    key == "hub.url" || provider_setting_target(key).is_some()
 }
 
 /// Mask a secret to a short non-secret prefix, e.g. `sk-ant-****`.
@@ -837,17 +850,34 @@ fn redact_key(value: &str) -> String {
     format!("{prefix}****")
 }
 
+/// The settable user-config keys, for the usage line: `hub.url` and, in a
+/// build with inference, each cloud provider's settings — derived from the
+/// executor's provider table so a provider added there is listed here.
+#[cfg(feature = "native")]
+fn settable_config_keys() -> String {
+    let mut keys = vec!["hub.url".to_owned()];
+    #[cfg(feature = "inference")]
+    for info in strata_executor::INFERENCE_CLOUD_PROVIDER_KEYS {
+        for setting in PROVIDER_SETTINGS {
+            keys.push(format!("{}.{}", info.provider, setting.field()));
+        }
+    }
+    keys.join(", ")
+}
+
 #[cfg(feature = "native")]
 fn unknown_config_key(key: &str) -> CliError {
     CliError::usage(format!(
-        "unknown config key `{key}`; settable keys: hub.url, openai.api_key, \
-         anthropic.api_key, google.api_key"
+        "unknown config key `{key}`; settable keys: {}",
+        settable_config_keys()
     ))
 }
 
 /// `strata config set <key> <value>` — writes the global user config.
 /// `hub.url` sets the hub; `<provider>.api_key` stores a cloud API key (0600,
-/// never echoed back in plaintext).
+/// never echoed back in plaintext); `<provider>.base_url` redirects the
+/// provider's requests (#3270). The provider's own environment variable
+/// (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, …) overrides a stored value.
 #[cfg(feature = "native")]
 fn user_config_set(key: &str, value: &str) -> Result<serde_json::Value, CliError> {
     if key == "hub.url" {
@@ -859,15 +889,27 @@ fn user_config_set(key: &str, value: &str) -> Result<serde_json::Value, CliError
             "path": path.display().to_string(),
         }));
     }
-    if let Some(provider) = provider_api_key_target(key) {
-        let path = strata_hub::write_global_provider_key(provider, value)
+    if let Some((provider, setting)) = provider_setting_target(key) {
+        let path = strata_hub::global_config_path().ok_or_else(|| {
+            CliError::usage("the platform exposes no user config directory to store the setting in")
+        })?;
+        strata_hub::write_provider_setting(&path, provider, setting, value)
             .map_err(|error| CliError::usage(error.to_string()))?;
-        return Ok(serde_json::json!({
-            "key": key,
-            "value": redact_key(value),
-            "path": path.display().to_string(),
-            "note": "API key stored (env var overrides it)",
-        }));
+        let path = path.display().to_string();
+        return Ok(match setting {
+            strata_hub::ProviderSetting::ApiKey => serde_json::json!({
+                "key": key,
+                "value": redact_key(value),
+                "path": path,
+                "note": "API key stored (env var overrides it)",
+            }),
+            strata_hub::ProviderSetting::BaseUrl => serde_json::json!({
+                "key": key,
+                "value": value,
+                "path": path,
+                "note": "base URL stored (env var overrides it)",
+            }),
+        });
     }
     Err(unknown_config_key(key))
 }
@@ -883,13 +925,21 @@ fn user_config_unset(key: &str) -> Result<serde_json::Value, CliError> {
             "path": path.map(|path| path.display().to_string()),
         }));
     }
-    if let Some(provider) = provider_api_key_target(key) {
-        let path = strata_hub::unset_global_provider_key(provider)
-            .map_err(|error| CliError::usage(error.to_string()))?;
+    if let Some((provider, setting)) = provider_setting_target(key) {
+        // `path` names the file only when one existed to remove the field from,
+        // as for `hub.url`; no config directory means no file either.
+        let path = strata_hub::global_config_path()
+            .map(|path| {
+                strata_hub::unset_provider_setting(&path, provider, setting)
+                    .map(|existed| existed.then(|| path.display().to_string()))
+            })
+            .transpose()
+            .map_err(|error| CliError::usage(error.to_string()))?
+            .flatten();
         return Ok(serde_json::json!({
             "key": key,
             "unset": true,
-            "path": path.map(|path| path.display().to_string()),
+            "path": path,
         }));
     }
     Err(unknown_config_key(key))
@@ -905,17 +955,22 @@ fn user_config_get(key: &str) -> Result<serde_json::Value, CliError> {
             "value": value.map(|url| url.to_string()),
         }));
     }
-    if let Some(provider) = provider_api_key_target(key) {
-        // Never surface the raw key — report set/unset with a redacted preview.
+    if let Some((provider, setting)) = provider_setting_target(key) {
         let value = strata_hub::global_config_path()
             .map_or(Ok(None), |path| {
-                strata_hub::read_provider_key(&path, provider)
+                strata_hub::read_provider_setting(&path, provider, setting)
             })
             .map_err(|error| CliError::usage(error.to_string()))?;
+        // Never surface a raw key — report set/unset with a redacted preview.
+        // A base URL is not a secret and reads back as stored.
+        let shown = match setting {
+            strata_hub::ProviderSetting::ApiKey => value.as_deref().map(redact_key),
+            strata_hub::ProviderSetting::BaseUrl => value.clone(),
+        };
         return Ok(serde_json::json!({
             "key": key,
             "set": value.is_some(),
-            "value": value.as_deref().map(redact_key),
+            "value": shown,
         }));
     }
     Err(unknown_config_key(key))
@@ -2435,7 +2490,11 @@ fn parse_tool_choice(value: &str) -> strata_executor::InferenceToolChoice {
 #[cfg(test)]
 #[cfg(feature = "inference")]
 mod config_key_tests {
-    use super::{is_user_config_key, provider_api_key_target, redact_key};
+    use super::{
+        is_user_config_key, provider_setting_target, redact_key, settable_config_keys,
+        unknown_config_key,
+    };
+    use strata_hub::ProviderSetting;
 
     #[test]
     fn redacts_to_a_non_secret_prefix() {
@@ -2448,22 +2507,74 @@ mod config_key_tests {
     }
 
     #[test]
-    fn provider_api_key_targets_are_validated() {
-        assert_eq!(provider_api_key_target("openai.api_key"), Some("openai"));
+    fn provider_setting_targets_are_validated() {
+        for (provider, setting) in [
+            ("openai", ProviderSetting::ApiKey),
+            ("anthropic", ProviderSetting::ApiKey),
+            ("google", ProviderSetting::ApiKey),
+            ("openai", ProviderSetting::BaseUrl),
+            ("anthropic", ProviderSetting::BaseUrl),
+            ("google", ProviderSetting::BaseUrl),
+        ] {
+            let key = format!("{provider}.{}", setting.field());
+            assert_eq!(
+                provider_setting_target(&key),
+                Some((provider, setting)),
+                "{key}"
+            );
+        }
+        // The provider name is canonicalized the way `inference status` names it.
         assert_eq!(
-            provider_api_key_target("anthropic.api_key"),
-            Some("anthropic")
+            provider_setting_target("OpenAI.base_url"),
+            Some(("openai", ProviderSetting::BaseUrl))
         );
-        assert_eq!(provider_api_key_target("google.api_key"), Some("google"));
-        assert_eq!(provider_api_key_target("bogus.api_key"), None);
-        assert_eq!(provider_api_key_target("openai.base_url"), None);
+        for key in [
+            "bogus.api_key",
+            "bogus.base_url",
+            "openai.model",
+            "openai",
+            "api_key",
+            ".api_key",
+            "openai.api_key.extra",
+        ] {
+            assert_eq!(provider_setting_target(key), None, "{key}");
+        }
     }
 
     #[test]
     fn user_config_keys_recognized() {
         assert!(is_user_config_key("hub.url"));
         assert!(is_user_config_key("openai.api_key"));
+        assert!(is_user_config_key("google.base_url"));
         assert!(!is_user_config_key("nonsense"));
+        assert!(!is_user_config_key("hub.base_url"));
+    }
+
+    /// The usage line lists every key `strata config set` accepts and no
+    /// other — each listed key is a target, each target is listed.
+    #[test]
+    fn the_usage_line_lists_exactly_the_settable_keys() {
+        let listed = settable_config_keys();
+        let keys: Vec<&str> = listed.split(", ").collect();
+        assert_eq!(keys[0], "hub.url");
+        for key in &keys[1..] {
+            assert!(
+                provider_setting_target(key).is_some(),
+                "{key} is listed but not settable"
+            );
+        }
+        for info in strata_executor::INFERENCE_CLOUD_PROVIDER_KEYS {
+            for setting in [ProviderSetting::ApiKey, ProviderSetting::BaseUrl] {
+                let key = format!("{}.{}", info.provider, setting.field());
+                assert!(
+                    keys.contains(&key.as_str()),
+                    "{key} is settable but not listed"
+                );
+            }
+        }
+        let error = unknown_config_key("bogus.key").to_string();
+        assert!(error.contains("`bogus.key`"), "{error}");
+        assert!(error.contains(&listed), "{error}");
     }
 }
 

@@ -239,6 +239,28 @@ impl GenerationEngine {
         }
     }
 
+    /// Send a cloud engine's requests to `base_url` instead of the provider's
+    /// public endpoint (#3270). The runtime applies the effective base URL
+    /// from its [`ProviderSettings`](crate::ProviderSettings) here; a local
+    /// engine has nowhere to send a request and is unchanged.
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    pub(crate) fn with_base_url(self, base_url: &str) -> Self {
+        let provider = match self.provider {
+            #[cfg(feature = "local")]
+            Provider::Local(p) => Provider::Local(p),
+
+            #[cfg(feature = "anthropic")]
+            Provider::Anthropic(p) => Provider::Anthropic(p.with_base_url(base_url)),
+
+            #[cfg(feature = "openai")]
+            Provider::OpenAI(p) => Provider::OpenAI(p.with_base_url(base_url)),
+
+            #[cfg(feature = "google")]
+            Provider::Google(p) => Provider::Google(p.with_base_url(base_url)),
+        };
+        Self { provider }
+    }
+
     /// Generate text from a prompt.
     ///
     /// Dispatches to the underlying provider (local llama.cpp or cloud API).

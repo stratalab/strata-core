@@ -534,6 +534,15 @@ fn print_inference_status(data: &Value, out: &mut String) {
             "not ready".to_owned()
         };
         line!(out, "  {name}\t{detail}");
+        // Only an override is worth a line: the public endpoint is the
+        // expectation, a redirected one is what a reader needs to know.
+        if let Some(from) = provider.get("base_url_source").and_then(Value::as_str) {
+            let url = provider
+                .get("base_url")
+                .and_then(Value::as_str)
+                .unwrap_or("-");
+            line!(out, "\tat {url} (from {from})");
+        }
     }
 
     let dir = data
@@ -1718,6 +1727,46 @@ mod tests {
         assert!(
             !status(true, 1, 3).contains(FOOTER),
             "a build that can download does not need telling"
+        );
+    }
+
+    /// A provider's row says where a request goes only when that is not the
+    /// public endpoint (#3270): the override and its source, never a line for
+    /// the default.
+    #[test]
+    fn a_provider_row_names_a_redirected_endpoint_and_its_source() {
+        let status = |base_url_source: Option<&str>| {
+            human(&json!({
+                "type": "inference_status",
+                "data": {
+                    "local_execution": false,
+                    "model_download": true,
+                    "providers": [{
+                        "provider": "openai",
+                        "feature_enabled": true,
+                        "requires_api_key": true,
+                        "ready": true,
+                        "model_prefix": "openai:",
+                        "key_source": "OPENAI_API_KEY",
+                        "base_url": "http://127.0.0.1:8000/v1",
+                        "base_url_source": base_url_source,
+                    }],
+                    "models_dir": "/models",
+                    "models_downloaded": 0,
+                    "models_catalogued": 0,
+                }
+            }))
+        };
+
+        let redirected = status(Some("OPENAI_BASE_URL"));
+        assert!(
+            redirected.contains("  openai\tready -- key from OPENAI_API_KEY; use openai:<model>\n\tat http://127.0.0.1:8000/v1 (from OPENAI_BASE_URL)\n"),
+            "{redirected}"
+        );
+        let public = status(None);
+        assert!(
+            !public.contains("\tat "),
+            "the public endpoint earns no line: {public}"
         );
     }
 

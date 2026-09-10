@@ -87,11 +87,10 @@ impl CloudEmbeddingEngine {
         })
     }
 
-    /// Point requests at a local stand-in for the provider's API, so a test
-    /// can drive the real request path against a canned response.
-    #[cfg(test)]
-    pub(crate) fn with_api_base(mut self, api_base: &str) -> Self {
-        self.api_base = api_base.to_string();
+    /// Point requests at `base_url` instead of the provider's public API: an
+    /// OpenAI-compatible server, a proxy, or a test's canned-response server.
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.api_base = base_url.to_string();
         self
     }
 
@@ -273,19 +272,14 @@ const _: () = {
     let _ = assert_both;
 };
 
-/// The API root for `provider`.
+/// The API root for `provider` when nothing overrides it.
 ///
 /// Only reached for a provider `new` has admitted, and `new` admits exactly
-/// the providers whose feature is on, so the fall-through arm never serves a
-/// request.
+/// the cloud providers whose feature is on — every one of which has a
+/// default — so the empty fallback (the local provider's "no endpoint")
+/// never serves a request.
 fn api_base_for(provider: ProviderKind) -> &'static str {
-    match provider {
-        #[cfg(feature = "openai")]
-        ProviderKind::OpenAI => crate::provider::openai::API_BASE,
-        #[cfg(feature = "google")]
-        ProviderKind::Google => crate::provider::google::API_BASE,
-        _ => "",
-    }
+    crate::default_base_url(provider).unwrap_or_default()
 }
 
 /// L2-normalize an embedding vector.
@@ -532,7 +526,7 @@ mod tests {
     fn engine_at(provider: ProviderKind, server: &CannedResponse) -> CloudEmbeddingEngine {
         CloudEmbeddingEngine::new(provider, "test-key".into(), "embed-test".into())
             .expect("a valid engine")
-            .with_api_base(server.base_url())
+            .with_base_url(server.base_url())
     }
 
     fn assert_unit(actual: &[f32], expected: &[f32]) {
@@ -628,7 +622,7 @@ mod tests {
 
         let request = server.request();
         assert!(
-            request.starts_with("POST /embed-test:embedContent "),
+            request.starts_with("POST /v1beta/models/embed-test:embedContent "),
             "the model's endpoint under the base: {request}"
         );
         assert!(
@@ -655,7 +649,7 @@ mod tests {
         assert_unit(&vectors[1], &[0.0, 1.0]);
         assert!(server
             .request()
-            .starts_with("POST /embed-test:batchEmbedContents "));
+            .starts_with("POST /v1beta/models/embed-test:batchEmbedContents "));
     }
 
     /// A retired Google embedding model is a 404 `NOT_FOUND` (#3236) —

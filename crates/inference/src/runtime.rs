@@ -34,9 +34,10 @@ use crate::error::ProviderFailure;
 
 use crate::InferenceEngine;
 
-// Ungated: `status` names every provider's key variable, including for
-// providers this build cannot call — that is how it says what to set.
-use crate::api_key_env_var;
+// Ungated: `status` names every provider's key and base-URL variables and
+// endpoint, including for providers this build cannot call — that is how it
+// says what to set.
+use crate::{api_key_env_var, base_url_env_var, default_base_url, ProviderBaseUrl};
 
 #[cfg(any(
     feature = "local",
@@ -110,6 +111,19 @@ pub struct ProviderStatus {
     /// config set <provider>.api_key` — so a caller is told the file, not a
     /// variable it never exported.
     pub key_source: Option<String>,
+    /// Where a request to this provider would be sent: its public endpoint,
+    /// or the base URL that overrides it (#3270). `None` for the local
+    /// provider, which is not reached over HTTP.
+    pub base_url: Option<String>,
+    /// The environment variable that overrides `base_url` for this provider,
+    /// whether or not one is set — the variable the provider's own SDK reads.
+    /// `None` for the local provider.
+    pub base_url_env_var: Option<String>,
+    /// Where the override came from, when `base_url` is not the public
+    /// endpoint: the environment variable, or the config file's path for a
+    /// URL stored with `strata config set <provider>.base_url`. `None` when
+    /// requests go to the public endpoint.
+    pub base_url_source: Option<String>,
     /// Whether a call could be attempted right now.
     pub ready: bool,
     /// The model-spec prefix that selects this provider, e.g. `"openai:"`.
@@ -453,6 +467,10 @@ impl InferenceRuntime {
             let key_source =
                 reported_key_source(requires_api_key, self.settings.0.key(provider).as_ref());
             let key_present = key_source.is_some();
+            let (base_url, base_url_source) = reported_base_url(
+                default_base_url(provider),
+                self.settings.0.base_url(provider).as_ref(),
+            );
             ProviderStatus {
                 provider,
                 feature_enabled,
@@ -460,6 +478,9 @@ impl InferenceRuntime {
                 key_present,
                 key_env_var,
                 key_source,
+                base_url,
+                base_url_env_var: base_url_env_var(provider).map(str::to_owned),
+                base_url_source,
                 ready: provider_is_ready(feature_enabled, key_present, requires_api_key),
                 model_prefix: format!("{provider}:"),
             }
@@ -1035,7 +1056,9 @@ impl InferenceRuntime {
         #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
         {
             let api_key = self.api_key(resolved.provider)?;
+            let base_url = self.base_url(resolved.provider)?;
             GenerationEngine::cloud(resolved.provider, api_key, resolved.name.clone())
+                .map(|engine| engine.with_base_url(&base_url))
         }
         #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "google")))]
         {
@@ -1052,7 +1075,25 @@ impl InferenceRuntime {
         resolved: &ResolvedModel,
     ) -> Result<CloudEmbeddingEngine, InferenceError> {
         let api_key = self.api_key(resolved.provider)?;
+        let base_url = self.base_url(resolved.provider)?;
         CloudEmbeddingEngine::new(resolved.provider, api_key, resolved.name.clone())
+            .map(|engine| engine.with_base_url(&base_url))
+    }
+
+    /// Where a request to `provider` goes: the base URL this runtime's
+    /// [`ProviderSettings`] override it with, else the public endpoint — the
+    /// same answer `status` reports as `base_url`, from the same two inputs.
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    fn base_url(&self, provider: ProviderKind) -> Result<String, InferenceError> {
+        let (base_url, _source) = reported_base_url(
+            default_base_url(provider),
+            self.settings.0.base_url(provider).as_ref(),
+        );
+        base_url.ok_or_else(|| InferenceError::Unsupported {
+            kind: UnsupportedKind::Provider,
+            message: "the local provider is not reached over HTTP".to_owned(),
+            details: None,
+        })
     }
 
     /// The provider's key, from this runtime's [`ProviderSettings`].
@@ -1337,6 +1378,31 @@ fn reported_key_source(requires_api_key: bool, key: Option<&ProviderKey>) -> Opt
     key.map(|key| key.source().label())
 }
 
+/// The `base_url` and `base_url_source` a `status` row reports, and the URL
+/// a provider call is sent to: the override when the settings hold one, with
+/// where it came from; else the provider's public endpoint, with no source.
+/// A provider with no public endpoint — the local one — has no base URL,
+/// however the settings answer for it.
+///
+/// A pure function for the same reason as `reported_key_source`: decided on
+/// values it has a truth table, and `status` and the engine builders share
+/// it so the reported URL is the one a request would go to.
+fn reported_base_url(
+    default: Option<&'static str>,
+    override_: Option<&ProviderBaseUrl>,
+) -> (Option<String>, Option<String>) {
+    let Some(default) = default else {
+        return (None, None);
+    };
+    match override_ {
+        Some(override_) => (
+            Some(override_.url().to_owned()),
+            Some(override_.source().label()),
+        ),
+        None => (Some(default.to_owned()), None),
+    }
+}
+
 /// A provider can be called when the build has it and it has whatever key it
 /// needs.
 ///
@@ -1544,7 +1610,7 @@ mod tests {
         const SECRET: &str = "sk-do-not-leak-this-value";
         let key = ProviderKey::new(
             SECRET,
-            crate::KeySource::Environment("OPENAI_API_KEY".into()),
+            crate::SettingSource::Environment("OPENAI_API_KEY".into()),
         );
 
         // Held: the source is the PLACE. If this ever returned the value, a
@@ -1598,6 +1664,188 @@ mod tests {
                 keyed.provider
             );
             assert!(!keyless.ready, "{:?}", keyless.provider);
+        }
+    }
+
+    /// The truth table for where a request goes and what `status` says about
+    /// it: an override wins and names its source; no override is the public
+    /// endpoint with no source; no endpoint (the local provider) is nothing,
+    /// however the settings answer.
+    #[test]
+    fn base_url_reports_the_override_or_the_public_endpoint() {
+        let override_ = ProviderBaseUrl::new(
+            "http://127.0.0.1:1",
+            crate::SettingSource::Environment("OPENAI_BASE_URL".into()),
+        );
+        assert_eq!(
+            reported_base_url(Some("https://api.openai.com/v1"), Some(&override_)),
+            (
+                Some("http://127.0.0.1:1".to_owned()),
+                Some("OPENAI_BASE_URL".to_owned())
+            ),
+            "an override is the URL and where it came from"
+        );
+        assert_eq!(
+            reported_base_url(Some("https://api.openai.com/v1"), None),
+            (Some("https://api.openai.com/v1".to_owned()), None),
+            "no override is the public endpoint, from nowhere in particular"
+        );
+        assert_eq!(reported_base_url(None, Some(&override_)), (None, None));
+        assert_eq!(reported_base_url(None, None), (None, None));
+    }
+
+    /// `status` reports, for every cloud provider, where a request would go
+    /// and the variable that would move it — from the runtime's settings,
+    /// through the one call site — and nothing of the kind for the local
+    /// provider.
+    #[test]
+    fn status_reports_where_requests_go_from_the_runtime_settings() {
+        let public = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeys),
+        )
+        .status();
+        let overridden = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeysAt::new("http://127.0.0.1:1")),
+        )
+        .status();
+        for (at_public, at_override) in public.providers.iter().zip(&overridden.providers) {
+            let provider = at_public.provider;
+            assert_eq!(provider, at_override.provider);
+            if provider == ProviderKind::Local {
+                for row in [at_public, at_override] {
+                    assert_eq!(row.base_url, None);
+                    assert_eq!(row.base_url_env_var, None);
+                    assert_eq!(row.base_url_source, None);
+                }
+                continue;
+            }
+            assert_eq!(
+                at_public.base_url.as_deref(),
+                default_base_url(provider),
+                "{provider}: the public endpoint"
+            );
+            assert_eq!(at_public.base_url_source, None, "{provider}");
+            assert_eq!(
+                at_override.base_url.as_deref(),
+                Some("http://127.0.0.1:1"),
+                "{provider}: the override"
+            );
+            assert_eq!(
+                at_override.base_url_source.as_deref(),
+                Some("application"),
+                "{provider}"
+            );
+            for row in [at_public, at_override] {
+                assert_eq!(
+                    row.base_url_env_var.as_deref(),
+                    base_url_env_var(provider),
+                    "{provider}: the variable is named whether or not it is set"
+                );
+            }
+        }
+    }
+
+    /// A cloud run is sent to the base URL the settings hold — the same
+    /// answer `status` reports — with the held key: the chat and embedding
+    /// engine builders both apply it. Observed against a canned server that
+    /// records the request, so the path the client appends is pinned too.
+    #[test]
+    #[cfg(feature = "openai")]
+    fn a_cloud_run_is_sent_to_the_base_url_the_settings_hold() {
+        use crate::provider::cloud::test_server::CannedResponse;
+
+        let models_dir = tempfile::tempdir().expect("tempdir");
+        let runtime_at = |server: &CannedResponse| {
+            InferenceRuntime::with_settings(
+                InferenceRuntimeConfig {
+                    models_dir: Some(models_dir.path().to_path_buf()),
+                    network_enabled: true,
+                },
+                Arc::new(crate::testkit::FakeKeysAt::new(server.base_url())),
+            )
+        };
+
+        let server = CannedResponse::serve(
+            200,
+            r#"{"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}],
+                "usage":{"prompt_tokens":1,"completion_tokens":1}}"#,
+        );
+        let chat = crate::wire::ChatRequest {
+            prompt: Some("hi".to_owned()),
+            ..Default::default()
+        };
+        let response = runtime_at(&server)
+            .chat("openai:gpt-test", &chat)
+            .expect("a completion from the canned server");
+        assert_eq!(response.choices[0].message.content, "hello");
+        let request = server.request();
+        assert!(
+            request.starts_with("POST /chat/completions "),
+            "the chat endpoint under the override: {request}"
+        );
+        assert!(
+            request.to_ascii_lowercase().contains(&format!(
+                "authorization: bearer {}",
+                crate::testkit::FAKE_KEY
+            )),
+            "the held key travels with it: {request}"
+        );
+
+        let server = CannedResponse::serve(
+            200,
+            r#"{"data":[{"index":0,"embedding":[3.0,4.0]}],"usage":{"prompt_tokens":1,"total_tokens":1}}"#,
+        );
+        let embed = crate::wire::EmbeddingsRequest {
+            input: crate::wire::EmbedInput::One("hi".to_owned()),
+            dimensions: None,
+            normalize: None,
+            input_type: None,
+            instruction: None,
+        };
+        let response = runtime_at(&server)
+            .embeddings("openai:embed-test", &embed)
+            .expect("an embedding from the canned server");
+        assert_eq!(response.data.len(), 1);
+        let request = server.request();
+        assert!(
+            request.starts_with("POST /embeddings "),
+            "the embeddings endpoint under the override: {request}"
+        );
+    }
+
+    /// A base URL nothing listens at fails the call before it leaves the
+    /// machine, as `inference.provider_unavailable` — the code the resolution
+    /// matrix's keyed cloud cells assert, for every built-in cloud provider.
+    #[test]
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    fn a_cloud_run_at_a_closed_port_is_provider_unavailable() {
+        let models_dir = tempfile::tempdir().expect("tempdir");
+        let runtime = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig {
+                models_dir: Some(models_dir.path().to_path_buf()),
+                network_enabled: true,
+            },
+            Arc::new(crate::testkit::FakeKeysAt::new("http://127.0.0.1:1")),
+        );
+        let chat = crate::wire::ChatRequest {
+            prompt: Some("hi".to_owned()),
+            max_tokens: Some(1),
+            ..Default::default()
+        };
+        for provider in [
+            ProviderKind::OpenAI,
+            ProviderKind::Anthropic,
+            ProviderKind::Google,
+        ] {
+            if !generation_provider_feature_enabled(provider) {
+                continue;
+            }
+            let error = runtime
+                .chat(&format!("{provider}:m"), &chat)
+                .expect_err("nothing listens on the closed port");
+            assert_eq!(error.code(), "inference.provider_unavailable", "{provider}");
         }
     }
 

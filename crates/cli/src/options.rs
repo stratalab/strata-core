@@ -353,16 +353,18 @@ pub(crate) enum SkillTarget {
 pub(crate) enum ConfigCommand {
     /// Print sanitized config.
     Get,
-    /// Print one sanitized config value. Keys: `hub.url`, `openai.api_key`,
-    /// `anthropic.api_key`, `google.api_key` (API keys print redacted).
+    /// Print one sanitized config value. Keys: `hub.url`, `<provider>.api_key`
+    /// (printed redacted), `<provider>.base_url`; providers: `openai`,
+    /// `anthropic`, `google`.
     GetKey {
         /// Config key.
         key: String,
     },
     /// Set a user-config key in the global strata config. Keys: `hub.url`,
-    /// `openai.api_key`, `anthropic.api_key`, `google.api_key`. API keys are
-    /// stored with 0600 permissions; a matching env var (e.g. `OPENAI_API_KEY`)
-    /// always overrides.
+    /// `<provider>.api_key`, `<provider>.base_url`; providers: `openai`,
+    /// `anthropic`, `google`. The file is stored with 0600 permissions; the
+    /// provider's own env var (`OPENAI_API_KEY`, `OPENAI_BASE_URL`, …) always
+    /// overrides.
     Set {
         /// Config key.
         key: String,
@@ -370,7 +372,7 @@ pub(crate) enum ConfigCommand {
         value: String,
     },
     /// Remove a user-config key from the global config. Keys: `hub.url`,
-    /// `openai.api_key`, `anthropic.api_key`, `google.api_key`.
+    /// `<provider>.api_key`, `<provider>.base_url`.
     Unset {
         /// Config key.
         key: String,

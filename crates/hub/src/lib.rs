@@ -49,9 +49,8 @@ pub use remote::{
     read_remote_tracking_ref, write_remote_tracking_ref, RemoteRefError, RemoteTrackingRef,
 };
 pub use resolve::{
-    global_config_path, read_global_hub_url, read_provider_key, resolve_hub_url,
-    unset_global_hub_url, unset_global_provider_key, write_global_hub_url,
-    write_global_provider_key, HubUrlError, HubUrlInputs, HubUrlSource, ResolvedHubUrl,
-    DEFAULT_HUB_URL,
+    global_config_path, read_global_hub_url, read_provider_setting, resolve_hub_url,
+    unset_global_hub_url, unset_provider_setting, write_global_hub_url, write_provider_setting,
+    HubUrlError, HubUrlInputs, HubUrlSource, ProviderSetting, ResolvedHubUrl, DEFAULT_HUB_URL,
 };
 pub use transport::ClientTransport;

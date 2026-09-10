@@ -21,8 +21,8 @@ use crate::resolve::{
 };
 use crate::runtime::ModelAbilities;
 use crate::{
-    GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, KeySource, ModelTask,
-    ProviderKey, ProviderKind, ProviderSettings, RegistryFailure, StopReason,
+    GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, ModelTask, ProviderBaseUrl,
+    ProviderKey, ProviderKind, ProviderSettings, RegistryFailure, SettingSource, StopReason,
 };
 
 /// The key [`FakeKeys`] holds for every cloud provider. Not a real key: a
@@ -54,7 +54,38 @@ pub struct FakeKeys;
 impl ProviderSettings for FakeKeys {
     fn key(&self, provider: ProviderKind) -> Option<ProviderKey> {
         (provider != ProviderKind::Local)
-            .then(|| ProviderKey::new(FAKE_KEY, KeySource::Application))
+            .then(|| ProviderKey::new(FAKE_KEY, SettingSource::Application))
+    }
+}
+
+/// [`FakeKeys`] with every cloud provider's requests pointed at one base URL,
+/// sourced from the application: a test double's address, or a closed
+/// loopback port when the test wants the call to fail before it leaves the
+/// machine (`inference.provider_unavailable`) — so a keyed cloud run can be
+/// driven end to end without a network and without a real key ever being
+/// sent anywhere (#3270).
+#[derive(Clone, Debug)]
+pub struct FakeKeysAt {
+    base_url: String,
+}
+
+impl FakeKeysAt {
+    /// Fake keys, and every cloud provider reached at `base_url`.
+    pub fn new(base_url: impl Into<String>) -> Self {
+        Self {
+            base_url: base_url.into(),
+        }
+    }
+}
+
+impl ProviderSettings for FakeKeysAt {
+    fn key(&self, provider: ProviderKind) -> Option<ProviderKey> {
+        FakeKeys.key(provider)
+    }
+
+    fn base_url(&self, provider: ProviderKind) -> Option<ProviderBaseUrl> {
+        (provider != ProviderKind::Local)
+            .then(|| ProviderBaseUrl::new(&self.base_url, SettingSource::Application))
     }
 }
 
@@ -787,6 +818,9 @@ impl crate::InferenceService for FakeInferenceService {
                 key_present: false,
                 key_env_var: None,
                 key_source: None,
+                base_url: None,
+                base_url_env_var: None,
+                base_url_source: None,
                 ready: true,
                 model_prefix: "local:".to_owned(),
             }],

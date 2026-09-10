@@ -80,6 +80,27 @@
     "ProviderStatus": {
       "description": "Whether one provider can be used right now, and if not, why not.\n\nNever carries a key — only where one was found (#3124/D11).",
       "properties": {
+        "base_url": {
+          "description": "Where a request to this provider would be sent: its public endpoint,\nor the base URL that overrides it (#3270). `None` for the local\nprovider, which is not reached over HTTP.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url_env_var": {
+          "description": "The environment variable that overrides `base_url` for this provider,\nwhether or not one is set — the variable the provider's own SDK reads.\n`None` for the local provider.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "base_url_source": {
+          "description": "Where the override came from, when `base_url` is not the public\nendpoint: the environment variable, or the config file's path for a\nURL stored with `strata config set <provider>.base_url`. `None` when\nrequests go to the public endpoint.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "feature_enabled": {
           "description": "Whether this binary was compiled with the provider.",
           "type": "boolean"
@@ -135,7 +156,7 @@
   "command": "inference.status",
   "request": {
     "additionalProperties": false,
-    "description": "Reports what this binary can do before anything is attempted.\n\n# Guaranteed semantics\n\n- **Answers before the attempt.** Which providers are compiled in,\n  which have a key and where it came from, whether local execution\n  exists in this build, and how many catalogued models are on disk —\n  all knowable without trying an operation and failing (#3124).\n- **Never returns a key.** `key_source` names where a key was read\n  from — the environment variable, or the config file when the CLI\n  loaded it from `strata config set`; the value is never included.\n- **The model directory is shared** by every database on the machine, so\n  a model downloaded once is available to all of them.",
+    "description": "Reports what this binary can do before anything is attempted.\n\n# Guaranteed semantics\n\n- **Answers before the attempt.** Which providers are compiled in,\n  which have a key and where it came from, whether local execution\n  exists in this build, and how many catalogued models are on disk —\n  all knowable without trying an operation and failing (#3124).\n- **Never returns a key.** `key_source` names where a key was read\n  from — the environment variable, or the config file `strata config\n  set` wrote; the value is never included. `base_url` is the endpoint\n  a provider's requests go to and `base_url_source` where that came\n  from (`null` for the provider's public endpoint).\n- **The model directory is shared** by every database on the machine, so\n  a model downloaded once is available to all of them.",
     "properties": {
       "type": {
         "const": "inference_status",
