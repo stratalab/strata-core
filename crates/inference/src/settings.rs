@@ -193,8 +193,8 @@ pub struct EnvProviderSettings;
 
 impl ProviderSettings for EnvProviderSettings {
     fn key(&self, provider: ProviderKind) -> Option<ProviderKey> {
-        let variable = api_key_env_var(provider);
-        key_from_variable(provider, variable, std::env::var_os(variable).as_deref())
+        let variable = api_key_env_var(provider)?;
+        key_from_variable(variable, std::env::var_os(variable).as_deref())
     }
 
     fn base_url(&self, provider: ProviderKind) -> Option<ProviderBaseUrl> {
@@ -203,14 +203,14 @@ impl ProviderSettings for EnvProviderSettings {
     }
 }
 
-/// The key one environment variable holds for `provider`.
+/// The key one environment variable holds.
 ///
 /// A variable that exists but holds nothing is not a key: `KEY=""` is what an
 /// unset shell variable expands to in a script, and reporting a key present
 /// there sends the caller to a provider that will reject them instead of to
 /// the line that sets it. A value that is not UTF-8 is not a key either — it
-/// cannot be sent as a header. The local provider has no key variable, so it
-/// is never one.
+/// cannot be sent as a header. The local provider has no key variable
+/// ([`api_key_env_var`] names none), so it never reaches here.
 ///
 /// A pure function on purpose: the alternative is a test that mutates the
 /// process environment. No provider variable is set in CI, so a predicate
@@ -218,14 +218,7 @@ impl ProviderSettings for EnvProviderSettings {
 /// that drops the emptiness check survived that way once. Decided on a value,
 /// it has a truth table; the environment read itself is observed end to end
 /// by the resolution matrix's keyed child process.
-pub(crate) fn key_from_variable(
-    provider: ProviderKind,
-    variable: &str,
-    value: Option<&OsStr>,
-) -> Option<ProviderKey> {
-    if provider == ProviderKind::Local {
-        return None;
-    }
+pub(crate) fn key_from_variable(variable: &str, value: Option<&OsStr>) -> Option<ProviderKey> {
     setting_from_variable(value)
         .map(|value| ProviderKey::new(value, SettingSource::Environment(variable.to_owned())))
 }
@@ -260,17 +253,16 @@ mod tests {
     /// The truth table for what counts as a key in a variable.
     #[test]
     fn a_variable_holds_a_key_when_set_non_empty_and_utf8() {
-        let openai = ProviderKind::OpenAI;
         assert!(
-            key_from_variable(openai, VARIABLE, None).is_none(),
+            key_from_variable(VARIABLE, None).is_none(),
             "unset is no key"
         );
         assert!(
-            key_from_variable(openai, VARIABLE, Some(OsStr::new(""))).is_none(),
+            key_from_variable(VARIABLE, Some(OsStr::new(""))).is_none(),
             "empty is no key"
         );
-        let found = key_from_variable(openai, VARIABLE, Some(OsStr::new("sk-abc")))
-            .expect("a value is a key");
+        let found =
+            key_from_variable(VARIABLE, Some(OsStr::new("sk-abc"))).expect("a value is a key");
         assert_eq!(found.secret(), "sk-abc");
         assert_eq!(
             found.source(),
@@ -278,20 +270,18 @@ mod tests {
             "the source names the variable read"
         );
         assert!(
-            key_from_variable(openai, VARIABLE, Some(OsStr::new(" "))).is_some(),
+            key_from_variable(VARIABLE, Some(OsStr::new(" "))).is_some(),
             "whitespace is a value"
         );
     }
 
-    /// The local provider has no key, whatever its (unused) variable holds.
+    /// The local provider has no key variable, so the environment never
+    /// holds a key for it — whatever the process environment contains.
     #[test]
     fn the_local_provider_never_holds_a_key() {
-        assert!(key_from_variable(
-            ProviderKind::Local,
-            "STRATA_LOCAL_API_KEY",
-            Some(OsStr::new("sk-abc"))
-        )
-        .is_none());
+        assert_eq!(api_key_env_var(ProviderKind::Local), None);
+        assert!(EnvProviderSettings.key(ProviderKind::Local).is_none());
+        assert!(EnvProviderSettings.base_url(ProviderKind::Local).is_none());
     }
 
     /// A value that cannot be sent as a header is not a key.
@@ -300,7 +290,7 @@ mod tests {
     fn a_non_utf8_value_is_not_a_key() {
         use std::os::unix::ffi::OsStrExt as _;
         let value = OsStr::from_bytes(b"sk-\xff");
-        assert!(key_from_variable(ProviderKind::OpenAI, VARIABLE, Some(value)).is_none());
+        assert!(key_from_variable(VARIABLE, Some(value)).is_none());
         assert!(base_url_from_variable(URL_VARIABLE, Some(value)).is_none());
     }
 

@@ -2310,8 +2310,10 @@ pub(crate) enum InferenceModelsCommand {
 }
 
 #[cfg(test)]
-mod tests {
-    use clap::{CommandFactory, Parser};
+pub(crate) mod tests {
+    use clap::CommandFactory;
+    #[cfg(feature = "inference")]
+    use clap::Parser;
 
     /// Collects every leaf verb path (a subcommand with no further
     /// subcommands) from the clap tree, e.g. `"kv get"`, `"config set"`.
@@ -2520,12 +2522,27 @@ mod tests {
     /// walked recursively for `.md` files.
     const READER_SURFACES: &[&str] = &["README.md", "docs/inference"];
 
-    fn reader_surfaces() -> Vec<(std::path::PathBuf, String)> {
+    /// The inference design documents: every `.md` under this directory whose
+    /// path below it starts with `inference`. An engineer reads these, not an
+    /// agent, so they are not reader surfaces — they may discuss a cargo
+    /// feature — but a command they sketch must still be one the tree has:
+    /// a verb invented in a design is how `strata models pull` reached a
+    /// product document (#3261).
+    #[cfg(feature = "inference")]
+    const DESIGN_SURFACES_DIR: &str = "docs/design";
+    #[cfg(feature = "inference")]
+    const DESIGN_SURFACES_PREFIX: &str = "inference";
+
+    fn workspace_root() -> std::path::PathBuf {
         // CARGO_MANIFEST_DIR = crates/cli.
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
-            .expect("workspace root resolves");
+            .expect("workspace root resolves")
+    }
+
+    fn reader_surfaces() -> Vec<(std::path::PathBuf, String)> {
+        let root = workspace_root();
         let mut out = Vec::new();
         for surface in READER_SURFACES {
             let path = root.join(surface);
@@ -2541,6 +2558,28 @@ mod tests {
         assert!(
             !out.is_empty(),
             "no reader-facing markdown found under {READER_SURFACES:?}"
+        );
+        out
+    }
+
+    #[cfg(feature = "inference")]
+    fn design_surfaces() -> Vec<(std::path::PathBuf, String)> {
+        let dir = workspace_root().join(DESIGN_SURFACES_DIR);
+        let mut all = Vec::new();
+        crate::arg_spec::tests::markdown_files(&dir, &mut all);
+        let mut out: Vec<_> = all
+            .into_iter()
+            .filter(|(path, _)| {
+                path.strip_prefix(&dir)
+                    .expect("walked below the design dir")
+                    .to_str()
+                    .is_some_and(|below| below.starts_with(DESIGN_SURFACES_PREFIX))
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        assert!(
+            !out.is_empty(),
+            "no `{DESIGN_SURFACES_PREFIX}*` design documents found under {DESIGN_SURFACES_DIR}"
         );
         out
     }
@@ -2601,10 +2640,26 @@ mod tests {
     /// or a redirection (`>`, `>out`, `2>&1`, `<in`). Words are `shlex`'s,
     /// so an unspaced `ping;` or `k>out` stays one word (bash would split
     /// it) and a quoted `"|"` argument is indistinguishable from the
-    /// operator; the reader surfaces do neither.
+    /// operator; the reader surfaces do neither. A `<name>` placeholder
+    /// (`<model>`, `<provider>.api_key`) is an argument the reader fills in,
+    /// not a redirection, and is kept.
     fn is_shell_operator(word: &str) -> bool {
-        word.trim_start_matches(|c: char| c.is_ascii_digit())
-            .starts_with(['|', ';', '&', '<', '>'])
+        !is_placeholder(word)
+            && word
+                .trim_start_matches(|c: char| c.is_ascii_digit())
+                .starts_with(['|', ';', '&', '<', '>'])
+    }
+
+    /// Whether a shell word opens with an angle-bracketed placeholder name.
+    fn is_placeholder(word: &str) -> bool {
+        word.strip_prefix('<')
+            .and_then(|rest| rest.split_once('>'))
+            .is_some_and(|(name, _)| {
+                !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-'))
+            })
     }
 
     /// Whether a shell word is a `NAME=value` environment prefix.
@@ -2727,8 +2782,24 @@ strata ./mydb kv put user:ada \\
         ] {
             assert!(is_shell_operator(word), "{word:?} is an operator");
         }
-        for word in ["strata", "a|b", "k>out", "5", "-k", "", "--as-of=1"] {
+        for word in [
+            "strata",
+            "a|b",
+            "k>out",
+            "5",
+            "-k",
+            "",
+            "--as-of=1",
+            // Placeholders a reader fills in, not redirections.
+            "<model>",
+            "<provider>.api_key",
+            "<KEY>",
+            "<target-triple>",
+        ] {
             assert!(!is_shell_operator(word), "{word:?} is not an operator");
+        }
+        for word in ["<in", "<>", "< model>", "<a b>", "<>x"] {
+            assert!(!is_placeholder(word), "{word:?} is not a placeholder");
         }
         for word in ["KEY=value", "OPENAI_API_KEY=sk-...", "_x=", "a1="] {
             assert!(is_env_assignment(word), "{word:?} is an assignment");
@@ -2810,6 +2881,11 @@ strata ./mydb kv put user:ada \\
             argv(r#"strata kv put k "a|b" 'c>d'"#),
             [["strata", "kv", "put", "k", "a|b", "c>d"]]
         );
+        // A placeholder is an argument, not a redirection; `<in` still is one.
+        assert_eq!(
+            argv("strata inference models pull <model> < in"),
+            [["strata", "inference", "models", "pull", "<model>"]]
+        );
         // A leading environment prefix is the shell's, not the command's.
         assert_eq!(
             argv("OPENAI_API_KEY=sk-... STRATA_LOG=debug strata ping"),
@@ -2828,56 +2904,195 @@ strata ./mydb kv put user:ada \\
         assert_eq!(strata_invocations(r#"strata kv put k "open"#), None);
     }
 
+    /// Whether an argv parses under the real clap tree. Help and version are
+    /// what those verbs print, so they count as parsed; anything else is the
+    /// error kind clap would show the reader.
+    #[cfg(feature = "inference")]
+    pub(crate) fn clap_parse_failure(argv: &[String]) -> Option<clap::error::ErrorKind> {
+        use clap::error::ErrorKind;
+        match super::Cli::try_parse_from(argv) {
+            Ok(_) => None,
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    ErrorKind::DisplayHelp
+                        | ErrorKind::DisplayVersion
+                        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+                ) =>
+            {
+                None
+            }
+            Err(err) => Some(err.kind()),
+        }
+    }
+
+    /// The `strata …` commands prose names, as a reader would copy them: the
+    /// text of every backtick span that starts with `strata`, and every line
+    /// whose first word is `strata` (a refusal prints the command to run on
+    /// its own indented line). A line that is itself a backtick span is
+    /// returned once.
+    pub(crate) fn named_commands(text: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for line in text.lines() {
+            let trimmed = line.trim();
+            if trimmed.split_whitespace().next() == Some("strata") {
+                out.push(trimmed.to_owned());
+                continue;
+            }
+            let mut rest = trimmed;
+            while let Some((_, after)) = rest.split_once('`') {
+                let Some((span, tail)) = after.split_once('`') else {
+                    break;
+                };
+                if span.split_whitespace().next() == Some("strata") {
+                    out.push(span.to_owned());
+                }
+                rest = tail;
+            }
+        }
+        out
+    }
+
+    /// Every `strata …` command in `commands` that does not parse, rendered
+    /// as `where: command\n    kind` lines for an assertion message.
+    #[cfg(feature = "inference")]
+    pub(crate) fn commands_that_do_not_parse(
+        commands: impl IntoIterator<Item = (String, String)>,
+    ) -> Vec<String> {
+        commands
+            .into_iter()
+            .filter_map(|(source, command)| {
+                let Some(argv) = strata_invocations(&command) else {
+                    return Some(format!(
+                        "{source}: {command}\n    does not tokenize (unbalanced quote)"
+                    ));
+                };
+                argv.into_iter().find_map(|argv| {
+                    clap_parse_failure(&argv)
+                        .map(|kind| format!("{source}: {}\n    {kind:?}", argv.join(" ")))
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn named_commands_are_backtick_spans_and_bare_lines() {
+        let text = "\
+Run `strata inference models pull <model>`, then retry.
+  strata inference models pull miniLM
+Check `strata inference models list` or `strata config path`; not `cargo build`.
+strata::not_a_command(); `strata` alone
+`unbalanced strata ping
+";
+        assert_eq!(
+            named_commands(text),
+            [
+                "strata inference models pull <model>",
+                "strata inference models pull miniLM",
+                "strata inference models list",
+                "strata config path",
+                "strata",
+            ]
+        );
+        assert_eq!(named_commands(""), Vec::<String>::new());
+    }
+
+    #[cfg(feature = "inference")]
+    #[test]
+    fn commands_that_do_not_parse_name_the_failing_command() {
+        let source = |c: &str| ("here".to_owned(), c.to_owned());
+        assert_eq!(
+            commands_that_do_not_parse([
+                source("strata inference models list"),
+                source("strata --help"),
+                source("strata ./mydb kv get k | jq ."),
+            ]),
+            Vec::<String>::new()
+        );
+        let failures = commands_that_do_not_parse([
+            source("strata models pull miniLM"),
+            source(r#"strata kv put k "open"#),
+        ]);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(
+            failures[0].starts_with("here: strata models pull miniLM\n"),
+            "{failures:?}"
+        );
+        assert!(
+            failures[1].ends_with("does not tokenize (unbalanced quote)"),
+            "{failures:?}"
+        );
+    }
+
     /// An agent copies these lines verbatim, so every `strata` command on a
     /// reader surface must parse under the real clap tree, and every shell
-    /// line must tokenize. Help and version are what those verbs print, so
-    /// they count as parsed. Gated on `inference` because it is the only
-    /// feature that shapes the clap tree, and the docs describe the shipped
-    /// binary, which carries it.
+    /// line must tokenize. A design document's fenced sketches are held to
+    /// the same tree, but only the lines that open with `strata`: a sketch
+    /// draws flow lines around its commands, and those are not shell (#3261).
+    /// Gated on `inference` because it is the only feature that shapes the
+    /// clap tree, and the docs describe the shipped binary, which carries it.
     #[cfg(feature = "inference")]
     #[test]
     fn reader_surfaces_name_only_commands_the_clap_tree_parses() {
-        use clap::error::ErrorKind;
-
-        let mut failures = Vec::new();
-        let mut checked = 0;
+        let mut commands = Vec::new();
         for (path, text) in reader_surfaces() {
             for (line_no, line) in fenced_shell_lines(&text) {
-                let Some(invocations) = strata_invocations(&line) else {
-                    failures.push(format!(
-                        "{}:{line_no}: {line}\n    does not tokenize (unbalanced quote)",
-                        path.display()
-                    ));
-                    continue;
-                };
-                for argv in invocations {
-                    checked += 1;
-                    match super::Cli::try_parse_from(&argv) {
-                        Ok(_) => {}
-                        Err(err)
-                            if matches!(
-                                err.kind(),
-                                ErrorKind::DisplayHelp
-                                    | ErrorKind::DisplayVersion
-                                    | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-                            ) => {}
-                        Err(err) => failures.push(format!(
-                            "{}:{line_no}: {}\n    {:?}",
-                            path.display(),
-                            argv.join(" "),
-                            err.kind()
-                        )),
-                    }
+                commands.push((format!("{}:{line_no}", path.display()), line));
+            }
+        }
+        let mut sketches = 0;
+        for (path, text) in design_surfaces() {
+            for (line_no, line) in fenced_shell_lines(&text) {
+                if line.split_whitespace().next() == Some("strata") {
+                    sketches += 1;
+                    commands.push((format!("{}:{line_no}", path.display()), line));
                 }
             }
         }
         assert!(
-            checked > 0,
-            "no fenced `strata …` examples found on the reader surfaces"
+            commands.len() > sketches,
+            "no fenced shell lines found on the reader surfaces"
         );
+        assert!(
+            sketches > 0,
+            "no fenced `strata …` sketches in the design documents"
+        );
+        let failures = commands_that_do_not_parse(commands);
         assert!(
             failures.is_empty(),
             "fenced examples an agent would copy do not parse:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// A registry fix or message is what the reader sees when a command is
+    /// refused, so every `strata …` it names must parse under the real clap
+    /// tree — `strata models list` in a hint sent readers to a verb that does
+    /// not exist (#3256). Placeholders like `<model>` are one word to the
+    /// shell and any word to a positional, so they parse as the reader's
+    /// substitution would.
+    #[cfg(feature = "inference")]
+    #[test]
+    fn registry_hints_name_only_commands_the_clap_tree_parses() {
+        let mut commands = Vec::new();
+        for entry in strata_executor::public_error_code_entries() {
+            for (field, text) in [
+                ("suggested_fix", entry.suggested_fix),
+                ("message_template", entry.message_template),
+            ] {
+                for command in named_commands(text) {
+                    commands.push((format!("{} {field}", entry.code), command));
+                }
+            }
+        }
+        assert!(
+            !commands.is_empty(),
+            "no registry hint or message names a `strata …` command"
+        );
+        let failures = commands_that_do_not_parse(commands);
+        assert!(
+            failures.is_empty(),
+            "registry text names commands the clap tree does not parse:\n{}",
             failures.join("\n")
         );
     }

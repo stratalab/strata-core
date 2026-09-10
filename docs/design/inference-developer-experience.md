@@ -86,7 +86,7 @@ output belongs to a collection, and a collection can only hold one model's
 vectors.
 
 ```
-strata <db> vector add <collection> <key> --text "..."
+strata <db> vector upsert <collection> <key> --text "..."
 │
 ├─ collection exists?              ──no──▶ REFUSE, name the create command
 ├─ collection has an embedding model recorded?
@@ -196,7 +196,7 @@ work", available before the attempt, in one place.
 | D7 | Models stay in `~/.strata/models`, **shared across databases**, and we say so | Already true; nowhere documented, so nobody relies on it |
 | D8 | Interactive first use **offers the download**; `--json` and non-tty refuse with the pull command | An agent must never block on a hidden 600 MB fetch |
 | D9 | Collections **record their embedding model**; mismatched embed or query refuses with `failed_precondition.embedding_model_mismatch` | CLAUDE.md rule 24 already promises this. It does not exist |
-| D10 | `vector add --text` / `vector query --text` embed and store in **one command**, orchestrated in executor | Otherwise every user hand-rolls embed → capture JSON → upsert. **Engine cannot import inference** (hard rules 2–3, and `strata-engine` has no inference dependency), so the embed call lives in executor and the *store* is the single commit — the embedding precedes it and can fail without writing anything. This is real logic in the layer CLAUDE.md calls thin; it is a recorded exception, taken because the intelligence layer that would own it is deferred with no target release (#3171) |
+| D10 | `vector upsert --text` / `vector query --text` embed and store in **one command**, orchestrated in executor | Otherwise every user hand-rolls embed → capture JSON → upsert. **Engine cannot import inference** (hard rules 2–3, and `strata-engine` has no inference dependency), so the embed call lives in executor and the *store* is the single commit — the embedding precedes it and can fail without writing anything. This is real logic in the layer CLAUDE.md calls thin; it is a recorded exception, taken because the intelligence layer that would own it is deferred with no target release (#3171) |
 | D11 | `strata inference status` is the single truth surface | Replaces "find out by failing" |
 
 ---
@@ -302,7 +302,7 @@ Verified against `main` at 1.2.1.
 it Strata's embedding is an OpenAI proxy that happens to live in the same
 binary: the user does the model bookkeeping, and the database — which is the
 thing that knows what is stored — helps not at all. With it, a collection is
-self-describing, a query cannot be silently wrong, and `vector add --text` is
+self-describing, a query cannot be silently wrong, and `vector upsert --text` is
 the shortest path from a document to a searchable database of any system in
 this class. This is also the piece the deferred intelligence layer (M8, #3171)
 was going to own, and it does not need that layer: the provenance belongs in
@@ -324,7 +324,7 @@ we already have.
    Self-contained, no distribution changes.
 4. **Embedding provenance** (D9) — engine records the model on the collection
    and refuses mismatches. Largest engine change; unblocks D10.
-5. **One-step embed** (D10) — `vector add --text`, `vector query --text`.
+5. **One-step embed** (D10) — `vector upsert --text`, `vector query --text`.
 6. **install-local** (D1, D2) — release matrix, second asset, the swap command.
    Last because it is the only one that changes what we ship.
 

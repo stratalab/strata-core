@@ -3558,6 +3558,102 @@ mod tests {
         assert!(matches!(output, Output::InferenceTokenIds(_)), "{output:?}");
     }
 
+    /// #3235: the size the refusal quotes is the size `models list` shows for
+    /// the same bytes — one formatter, read at both sites, not a decimal one
+    /// in the refusal and a binary one in the table. The fake lists only its
+    /// own zero-sized models, so the table row is built from the byte count
+    /// the refusal itself reports.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    #[test]
+    fn the_refusal_quotes_the_size_models_list_shows() {
+        use super::execute_offering_download;
+        use crate::options::Format;
+
+        let error = execute_offering_download(
+            &undownloaded_world(),
+            tokenize_with("miniLM"),
+            Format::Human,
+            false,
+            &mut never_asked,
+        )
+        .expect_err("not on disk");
+        let CliError::Executor(refusal) = error else {
+            panic!("not an executor refusal: {error:?}")
+        };
+        assert_eq!(refusal.code(), "inference.missing_model");
+        let size_bytes = refusal
+            .inference_availability()
+            .and_then(|details| details.size_bytes)
+            .expect("a catalogued variant has a size");
+
+        let table = crate::render::value_to_string(
+            &serde_json::json!({
+                "type": "inference_models",
+                "data": { "items": [{
+                    "name": "miniLM", "task": "embed", "architecture": "bert",
+                    "default_quant": "f16", "is_local": false, "runnable": true,
+                    "size_bytes": size_bytes
+                }] }
+            }),
+            Format::Human,
+        )
+        .expect("renders");
+        let size = table.trim_end().rsplit('\t').next().expect("a size column");
+        assert!(
+            size.ends_with(" MB"),
+            "a catalogued size, not `-`: {table:?}"
+        );
+        assert!(
+            refusal.message().contains(&format!("({size}, ")),
+            "the refusal quotes {size:?}: {:?}",
+            refusal.message()
+        );
+    }
+
+    /// The prompt a person reads before answering names only commands the
+    /// clap tree parses — the refusal's own `strata inference models pull …`
+    /// line, and anything else it quotes (#3261, the `strata models list`
+    /// class of #3256). Checked on the real refusal the offer loop shows,
+    /// rendered by the same function that shows it.
+    #[cfg(all(feature = "native", feature = "inference", feature = "testkit"))]
+    #[test]
+    fn the_prompt_names_only_commands_the_clap_tree_parses() {
+        use super::{ask_for_download, execute_offering_download};
+        use crate::options::tests::{commands_that_do_not_parse, named_commands};
+        use crate::options::Format;
+
+        let mut prompt = Vec::new();
+        let mut decline = |error: &ExecutorError, pull_spec: &str| -> bool {
+            ask_for_download(error, pull_spec, &b"n\n"[..], &mut prompt)
+        };
+        let error = execute_offering_download(
+            &undownloaded_world(),
+            tokenize_with("miniLM"),
+            Format::Human,
+            true,
+            &mut decline,
+        )
+        .expect_err("declined");
+        assert_eq!(refusal_code(error), "inference.missing_model");
+
+        let prompt = String::from_utf8(prompt).expect("the prompt is text");
+        let named = named_commands(&prompt);
+        assert!(
+            named.contains(&"strata inference models pull miniLM".to_owned()),
+            "the prompt names the pull: {named:?}\n{prompt}"
+        );
+        let failures = commands_that_do_not_parse(
+            named
+                .into_iter()
+                .map(|command| ("prompt".to_owned(), command)),
+        );
+        assert!(
+            failures.is_empty(),
+            "the prompt names commands the clap tree does not parse:\n{}\n{prompt}",
+            failures.join("\n")
+        );
+    }
+
     /// The offer keys on the resolver's answer, not the command: `vector
     /// --text` loads the collection's recorded model and gets the same offer,
     /// and a name the catalog does not know gets none.
