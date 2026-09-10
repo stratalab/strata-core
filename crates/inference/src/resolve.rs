@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use crate::registry::{
     format_size, probe_model_file, CatalogEntry, CatalogLookup, ModelRegistry, QuantVariant,
 };
-use crate::runtime::{InferenceRuntime, ModelAbilities, LOCAL_UNAVAILABLE_REMEDY};
+use crate::runtime::{InferenceRuntime, ModelAbilities, TaskFacts, LOCAL_UNAVAILABLE_REMEDY};
 use crate::{
     api_key_env_var, generation_provider_feature_enabled, parse_model_spec, InferenceError,
     ModelTask, ProviderFailure, ProviderKind, RegistryFailure, UnsupportedKind,
@@ -382,6 +382,23 @@ impl ResolvedModel {
         }
     }
 
+    /// What is known about the model's task before it is loaded — the one
+    /// place a resolution turns into [`TaskFacts`], so `capability` and the
+    /// testkit's fake cannot read it differently.
+    ///
+    /// A path is a model only while a file is behind it (Q5): with none, it
+    /// is a name for nothing, like a name the catalog does not know.
+    pub(crate) fn task_facts(&self) -> TaskFacts {
+        match &self.source {
+            ModelSource::Catalog { entry, .. } => TaskFacts::Catalogued(entry.task),
+            ModelSource::GgufPath(_) if self.availability == Availability::PathMissing => {
+                TaskFacts::None
+            }
+            ModelSource::GgufPath(_) => TaskFacts::AnyLocal,
+            ModelSource::Uncatalogued { .. } | ModelSource::Cloud => TaskFacts::None,
+        }
+    }
+
     /// The file a local model loads from, whether or not it is there. `None`
     /// for cloud models and names the catalog does not know.
     #[must_use]
@@ -588,7 +605,8 @@ fn resolve_local(
             path,
             downloaded,
         } => {
-            let abilities = ModelAbilities::of(ProviderKind::Local, Some(entry.task));
+            let abilities =
+                ModelAbilities::of(ProviderKind::Local, TaskFacts::Catalogued(entry.task));
             let availability = match use_ {
                 Some(requested) if !supports(abilities, requested) => {
                     Availability::TaskNotSupported { requested }
@@ -618,7 +636,7 @@ fn resolve_cloud(
     key_present: &dyn Fn(ProviderKind) -> bool,
     use_: Option<ModelUse>,
 ) -> (ModelSource, Availability) {
-    let abilities = ModelAbilities::of(provider, None);
+    let abilities = ModelAbilities::of(provider, TaskFacts::None);
     // Locating a cloud model asks nothing of the build, the network, or the
     // key: there is no file to find, and every remaining check is about
     // reaching the provider, which only a run does. `pull` refuses a cloud
@@ -1070,7 +1088,8 @@ mod tests {
     #[test]
     fn every_catalogued_model_tokenizes_but_only_for_its_own_task_runs() {
         for entry in crate::registry::catalog::CATALOG {
-            let abilities = ModelAbilities::of(ProviderKind::Local, Some(entry.task));
+            let abilities =
+                ModelAbilities::of(ProviderKind::Local, TaskFacts::Catalogued(entry.task));
             assert!(supports(abilities, ModelUse::Tokenize), "{}", entry.name);
             for task in [ModelTask::Generate, ModelTask::Embed, ModelTask::Rank] {
                 assert_eq!(

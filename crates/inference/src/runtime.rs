@@ -187,7 +187,9 @@ pub struct InferenceCapability {
     ///
     /// False when the provider's feature is compiled out, even for a model
     /// that inherently generates — see `provider_feature_enabled` for why. The
-    /// model's own task is in the catalog (`inference models list`).
+    /// model's own task is in the catalog (`inference models list`); a GGUF
+    /// file named by path has no catalogued task and claims every local
+    /// ability this binary has — the load decides what the file can do.
     pub can_generate: bool,
     /// Whether **this binary** can tokenize with this model right now.
     pub can_tokenize: bool,
@@ -520,8 +522,7 @@ impl InferenceRuntime {
                 None
             }
         };
-        let task = entry.map(|entry| entry.task);
-        let abilities = ModelAbilities::of(provider, task);
+        let abilities = ModelAbilities::of(provider, resolved.task_facts());
         Ok(InferenceCapability {
             provider,
             model: resolved.name,
@@ -1415,6 +1416,24 @@ fn provider_is_ready(feature_enabled: bool, key_present: bool, requires_api_key:
     feature_enabled && (key_present || !requires_api_key)
 }
 
+/// What the resolver knows about a model's task before anything is loaded.
+///
+/// Derived from a [`ResolvedModel`] in exactly one place
+/// ([`ResolvedModel::task_facts`]), so `capability`, the resolver's own
+/// task check and the testkit's fake read the same facts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TaskFacts {
+    /// A catalogued local model: the catalog states the one task it does.
+    Catalogued(ModelTask),
+    /// A caller-supplied GGUF file that exists. This binary loads it for
+    /// whichever task is asked and lets the load decide, so no local task is
+    /// ruled out before then (#3303).
+    AnyLocal,
+    /// Nothing to say: a local name the catalog does not know, a path with
+    /// no file behind it, or a cloud spec — where the provider alone decides.
+    None,
+}
+
 /// What a model and provider inherently support, before any question of what
 /// this binary was compiled with.
 ///
@@ -1432,30 +1451,40 @@ pub(crate) struct ModelAbilities {
 }
 
 impl ModelAbilities {
-    /// `task` is the catalogued task for a local model, and `None` for a cloud
-    /// spec (where the provider alone decides) or a local spec the catalog
-    /// does not know.
-    ///
     /// A local model does exactly what its catalogued task says: a reranker
     /// ranks, an embedding model embeds, a generation model generates, and
-    /// each of them tokenizes. An uncatalogued local spec claims nothing —
-    /// the registry cannot load it, so this binary can do nothing with it.
-    pub(crate) fn of(provider: ProviderKind, task: Option<ModelTask>) -> Self {
+    /// each of them tokenizes. A GGUF file the caller names may do any of
+    /// them — every verb loads it and lets the load decide — so all four are
+    /// claimed (#3303). An uncatalogued local spec, or a path with no file,
+    /// claims nothing: the registry cannot load it, so this binary can do
+    /// nothing with it. A cloud provider decides for itself.
+    pub(crate) fn of(provider: ProviderKind, task: TaskFacts) -> Self {
         let local = provider == ProviderKind::Local;
         Self {
             // Every cloud provider generates; a local model only when that is
             // its task. `!= Some(Embed)` here once claimed generation for a
             // reranker (#3124).
-            generate: !local || task == Some(ModelTask::Generate),
+            generate: !local
+                || matches!(
+                    task,
+                    TaskFacts::Catalogued(ModelTask::Generate) | TaskFacts::AnyLocal
+                ),
             // Tokenization is a property of a local GGUF; cloud providers do
             // not expose it.
-            tokenize: local && task.is_some(),
+            tokenize: local && task != TaskFacts::None,
             // OpenAI and Google serve embedding endpoints; Anthropic does not.
             // A local model embeds when that is its catalogued task.
             embed: matches!(provider, ProviderKind::OpenAI | ProviderKind::Google)
-                || task == Some(ModelTask::Embed),
+                || matches!(
+                    task,
+                    TaskFacts::Catalogued(ModelTask::Embed) | TaskFacts::AnyLocal
+                ),
             // Reranking is local-only, and only for a rank model.
-            rank: local && task == Some(ModelTask::Rank),
+            rank: local
+                && matches!(
+                    task,
+                    TaskFacts::Catalogued(ModelTask::Rank) | TaskFacts::AnyLocal
+                ),
         }
     }
 }
@@ -1880,7 +1909,7 @@ mod tests {
         use ProviderKind::{Anthropic, Google, Local, OpenAI};
 
         // Local embedding model: embeds and tokenizes, does not generate.
-        let embed = ModelAbilities::of(Local, Some(ModelTask::Embed));
+        let embed = ModelAbilities::of(Local, TaskFacts::Catalogued(ModelTask::Embed));
         assert_eq!(
             embed,
             ModelAbilities {
@@ -1892,7 +1921,7 @@ mod tests {
         );
 
         // Local generation model: generates and tokenizes, does not embed.
-        let generate = ModelAbilities::of(Local, Some(ModelTask::Generate));
+        let generate = ModelAbilities::of(Local, TaskFacts::Catalogued(ModelTask::Generate));
         assert_eq!(
             generate,
             ModelAbilities {
@@ -1904,7 +1933,7 @@ mod tests {
         );
 
         // Local rank model: ranks and tokenizes; neither generates nor embeds.
-        let rank = ModelAbilities::of(Local, Some(ModelTask::Rank));
+        let rank = ModelAbilities::of(Local, TaskFacts::Catalogued(ModelTask::Rank));
         assert_eq!(
             rank,
             ModelAbilities {
@@ -1915,9 +1944,23 @@ mod tests {
             }
         );
 
-        // An uncatalogued local spec has no task, and the registry cannot load
-        // it: nothing is claimed.
-        let unknown = ModelAbilities::of(Local, None);
+        // A GGUF file on disk has no catalogue entry to say what it is for,
+        // and the local runtime loads it for whichever engine a verb wants:
+        // it claims every local task (#3303).
+        let path = ModelAbilities::of(Local, TaskFacts::AnyLocal);
+        assert_eq!(
+            path,
+            ModelAbilities {
+                generate: true,
+                tokenize: true,
+                embed: true,
+                rank: true
+            }
+        );
+
+        // An uncatalogued local spec, or a path that is not there, has no
+        // task, and the registry cannot load it: nothing is claimed.
+        let unknown = ModelAbilities::of(Local, TaskFacts::None);
         assert_eq!(
             unknown,
             ModelAbilities {
@@ -1932,7 +1975,7 @@ mod tests {
         // Anthropic does not.
         for provider in [OpenAI, Google] {
             assert_eq!(
-                ModelAbilities::of(provider, None),
+                ModelAbilities::of(provider, TaskFacts::None),
                 ModelAbilities {
                     generate: true,
                     tokenize: false,
@@ -1943,7 +1986,7 @@ mod tests {
             );
         }
         assert_eq!(
-            ModelAbilities::of(Anthropic, None),
+            ModelAbilities::of(Anthropic, TaskFacts::None),
             ModelAbilities {
                 generate: true,
                 tokenize: false,

@@ -548,22 +548,12 @@ fn is_fakes_own(resolved: &ResolvedModel) -> bool {
         && FAKE_MODELS.iter().any(|(name, _)| *name == resolved.name)
 }
 
-/// What a resolved model does in the fake world: the real ability table for
-/// a catalogued or cloud model, everything for one of the fake's own.
+/// What a resolved model does in the fake world: the real ability table,
+/// read from the same facts the runtime reads. One of the fake's own is a
+/// GGUF path in this world (`locate`), and a path claims every local task
+/// (#3303) — which is how the fake's models come to do everything.
 fn fake_abilities(resolved: &ResolvedModel) -> ModelAbilities {
-    if is_fakes_own(resolved) {
-        return ModelAbilities {
-            generate: true,
-            tokenize: true,
-            embed: true,
-            rank: true,
-        };
-    }
-    let task = match resolved.source {
-        ModelSource::Catalog { entry, .. } => Some(entry.task),
-        ModelSource::GgufPath(_) | ModelSource::Uncatalogued { .. } | ModelSource::Cloud => None,
-    };
-    ModelAbilities::of(resolved.provider, task)
+    ModelAbilities::of(resolved.provider, resolved.task_facts())
 }
 
 fn fake_model(name: &str, task: crate::ModelTask, embedding_dim: usize) -> crate::ModelInfo {
@@ -657,7 +647,7 @@ impl crate::InferenceService for FakeInferenceService {
             can_embed: abilities.embed,
             can_rank: abilities.rank,
             requires_network: provider != ProviderKind::Local,
-            requires_api_key: provider != ProviderKind::Local,
+            requires_api_key: crate::api_key_env_var(provider).is_some(),
             provider_feature_enabled: true,
             network_enabled: true,
             embedding_dim: if abilities.embed {
@@ -1229,6 +1219,38 @@ mod tests {
                 && !unknown.can_embed
                 && !unknown.can_rank
                 && !unknown.can_tokenize
+        );
+    }
+
+    /// The fake reads the same task facts the runtime reads, with every
+    /// feature built in — so it is where a build without `local` can still
+    /// see what a GGUF path claims (#3303): a present file every local
+    /// task, an absent one nothing.
+    #[test]
+    fn a_gguf_path_claims_in_the_fake_what_it_claims_in_the_runtime() {
+        let service = FakeInferenceService::new();
+        let dir = tempfile::tempdir().unwrap();
+        let present = dir.path().join("model.gguf");
+        std::fs::write(&present, b"gguf").unwrap();
+
+        let path = service
+            .capability(present.to_str().unwrap())
+            .expect("located, never loaded");
+        assert_eq!(path.provider, ProviderKind::Local);
+        assert_eq!(path.availability, AvailabilityKind::Ready);
+        assert!(
+            path.can_generate && path.can_embed && path.can_rank && path.can_tokenize,
+            "{path:?}"
+        );
+        assert!(!path.requires_network && !path.requires_api_key);
+
+        let absent = service
+            .capability(dir.path().join("absent.gguf").to_str().unwrap())
+            .expect("reported, not refused");
+        assert_eq!(absent.availability, AvailabilityKind::PathMissing);
+        assert!(
+            !absent.can_generate && !absent.can_embed && !absent.can_rank && !absent.can_tokenize,
+            "{absent:?}"
         );
     }
 
