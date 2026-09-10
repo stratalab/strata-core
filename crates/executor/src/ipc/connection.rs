@@ -1061,6 +1061,14 @@ mod tests {
             .expect_err("a command with no owner fails");
         assert_eq!(error.code(), "unavailable.executor.ipc_transport");
         assert_eq!(error.class(), crate::ExecutorErrorClass::Unavailable);
+        // #3244: the site restated the row's retry flag and had drifted from
+        // it; the whole row is what the caller must see.
+        let entry = crate::public_error_code_entry("unavailable.executor.ipc_transport")
+            .expect("ipc_transport is registered");
+        assert_eq!(error.public_class(), entry.class);
+        assert_eq!(error.retry_policy(), entry.retry_policy);
+        assert_eq!(error.commit_outcome(), entry.commit_outcome);
+        assert_eq!(error.suggested_fix(), entry.suggested_fix);
     }
 
     #[test]

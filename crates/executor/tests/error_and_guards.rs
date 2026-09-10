@@ -87,7 +87,7 @@ fn executor_error_rendering_uses_injected_boundary_config() {
     );
 
     let error = with_error_render_config(config, || {
-        ExecutorError::invalid_input("invalid_argument.executor.batch_item", "public message")
+        ExecutorError::new("invalid_argument.executor.batch_item", "public message")
     });
 
     assert_eq!(error.reference_id(), "ref_test_000001");
@@ -109,8 +109,7 @@ fn executor_preserves_engine_error_codes_at_public_boundary() {
 
 #[test]
 fn serialized_errors_have_v1_status_shape() {
-    let error =
-        ExecutorError::invalid_input("invalid_argument.executor.batch_item", "public message");
+    let error = ExecutorError::new("invalid_argument.executor.batch_item", "public message");
     let encoded = serde_json::to_string(&error).expect("error serializes");
     let status: serde_json::Value = serde_json::from_str(&encoded).expect("json parses");
 
@@ -141,9 +140,13 @@ fn serialized_errors_have_v1_status_shape() {
     }
 }
 
+fn status_from_json(value: serde_json::Value) -> ErrorStatus {
+    serde_json::from_value(value).expect("error status deserializes")
+}
+
 #[test]
 fn deserialized_error_status_derives_retryable_from_retry_policy() {
-    let status: ErrorStatus = serde_json::from_value(serde_json::json!({
+    let status = status_from_json(serde_json::json!({
         "class": "unavailable",
         "code": "unavailable.executor.lock_unavailable",
         "retry_policy": "same_request",
@@ -153,8 +156,7 @@ fn deserialized_error_status_derives_retryable_from_retry_policy() {
         "suggested_fix": "Retry the same request after the lock becomes available.",
         "docs_url": "https://stratadb.org/e/unavailable.executor.lock_unavailable",
         "reference_id": "err-test-000001"
-    }))
-    .expect("error status deserializes");
+    }));
 
     assert_eq!(status.retry_policy(), RetryPolicy::SameRequest);
     assert!(status.retryable());
@@ -162,7 +164,7 @@ fn deserialized_error_status_derives_retryable_from_retry_policy() {
 
 #[test]
 fn unregistered_executor_errors_render_registered_internal_fallback() {
-    let error = ExecutorError::invalid_input("invalid_argument.executor.test", "public message");
+    let error = ExecutorError::new("invalid_argument.executor.test", "public message");
 
     assert_eq!(error.code(), "internal.executor.unregistered_code");
     assert_eq!(error.public_class(), ErrorClass::Internal);
@@ -176,90 +178,93 @@ fn unregistered_executor_errors_render_registered_internal_fallback() {
             && detail.value() == "invalid_argument.executor.test"));
 }
 
+/// A wire status is a DTO; `from_status` is where the boundary re-establishes
+/// the registry as the authority. An unregistered code collapses to the
+/// registered fallback, keeps the original code as a detail, and has its docs
+/// URL rewritten to the fallback's page whatever base the sender used.
 #[test]
-fn explicit_error_status_constructors_normalize_unregistered_codes() {
-    let direct = ErrorStatus::new(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.direct_test",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        "public message",
-        "custom fix",
-        "err-test-direct",
-        None,
-        Vec::new(),
-        Vec::new(),
-    );
-    assert_eq!(direct.code(), "internal.executor.unregistered_code");
-    assert_eq!(direct.class(), ErrorClass::Internal);
-    assert!(direct
-        .details()
-        .iter()
-        .any(|detail| detail.key() == "unregistered_code"
-            && detail.value() == "invalid_argument.executor.direct_test"));
+fn from_status_normalizes_unregistered_codes_and_docs_urls() {
+    let wire = |docs_url: &str| {
+        status_from_json(serde_json::json!({
+            "class": "invalid_argument",
+            "code": "invalid_argument.executor.from_status_test",
+            "retry_policy": "never",
+            "retryable": false,
+            "commit_outcome": "not_started",
+            "message": "public message",
+            "suggested_fix": "custom fix",
+            "docs_url": docs_url,
+            "reference_id": "err-test-from-status"
+        }))
+    };
 
-    let with_url = ErrorStatus::new_with_docs_url(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.url_test",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        "public message",
-        "custom fix",
-        "https://example.invalid/errors#wrong-anchor",
-        "err-test-url",
-        None,
-        Vec::new(),
-        Vec::new(),
-    );
-    assert_eq!(with_url.code(), "internal.executor.unregistered_code");
-    assert_eq!(
-        with_url.docs_url(),
-        "https://stratadb.org/e/internal.executor.unregistered_code"
-    );
-
-    let with_registry_url = ErrorStatus::new_with_docs_url(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.url_test",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        "public message",
-        "custom fix",
-        "https://docs.example.test/errors/e#wrong-anchor",
-        "err-test-url",
-        None,
-        Vec::new(),
-        Vec::new(),
-    );
-    assert_eq!(
-        with_registry_url.docs_url(),
-        "https://docs.example.test/errors/e/internal.executor.unregistered_code"
-    );
-}
-
-#[test]
-fn executor_error_from_status_normalizes_unregistered_codes() {
-    let status = ErrorStatus::new_with_docs_url(
-        ErrorClass::InvalidArgument,
-        "invalid_argument.executor.from_status_test",
-        RetryPolicy::Never,
-        CommitOutcomeStatus::NotStarted,
-        "public message",
-        "custom fix",
-        "https://example.invalid/errors#wrong-anchor",
-        "err-test-from-status",
-        None,
-        Vec::new(),
-        Vec::new(),
-    );
-
-    let error = ExecutorError::from_status(status);
-
+    let error = ExecutorError::from_status(wire("https://example.invalid/errors#wrong-anchor"));
     assert_eq!(error.code(), "internal.executor.unregistered_code");
     assert_eq!(error.public_class(), ErrorClass::Internal);
+    assert_eq!(error.retry_policy(), RetryPolicy::Unknown);
+    assert_eq!(error.commit_outcome(), CommitOutcomeStatus::NotApplicable);
     assert_eq!(
         error.docs_url(),
         "https://stratadb.org/e/internal.executor.unregistered_code"
     );
+    assert!(error
+        .status()
+        .details()
+        .iter()
+        .any(|detail| detail.key() == "unregistered_code"
+            && detail.value() == "invalid_argument.executor.from_status_test"));
+
+    let error = ExecutorError::from_status(wire("https://docs.example.test/errors/e#wrong-anchor"));
+    assert_eq!(
+        error.docs_url(),
+        "https://docs.example.test/errors/e/internal.executor.unregistered_code"
+    );
+}
+
+/// #3244: a registered code arriving over the wire with every row field wrong
+/// (a stale peer, a hand-built status) crosses the boundary carrying the local
+/// registry's class, retry policy, commit outcome and suggested fix — the
+/// sender owns only the message, ids, details and hints.
+#[test]
+fn from_status_re_derives_the_registry_row_and_keeps_the_site_fields() {
+    let code = "unavailable.executor.ipc_transport";
+    let entry = public_error_code_entry(code).expect("ipc_transport is registered");
+    let error = ExecutorError::from_status(status_from_json(serde_json::json!({
+        "class": "internal",
+        "code": code,
+        "retry_policy": "never",
+        "retryable": false,
+        "commit_outcome": "maybe_committed",
+        "message": "lock unavailable",
+        "suggested_fix": "site text that must not survive",
+        "docs_url": "https://docs.example.test/e/unavailable.executor.ipc_transport",
+        "reference_id": "err-test-000001",
+        "trace_id": "trace-000001",
+        "details": [{"key": "path", "value": "db"}],
+        "hints": ["site hint that must survive"]
+    })));
+
+    assert_eq!(error.code(), code);
+    assert_eq!(error.public_class(), entry.class);
+    assert_eq!(error.retry_policy(), entry.retry_policy);
+    assert_eq!(error.retryable(), error.status().retryable());
+    assert_eq!(error.commit_outcome(), entry.commit_outcome);
+    assert_eq!(error.suggested_fix(), entry.suggested_fix);
+    assert_eq!(error.message(), "lock unavailable");
+    assert_eq!(error.reference_id(), "err-test-000001");
+    assert_eq!(error.status().trace_id(), Some("trace-000001"));
+    // A canonical per-code page from the sender's docs base is kept as-is,
+    // not re-based onto this process's default.
+    assert_eq!(
+        error.docs_url(),
+        "https://docs.example.test/e/unavailable.executor.ipc_transport"
+    );
+    assert!(error
+        .status()
+        .details()
+        .iter()
+        .any(|detail| detail.key() == "path" && detail.value() == "db"));
+    assert_eq!(error.status().hints(), ["site hint that must survive"]);
 }
 
 #[test]

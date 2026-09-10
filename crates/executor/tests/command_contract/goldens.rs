@@ -53,6 +53,19 @@ fn shared_concept_goldens_match_public_json() {
     );
 }
 
+/// The error-status golden is a committed wire sample; its class, retry
+/// policy, commit outcome and suggested fix must be the registry row for its
+/// code, because after #3244 nothing else can reach the wire.
+#[test]
+fn error_status_fixture_matches_the_registry_row() {
+    let status = error_status_fixture();
+    let entry = public_error_code_entry(status.code()).expect("fixture code is registered");
+    assert_eq!(status.class(), entry.class);
+    assert_eq!(status.retry_policy(), entry.retry_policy);
+    assert_eq!(status.commit_outcome(), entry.commit_outcome);
+    assert_eq!(status.suggested_fix(), entry.suggested_fix);
+}
+
 #[test]
 #[allow(clippy::too_many_lines)]
 fn public_response_family_goldens_match_public_json() {

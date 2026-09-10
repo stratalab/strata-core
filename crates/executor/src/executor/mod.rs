@@ -86,7 +86,7 @@ use strata_engine::{
 };
 
 use crate::command::Command;
-use crate::error::{engine_error_status, ExecutorError, ExecutorErrorClass, ExecutorResult};
+use crate::error::{engine_error_status, ExecutorError, ExecutorResult};
 use crate::output::Output;
 use crate::types::{
     AdminCapabilities as OutputAdminCapabilities, AdminConfig as OutputAdminConfig,
@@ -131,7 +131,10 @@ const DEFAULT_GRAPH_LIST_LIMIT: usize = 100;
 
 mod admin_branch;
 mod admin_convert;
+#[cfg(feature = "arrow")]
 mod arrow_commands;
+#[cfg(not(feature = "arrow"))]
+mod arrow_disabled;
 mod batch;
 mod dispatch;
 mod event;

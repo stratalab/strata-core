@@ -1,8 +1,8 @@
 use super::{
     BTreeSet, BatchExistsItemResult, BatchExistsPresence, BatchGetItemResult, BatchItem,
     BatchItemResult, BatchMode, BatchResult, Bytes, EventBatchAppendItemResult, ExecutorError,
-    ExecutorErrorClass, ExecutorResult, GraphBatchItemResult, JsonBatchGetItemResult,
-    JsonBatchItemResult, VectorBatchGetItemResult, VectorBatchItemResult,
+    ExecutorResult, GraphBatchItemResult, JsonBatchGetItemResult, JsonBatchItemResult,
+    VectorBatchGetItemResult, VectorBatchItemResult,
 };
 
 pub(super) fn empty_batch_results(len: usize) -> Vec<Option<BatchItem<BatchItemResult>>> {
@@ -216,12 +216,7 @@ fn reject_duplicates<T: Ord>(
     let mut seen = BTreeSet::new();
     for key in keys {
         if !seen.insert(key) {
-            return Err(ExecutorError::new(
-                ExecutorErrorClass::InvalidInput,
-                code,
-                false,
-                message,
-            ));
+            return Err(ExecutorError::new(code, message));
         }
     }
     Ok(())

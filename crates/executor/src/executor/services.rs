@@ -7,7 +7,7 @@ use strata_core::Timestamp;
 
 /// #3112 S3a: `as_of` and `as_of_time` ask the same question in two clocks.
 fn as_of_conflict() -> ExecutorError {
-    ExecutorError::invalid_input(
+    ExecutorError::new(
         "invalid_argument.executor.as_of_conflict",
         "as_of and as_of_time are mutually exclusive: pass a commit timestamp or \
          a wall-clock instant, not both",

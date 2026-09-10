@@ -338,17 +338,22 @@ Layer responsibilities for the surface:
 
 1. Storage owns fields 1, 2, the mechanical half of 3, and the mechanical
    half of 4. It owns no reference id, no doc URL, and no user-facing phrasing.
-2. Engine composes product meaning: user-facing message and suggested fix.
-   The error-code registry (engine rows in
-   `crates/engine/src/diagnostics/registry.rs`, executor-owned rows such as
-   `inference.*` in `crates/executor/src/error_registry.rs`) is the single
-   authority for a code's suggested fix: the hint `strata agents errors`
-   documents is the hint a live error constructed for that code carries. A
-   construction site that builds its status by hand may supply a *more
-   specific* hint, never a class-generic one and never a private per-code
-   table of its own (#3237, #3243).
-3. The boundary (command/IPC/SDK/CLI status renderer) assigns the reference id,
-   derives the doc link from the code, and emits the full six-field status.
+2. Engine composes product meaning: the user-facing message. The error-code
+   registry (engine rows in `crates/engine/src/diagnostics/registry.rs`,
+   executor-owned rows such as `inference.*` in
+   `crates/executor/src/error_registry.rs`) is the single authority for a
+   code's class, retry policy, commit outcome and suggested fix: the row
+   `strata agents errors` documents is the row a live error for that code
+   carries — always, not only when the site left a field at its default. A
+   construction site owns the code, the message, `details` and `hints`; it
+   has no channel to override the row (#3244), so site-specific remediation
+   goes in `hints`, never in a per-code table of its own (#3237, #3243).
+   A wrong row is fixed in the registry (#3275), not hidden at the site.
+3. The boundary (command/IPC/SDK/CLI status renderer) resolves the code to
+   its row, assigns the reference id, derives the doc link from the code, and
+   emits the full status. A status arriving from a peer (IPC, a stale build)
+   is re-resolved against the local registry the same way; only the peer's
+   message, ids, details and hints survive the boundary.
 
 ### Retry Policy
 

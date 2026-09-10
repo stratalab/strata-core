@@ -13,11 +13,12 @@ exclude_globs = [
     # The default-feature executor slice compiles the hub- and arrow-enabled
     # handlers; the inverse feature-disabled stubs are cfg-disabled here, so a
     # mutant on them is a no-op on non-compiled code and survives vacuously.
-    # This one is a whole-file stub, so it is excluded by PATH. (Its sibling,
+    # These are whole-file stubs, so they are excluded by PATH. (Their sibling,
     # `arrow_feature_disabled`, is a single cfg-gated fn inside a file that also
     # holds real code, so it is excluded by NAME below — never by line number:
     # line ranges rot and can swallow real code.)
     "crates/executor/src/executor/hub_disabled.rs",
+    "crates/executor/src/executor/arrow_disabled.rs",
     "crates/executor/src/bin/**",
 ]
 

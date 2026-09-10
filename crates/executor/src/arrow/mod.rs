@@ -10,29 +10,19 @@ pub(crate) mod writer;
 use crate::error::{ExecutorError, ExecutorResult};
 
 fn invalid_input(code: &'static str, message: impl Into<String>) -> ExecutorError {
-    ExecutorError::invalid_input(code, message)
+    ExecutorError::new(code, message)
 }
 
 fn not_found(code: &'static str, message: impl Into<String>) -> ExecutorError {
-    ExecutorError::not_found(code, message)
+    ExecutorError::new(code, message)
 }
 
 fn io_error(message: impl Into<String>) -> ExecutorError {
-    ExecutorError::new(
-        crate::ExecutorErrorClass::Unavailable,
-        "unavailable.executor.arrow_io",
-        true,
-        message,
-    )
+    ExecutorError::new("unavailable.executor.arrow_io", message)
 }
 
 fn internal_error(message: impl Into<String>) -> ExecutorError {
-    ExecutorError::new(
-        crate::ExecutorErrorClass::Internal,
-        "internal.executor.arrow",
-        false,
-        message,
-    )
+    ExecutorError::new("internal.executor.arrow", message)
 }
 
 fn unexpected_output(command: &'static str) -> ExecutorError {

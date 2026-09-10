@@ -7,7 +7,8 @@ use std::sync::{Arc, OnceLock};
 
 use serde::{Deserialize, Deserializer, Serialize};
 use strata_engine::{
-    CommitOutcomeStatus, EngineError, EngineErrorStatus, ErrorClass, ErrorDetail, RetryPolicy,
+    CommitOutcomeStatus, EngineError, EngineErrorStatus, ErrorClass, ErrorCodeRegistryEntry,
+    ErrorDetail, RetryPolicy,
 };
 
 use crate::error_registry::{
@@ -174,68 +175,6 @@ pub struct ErrorStatus {
 }
 
 impl ErrorStatus {
-    /// Creates a public error status.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn new(
-        class: ErrorClass,
-        code: impl Into<String>,
-        retry_policy: RetryPolicy,
-        commit_outcome: CommitOutcomeStatus,
-        message: impl Into<String>,
-        suggested_fix: impl Into<String>,
-        reference_id: impl Into<String>,
-        trace_id: Option<String>,
-        details: Vec<ErrorDetail>,
-        hints: Vec<String>,
-    ) -> Self {
-        let code = code.into();
-        normalize_explicit_status(
-            class,
-            code,
-            retry_policy,
-            commit_outcome,
-            message.into(),
-            suggested_fix.into(),
-            None,
-            reference_id.into(),
-            trace_id,
-            details,
-            hints,
-        )
-    }
-
-    /// Creates a public error status with a boundary-rendered docs URL.
-    #[allow(clippy::too_many_arguments)]
-    #[must_use]
-    pub fn new_with_docs_url(
-        class: ErrorClass,
-        code: impl Into<String>,
-        retry_policy: RetryPolicy,
-        commit_outcome: CommitOutcomeStatus,
-        message: impl Into<String>,
-        suggested_fix: impl Into<String>,
-        docs_url: impl Into<String>,
-        reference_id: impl Into<String>,
-        trace_id: Option<String>,
-        details: Vec<ErrorDetail>,
-        hints: Vec<String>,
-    ) -> Self {
-        normalize_explicit_status(
-            class,
-            code.into(),
-            retry_policy,
-            commit_outcome,
-            message.into(),
-            suggested_fix.into(),
-            Some(docs_url.into()),
-            reference_id.into(),
-            trace_id,
-            details,
-            hints,
-        )
-    }
-
     /// Returns the public class.
     #[must_use]
     pub const fn class(&self) -> ErrorClass {
@@ -365,44 +304,27 @@ pub struct ExecutorError {
 }
 
 impl ExecutorError {
-    /// Creates an executor error.
-    pub fn new(
-        class: ExecutorErrorClass,
-        code: impl Into<String>,
-        retryable: bool,
-        message: impl Into<String>,
-    ) -> Self {
-        let code = code.into();
-        let public_class = public_class_for_executor(class, &code);
-        let retry_policy = if retryable {
-            RetryPolicy::SameRequest
-        } else {
-            default_retry_policy(public_class)
-        };
-        Self::from_status(render_status(
-            public_class,
-            code,
-            retry_policy,
-            default_commit_outcome(public_class),
-            message,
-            default_suggested_fix(public_class),
-            None,
-            Vec::new(),
-            Vec::new(),
-        ))
+    /// Creates an executor error for a registered code.
+    ///
+    /// The registry row for `code` supplies the class, retry policy, commit
+    /// outcome and suggested fix; a construction site owns only the public
+    /// message (#3244 — the old `(class, retryable)` arguments were per-site
+    /// copies of the row, and sites drifted from it). An unregistered code
+    /// renders as `internal.executor.unregistered_code` with the requested
+    /// code kept as a detail.
+    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        Self {
+            status: render_status(code, message, None, Vec::new(), Vec::new()),
+        }
     }
 
-    /// Creates an invalid-input error.
-    pub fn invalid_input(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ExecutorErrorClass::InvalidInput, code, false, message)
-    }
-
-    /// Creates a not-found error.
-    pub fn not_found(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::new(ExecutorErrorClass::NotFound, code, false, message)
-    }
-
-    /// Creates an executor error from an existing public status.
+    /// Creates an executor error from a wire status.
+    ///
+    /// The status is a transport DTO: its class, retry policy, commit outcome
+    /// and suggested fix are re-derived from this process's registry row for
+    /// the code, so every `ExecutorError` in-process carries the row whatever
+    /// the sender rendered. The message, reference id, trace id, details and
+    /// hints are kept; the docs URL is re-anchored to the code's page.
     #[must_use]
     pub fn from_status(status: ErrorStatus) -> Self {
         Self {
@@ -521,24 +443,11 @@ fn source_chain_display(error: &dyn Error) -> Option<String> {
 #[cfg(feature = "inference")]
 impl From<strata_inference::InferenceError> for ExecutorError {
     fn from(value: strata_inference::InferenceError) -> Self {
-        let code = value.code();
         // The registry row is the single authority for a registered code's
-        // class, retry policy and suggested fix; private per-code tables here
-        // drifted from it (#3243). A code missing from the registry renders as
-        // `internal.executor.unregistered_code`, whose row supplies all three.
-        let entry = public_error_code_entry(code);
-        let status = render_status(
-            entry.map_or(ErrorClass::Internal, |entry| entry.class),
-            code,
-            entry.map_or(RetryPolicy::Never, |entry| entry.retry_policy),
-            CommitOutcomeStatus::NotApplicable,
-            value.public_message(),
-            entry.map_or("", |entry| entry.suggested_fix),
-            None,
-            Vec::new(),
-            Vec::new(),
-        );
-        Self::from_status(status)
+        // class, retry policy, commit outcome and suggested fix; private
+        // per-code tables here drifted from it (#3243). A code missing from
+        // the registry renders as `internal.executor.unregistered_code`.
+        Self::new(value.code(), value.public_message())
     }
 }
 
@@ -575,147 +484,110 @@ fn current_error_render_config() -> ErrorRenderConfig {
     ERROR_RENDER_CONFIG.with(|current| current.borrow().clone())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn normalize_explicit_status(
-    class: ErrorClass,
-    requested_code: String,
-    retry_policy: RetryPolicy,
-    commit_outcome: CommitOutcomeStatus,
+/// What a construction site owns on a status: everything the registry row
+/// does not.
+struct SiteFields {
     message: String,
-    suggested_fix: String,
-    docs_url: Option<String>,
-    reference_id: String,
     trace_id: Option<String>,
-    mut details: Vec<ErrorDetail>,
+    details: Vec<ErrorDetail>,
     hints: Vec<String>,
+}
+
+/// Resolves the registry row a status renders with: the row for
+/// `requested_code` when it is registered, otherwise the
+/// `internal.executor.unregistered_code` fallback with the requested code
+/// recorded as a detail. Returns the row and the code the status carries.
+fn resolve_row(
+    requested_code: String,
+    details: &mut Vec<ErrorDetail>,
+) -> (ErrorCodeRegistryEntry, String) {
+    if let Some(entry) = public_error_code_entry(&requested_code) {
+        return (entry, requested_code);
+    }
+    let entry = unregistered_code_entry();
+    details.push(ErrorDetail::new("unregistered_code", requested_code));
+    (entry, entry.code.to_owned())
+}
+
+/// The one place a registry row becomes a status: class, retry policy,
+/// commit outcome and suggested fix are the row's, unconditionally.
+fn status_from_row(
+    row: &ErrorCodeRegistryEntry,
+    code: String,
+    site: SiteFields,
+    docs_url: String,
+    reference_id: String,
 ) -> ErrorStatus {
-    let registry_entry = public_error_code_entry(&requested_code);
-    let entry = registry_entry.unwrap_or_else(unregistered_code_entry);
-    let code = if registry_entry.is_some() {
-        requested_code
-    } else {
-        details.push(ErrorDetail::new("unregistered_code", requested_code));
-        entry.code.to_owned()
-    };
-    let suggested_fix = if suggested_fix.trim().is_empty()
-        || suggested_fix == default_suggested_fix(class)
-        || registry_entry.is_none()
-    {
-        entry.suggested_fix.to_owned()
-    } else {
-        suggested_fix
-    };
-    let retry_policy = override_retry_policy(retry_policy, entry.retry_policy);
     ErrorStatus {
-        class: entry.class,
+        class: row.class,
         code,
-        retry_policy,
-        retryable: retry_policy_allows_retry(retry_policy),
-        commit_outcome: override_commit_outcome(commit_outcome, entry.commit_outcome),
-        message,
-        suggested_fix,
-        docs_url: normalize_docs_url(docs_url, entry.docs_slug),
+        retry_policy: row.retry_policy,
+        retryable: retry_policy_allows_retry(row.retry_policy),
+        commit_outcome: row.commit_outcome,
+        message: site.message,
+        suggested_fix: row.suggested_fix.to_owned(),
+        docs_url,
         reference_id,
-        trace_id,
-        details,
-        hints,
+        trace_id: site.trace_id,
+        details: site.details,
+        hints: site.hints,
     }
 }
 
-fn normalize_status(status: ErrorStatus) -> ErrorStatus {
-    normalize_explicit_status(
-        status.class,
-        status.code,
-        status.retry_policy,
-        status.commit_outcome,
-        status.message,
-        status.suggested_fix,
-        Some(status.docs_url),
-        status.reference_id,
-        status.trace_id,
-        status.details,
-        status.hints,
-    )
-}
-
-fn normalize_docs_url(docs_url: Option<String>, docs_slug: &str) -> String {
-    if let Some(url) = docs_url {
-        // Ignore any legacy fragment; the canonical form is a path slug.
-        let base = url
-            .split_once('#')
-            .map_or(url.as_str(), |(base, _anchor)| base);
-        let base = base.trim_end_matches('/');
-        let mut segments = base.rsplit('/');
-        let last = segments.next();
-        let second_last = segments.next();
-        // Already the canonical per-code page: …/e/<code>.
-        if last == Some(docs_slug) && second_last == Some(ERROR_REGISTRY_DOC_PAGE) {
-            return base.to_owned();
-        }
-        // A docs base ending at the error segment: …/e — append the code.
-        if last == Some(ERROR_REGISTRY_DOC_PAGE) {
-            return format!("{base}/{docs_slug}");
-        }
-    }
-    current_error_render_config().docs_url_for(docs_slug)
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Renders a fresh status for `code` under the current boundary config, which
+/// supplies the docs URL and the reference id.
 fn render_status(
-    class: ErrorClass,
     code: impl Into<String>,
-    retry_policy: RetryPolicy,
-    commit_outcome: CommitOutcomeStatus,
     message: impl Into<String>,
-    suggested_fix: impl Into<String>,
     trace_id: Option<String>,
     details: Vec<ErrorDetail>,
     hints: Vec<String>,
 ) -> ErrorStatus {
     let config = current_error_render_config();
-    let requested_code = code.into();
-    let message = message.into();
-    let supplied_fix = suggested_fix.into();
-    let registry_entry = public_error_code_entry(&requested_code);
-    let entry = registry_entry.unwrap_or_else(unregistered_code_entry);
-    let mut details = details;
-    let code = if registry_entry.is_some() {
-        requested_code
-    } else {
-        details.push(ErrorDetail::new("unregistered_code", requested_code));
-        entry.code.to_owned()
-    };
-    let suggested_fix = if supplied_fix.trim().is_empty()
-        || supplied_fix == default_suggested_fix(class)
-        || registry_entry.is_none()
-    {
-        entry.suggested_fix.to_owned()
-    } else {
-        supplied_fix
-    };
-    ErrorStatus::new_with_docs_url(
-        entry.class,
-        code.clone(),
-        override_retry_policy(retry_policy, entry.retry_policy),
-        override_commit_outcome(commit_outcome, entry.commit_outcome),
-        message,
-        suggested_fix,
-        config.docs_url_for(entry.docs_slug),
-        config.next_reference_id(),
+    let mut site = SiteFields {
+        message: message.into(),
         trace_id,
         details,
         hints,
-    )
+    };
+    let (row, code) = resolve_row(code.into(), &mut site.details);
+    let docs_url = config.docs_url_for(row.docs_slug);
+    let reference_id = config.next_reference_id();
+    status_from_row(&row, code, site, docs_url, reference_id)
 }
 
-const fn override_retry_policy(
-    supplied: RetryPolicy,
-    registry_default: RetryPolicy,
-) -> RetryPolicy {
-    match supplied {
-        RetryPolicy::Never => registry_default,
-        _ => supplied,
+/// Re-derives the row-owned fields of a wire status from this process's
+/// registry, keeping what the sender owns (see [`ExecutorError::from_status`]).
+fn normalize_status(status: ErrorStatus) -> ErrorStatus {
+    let mut site = SiteFields {
+        message: status.message,
+        trace_id: status.trace_id,
+        details: status.details,
+        hints: status.hints,
+    };
+    let (row, code) = resolve_row(status.code, &mut site.details);
+    let docs_url = normalize_docs_url(&status.docs_url, row.docs_slug);
+    status_from_row(&row, code, site, docs_url, status.reference_id)
+}
+
+fn normalize_docs_url(docs_url: &str, docs_slug: &str) -> String {
+    // Ignore any legacy fragment; the canonical form is a path slug.
+    let base = docs_url
+        .split_once('#')
+        .map_or(docs_url, |(base, _anchor)| base);
+    let base = base.trim_end_matches('/');
+    let mut segments = base.rsplit('/');
+    let last = segments.next();
+    let second_last = segments.next();
+    // Already the canonical per-code page: …/e/<code>.
+    if last == Some(docs_slug) && second_last == Some(ERROR_REGISTRY_DOC_PAGE) {
+        return base.to_owned();
     }
+    // A docs base ending at the error segment: …/e — append the code.
+    if last == Some(ERROR_REGISTRY_DOC_PAGE) {
+        return format!("{base}/{docs_slug}");
+    }
+    current_error_render_config().docs_url_for(docs_slug)
 }
 
 const fn retry_policy_allows_retry(policy: RetryPolicy) -> bool {
@@ -725,64 +597,18 @@ const fn retry_policy_allows_retry(policy: RetryPolicy) -> bool {
     )
 }
 
-const fn override_commit_outcome(
-    supplied: CommitOutcomeStatus,
-    registry_default: CommitOutcomeStatus,
-) -> CommitOutcomeStatus {
-    match supplied {
-        CommitOutcomeStatus::NotApplicable | CommitOutcomeStatus::NotStarted => registry_default,
-        _ => supplied,
-    }
-}
-
+/// Renders an engine status at the boundary. The engine's own class, retry
+/// policy, commit outcome and suggested fix are not consulted: the registry
+/// row for the code is the authority on this side too, and a site-specific
+/// remedy travels in `hints`.
 pub(crate) fn engine_error_status(status: &EngineErrorStatus) -> ErrorStatus {
     render_status(
-        status.class(),
         status.code().to_owned(),
-        status.retry_policy(),
-        status.commit_outcome(),
         status.message().to_owned(),
-        status.suggested_fix().to_owned(),
         None,
         status.details().to_vec(),
         status.hints().to_vec(),
     )
-}
-
-fn public_class_for_executor(class: ExecutorErrorClass, code: &str) -> ErrorClass {
-    match code.split('.').next() {
-        Some("not_found") => ErrorClass::NotFound,
-        Some("already_exists") => ErrorClass::AlreadyExists,
-        Some("invalid_argument") => ErrorClass::InvalidArgument,
-        Some("failed_precondition") => ErrorClass::FailedPrecondition,
-        Some("access_denied") => ErrorClass::AccessDenied,
-        Some("conflict") => ErrorClass::Conflict,
-        Some("ambiguous_commit") => ErrorClass::AmbiguousCommit,
-        Some("history_unavailable") => ErrorClass::HistoryUnavailable,
-        Some("unsupported") => ErrorClass::Unsupported,
-        Some("resource_exhausted") => ErrorClass::ResourceExhausted,
-        Some("unavailable") => ErrorClass::Unavailable,
-        Some("io") => ErrorClass::Io,
-        // Internal prefix-fold only; the wire class is registry-driven (see
-        // `public_error_code_entry(...).class`). `data_loss` and `corruption`
-        // share the internal corruption posture here, so splitting them would
-        // change nothing observable — the split lives in the registry.
-        Some("corruption" | "data_loss") => ErrorClass::Corruption,
-        Some("serialization") => ErrorClass::Serialization,
-        Some("internal") => ErrorClass::Internal,
-        _ => match class {
-            ExecutorErrorClass::InvalidInput => ErrorClass::InvalidArgument,
-            ExecutorErrorClass::NotFound => ErrorClass::NotFound,
-            ExecutorErrorClass::Conflict => ErrorClass::Conflict,
-            ExecutorErrorClass::Unavailable => ErrorClass::Unavailable,
-            ExecutorErrorClass::AmbiguousCommit => ErrorClass::AmbiguousCommit,
-            ExecutorErrorClass::IncompatibleLayout | ExecutorErrorClass::ClosedHandle => {
-                ErrorClass::FailedPrecondition
-            }
-            ExecutorErrorClass::Corruption => ErrorClass::Corruption,
-            ExecutorErrorClass::Internal => ErrorClass::Internal,
-        },
-    }
 }
 
 fn executor_class_for_status(status: &ErrorStatus) -> ExecutorErrorClass {
@@ -808,49 +634,6 @@ fn executor_class_for_status(status: &ErrorStatus) -> ExecutorErrorClass {
         // "stop and inspect" posture, only the public class segment differs.
         ErrorClass::Corruption | ErrorClass::DataLoss => ExecutorErrorClass::Corruption,
         _ => ExecutorErrorClass::Internal,
-    }
-}
-
-const fn default_retry_policy(class: ErrorClass) -> RetryPolicy {
-    match class {
-        ErrorClass::Unavailable | ErrorClass::ResourceExhausted => RetryPolicy::AfterStateChange,
-        ErrorClass::AmbiguousCommit | ErrorClass::Internal | ErrorClass::Io => RetryPolicy::Unknown,
-        _ => RetryPolicy::Never,
-    }
-}
-
-const fn default_commit_outcome(class: ErrorClass) -> CommitOutcomeStatus {
-    match class {
-        ErrorClass::InvalidArgument
-        | ErrorClass::AlreadyExists
-        | ErrorClass::Conflict
-        | ErrorClass::FailedPrecondition => CommitOutcomeStatus::NotStarted,
-        ErrorClass::AmbiguousCommit => CommitOutcomeStatus::MaybeCommitted,
-        _ => CommitOutcomeStatus::NotApplicable,
-    }
-}
-
-const fn default_suggested_fix(class: ErrorClass) -> &'static str {
-    match class {
-        ErrorClass::InvalidArgument => "Correct the command input and retry.",
-        ErrorClass::NotFound => "Check that the requested object exists before retrying.",
-        ErrorClass::AlreadyExists => "Use the existing object or choose a new name.",
-        ErrorClass::FailedPrecondition => {
-            "Change the database state or command options before retrying."
-        }
-        ErrorClass::AccessDenied => "Update credentials or permissions before retrying.",
-        ErrorClass::Conflict => "Reload current state and retry against the latest version.",
-        ErrorClass::AmbiguousCommit => {
-            "Re-open or inspect the database state before assuming whether the write committed."
-        }
-        ErrorClass::HistoryUnavailable => "Request history inside the retained window.",
-        ErrorClass::Unsupported => "Use a supported mode, backend, command, or option.",
-        ErrorClass::ResourceExhausted => "Reduce resource pressure or raise the configured limit.",
-        ErrorClass::Unavailable => "Retry after the required service or backend is available.",
-        ErrorClass::Io => "Inspect local IO state and retry when the backend is healthy.",
-        ErrorClass::Corruption => "Stop writing and inspect diagnostics before continuing.",
-        ErrorClass::Serialization => "Correct the serialized payload or use a compatible format.",
-        _ => "Capture the reference id and report this as a Strata bug.",
     }
 }
 
@@ -915,15 +698,49 @@ mod tests {
     }
 
     #[test]
+    fn normalize_docs_url_keeps_only_the_canonical_per_code_page() {
+        use super::{normalize_docs_url, ERROR_REGISTRY_DOC_PAGE};
+
+        let slug = "not_found.engine.persistence";
+        let canonical = format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/{slug}");
+        let local = format!("/{ERROR_REGISTRY_DOC_PAGE}/{slug}");
+
+        // A foreign canonical page survives as sent, fragment stripped.
+        assert_eq!(normalize_docs_url(&canonical, slug), canonical);
+        assert_eq!(
+            normalize_docs_url(&format!("{canonical}#legacy"), slug),
+            canonical
+        );
+        // A base ending at the error segment gets the code appended.
+        assert_eq!(
+            normalize_docs_url(
+                &format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/"),
+                slug
+            ),
+            canonical
+        );
+        // Direction controls: both halves of the canonical test are
+        // load-bearing. Another code's page is not this code's page, and a
+        // path that merely ends in the code is not the error page — each is
+        // re-derived from this process's docs base instead.
+        for foreign in [
+            format!("https://docs.example/{ERROR_REGISTRY_DOC_PAGE}/some.other.code"),
+            format!("https://docs.example/guide/{slug}"),
+        ] {
+            let normalized = normalize_docs_url(&foreign, slug);
+            assert_ne!(normalized, foreign);
+            assert!(normalized.ends_with(&local), "{normalized}");
+        }
+    }
+
+    #[test]
     fn data_loss_error_surfaces_data_loss_public_class_but_corruption_compat_class() {
         use super::{ErrorClass, ExecutorError, ExecutorErrorClass};
 
         // #2749: a registered `data_loss.*` code surfaces its own public wire
         // class, driven by the registry entry, not folded onto `corruption`.
         let error = ExecutorError::new(
-            ExecutorErrorClass::Corruption,
             "data_loss.engine.kv_value",
-            false,
             "stored KV row is missing a value",
         );
         assert_eq!(error.public_class(), ErrorClass::DataLoss);
@@ -943,9 +760,7 @@ mod tests {
         // the same diff hunk; pin it so its deletion is caught rather than
         // folding an ambiguous-commit error onto `Internal`.
         let error = ExecutorError::new(
-            ExecutorErrorClass::AmbiguousCommit,
             "ambiguous_commit.engine.persistence",
-            false,
             "commit outcome could not be proven",
         );
         assert_eq!(error.public_class(), ErrorClass::AmbiguousCommit);

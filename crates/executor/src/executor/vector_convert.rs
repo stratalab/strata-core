@@ -38,11 +38,11 @@ pub(super) fn resolve_vector_or_text(
     match (vector.is_empty(), text) {
         (true, Some(text)) => embed(text),
         (false, None) => Ok(vector),
-        (false, Some(_)) => Err(ExecutorError::invalid_input(
+        (false, Some(_)) => Err(ExecutorError::new(
             "invalid_argument.executor.vector_input",
             "pass either a vector or a text to embed, not both",
         )),
-        (true, None) => Err(ExecutorError::invalid_input(
+        (true, None) => Err(ExecutorError::new(
             "invalid_argument.executor.vector_input",
             "pass a vector, or a text to embed",
         )),
@@ -159,7 +159,7 @@ pub(super) fn require_vector_collection_info(
     collection: &EngineVectorCollectionName,
 ) -> ExecutorResult<EngineVectorCollectionInfo> {
     service.collection_info(collection)?.ok_or_else(|| {
-        ExecutorError::not_found(
+        ExecutorError::new(
             "not_found.engine.vector_collection",
             "vector collection does not exist",
         )
@@ -167,7 +167,7 @@ pub(super) fn require_vector_collection_info(
 }
 
 pub(super) fn vector_dimension_mismatch_error(expected: usize, actual: usize) -> ExecutorError {
-    ExecutorError::invalid_input(
+    ExecutorError::new(
         "invalid_argument.executor.vector_dimension",
         format!("vector dimension mismatch: expected {expected}, got {actual}"),
     )

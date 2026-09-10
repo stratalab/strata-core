@@ -45,7 +45,7 @@ fn decode_and_execute(
 ) -> ExecutorResult<Output> {
     guard_json_integers(request_json)?;
     let command: Command = serde_json::from_str(request_json).map_err(|error| {
-        ExecutorError::invalid_input(
+        ExecutorError::new(
             "invalid_argument.executor.wire_request",
             format!("malformed command request: {error}"),
         )
@@ -61,10 +61,7 @@ fn decode_and_execute(
 /// courtesy pre-rejection, so both surfaces speak one error.
 pub(crate) fn read_only_rejection(command: &Command) -> ExecutorError {
     ExecutorError::new(
-        // The wire class derives from the code's `access_denied.` prefix.
-        crate::error::ExecutorErrorClass::Unavailable,
         "access_denied.executor.read_only_session",
-        false,
         format!(
             "`{}` is a write command and this session is read-only",
             command.name()
@@ -77,9 +74,7 @@ pub(crate) fn read_only_rejection(command: &Command) -> ExecutorError {
 /// receives a well-formed `{"error":…}` frame with a registered code.
 fn serialize_failure_envelope(error: &serde_json::Error) -> String {
     let status = ExecutorError::new(
-        crate::error::ExecutorErrorClass::Internal,
         "internal.executor.wire_response",
-        false,
         format!("wire response serialization failed: {error}"),
     );
     serde_json::to_string(&json!({ "error": status })).unwrap_or_else(|_| {

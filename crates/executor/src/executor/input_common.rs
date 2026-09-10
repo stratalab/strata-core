@@ -78,7 +78,7 @@ pub(super) fn optional_limit(limit: Option<u64>) -> ExecutorResult<Option<usize>
     limit
         .map(|limit| {
             usize::try_from(limit).map_err(|_| {
-                ExecutorError::invalid_input(
+                ExecutorError::new(
                     "invalid_argument.executor.limit",
                     "limit does not fit this platform",
                 )
@@ -92,5 +92,5 @@ pub(super) fn required_usize(
     code: &'static str,
     message: &'static str,
 ) -> ExecutorResult<usize> {
-    usize::try_from(value).map_err(|_| ExecutorError::invalid_input(code, message))
+    usize::try_from(value).map_err(|_| ExecutorError::new(code, message))
 }

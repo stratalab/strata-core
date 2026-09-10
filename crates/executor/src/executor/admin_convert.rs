@@ -16,7 +16,7 @@ use super::ExecutorError;
 
 #[cfg(not(feature = "arrow"))]
 pub(super) fn arrow_feature_disabled() -> ExecutorError {
-    ExecutorError::invalid_input(
+    ExecutorError::new(
         "unsupported.executor.arrow_feature_disabled",
         "Arrow import/export requires the executor arrow feature",
     )
