@@ -7,7 +7,9 @@
     feature = "google"
 ))]
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
+use std::sync::Arc;
 #[cfg(any(
     feature = "local",
     feature = "anthropic",
@@ -22,8 +24,9 @@ use std::sync::{Mutex, MutexGuard};
 use crate::error::RegistryFailure;
 use crate::resolve::{AvailabilityKind, ModelSource, ModelUse, PullAction, ResolvedModel};
 use crate::{
-    generation_provider_feature_enabled, GenerateRequest, GenerateResponse, InferenceError,
-    ModelInfo, ModelRegistry, ModelTask, ProviderKind, UnsupportedKind,
+    generation_provider_feature_enabled, EnvProviderSettings, GenerateRequest, GenerateResponse,
+    InferenceError, ModelInfo, ModelRegistry, ModelTask, ProviderKey, ProviderKind,
+    ProviderSettings, UnsupportedKind,
 };
 
 #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
@@ -102,11 +105,10 @@ pub struct ProviderStatus {
     /// Where the key was found, when one was. Never a value. `None` when no
     /// key is present.
     ///
-    /// This runtime reads only the environment, so it always names the
-    /// variable. The CLI copies `strata config set <provider>.api_key` keys
-    /// into that environment before running, and replaces this with the
-    /// config file's path for the ones it copied — so a caller is told the
-    /// file, not a variable it never exported.
+    /// The runtime's [`ProviderSettings`] names the place: the environment
+    /// variable, or the config file's path for a key stored with `strata
+    /// config set <provider>.api_key` — so a caller is told the file, not a
+    /// variable it never exported.
     pub key_source: Option<String>,
     /// Whether a call could be attempted right now.
     pub ready: bool,
@@ -296,6 +298,9 @@ pub struct InferenceRuntime {
     /// second registry somewhere that could be looking at a different
     /// directory (#3260).
     registry: ModelRegistry,
+    /// The one source of provider keys (R4): resolution, `status` and the
+    /// provider call all ask this instance, so they cannot disagree.
+    settings: Settings,
     #[cfg(any(
         feature = "local",
         feature = "anthropic",
@@ -309,6 +314,16 @@ pub struct InferenceRuntime {
     rankers: Mutex<HashMap<String, RankingEngine>>,
 }
 
+/// The injected [`ProviderSettings`], opaque to `Debug` so a runtime dump can
+/// never show a key an implementation happens to hold.
+struct Settings(Arc<dyn ProviderSettings>);
+
+impl fmt::Debug for Settings {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ProviderSettings")
+    }
+}
+
 impl Default for InferenceRuntime {
     fn default() -> Self {
         Self::new(InferenceRuntimeConfig::default())
@@ -316,8 +331,21 @@ impl Default for InferenceRuntime {
 }
 
 impl InferenceRuntime {
-    /// Creates a runtime facade.
+    /// Creates a runtime facade that reads provider keys from the process
+    /// environment ([`EnvProviderSettings`]).
     pub fn new(config: InferenceRuntimeConfig) -> Self {
+        Self::with_settings(config, Arc::new(EnvProviderSettings))
+    }
+
+    /// Creates a runtime facade with an injected source of provider settings
+    /// (R4). This is how an embedding application adds places to look for a
+    /// key beyond the environment — the executor composes the environment
+    /// with the user's config file — and how a test fixes the answer without
+    /// touching the environment.
+    pub fn with_settings(
+        config: InferenceRuntimeConfig,
+        settings: Arc<dyn ProviderSettings>,
+    ) -> Self {
         let registry = config
             .models_dir
             .clone()
@@ -325,6 +353,7 @@ impl InferenceRuntime {
         Self {
             config,
             registry,
+            settings: Settings(settings),
             #[cfg(any(
                 feature = "local",
                 feature = "anthropic",
@@ -421,9 +450,8 @@ impl InferenceRuntime {
                 || embedding_provider_feature_enabled_for_capability(provider);
             let requires_api_key = provider != ProviderKind::Local;
             let key_env_var = requires_api_key.then(|| api_key_env_var(provider).to_owned());
-            let key_source = resolve_key_source(key_env_var.as_deref(), |name| {
-                env_holds_a_key(std::env::var_os(name).as_deref())
-            });
+            let key_source =
+                reported_key_source(requires_api_key, self.settings.0.key(provider).as_ref());
             let key_present = key_source.is_some();
             ProviderStatus {
                 provider,
@@ -530,7 +558,7 @@ impl InferenceRuntime {
         ))]
         {
             if resolved.source.is_cloud() {
-                let mut engine = cloud_generation_engine(&resolved)?;
+                let mut engine = self.cloud_generation_engine(&resolved)?;
                 return engine.generate(request);
             }
             let mut cache = self.lock_generation();
@@ -577,7 +605,7 @@ impl InferenceRuntime {
         ))]
         {
             let mut response = if resolved.source.is_cloud() {
-                let mut engine = cloud_generation_engine(&resolved)?;
+                let mut engine = self.cloud_generation_engine(&resolved)?;
                 engine.generate_chat(request)?
             } else {
                 let mut cache = self.lock_generation();
@@ -860,7 +888,7 @@ impl InferenceRuntime {
         if resolved.source.is_cloud() {
             #[cfg(any(feature = "openai", feature = "google"))]
             {
-                let engine = cloud_embedding_engine(resolved)?;
+                let engine = self.cloud_embedding_engine(resolved)?;
                 return op(&engine);
             }
             #[cfg(not(any(feature = "openai", feature = "google")))]
@@ -990,35 +1018,78 @@ impl InferenceRuntime {
     }
 }
 
-/// Builds a cloud generation engine for a resolved, ready cloud model. The key
-/// is read here, after `require_ready` has already established it is set.
-#[cfg(any(
-    feature = "local",
-    feature = "anthropic",
-    feature = "openai",
-    feature = "google"
-))]
-fn cloud_generation_engine(resolved: &ResolvedModel) -> Result<GenerationEngine, InferenceError> {
-    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    {
-        let api_key = api_key(resolved.provider)?;
-        GenerationEngine::cloud(resolved.provider, api_key, resolved.name.clone())
+impl InferenceRuntime {
+    /// Builds a cloud generation engine for a resolved, ready cloud model. The
+    /// key is read here, after `require_ready` has already established it is
+    /// set.
+    #[cfg(any(
+        feature = "local",
+        feature = "anthropic",
+        feature = "openai",
+        feature = "google"
+    ))]
+    fn cloud_generation_engine(
+        &self,
+        resolved: &ResolvedModel,
+    ) -> Result<GenerationEngine, InferenceError> {
+        #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+        {
+            let api_key = self.api_key(resolved.provider)?;
+            GenerationEngine::cloud(resolved.provider, api_key, resolved.name.clone())
+        }
+        #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "google")))]
+        {
+            unreachable!(
+                "`require_ready` refuses every cloud model in a build without a cloud provider: `{}`",
+                resolved.spec
+            )
+        }
     }
-    #[cfg(not(any(feature = "anthropic", feature = "openai", feature = "google")))]
-    {
-        unreachable!(
-            "`require_ready` refuses every cloud model in a build without a cloud provider: `{}`",
-            resolved.spec
+
+    #[cfg(any(feature = "openai", feature = "google"))]
+    fn cloud_embedding_engine(
+        &self,
+        resolved: &ResolvedModel,
+    ) -> Result<CloudEmbeddingEngine, InferenceError> {
+        let api_key = self.api_key(resolved.provider)?;
+        CloudEmbeddingEngine::new(resolved.provider, api_key, resolved.name.clone())
+    }
+
+    /// The provider's key, from this runtime's [`ProviderSettings`].
+    ///
+    /// The resolver has already refused a missing key by the time an engine is
+    /// built, so the error here is the same `missing_api_key` with the same
+    /// text — one authoring site, `missing_api_key_message` — for the window
+    /// in which the key disappears between the two reads.
+    #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
+    fn api_key(&self, provider: ProviderKind) -> Result<String, InferenceError> {
+        if provider == ProviderKind::Local {
+            return Err(InferenceError::Unsupported {
+                kind: UnsupportedKind::Provider,
+                message: "the local provider does not use API keys".to_owned(),
+                details: None,
+            });
+        }
+        self.settings.0.key(provider).map_or_else(
+            || {
+                Err(InferenceError::ProviderFailed {
+                    kind: ProviderFailure::MissingApiKey,
+                    message: crate::resolve::missing_api_key_message(
+                        provider,
+                        api_key_env_var(provider),
+                    ),
+                    details: None,
+                })
+            },
+            |key| Ok(key.secret().to_owned()),
         )
     }
-}
 
-#[cfg(any(feature = "openai", feature = "google"))]
-fn cloud_embedding_engine(
-    resolved: &ResolvedModel,
-) -> Result<CloudEmbeddingEngine, InferenceError> {
-    let api_key = api_key(resolved.provider)?;
-    CloudEmbeddingEngine::new(resolved.provider, api_key, resolved.name.clone())
+    /// Whether this runtime's settings hold a key for `provider`: the answer
+    /// the resolver folds into `Availability::KeyMissing`.
+    pub(crate) fn key_present(&self, provider: ProviderKind) -> bool {
+        self.settings.0.key(provider).is_some()
+    }
 }
 
 /// Loads a local generation engine from the resolved model's file.
@@ -1142,30 +1213,6 @@ impl crate::InferenceService for InferenceRuntime {
     }
 }
 
-/// The provider's key, read from its environment variable.
-///
-/// The resolver has already refused a missing key by the time an engine is
-/// built, so the error here is the same `missing_api_key` with the same text
-/// — one authoring site, `missing_api_key_message` — for the window in which
-/// the variable is unset between the two reads. S3 replaces the environment
-/// read with an injected `ProviderKeySource`.
-#[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-fn api_key(provider: ProviderKind) -> Result<String, InferenceError> {
-    if provider == ProviderKind::Local {
-        return Err(InferenceError::Unsupported {
-            kind: UnsupportedKind::Provider,
-            message: "the local provider does not use API keys".to_owned(),
-            details: None,
-        });
-    }
-    let env_var = api_key_env_var(provider);
-    std::env::var(env_var).map_err(|_| InferenceError::ProviderFailed {
-        kind: ProviderFailure::MissingApiKey,
-        message: crate::resolve::missing_api_key_message(provider, env_var),
-        details: None,
-    })
-}
-
 /// Cache key for a loaded generation engine. A default or absent config shares
 /// the plain-spec key (so tokenize/generate and a config-less chat reuse one
 /// engine); a non-default config keys a distinct engine so its load params
@@ -1275,25 +1322,19 @@ pub const LOCAL_UNAVAILABLE_REMEDY: &str =
      `google:<model>` or `anthropic:<model>` — or run `strata inference \
      install-local` to add local execution.";
 
-/// Where a provider's key came from, given which variable it reads and whether
-/// that variable holds anything.
+/// The `key_source` a `status` row reports: where the key was found, for a
+/// provider that needs one and has one; nothing otherwise.
 ///
-/// A pure function on purpose: the alternative is a test that mutates the
-/// process environment, which races every other test in the binary. It also
-/// makes the one property that matters directly checkable — the result is the
-/// variable's NAME, never its value, so `status` cannot leak a key.
-fn resolve_key_source(env_var: Option<&str>, is_set: impl Fn(&str) -> bool) -> Option<String> {
-    env_var.filter(|name| is_set(name)).map(str::to_owned)
-}
-
-/// A variable that exists but holds nothing is not a key.
-///
-/// Extracted from the closure inside `status` so the rule has a truth table.
-/// No provider variable is set in CI, so `var_os` returns `None` there and the
-/// predicate's body is never reached — dropping the `!` was undetectable from
-/// `status` alone, and the mutant survived. Here it is decided on a value.
-pub(crate) fn env_holds_a_key(value: Option<&std::ffi::OsStr>) -> bool {
-    value.is_some_and(|value| !value.is_empty())
+/// A pure function on purpose: the result is the key's source LABEL, never
+/// its value, so `status` cannot leak a key — and a provider that needs no
+/// key reports no source however the settings answer, which the truth table
+/// pins directly instead of through a settings fake that lies about the local
+/// provider.
+fn reported_key_source(requires_api_key: bool, key: Option<&ProviderKey>) -> Option<String> {
+    if !requires_api_key {
+        return None;
+    }
+    key.map(|key| key.source().label())
 }
 
 /// A provider can be called when the build has it and it has whatever key it
@@ -1396,56 +1437,37 @@ mod tests {
         assert!(!provider_is_ready(false, false, true));
     }
 
-    /// An empty variable is not a key.
-    ///
-    /// The distinction matters because `KEY=""` is what an unset shell variable
-    /// expands to in a script: reporting a key present there sends the caller
-    /// to a provider that will reject them, instead of to the line that sets it.
-    #[test]
-    fn an_empty_variable_does_not_count_as_a_key() {
-        use std::ffi::OsStr;
-        assert!(!env_holds_a_key(None), "unset is no key");
-        assert!(!env_holds_a_key(Some(OsStr::new(""))), "empty is no key");
-        assert!(env_holds_a_key(Some(OsStr::new("sk-abc"))));
-        assert!(
-            env_holds_a_key(Some(OsStr::new(" "))),
-            "whitespace is a value"
-        );
-    }
-
-    /// `api_key` reports exactly what the environment holds.
-    ///
-    /// Written as a relationship rather than a fixed answer so it holds whether
-    /// or not the developer running it has keys set, while still killing the
-    /// mutants: with no key set (CI) an `Ok(_)` of any kind contradicts the
-    /// error, and with one set a wrong or empty string contradicts the value.
+    /// `api_key` reports exactly what the runtime's settings hold: the key
+    /// verbatim when there is one, `missing_api_key` when there is not.
     #[test]
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
-    fn the_reported_key_is_the_one_the_environment_holds() {
+    fn the_reported_key_is_the_one_the_settings_hold() {
+        let with_keys = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeys),
+        );
+        let without = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::NoKeys),
+        );
         for provider in [
             ProviderKind::OpenAI,
             ProviderKind::Anthropic,
             ProviderKind::Google,
         ] {
-            let variable = api_key_env_var(provider);
-            let expected = std::env::var(variable);
-            let reported = api_key(provider);
             assert_eq!(
-                reported.is_ok(),
-                expected.is_ok(),
-                "{provider} must report a key exactly when {variable} is set"
+                with_keys.api_key(provider).expect("a key is held"),
+                crate::testkit::FAKE_KEY,
+                "{provider} must report the held key verbatim"
             );
-            if let (Ok(reported), Ok(expected)) = (reported, expected) {
-                assert_eq!(
-                    reported, expected,
-                    "{provider} must report {variable} verbatim"
-                );
-            }
+            let error = without.api_key(provider).expect_err("no key is held");
+            assert_eq!(error.code(), "inference.missing_api_key", "{provider}");
         }
     }
 
     /// The local provider has no key to report, and says so as a refusal rather
-    /// than as an empty string that would read like a key.
+    /// than as an empty string that would read like a key — whatever the
+    /// settings would answer for it.
     ///
     /// The code is chosen by `UnsupportedKind::Provider`, not by the wording of
     /// the message: this used to be classified by substring-matching the text
@@ -1453,7 +1475,13 @@ mod tests {
     #[test]
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
     fn the_local_provider_has_no_api_key() {
-        let error = api_key(ProviderKind::Local).expect_err("local uses no key");
+        let runtime = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeys),
+        );
+        let error = runtime
+            .api_key(ProviderKind::Local)
+            .expect_err("local uses no key");
         assert_eq!(error.code(), "inference.unsupported_provider");
     }
 
@@ -1464,24 +1492,68 @@ mod tests {
         assert!(config.models_dir.is_none());
     }
 
-    /// The key source is the variable's name, never its value (D11).
+    /// The key source is where the key was found, never its value (D11), and
+    /// only for a provider that needs a key.
     #[test]
-    fn key_source_reports_the_variable_name_never_the_value() {
+    fn key_source_reports_the_place_never_the_value() {
         const SECRET: &str = "sk-do-not-leak-this-value";
+        let key = ProviderKey::new(
+            SECRET,
+            crate::KeySource::Environment("OPENAI_API_KEY".into()),
+        );
 
-        // Set: the source is the NAME. If this ever returned the value, a key
-        // would ride out on every `inference status`.
-        let found = resolve_key_source(Some("OPENAI_API_KEY"), |_| true);
+        // Held: the source is the PLACE. If this ever returned the value, a
+        // key would ride out on every `inference status`.
+        let found = reported_key_source(true, Some(&key));
         assert_eq!(found.as_deref(), Some("OPENAI_API_KEY"));
         assert_ne!(found.as_deref(), Some(SECRET));
 
-        // Unset: no source at all.
-        assert_eq!(resolve_key_source(Some("OPENAI_API_KEY"), |_| false), None);
+        // Not held: no source at all.
+        assert_eq!(reported_key_source(true, None), None);
 
         // A provider that needs no key never reports a source, however the
-        // lookup behaves.
-        assert_eq!(resolve_key_source(None, |_| true), None);
-        assert_eq!(resolve_key_source(None, |_| false), None);
+        // settings answer.
+        assert_eq!(reported_key_source(false, Some(&key)), None);
+        assert_eq!(reported_key_source(false, None), None);
+    }
+
+    /// `status` asks the runtime's settings, and reports every cloud provider
+    /// keyed or keyless together with them — the end-to-end form of the two
+    /// pure rules above, through the one call site.
+    #[test]
+    fn status_reports_keys_from_the_runtime_settings() {
+        let with_keys = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeys),
+        )
+        .status();
+        let without = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::NoKeys),
+        )
+        .status();
+        for (keyed, keyless) in with_keys.providers.iter().zip(&without.providers) {
+            assert_eq!(keyed.provider, keyless.provider);
+            if keyed.provider == ProviderKind::Local {
+                assert!(!keyed.key_present && keyed.key_source.is_none());
+                continue;
+            }
+            assert!(keyed.key_present, "{:?}", keyed.provider);
+            assert_eq!(
+                keyed.key_source.as_deref(),
+                Some("application"),
+                "{:?}",
+                keyed.provider
+            );
+            assert!(!keyless.key_present, "{:?}", keyless.provider);
+            assert_eq!(keyless.key_source, None);
+            assert_eq!(
+                keyed.ready, keyed.feature_enabled,
+                "a keyed provider is ready exactly when built in: {:?}",
+                keyed.provider
+            );
+            assert!(!keyless.ready, "{:?}", keyless.provider);
+        }
     }
 
     /// The truth table for what a model inherently supports (#3124).
@@ -1900,23 +1972,24 @@ mod tests {
     #[test]
     #[cfg(feature = "openai")]
     fn a_cloud_spec_is_served_by_its_provider_not_the_model_cache() {
-        let runtime = InferenceRuntime::default();
+        let runtime = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::NoKeys),
+        );
         let request = GenerateRequest::default();
         let chat = crate::wire::ChatRequest {
             prompt: Some("hi".to_owned()),
             ..Default::default()
         };
 
-        crate::tests::with_env_unset("OPENAI_API_KEY", || {
-            let error = runtime
-                .generate("openai:gpt-test", &request)
-                .expect_err("no key is set");
-            assert_eq!(error.code(), "inference.missing_api_key");
-            let error = runtime
-                .chat("openai:gpt-test", &chat)
-                .expect_err("no key is set");
-            assert_eq!(error.code(), "inference.missing_api_key");
-        });
+        let error = runtime
+            .generate("openai:gpt-test", &request)
+            .expect_err("no key is held");
+        assert_eq!(error.code(), "inference.missing_api_key");
+        let error = runtime
+            .chat("openai:gpt-test", &chat)
+            .expect_err("no key is held");
+        assert_eq!(error.code(), "inference.missing_api_key");
     }
 
     /// The other side of the fork: a local spec reaches the local loader,

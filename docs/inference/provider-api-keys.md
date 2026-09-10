@@ -4,9 +4,11 @@ Strata is an **embedded** database — it runs inside your process, like SQLite 
 DuckDB, and ships **no API keys of its own**. To use a cloud inference provider
 (OpenAI, Anthropic, or Google) you bring your own key. Local GGUF models need no
 key. The default binary runs cloud models only: `strata inference install-local`
-swaps in the local-capable build, `strata --cache inference status` reports
-what your build can run and how many models are downloaded, and
-`strata --cache inference models local` lists them.
+swaps in the local-capable build, `strata inference status` reports what your
+build can run and how many models are downloaded, and
+`strata inference models local` lists them. Inference commands work on models,
+not on a database's data, so they need no database: run them from any
+directory (a `--db` or `STRATA_DB` target is honored when given).
 
 ## Get a key
 
@@ -28,7 +30,7 @@ file**, so you can pin a key globally and override it per-shell or in CI.
 
 ```bash
 export OPENAI_API_KEY=sk-...
-strata --cache inference generate openai:gpt-4o-mini "Hello"
+strata inference generate openai:gpt-4o-mini "Hello"
 ```
 
 ### 2. Stored in the Strata config (persists across sessions)
@@ -62,6 +64,13 @@ For each provider, Strata resolves the key as:
 The first one set wins. If neither is set, a cloud request fails with
 `failed_precondition.inference.missing_api_key` and an error that names the
 variable and links where to get a key.
+
+The same lookup runs wherever a key is needed — the CLI, the SDK, and every
+embedded use — because it is part of the inference runtime a database opens
+with, not something the CLI does before a command runs. `strata inference
+status` reports it as `key_source`: the variable name for an exported key, the
+config file's path for a stored one, and `strata doctor` reads the same
+runtime.
 
 ## Security notes
 

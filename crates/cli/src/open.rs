@@ -12,6 +12,12 @@ use crate::CliError;
 pub(crate) enum OpenIntent {
     /// A single command: refuses to run without an explicit target.
     OneShot,
+    /// A single `inference` command (R9 of #3261): it works on models, not on
+    /// a database's data, so with no target it runs in an ephemeral cache
+    /// session instead of refusing — `strata inference status` answers from
+    /// any directory. An explicit target is honored exactly as for
+    /// [`OneShot`](Self::OneShot); the current directory is never opened.
+    InferenceOneShot,
     /// An interactive TTY session: falls back to an ephemeral cache session.
     Interactive,
     /// A piped (non-TTY) session: refuses like one-shot commands — an agent
@@ -22,8 +28,9 @@ pub(crate) enum OpenIntent {
 /// An opened connection plus how its target was chosen.
 pub(crate) struct OpenedConnection {
     pub(crate) connection: Connection,
-    /// True when a bare interactive invocation fell back to cache mode; the
-    /// caller prints the nothing-is-persisted banner.
+    /// True when a bare invocation fell back to cache mode; an interactive
+    /// caller prints the nothing-is-persisted banner (an inference one-shot
+    /// has nothing to announce: it persisted nothing).
     pub(crate) implicit_cache: bool,
     /// Set when a bare interactive invocation opened the database the current
     /// directory IS (#3000, the git model); the caller announces the path.
@@ -109,7 +116,7 @@ pub(crate) fn open_connection(
     }
 
     match intent {
-        OpenIntent::Interactive => Ok(OpenedConnection {
+        OpenIntent::Interactive | OpenIntent::InferenceOneShot => Ok(OpenedConnection {
             connection: Connection::cache(Executor::open_cache()?),
             implicit_cache: true,
             implicit_cwd: None,
@@ -238,15 +245,19 @@ mod tests {
             implicit_interactive_target(OpenIntent::Interactive, Some(root.path())),
             Some(root.path().to_path_buf())
         );
-        // Agents keep the refusal: never an implicit write target.
-        assert_eq!(
-            implicit_interactive_target(OpenIntent::OneShot, Some(root.path())),
-            None
-        );
-        assert_eq!(
-            implicit_interactive_target(OpenIntent::Pipe, Some(root.path())),
-            None
-        );
+        // Agents keep the refusal: never an implicit write target. An
+        // inference one-shot falls back to cache, never to the cwd (R9).
+        for intent in [
+            OpenIntent::OneShot,
+            OpenIntent::Pipe,
+            OpenIntent::InferenceOneShot,
+        ] {
+            assert_eq!(
+                implicit_interactive_target(intent, Some(root.path())),
+                None,
+                "{intent:?}"
+            );
+        }
         // A non-database cwd yields nothing even interactively.
         let plain = tempfile::tempdir().expect("tmp");
         assert_eq!(

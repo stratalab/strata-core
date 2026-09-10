@@ -67,4 +67,20 @@ exclude_re = [
     # behavior is covered by arrow_disabled_behavior.rs in the no-arrow
     # feature-matrix leg.
     "arrow_feature_disabled",
+
+    # default_inference_runtime (inference_settings): the one runtime every
+    # database opens with, over the executor's provider settings — the
+    # environment, then the user config file at the PLATFORM path
+    # (`strata config path`). Its only viable mutant, `Default::default()`,
+    # is the env-only runtime, which every executor test is blind to: the two
+    # differ only when a key is stored at the platform path, and an executor
+    # test cannot place one there without mutating `HOME` in-process. The
+    # composition itself (`EnvThenConfig`, `config_section`, `key_from_config`)
+    # is over an injected path and stays fully mutated with truth tables. The
+    # strength mechanism for the call site is the CLI's `config_behavior`
+    # suite in lane A, which runs the real binary under a hermetic `HOME`
+    # holding a stored key and asserts `inference status` names the file and
+    # `doctor` sees the key: hand-verified by planting
+    # `InferenceRuntime::default()` here — 2 tests red.
+    "default_inference_runtime",
 ]

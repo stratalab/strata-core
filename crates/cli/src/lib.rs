@@ -155,17 +155,6 @@ fn execute(cli: Cli) -> Result<i32, CliError> {
     let command = cli.command;
     let mut context = CommandContext::new(cli.branch, cli.space);
 
-    // Keys set with `strata config set <provider>.api_key` reach the inference
-    // runtime through the environment, so they are loaded once, here, before
-    // any path that can run inference: a one-shot `inference …`, a `vector …
-    // --text` that embeds through a cloud model, a REPL or piped session, an
-    // MCP server. Loading in the `inference` dispatch arm alone left every
-    // other path reporting `inference.missing_api_key` for a key that was set.
-    // The context keeps the list of what was bridged so `inference status`
-    // can name the file as the source, one-shot or mid-session.
-    #[cfg(feature = "inference")]
-    context.set_config_backed_keys(load_provider_keys_into_env());
-
     if let Some(command) = command {
         if let Some(name) = deferred_top_command(&command) {
             return Err(deferred_command(name));
@@ -285,7 +274,7 @@ fn execute(cli: Cli) -> Result<i32, CliError> {
             // A one-shot holds the lock briefly: broker to an owner, don't host.
             ipc.unwrap_or(IpcMode::Client),
             access,
-            open::OpenIntent::OneShot,
+            one_shot_intent(&command),
         )?;
         let connection = opened.connection;
         if let Some(branch) = context.scope_with_overrides(None, None).branch.as_deref() {
@@ -293,7 +282,7 @@ fn execute(cli: Cli) -> Result<i32, CliError> {
         }
 
         let scope = context.scope_with_overrides(None, None);
-        execute_parsed_command(&connection, command, &context, &scope, format)?;
+        execute_parsed_command(&connection, command, &scope, format)?;
         connection.close()?;
         return Ok(0);
     }
@@ -603,16 +592,13 @@ fn resolve_durable_target(
 
 /// The one dispatch for a parsed command, one-shot or mid-session. `scope` is
 /// the branch/space this command runs under (the session's, or the command's
-/// own overrides); `context` is the session it runs in, which only the
-/// inference arm reads.
+/// own overrides).
 #[cfg(feature = "native")]
 // A flat top-level command dispatch, like its family-level siblings.
 #[allow(clippy::too_many_lines)]
-#[cfg_attr(not(feature = "inference"), allow(unused_variables))]
 pub(crate) fn execute_parsed_command(
     connection: &Connection,
     command: options::TopCommand,
-    context: &CommandContext,
     scope: &Scope,
     format: options::Format,
 ) -> Result<(), CliError> {
@@ -721,24 +707,7 @@ pub(crate) fn execute_parsed_command(
         }
         #[cfg(feature = "inference")]
         options::TopCommand::Inference(args) => {
-            let command = inference_command(args.command)?;
-            let mut output = execute_with_download_offer(connection, command, format)?;
-            // The runtime saw the variables this process set at startup; only
-            // the CLI knows which of them it filled from the file, and the
-            // session context carries that list (a second bridge here would
-            // find every gap already filled and report none). No config path
-            // means nothing could have been bridged, so there is nothing to
-            // rename.
-            if let (strata_executor::Output::InferenceStatus(status), Some(config_path)) =
-                (&mut output, strata_hub::global_config_path())
-            {
-                name_config_key_sources(
-                    status,
-                    context.config_backed_keys(),
-                    &config_path.display().to_string(),
-                );
-            }
-            output
+            execute_with_download_offer(connection, inference_command(args.command)?, format)?
         }
         options::TopCommand::Command(args) => connection.execute(raw_command(args.command)?)?,
         options::TopCommand::Search(_)
@@ -938,7 +907,10 @@ fn user_config_get(key: &str) -> Result<serde_json::Value, CliError> {
     }
     if let Some(provider) = provider_api_key_target(key) {
         // Never surface the raw key — report set/unset with a redacted preview.
-        let value = strata_hub::read_global_provider_key(provider)
+        let value = strata_hub::global_config_path()
+            .map_or(Ok(None), |path| {
+                strata_hub::read_provider_key(&path, provider)
+            })
             .map_err(|error| CliError::usage(error.to_string()))?;
         return Ok(serde_json::json!({
             "key": key,
@@ -1073,62 +1045,17 @@ fn offerable_download<'a>(
     answer.pull_spec.as_deref()
 }
 
-/// Copies config-file provider keys into the environment the runtime reads,
-/// and returns the variables it filled.
-///
-/// A variable already set wins — the file only fills gaps — so every name
-/// returned is a key the environment did *not* have and the file supplied.
-/// That list is what lets `inference status` say so (see
-/// [`name_config_key_sources`]).
-///
-/// Called once per process, at the top of `execute`, because inference is no
-/// longer reachable only through `strata inference …`: `vector upsert --text`
-/// embeds through whatever model the collection recorded, and a session (REPL,
-/// pipe, MCP) runs any of these. The list it returns is recorded on the
-/// [`CommandContext`] for the same reason: a second call would find every gap
-/// already filled and report nothing, so the first call's answer is the only
-/// one. Only the CLI does this bridging; a library or SDK caller sets the
-/// variables itself (#3221).
-#[cfg(all(feature = "native", feature = "inference"))]
-fn load_provider_keys_into_env() -> Vec<&'static str> {
-    let mut filled = Vec::new();
-    for info in strata_executor::INFERENCE_CLOUD_PROVIDER_KEYS {
-        if std::env::var_os(info.env_var).is_some() {
-            continue;
-        }
-        if let Ok(Some(key)) = strata_hub::read_global_provider_key(info.provider) {
-            std::env::set_var(info.env_var, key);
-            filled.push(info.env_var);
-        }
-    }
-    filled
-}
-
-/// Reports where a bridged key actually lives.
-///
-/// The runtime reads keys from the environment and names the variable it
-/// found one in. That is true and misleading when the CLI put it there a
-/// moment ago from `strata config set <provider>.api_key`: `key from
-/// OPENAI_API_KEY` sends a user looking for an export that does not exist,
-/// and an agent that relays it repeats the mistake. For every provider whose
-/// variable is in `config_backed` — the ones [`load_provider_keys_into_env`]
-/// filled — the source becomes the file. A key that was already in the
-/// environment keeps its variable name; a provider with no key stays without
-/// a source, whatever the list says.
-#[cfg(all(feature = "native", feature = "inference"))]
-fn name_config_key_sources(
-    status: &mut strata_executor::InferenceStatus,
-    config_backed: &[&str],
-    config_path: &str,
-) {
-    for provider in &mut status.providers {
-        let bridged = provider
-            .key_env_var
-            .as_deref()
-            .is_some_and(|name| config_backed.contains(&name));
-        if bridged && provider.key_source.is_some() {
-            provider.key_source = Some(config_path.to_owned());
-        }
+/// How a one-shot command opens its target (R9 of #3261). An `inference`
+/// command works on models, not on a database's data, so with no target it
+/// runs in an ephemeral cache session — `strata inference status` answers
+/// from any directory, the way `strata doctor` does. Every other command
+/// keeps the refusal: agents never write to an implicit location.
+#[cfg(feature = "native")]
+fn one_shot_intent(command: &options::TopCommand) -> open::OpenIntent {
+    match command {
+        #[cfg(feature = "inference")]
+        options::TopCommand::Inference(_) => open::OpenIntent::InferenceOneShot,
+        _ => open::OpenIntent::OneShot,
     }
 }
 
@@ -3582,81 +3509,39 @@ mod tests {
         assert_eq!(refusal_code(error), "inference.unknown_model");
     }
 
-    /// The truth table for where `inference status` says a key came from.
-    ///
-    /// The runtime only ever names a variable. The CLI knows which variables
-    /// it filled from the config file, and those — only those — are renamed
-    /// to the file. A key that was already exported keeps its variable name,
-    /// a provider with no key never gains a source, and a provider that reads
-    /// no variable is untouched.
+    /// A one-shot `inference` command falls back to the ephemeral cache when
+    /// no target is named; every other one-shot keeps the refusal (R9).
     #[cfg(all(feature = "native", feature = "inference"))]
     #[test]
-    fn a_bridged_key_is_reported_from_the_file_not_the_variable() {
-        use strata_executor::{InferenceProviderKind, InferenceProviderStatus, InferenceStatus};
+    fn only_an_inference_one_shot_may_run_without_a_target() {
+        use open::OpenIntent;
 
-        use super::name_config_key_sources;
-
-        const CONFIG: &str = "/home/u/.config/strata/config.toml";
-
-        let provider = |kind: InferenceProviderKind, env_var: Option<&str>, present: bool| {
-            InferenceProviderStatus {
-                provider: kind,
-                feature_enabled: true,
-                requires_api_key: env_var.is_some(),
-                key_present: present,
-                key_env_var: env_var.map(str::to_owned),
-                key_source: present
-                    .then(|| env_var.expect("a present key names its variable"))
-                    .map(str::to_owned),
-                ready: present || env_var.is_none(),
-                model_prefix: format!("{kind}:"),
-            }
+        let command = |line: &str| {
+            Cli::try_parse_from(line.split(' '))
+                .expect("parses")
+                .command
+                .expect("a command")
         };
-        let mut status = InferenceStatus {
-            local_execution: false,
-            model_download: true,
-            providers: vec![
-                // Exported by the user: the environment had it first.
-                provider(InferenceProviderKind::OpenAI, Some("OPENAI_API_KEY"), true),
-                // Bridged from the file by this process.
-                provider(
-                    InferenceProviderKind::Anthropic,
-                    Some("ANTHROPIC_API_KEY"),
-                    true,
-                ),
-                // No key anywhere.
-                provider(InferenceProviderKind::Google, Some("GOOGLE_API_KEY"), false),
-                // Needs no key, reads no variable.
-                provider(InferenceProviderKind::Local, None, false),
-            ],
-            models_dir: std::path::PathBuf::from("/models"),
-            models_downloaded: 0,
-            models_catalogued: 0,
-            local_remedy: None,
-        };
-
-        // Google is listed as bridged though it has no key: the list must not
-        // conjure a source for a key that is not there.
-        name_config_key_sources(
-            &mut status,
-            &["ANTHROPIC_API_KEY", "GOOGLE_API_KEY"],
-            CONFIG,
-        );
-
-        let sources: Vec<Option<&str>> = status
-            .providers
-            .iter()
-            .map(|provider| provider.key_source.as_deref())
-            .collect();
         assert_eq!(
-            sources,
-            [Some("OPENAI_API_KEY"), Some(CONFIG), None, None],
-            "only the bridged, present key is attributed to the file"
+            one_shot_intent(&command("strata inference status")),
+            OpenIntent::InferenceOneShot
         );
-
-        // Nothing bridged: every row is exactly as the runtime reported it.
-        let untouched = status.clone();
-        name_config_key_sources(&mut status, &[], CONFIG);
-        assert_eq!(status, untouched);
+        assert_eq!(
+            one_shot_intent(&command("strata inference models list")),
+            OpenIntent::InferenceOneShot
+        );
+        // Data commands, and `vector upsert --text` that embeds on the way
+        // in, keep the refusal: they write somewhere.
+        for line in [
+            "strata kv get k",
+            "strata vector upsert docs d1 --text hello",
+            "strata admin ping",
+        ] {
+            assert_eq!(
+                one_shot_intent(&command(line)),
+                OpenIntent::OneShot,
+                "{line}"
+            );
+        }
     }
 }

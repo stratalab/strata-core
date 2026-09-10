@@ -412,11 +412,12 @@ fn downloaded_count_matches_what_resolves_and_what_models_local_lists() {
     );
 }
 
-/// Whatever the ambient environment holds, a reported source is the variable's
-/// name. The value-never-leaks property itself is pinned by
-/// `key_source_reports_the_variable_name_never_the_value`, which is a pure
-/// function and so needs no environment mutation — mutating the environment
-/// here would race every other test in this binary.
+/// Whatever the ambient environment holds, a runtime built with `new` reads
+/// the environment, and a reported source is the variable's name. The
+/// value-never-leaks property itself is pinned by
+/// `key_source_reports_the_place_never_the_value`, which is a pure function
+/// and so needs no environment mutation — mutating the environment here would
+/// race every other test in this binary.
 #[test]
 fn a_reported_key_source_is_a_variable_name() {
     for provider in runtime().status().providers {

@@ -21,9 +21,42 @@ use crate::resolve::{
 };
 use crate::runtime::ModelAbilities;
 use crate::{
-    GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, ModelTask, ProviderKind,
-    RegistryFailure, StopReason,
+    GenerateRequest, GenerateResponse, InferenceEngine, InferenceError, KeySource, ModelTask,
+    ProviderKey, ProviderKind, ProviderSettings, RegistryFailure, StopReason,
 };
+
+/// The key [`FakeKeys`] holds for every cloud provider. Not a real key: a
+/// provider call made with it is refused by the provider, and the resolution
+/// lanes never make one.
+pub const FAKE_KEY: &str = "sk-fake-key-for-tests";
+
+/// Provider settings holding no key for any provider — a scrubbed
+/// environment, without touching the environment.
+///
+/// Injected through [`crate::InferenceRuntime::with_settings`] so a test can
+/// assert the missing-key path (`Availability::KeyMissing`,
+/// `inference.missing_api_key`) deterministically, whatever the developer
+/// running it has exported.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NoKeys;
+
+impl ProviderSettings for NoKeys {
+    fn key(&self, _provider: ProviderKind) -> Option<ProviderKey> {
+        None
+    }
+}
+
+/// Provider settings holding [`FAKE_KEY`] for every cloud provider, sourced
+/// from the application. The local provider has no key, as ever.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FakeKeys;
+
+impl ProviderSettings for FakeKeys {
+    fn key(&self, provider: ProviderKind) -> Option<ProviderKey> {
+        (provider != ProviderKind::Local)
+            .then(|| ProviderKey::new(FAKE_KEY, KeySource::Application))
+    }
+}
 
 /// A scripted failure the fake engine raises on every call, phrased in the
 /// same `InferenceError` vocabulary the real providers use.

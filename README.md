@@ -130,7 +130,8 @@ Skills that teach agents this whole surface — usage, branching, time travel �
 `npx skills add stratalab/strata-agent-skills`, or `/plugin marketplace add stratalab/strata-agent-skills`
 in Claude Code. The same repo carries the one-command workspace setup (CLI + MCP + skills).
 
-Model execution is in the box too — embeddings and generation, from the same binary:
+Model execution is in the box too — embeddings and generation, from the same binary.
+Inference commands work on models, not on a database's data, so they need no database:
 
 ```bash
 export OPENAI_API_KEY=...                                  # or ANTHROPIC_API_KEY, GOOGLE_API_KEY
