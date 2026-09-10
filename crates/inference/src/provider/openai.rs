@@ -10,8 +10,8 @@ use crate::wire::{
 };
 use crate::{GenerateRequest, GenerateResponse, InferenceError, StopReason};
 
-/// The API root every OpenAI endpoint hangs off.
-pub(crate) const API_BASE: &str = "https://api.openai.com/v1";
+/// The API root every OpenAI endpoint hangs off when nothing overrides it.
+pub(crate) const API_BASE: &str = crate::settings::OPENAI_BASE_URL;
 
 /// The chat-completions endpoint under `api_base`.
 fn chat_url(api_base: &str) -> String {
@@ -27,7 +27,8 @@ pub(crate) fn embed_url(api_base: &str) -> String {
 pub(crate) struct OpenAIProvider {
     api_key: String,
     model: String,
-    /// Where requests go; [`API_BASE`] outside tests.
+    /// Where requests go: [`API_BASE`], or the base URL the runtime's
+    /// settings override it with.
     api_base: String,
 }
 
@@ -60,11 +61,10 @@ impl OpenAIProvider {
         })
     }
 
-    /// Point requests at a local stand-in for the OpenAI API, so a test can
-    /// drive the real request path against a canned response.
-    #[cfg(test)]
-    pub(crate) fn with_api_base(mut self, api_base: &str) -> Self {
-        self.api_base = api_base.to_string();
+    /// Point requests at `base_url` instead of the public API: an
+    /// OpenAI-compatible server, a proxy, or a test's canned-response server.
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.api_base = base_url.to_string();
         self
     }
 
@@ -1236,7 +1236,7 @@ mod tests {
     fn provider_at(server: &CannedResponse) -> OpenAIProvider {
         OpenAIProvider::new("sk-test-key".into(), "gpt-4o-mini".into())
             .expect("a valid provider")
-            .with_api_base(server.base_url())
+            .with_base_url(server.base_url())
     }
 
     fn short_request() -> GenerateRequest {

@@ -199,7 +199,7 @@ leaves the root to produce the next row.
 | R1 | One `resolve(spec, use) -> ResolvedModel` in `strata-inference`; `Availability` is a typed enum; `require_ready()` is the only place an availability becomes an error | A: #3255, #3260; the substrate for everything below |
 | R2 | Split `inference.missing_model` (catalogued, not downloaded) from a new `inference.unknown_model` (not in catalog / path absent) | #3256 |
 | R3 | Inference errors carry `details` under `strata.error.details.inference.v1`, defined by one Rust type; `capability` returns the same data; D8 reads details, not codes and command fields | #3226, #3256, #3216 p.1, #3244 (data not sentinel) |
-| R4 | Provider keys come from injected `ProviderSettings`; executor installs env-then-config; the CLI `set_var` bridge is deleted — **done** (S3a) | #3221, rule 9 |
+| R4 | Provider keys and base URLs come from injected `ProviderSettings`; executor installs env-then-config; the CLI `set_var` bridge is deleted — **done** (keys S3a, base URLs S3b) | #3221, #3270, rule 9 |
 | R5 | One `ModelRegistry`, built once in `InferenceRuntime::new`; the loaders take the resolved path and look nothing up | #3260 |
 | R6 | `pull_model` goes through the resolver; a cloud spec is `unsupported_operation`; network-disabled is the typed `DownloadDisabled` | #3255 |
 | R7 | One size formatter (decimal), exported from inference, used by the CLI | #3235 |
@@ -389,15 +389,16 @@ spelling; §R8 makes that spelling parse-checked.
 
 ### R4 — keys are looked up, not copied into the environment
 
-Shipped in S3a as `ProviderSettings` (`crates/inference/src/settings.rs`):
+Shipped in S3a (keys) and S3b (base URLs) as `ProviderSettings`
+(`crates/inference/src/settings.rs`):
 
 ```rust
 // crates/inference/src/settings.rs
 pub trait ProviderSettings: Send + Sync {
-    fn key(&self, provider: ProviderKind) -> Option<ProviderKey>;   // value + KeySource
-    fn api_base(&self, provider: ProviderKind) -> Option<String> { None } // consumed in S3b (#3270)
+    fn key(&self, provider: ProviderKind) -> Option<ProviderKey>;              // value + SettingSource
+    fn base_url(&self, provider: ProviderKind) -> Option<ProviderBaseUrl> { None } // value + SettingSource
 }
-pub struct EnvProviderSettings;                // OPENAI_API_KEY etc.; what `new` installs
+pub struct EnvProviderSettings;                // OPENAI_API_KEY / OPENAI_BASE_URL etc.; what `new` installs
 impl InferenceRuntime {
     pub fn new(config: InferenceRuntimeConfig) -> Self;            // environment only
     pub fn with_settings(config: InferenceRuntimeConfig, settings: Arc<dyn ProviderSettings>) -> Self;
@@ -406,18 +407,44 @@ impl InferenceRuntime {
 
 `InferenceRuntimeConfig` stays pure data; the settings are injected at
 construction. `ProviderKey { value, source }` is Debug-redacted, has no
-`PartialEq`, and exposes the secret through one named accessor. `KeySource`
-is `Environment(variable)`, `ConfigFile(path)` or `Application`, and
-`status.providers[].key_source` is its label — reported by the runtime
+`PartialEq`, and exposes the secret through one named accessor.
+`SettingSource` is `Environment(variable)`, `ConfigFile(path)` or
+`Application`, and `status.providers[].key_source` /
+`status.providers[].base_url_source` are its labels — reported by the runtime
 because the settings told it.
+
+A base URL follows the provider SDKs' conventions **and semantics**, so a
+value that works for the vendor's own client works unchanged here:
+
+| Provider | Env var | Default | What Strata appends |
+|---|---|---|---|
+| openai | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `/chat/completions`, `/embeddings` — the value includes `/v1` |
+| anthropic | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `/v1/messages` — the value is an origin |
+| google | `GOOGLE_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | `/v1beta/models/{model}:generateContent` etc. — the value is an origin |
+
+A trailing `/` is dropped when the value is read; nothing else is
+normalised. `status.providers[]` reports the effective `base_url` (the
+override or the default), `base_url_env_var`, and `base_url_source` (`null`
+when the default is in use); a local provider reports none of the three. The
+generation and embedding engines take the URL by constructor
+(`GenerationEngine::with_base_url`), the same way they take the key.
 
 - Inference imports nothing from the workspace (rule 3), so it cannot read
   `~/.config/strata/config.toml`. Executor imports `strata-hub` behind its
   `hub` feature (`executor/Cargo.toml:22,61`), so executor composes
   `EnvThenConfig { env: EnvProviderSettings, config_path }` over
-  `strata_hub::read_provider_key(path, section)` in
-  `crates/executor/src/inference_settings.rs`; without `hub` it installs
-  `EnvProviderSettings` alone. Env wins (D5). The file is read per lookup, so
+  `strata_hub::read_provider_setting(path, section, ProviderSetting::{ApiKey, BaseUrl})`
+  in `crates/executor/src/inference_settings.rs`; without `hub` it installs
+  `EnvProviderSettings` alone. Env wins (D5) — per setting, so an env key with
+  a config-file base URL is a legal combination. The config keys are
+  `<provider>.api_key` and `<provider>.base_url` (`strata config set`), which
+  the CLI writes through the hub's path-taking
+  `write_provider_setting` / `unset_provider_setting` (S3b — the reader and
+  the writers all take the file, so `global_config_path()` is resolved once
+  per caller and every function is testable against a temp file); the hub
+  refuses a base URL that is not `http`/`https` at write time
+  (`HubUrlError::MalformedSource` naming `<provider>.base_url`), so the file
+  never holds a value the runtime cannot use. The file is read per lookup, so
   a `config set` is seen by the next call; an unreadable or malformed file
   logs a warning naming the path and counts as no key (follow-up: `doctor`
   should surface that file state).
@@ -509,6 +536,7 @@ outlives them. It replaces the prose contract as the authority.
 | spec form | `""`, `"   "`, `"openai:"`, `"local:"`, `"miniLM"`, `"MINILM"`, `"  miniLM  "`, `"local:miniLM"`, `"qwen3:1.7b"`, `"qwen3:1.7b:q8_0"`, `"tinyllama:q8_0"`, `"tinyllama:q99"`, `"nope"`, `"nope:thing"`, `"local:nope"`, `"a:b:c:d"`, `"<tmp>/present.gguf"`, `"<tmp>/absent.gguf"`, `"openai:gpt-4o-mini"`, `"OpenAI:gpt-4o-mini"`, `"anthropic:claude-x"`, `"google:x"`, `"openai-compatible:ep:m"` |
 | registry state | empty dir; dir holding a non-empty `miniLM` file; dir holding a zero-length file |
 | key state | none; env (inference matrix: the source `new` installs); env-then-config (executor `inference_settings` truth tables + CLI `config_behavior` end to end, since S3a) |
+| base URL | every cloud provider's `*_BASE_URL` points at a closed loopback port in both key states (inference matrix, since S3b); env-then-config and the `config set` refusal at executor / CLI level, as for keys |
 | build | `cfg!(feature = "local")`, per-provider `cfg!` — the expectation is computed, and the matrix runs under both mutation-lane feature sets |
 | task / verb | generate, embed, rank, tokenize, pull, capability |
 
@@ -569,11 +597,12 @@ malformed-spec error; at executor level it is `(code, class, details keys)`.
   `with_undownloaded(pull_spec)` holds a catalogued variant off disk until it
   is pulled, so a consumer's refuse → pull → retry loop (D8) runs end to end
   in-process. No parallel harness.
-- Cloud `Ready` cells assert `capability` only; nothing in the matrix sends a
-  request. The 21 cells that would (a key present, the network on) are the
-  matrix's only never-run cells; they need a runtime-level provider base URL
-  the way downloads have `STRATA_HF_ENDPOINT` — **#3270**, proposed for S3
-  beside R4.
+- Cloud `Ready` cells assert `capability`; the 21 cells that dispatch (a key
+  present, the network on) do so against a closed loopback port — the child
+  sets every provider's `*_BASE_URL` to `http://127.0.0.1:1` (S3b, #3270),
+  so the request leaves `require_ready`, reaches the transport, and comes
+  back `inference.provider_unavailable`. Nothing in the matrix reaches the
+  internet, and the matrix has no never-run cells.
 
 ### 5.3 Known red, and falsification
 
@@ -690,7 +719,7 @@ column are **not** to be `/audit-fix`ed individually while this plan runs.
 | **S0** | Matrix (inference level, all cells) + `KNOWN_RED`; executor-level wire cells (pass-through, registry row, IDL declaration); falsification by re-planting #3222 — **done** (PR #3265), §5.3 | none | — (filed #3262, #3263, #3264) |
 | **S1** | R1 `resolve` / `ResolvedModel` / `Availability` / `require_ready`; R5 one registry; R6 pull through the resolver; the free loaders and `from_registry*` deleted — **done** (PR #3269), §5.3 | declarations only: `pull` gains `unsupported_operation` (cloud spec) and `invalid_request`; `tokenize` / `detokenize` / `rank` gain `invalid_request` | #3255, #3260, #3263 |
 | **S2** | R2 `unknown_model`; R3 `AvailabilityDetails` on the wire and in `capability`; D8 reads details; testkit fake composes the real resolver; replay fixtures for resolution-time codes; #3252 decided (Q4, wired) — **done** in two PRs: S2a (PR #3289: `unknown_model`, details on the wire) and S2b (`capability` fields, `io_failure` produced, fake composes the resolver, replay fixtures, D8 on details), §5.2 | **yes** — new code, new details, `capability` fields; release notes in both PR bodies | #3256, #3262, #3264, #3286 (S2a); #3226, #3252 (S2b) |
-| **S3** | Two PRs. **S3a — done**: R4 `ProviderSettings` (constructor-injected; executor composes env-then-config; CLI bridge deleted; `doctor` reads the executor's default runtime); R9 `OpenIntent::InferenceOneShot`; key dimension at executor level; docs drop `--cache`, §R4/§R9. **S3b**: `api_base` on `ProviderSettings` (config + env), `with_api_base` un-gated, the 21 `Expect::NeverRun` matrix cells go live | S3a: `status` key-source field semantics (same values, produced by the runtime); one-shot inference verbs run without a target. S3b: base-URL settings | S3a: #3221, #3233. S3b: #3270 |
+| **S3** | Two PRs. **S3a — done**: R4 `ProviderSettings` (constructor-injected; executor composes env-then-config; CLI bridge deleted; `doctor` reads the executor's default runtime); R9 `OpenIntent::InferenceOneShot`; key dimension at executor level; docs drop `--cache`, §R4/§R9. **S3b — done**: `base_url` on `ProviderSettings` (SDK-convention env vars + `<provider>.base_url` config key, validated at write), `GenerationEngine::with_base_url` un-gated, `status` reports the effective URL and its source, the 21 `Expect::NeverRun` matrix cells run against a closed loopback port and the variant is deleted | S3a: `status` key-source field semantics (same values, produced by the runtime); one-shot inference verbs run without a target. S3b: `inference.status` provider rows gain `base_url`, `base_url_env_var`, `base_url_source` (additive) | S3a: #3221, #3233. S3b: #3270 |
 | **S4** | R7 one size formatter; R8 rule 14 rewrite, clap-parse guard over docs and hints, nightly catalog check, dead-entry decision; `STRATA_LOCAL_API_KEY` removed; `strata models pull` fixed | none | #3235, #3257, #3045 |
 | **T** | Tooling lane: mutation-gate self-check (a diff that touches product code and yields zero viable mutants fails the gate); #3225 exit-3 precedence; #3227 `Result` alias; #3254 `local`-gated code in mixed files; #3258 non-`Default` enum arms; #3220 | none | #3225, #3227, #3254, #3258, #3220 |
 
@@ -738,9 +767,10 @@ Verified against `main` at `98f8f324`; rows updated for S1 and S2 (S2a, S2b).
 | Wire details | **S2**: `strata.error.details.inference.v1` defined by `AvailabilityDetails`, produced by every resolution refusal, flattened by the executor and read back by `ExecutorError::inference_availability`; `size_bytes` readable from its decimal string | — |
 | D8 offer | **S2b**: keyed on `details.availability == not_downloaded` and `details.pull_spec`, not on a code or a command field; covers `vector --text` (the model from the collection's record); never offers a name the catalog does not know (#3226); a refused pull is not re-offered | — |
 | Keys | `strata config set <provider>.api_key` stored 0600; env wins; **S3a**: the runtime learns keys from injected `ProviderSettings` — executor composes env-then-config, `status.key_source` reports the source that answered, `doctor` reads the same runtime | an unreadable or malformed config file logs a warning and counts as no key; `doctor` does not yet inspect the file (follow-up) |
+| Base URLs | **S3b**: `<provider>.base_url` config key (refused unless `http`/`https`) and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GOOGLE_GEMINI_BASE_URL` with the SDKs' semantics; env wins per setting; `status` reports the effective URL, its env var and its source; the engines take the URL by constructor | a malformed URL from the **environment** is not validated until a call, where it surfaces as `provider_unavailable` rather than a configuration fault (follow-up: an `Availability` variant for it) |
 | No-database use | `install-local` intercepted pre-open; **S3a**: every one-shot inference verb with no target runs in an ephemeral cache session (`OpenIntent::InferenceOneShot`); README and `provider-api-keys.md` agree | stratadb.org still shows `strata --cache inference …` (site handoff after S3a) |
 | Sizes | one decimal formatter in inference | CLI has a second, mislabelled one (#3235) |
-| Test reach | parser pinned (`api_contract.rs`); capability honesty pinned; wire==registry pinned; **S0 matrix** (`resolution_matrix.rs`, `inference_resolution_wire.rs`) with `KNOWN_RED` as the bug inventory; **S2b**: resolution-time codes replayed from IDL error cases against the fake-composes-real-resolver world, D8's loop driven end to end against `with_undownloaded` | no CI lane builds `local`, so the local-lane cells run only on a developer machine; mutation gate blind to `local` arms (#3254/#3258) and to guards that are equivalent programs in every CI lane (#3267); cloud dispatch after `require_ready` observable only with a live key (#3270) |
+| Test reach | parser pinned (`api_contract.rs`); capability honesty pinned; wire==registry pinned; **S0 matrix** (`resolution_matrix.rs`, `inference_resolution_wire.rs`) with `KNOWN_RED` as the bug inventory; **S2b**: resolution-time codes replayed from IDL error cases against the fake-composes-real-resolver world, D8's loop driven end to end against `with_undownloaded` | no CI lane builds `local`, so the local-lane cells run only on a developer machine; mutation gate blind to `local` arms (#3254/#3258) and to guards that are equivalent programs in every CI lane (#3267); cloud dispatch is observed only as far as the transport (a closed loopback port, S3b) — no test parses a provider's response body without a live key |
 
 ---
 
@@ -806,6 +836,7 @@ table to the first or delete them.
 | model size | `render.rs` MiB math + inference decimal | one formatter (R7) |
 | model directory | `ModelRegistry::new()` ×4 | one registry (R5) |
 | provider key | env read ×3 + CLI `set_var` bridge + CLI status relabel | one `ProviderSettings` (R4, **done** in S3a) |
+| provider base URL | a per-provider default string ×3, a `cfg(test)`-gated `with_api_base` | one `ProviderSettings::base_url` with SDK-convention env vars and one defaults table (R4, **done** in S3b) |
 | commands named in prose | README, `provider-api-keys.md`, `strata-v1-cli-sdk-experience.md`, registry hints, D8 prompt | clap-parse guard (R8) |
 | catalog repos | `catalog.rs` `hf_repo` strings | nightly HEAD check (R8) |
 | `STRATA_LOCAL_API_KEY` | `lib.rs:408` | delete |

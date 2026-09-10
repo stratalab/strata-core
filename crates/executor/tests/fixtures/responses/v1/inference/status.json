@@ -8,6 +8,9 @@
     "models_downloaded": 0,
     "providers": [
       {
+        "base_url": null,
+        "base_url_env_var": null,
+        "base_url_source": null,
         "feature_enabled": true,
         "key_env_var": null,
         "key_present": false,

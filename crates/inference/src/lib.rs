@@ -78,7 +78,10 @@ pub use runtime::{
     InferenceRuntimeConfig, InferenceStatus, ModelCacheStatus, ProviderStatus, PullModelOutput,
     RankRequest, RankResponse, RankRuntimeOutcome, LOCAL_UNAVAILABLE_REMEDY,
 };
-pub use settings::{EnvProviderSettings, KeySource, ProviderKey, ProviderSettings};
+pub(crate) use settings::{base_url_env_var, default_base_url};
+pub use settings::{
+    EnvProviderSettings, ProviderBaseUrl, ProviderKey, ProviderSettings, SettingSource,
+};
 pub use wire::{
     ChatChoice, ChatMessage, ChatRequest, ChatResponse, EmbedInput, EmbeddingItem,
     EmbeddingsRequest, EmbeddingsResponse, FinishReason, FunctionDef, InputType, JsonSchemaSpec,
@@ -406,7 +409,7 @@ pub fn parse_model_spec(spec: &str) -> Result<(ProviderKind, String), InferenceE
 /// the ones this build cannot call, and naming the variable is exactly how it
 /// says what a caller would need to set. A pure name mapping with no
 /// dependencies, so there is nothing to gate.
-pub(crate) fn api_key_env_var(provider: ProviderKind) -> &'static str {
+pub(crate) const fn api_key_env_var(provider: ProviderKind) -> &'static str {
     match provider {
         ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
         ProviderKind::OpenAI => "OPENAI_API_KEY",
@@ -415,8 +418,9 @@ pub(crate) fn api_key_env_var(provider: ProviderKind) -> &'static str {
     }
 }
 
-/// Public metadata for a cloud provider's API key: the canonical provider name,
-/// the environment variable Strata reads, and where a user acquires a key.
+/// Public metadata for a cloud provider's settings: the canonical provider
+/// name, the environment variables Strata reads, and where a user acquires a
+/// key.
 ///
 /// Strata is embedded and ships no keys — callers bring their own. This is the
 /// one source of truth the CLI's `config` surface and the missing-key error
@@ -427,28 +431,47 @@ pub struct ProviderKeyInfo {
     pub provider: &'static str,
     /// Environment variable Strata reads for this provider's key.
     pub env_var: &'static str,
+    /// Environment variable that points this provider's requests somewhere
+    /// other than its public endpoint — the variable the provider's own SDK
+    /// reads, with the same meaning (#3270).
+    pub base_url_env_var: &'static str,
     /// URL where a user acquires an API key for this provider.
     pub acquisition_url: &'static str,
 }
 
-/// Key metadata for every cloud provider, in a stable order.
+/// Key metadata for every cloud provider, in a stable order. The variable
+/// names come from the same tables `status` and the environment reader use,
+/// so this cannot drift from what a runtime actually reads.
 pub const CLOUD_PROVIDER_KEYS: &[ProviderKeyInfo] = &[
     ProviderKeyInfo {
         provider: "openai",
-        env_var: "OPENAI_API_KEY",
+        env_var: api_key_env_var(ProviderKind::OpenAI),
+        base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::OpenAI)),
         acquisition_url: "https://platform.openai.com/api-keys",
     },
     ProviderKeyInfo {
         provider: "anthropic",
-        env_var: "ANTHROPIC_API_KEY",
+        env_var: api_key_env_var(ProviderKind::Anthropic),
+        base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::Anthropic)),
         acquisition_url: "https://console.anthropic.com/settings/keys",
     },
     ProviderKeyInfo {
         provider: "google",
-        env_var: "GOOGLE_API_KEY",
+        env_var: api_key_env_var(ProviderKind::Google),
+        base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::Google)),
         acquisition_url: "https://aistudio.google.com/apikey",
     },
 ];
+
+/// Unwraps a cloud provider's variable name at compile time: every entry of
+/// [`CLOUD_PROVIDER_KEYS`] is a cloud provider, and each has one, so the
+/// panic is a build error and never a runtime path.
+const fn cloud_variable(variable: Option<&'static str>) -> &'static str {
+    match variable {
+        Some(variable) => variable,
+        None => panic!("every cloud provider has a base URL variable"),
+    }
+}
 
 /// Look up a cloud provider's key metadata by canonical name (case-insensitive).
 /// Returns `None` for unknown or non-cloud providers.
@@ -997,5 +1020,35 @@ string ::= "\"" [a-zA-Z]+ "\""
         );
         assert!(engine.supports_embed());
         assert!(!engine.supports_generate());
+    }
+
+    /// The public key table names every cloud provider once, and what it
+    /// says a runtime reads is what the runtime reads.
+    #[test]
+    fn the_key_table_names_each_cloud_provider_with_the_variables_a_runtime_reads() {
+        let mut seen = Vec::new();
+        for info in CLOUD_PROVIDER_KEYS {
+            let kind: ProviderKind = info.provider.parse().expect("a canonical provider name");
+            assert_ne!(kind, ProviderKind::Local, "{}", info.provider);
+            assert_eq!(kind.to_string(), info.provider, "canonical spelling");
+            assert_eq!(info.env_var, api_key_env_var(kind));
+            assert_eq!(Some(info.base_url_env_var), base_url_env_var(kind));
+            assert!(
+                info.acquisition_url.starts_with("https://"),
+                "{}",
+                info.provider
+            );
+            assert!(!seen.contains(&kind), "{kind} listed twice");
+            seen.push(kind);
+        }
+        assert_eq!(seen.len(), 3, "every cloud provider is listed");
+
+        assert_eq!(
+            provider_key_info(" OpenAI ").map(|info| info.provider),
+            Some("openai"),
+            "lookup is case-insensitive and trims"
+        );
+        assert!(provider_key_info("local").is_none());
+        assert!(provider_key_info("nobody").is_none());
     }
 }

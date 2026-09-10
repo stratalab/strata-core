@@ -43,8 +43,9 @@ strata config set google.api_key ...
 
 This writes the key to the **global** Strata config file
 (`<config-dir>/strata/config.toml`, e.g. `~/.config/strata/config.toml` on
-Linux) with `0600` permissions. Settable keys are `openai.api_key`,
-`anthropic.api_key`, and `google.api_key` (plus `hub.url`).
+Linux) with `0600` permissions. Settable keys are `<provider>.api_key` and
+`<provider>.base_url` for `openai`, `anthropic` and `google` (plus `hub.url`);
+`strata config set` with any other key lists them.
 
 Check or remove a stored key (values are printed **redacted**, never in full):
 
@@ -71,6 +72,36 @@ with, not something the CLI does before a command runs. `strata inference
 status` reports it as `key_source`: the variable name for an exported key, the
 config file's path for a stored one, and `strata doctor` reads the same
 runtime.
+
+## Point a provider at another endpoint
+
+To send a provider's requests through a proxy, a gateway, or a compatible
+server, set its base URL. The variable names and their meaning are the ones
+the provider's own SDK uses, so a value that works for the vendor's client
+works unchanged here:
+
+| Provider | Environment variable | Default | Strata appends |
+|---|---|---|---|
+| OpenAI | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | `/chat/completions`, `/embeddings` — include the `/v1` |
+| Anthropic | `ANTHROPIC_BASE_URL` | `https://api.anthropic.com` | `/v1/messages` — give the origin only |
+| Google (Gemini) | `GOOGLE_GEMINI_BASE_URL` | `https://generativelanguage.googleapis.com` | `/v1beta/models/<model>:generateContent` … — give the origin only |
+
+```bash
+export OPENAI_BASE_URL=http://localhost:8000/v1      # per shell / CI
+strata config set openai.base_url http://localhost:8000/v1   # stored, global config
+strata config get-key openai.base_url                 # printed in full — it is not a secret
+strata config unset openai.base_url
+```
+
+The base URL resolves like the key — environment variable first, then the
+stored `<provider>.base_url`, then the default — and independently of it, so
+an exported key with a stored base URL is fine. `strata config set` refuses a
+value that is not an `http` or `https` URL. `strata inference status` reports
+each provider's effective `base_url`, the variable that would override it
+(`base_url_env_var`), and `base_url_source` — the variable name or the config
+file's path, `null` when the default is in use — and the human rendering adds
+an `at <url> (from <source>)` line under a redirected provider. A base URL
+changes only where requests go; the key is still required and still sent.
 
 ## Security notes
 

@@ -1,22 +1,23 @@
 //! The executor's provider settings (R4 of #3261): where an inference runtime
-//! this crate builds learns a provider's API key from.
+//! this crate builds learns a provider's API key and base URL from.
 //!
-//! Two places hold a key — the environment, and the user config file that
-//! `strata config set <provider>.api_key` writes — and the environment wins
-//! (D5). Until #3221 the CLI bridged the file into the environment at startup
-//! and then corrected `inference status` after the fact, so a library or SDK
-//! caller opening the same database never saw the stored key, and `doctor`
-//! answered from an environment nobody had bridged. Now one
-//! [`ProviderSettings`] composes both sources, every runtime the executor
-//! builds is constructed with it, and the runtime asks it in the three places
-//! that need a key — resolution, `status`, and the provider call — so they
-//! cannot disagree and the reported source is where the key actually came
-//! from.
+//! Two places hold a setting — the environment, and the user config file that
+//! `strata config set <provider>.api_key` / `<provider>.base_url` writes — and
+//! the environment wins (D5). Until #3221 the CLI bridged the file into the
+//! environment at startup and then corrected `inference status` after the
+//! fact, so a library or SDK caller opening the same database never saw the
+//! stored key, and `doctor` answered from an environment nobody had bridged.
+//! Now one [`ProviderSettings`] composes both sources, every runtime the
+//! executor builds is constructed with it, and the runtime asks it in the
+//! three places that need a setting — resolution, `status`, and the provider
+//! call — so they cannot disagree and the reported source is where the value
+//! actually came from. The base URL (#3270) rides the same composition: the
+//! provider's own SDK variable first, then `[providers.<name>].base_url`.
 //!
-//! The file is read per call, not cached: a key set mid-session is seen on
-//! the next command. The file's *path* is fixed at construction (the platform
-//! config dir does not move while a process runs), which is also what lets a
-//! test point the composition at a temp file.
+//! The file is read per call, not cached: a setting stored mid-session is
+//! seen on the next command. The file's *path* is fixed at construction (the
+//! platform config dir does not move while a process runs), which is also
+//! what lets a test point the composition at a temp file.
 
 use std::sync::Arc;
 
@@ -26,7 +27,11 @@ use std::path::{Path, PathBuf};
 use strata_inference::{EnvProviderSettings, InferenceRuntime, InferenceRuntimeConfig};
 
 #[cfg(feature = "hub")]
-use strata_inference::{KeySource, ProviderKey, ProviderKind, ProviderSettings};
+use strata_hub::ProviderSetting;
+#[cfg(feature = "hub")]
+use strata_inference::{
+    ProviderBaseUrl, ProviderKey, ProviderKind, ProviderSettings, SettingSource,
+};
 
 /// The inference runtime every executor opens with, and the one `strata
 /// doctor` inspects: the default configuration over the executor's provider
@@ -57,15 +62,42 @@ struct EnvThenConfig<E> {
 impl<E: ProviderSettings> ProviderSettings for EnvThenConfig<E> {
     fn key(&self, provider: ProviderKind) -> Option<ProviderKey> {
         self.env.key(provider).or_else(|| {
-            let section = config_section(provider)?;
-            let path = self.config_path.as_deref()?;
-            key_from_config(path, strata_hub::read_provider_key(path, section))
+            let (path, value) = self.stored(provider, ProviderSetting::ApiKey)?;
+            Some(ProviderKey::new(value, SettingSource::ConfigFile(path)))
+        })
+    }
+
+    fn base_url(&self, provider: ProviderKind) -> Option<ProviderBaseUrl> {
+        self.env.base_url(provider).or_else(|| {
+            let (path, value) = self.stored(provider, ProviderSetting::BaseUrl)?;
+            Some(ProviderBaseUrl::new(value, SettingSource::ConfigFile(path)))
         })
     }
 }
 
-/// The `[providers.<section>]` a provider's key is stored under, or `None`
-/// for a provider that never uses one — so the file is not read for it.
+#[cfg(feature = "hub")]
+impl<E> EnvThenConfig<E> {
+    /// The stored value of one setting for a provider, with the file it came
+    /// from — `None` when the provider stores nothing, the platform has no
+    /// config file, or the file holds no usable value (see
+    /// [`setting_from_config`]).
+    fn stored(
+        &self,
+        provider: ProviderKind,
+        setting: ProviderSetting,
+    ) -> Option<(PathBuf, String)> {
+        let section = config_section(provider)?;
+        let path = self.config_path.as_deref()?;
+        let value = setting_from_config(
+            path,
+            strata_hub::read_provider_setting(path, section, setting),
+        )?;
+        Some((path.to_path_buf(), value))
+    }
+}
+
+/// The `[providers.<section>]` a provider's settings are stored under, or
+/// `None` for a provider that never uses one — so the file is not read for it.
 #[cfg(feature = "hub")]
 fn config_section(provider: ProviderKind) -> Option<&'static str> {
     match provider {
@@ -78,30 +110,28 @@ fn config_section(provider: ProviderKind) -> Option<&'static str> {
 
 /// What a read of the config file means for the caller.
 ///
-/// A stored key is a key from the file. An empty string is not a key (it
-/// cannot be a bearer credential, and the environment reader draws the same
-/// line). A file that cannot be read or parsed yields no key rather than a
-/// failure: the runtime asks for keys on every status call and provider
-/// call, and a broken config file must not turn `inference status` into an
-/// error — the old bridge swallowed the same read error. It is logged so the
+/// A stored value is the setting from the file. An empty string is not a
+/// value (an empty key cannot be a bearer credential, an empty base URL
+/// reaches nothing, and the environment reader draws the same line). A file
+/// that cannot be read or parsed yields no value rather than a failure: the
+/// runtime asks for settings on every status call and provider call, and a
+/// broken config file must not turn `inference status` into an error — the
+/// old bridge swallowed the same read error. It is logged so the
 /// disappearance is not silent; `doctor` surfacing the broken file is the
 /// follow-up. The log names the file and never the error detail, which can
 /// quote the offending line — and so the key.
 #[cfg(feature = "hub")]
-fn key_from_config(
+fn setting_from_config(
     path: &Path,
     read: Result<Option<String>, strata_hub::HubUrlError>,
-) -> Option<ProviderKey> {
+) -> Option<String> {
     match read {
-        Ok(Some(value)) if !value.is_empty() => Some(ProviderKey::new(
-            value,
-            KeySource::ConfigFile(path.to_path_buf()),
-        )),
+        Ok(Some(value)) if !value.is_empty() => Some(value),
         Ok(_) => None,
         Err(_) => {
             tracing::warn!(
                 path = %path.display(),
-                "the user config file could not be read; keys stored in it are unavailable"
+                "the user config file could not be read; settings stored in it are unavailable"
             );
             None
         }
@@ -113,7 +143,7 @@ fn key_from_config(
 mod tests {
     use super::*;
 
-    /// An environment holding a key for every cloud provider.
+    /// An environment holding a key and a base URL for every cloud provider.
     struct EnvWithKeys;
 
     impl ProviderSettings for EnvWithKeys {
@@ -121,7 +151,16 @@ mod tests {
             (provider != ProviderKind::Local).then(|| {
                 ProviderKey::new(
                     "sk-from-env",
-                    KeySource::Environment("A_VARIABLE".to_owned()),
+                    SettingSource::Environment("A_VARIABLE".to_owned()),
+                )
+            })
+        }
+
+        fn base_url(&self, provider: ProviderKind) -> Option<ProviderBaseUrl> {
+            (provider != ProviderKind::Local).then(|| {
+                ProviderBaseUrl::new(
+                    "http://env.example/v1",
+                    SettingSource::Environment("A_URL_VARIABLE".to_owned()),
                 )
             })
         }
@@ -164,7 +203,7 @@ mod tests {
             .key(ProviderKind::OpenAI)
             .expect("the file holds a key");
         assert_eq!(key.secret(), "sk-from-file");
-        assert_eq!(*key.source(), KeySource::ConfigFile(path.clone()));
+        assert_eq!(*key.source(), SettingSource::ConfigFile(path.clone()));
         assert!(
             settings.key(ProviderKind::Anthropic).is_none(),
             "a provider the file does not name has no key"
@@ -183,7 +222,48 @@ mod tests {
         assert_eq!(key.secret(), "sk-from-env");
         assert_eq!(
             *key.source(),
-            KeySource::Environment("A_VARIABLE".to_owned())
+            SettingSource::Environment("A_VARIABLE".to_owned())
+        );
+    }
+
+    #[test]
+    fn the_file_fills_only_the_base_urls_the_environment_lacks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = config_file(
+            dir.path(),
+            "[providers.openai]\nbase_url = \"http://127.0.0.1:8000/v1\"\n",
+        );
+
+        let settings = EnvThenConfig {
+            env: EmptyEnv,
+            config_path: Some(path.clone()),
+        };
+        let base_url = settings
+            .base_url(ProviderKind::OpenAI)
+            .expect("the file holds a base URL");
+        assert_eq!(base_url.url(), "http://127.0.0.1:8000/v1");
+        assert_eq!(*base_url.source(), SettingSource::ConfigFile(path.clone()));
+        assert!(
+            settings.base_url(ProviderKind::Anthropic).is_none(),
+            "a provider the file does not name keeps its public endpoint"
+        );
+        assert!(settings.base_url(ProviderKind::Local).is_none());
+        // A base URL stored for a provider says nothing about its key.
+        assert!(settings.key(ProviderKind::OpenAI).is_none());
+
+        // The environment wins for a provider it names, even though the file
+        // names it too.
+        let settings = EnvThenConfig {
+            env: EnvWithKeys,
+            config_path: Some(path),
+        };
+        let base_url = settings
+            .base_url(ProviderKind::OpenAI)
+            .expect("the environment holds a base URL");
+        assert_eq!(base_url.url(), "http://env.example/v1");
+        assert_eq!(
+            *base_url.source(),
+            SettingSource::Environment("A_URL_VARIABLE".to_owned())
         );
     }
 
@@ -195,6 +275,7 @@ mod tests {
         };
         for provider in CLOUD {
             assert!(settings.key(provider).is_none(), "{provider}");
+            assert!(settings.base_url(provider).is_none(), "{provider}");
         }
         let settings = EnvThenConfig {
             env: EnvWithKeys,
@@ -209,6 +290,14 @@ mod tests {
                 "sk-from-env",
                 "{provider}"
             );
+            assert_eq!(
+                settings
+                    .base_url(provider)
+                    .expect("from the environment")
+                    .url(),
+                "http://env.example/v1",
+                "{provider}"
+            );
         }
     }
 
@@ -221,14 +310,25 @@ mod tests {
             config_path: Some(path),
         };
         assert!(settings.key(ProviderKind::Google).is_none());
+        assert!(settings.base_url(ProviderKind::Google).is_none());
 
-        config_file(dir.path(), "[providers.google]\napi_key = \"sk-later\"\n");
+        config_file(
+            dir.path(),
+            "[providers.google]\napi_key = \"sk-later\"\nbase_url = \"http://127.0.0.1:1\"\n",
+        );
         assert_eq!(
             settings
                 .key(ProviderKind::Google)
                 .expect("set after the settings were built")
                 .secret(),
             "sk-later"
+        );
+        assert_eq!(
+            settings
+                .base_url(ProviderKind::Google)
+                .expect("set after the settings were built")
+                .url(),
+            "http://127.0.0.1:1"
         );
     }
 
@@ -247,30 +347,34 @@ mod tests {
     }
 
     #[test]
-    fn a_read_is_a_key_only_when_it_holds_a_non_empty_string() {
+    fn a_read_is_a_setting_only_when_it_holds_a_non_empty_string() {
         let path = Path::new("/somewhere/config.toml");
         let malformed = || strata_hub::HubUrlError::MalformedSource {
             source: path.display().to_string(),
             detail: "malformed TOML".to_owned(),
         };
 
-        let key = key_from_config(path, Ok(Some("sk-stored".to_owned()))).expect("a stored key");
-        assert_eq!(key.secret(), "sk-stored");
-        assert_eq!(*key.source(), KeySource::ConfigFile(path.to_path_buf()));
-
-        assert!(key_from_config(path, Ok(Some(String::new()))).is_none());
-        assert!(key_from_config(path, Ok(None)).is_none());
-        assert!(key_from_config(path, Err(malformed())).is_none());
+        assert_eq!(
+            setting_from_config(path, Ok(Some("sk-stored".to_owned()))),
+            Some("sk-stored".to_owned())
+        );
+        assert!(setting_from_config(path, Ok(Some(String::new()))).is_none());
+        assert!(setting_from_config(path, Ok(None)).is_none());
+        assert!(setting_from_config(path, Err(malformed())).is_none());
     }
 
     #[test]
-    fn a_malformed_file_is_no_key_not_a_failure() {
+    fn a_malformed_file_is_no_setting_not_a_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let path = config_file(dir.path(), "[providers.openai\napi_key = \"sk-broken\"\n");
+        let path = config_file(
+            dir.path(),
+            "[providers.openai\napi_key = \"sk-broken\"\nbase_url = \"http://127.0.0.1:1\"\n",
+        );
         let settings = EnvThenConfig {
             env: EmptyEnv,
             config_path: Some(path),
         };
         assert!(settings.key(ProviderKind::OpenAI).is_none());
+        assert!(settings.base_url(ProviderKind::OpenAI).is_none());
     }
 }

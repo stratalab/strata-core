@@ -143,6 +143,7 @@ Keys persist, so you set them once rather than exporting in every shell:
 
 ```bash
 strata config set openai.api_key sk-...   # stored at 0600; env still wins
+strata config set openai.base_url http://localhost:8000/v1   # or OPENAI_BASE_URL: a proxy or compatible server
 strata inference status                   # what this build can do, before you try
 ```
 

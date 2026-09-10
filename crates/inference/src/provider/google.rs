@@ -17,14 +17,17 @@ use crate::wire::{
 };
 use crate::{GenerateRequest, GenerateResponse, InferenceError, StopReason};
 
-/// The API root every Gemini model endpoint hangs off.
-pub(crate) const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+/// The origin every Gemini model endpoint hangs off when nothing overrides
+/// it. The `/v1beta/models` segments belong to the endpoint path, as in the
+/// Google GenAI SDK, so a base URL written for the SDK works here unchanged.
+pub(crate) const API_BASE: &str = crate::settings::GOOGLE_BASE_URL;
 
 /// Google cloud provider state.
 pub(crate) struct GoogleProvider {
     api_key: String,
     model: String,
-    /// Where requests go; [`API_BASE`] outside tests.
+    /// Where requests go: [`API_BASE`], or the base URL the runtime's
+    /// settings override it with.
     api_base: String,
 }
 
@@ -57,11 +60,10 @@ impl GoogleProvider {
         })
     }
 
-    /// Point requests at a local stand-in for the Gemini API, so a test can
-    /// drive the real request path against a canned response.
-    #[cfg(test)]
-    pub(crate) fn with_api_base(mut self, api_base: &str) -> Self {
-        self.api_base = api_base.to_string();
+    /// Point requests at `base_url` instead of the public API: a proxy, or a
+    /// test's canned-response server. The `/v1beta/models/…` path is appended.
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.api_base = base_url.to_string();
         self
     }
 
@@ -120,7 +122,13 @@ impl GoogleProvider {
 
 /// Build the full URL with the model name (API key sent via header).
 pub(crate) fn build_url(api_base: &str, model: &str) -> String {
-    format!("{api_base}/{}:generateContent", model_path(model))
+    model_endpoint(api_base, model, "generateContent")
+}
+
+/// One model method's endpoint under `api_base`:
+/// `{api_base}/v1beta/models/{model}:{method}`.
+fn model_endpoint(api_base: &str, model: &str, method: &str) -> String {
+    format!("{api_base}/v1beta/models/{}:{method}", model_path(model))
 }
 
 /// Build the Google Gemini API request JSON.
@@ -737,12 +745,12 @@ fn gemini_logprob(entry: &serde_json::Value) -> f32 {
 
 /// Build the URL for the Google embedContent API (single text).
 pub(crate) fn build_embed_url(api_base: &str, model: &str) -> String {
-    format!("{api_base}/{}:embedContent", model_path(model))
+    model_endpoint(api_base, model, "embedContent")
 }
 
 /// Build the URL for the Google batchEmbedContents API (multiple texts).
 pub(crate) fn build_batch_embed_url(api_base: &str, model: &str) -> String {
-    format!("{api_base}/{}:batchEmbedContents", model_path(model))
+    model_endpoint(api_base, model, "batchEmbedContents")
 }
 
 /// Build the Google embedContent request JSON for a single text.
@@ -913,9 +921,17 @@ mod tests {
     #[test]
     fn url_contains_model_not_key() {
         let url = build_url(API_BASE, "gemini-pro");
-        assert!(url.contains("gemini-pro"));
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent",
+            "the versioned model path under the origin"
+        );
         assert!(!url.contains("key="), "API key should not appear in URL");
-        assert!(url.contains("generateContent"));
+        assert_eq!(
+            build_url("http://127.0.0.1:8000", "models/gemini-pro"),
+            "http://127.0.0.1:8000/v1beta/models/gemini-pro:generateContent",
+            "an override is rooted the same way and a `models/` prefix folds in"
+        );
     }
 
     #[test]
@@ -1889,7 +1905,7 @@ mod tests {
     fn provider_at(server: &CannedResponse) -> GoogleProvider {
         GoogleProvider::new("AIzaTestKey".into(), "gemini-test".into())
             .expect("a valid provider")
-            .with_api_base(server.base_url())
+            .with_base_url(server.base_url())
     }
 
     fn short_request() -> GenerateRequest {
@@ -1916,8 +1932,8 @@ mod tests {
 
         let request = server.request();
         assert!(
-            request.starts_with("POST /gemini-test:generateContent "),
-            "the model's endpoint under the base: {request}"
+            request.starts_with("POST /v1beta/models/gemini-test:generateContent "),
+            "the model's versioned endpoint under the origin: {request}"
         );
         assert!(
             request
@@ -2140,16 +2156,19 @@ mod tests {
     #[test]
     fn embed_url_single_contains_model() {
         let url = build_embed_url(API_BASE, "text-embedding-004");
-        assert!(url.contains("text-embedding-004"));
-        assert!(url.contains("embedContent"));
-        assert!(!url.contains("batch"));
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent"
+        );
     }
 
     #[test]
     fn batch_embed_url_contains_model() {
         let url = build_batch_embed_url(API_BASE, "text-embedding-004");
-        assert!(url.contains("text-embedding-004"));
-        assert!(url.contains("batchEmbedContents"));
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:batchEmbedContents"
+        );
     }
 
     // -----------------------------------------------------------------------

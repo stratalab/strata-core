@@ -310,19 +310,74 @@ pub fn unset_global_hub_url() -> Result<Option<PathBuf>, HubUrlError> {
 // (#3221). Provider names are opaque here — the CLI validates them against the
 // known cloud providers.
 //
-// The reader takes the file's path, like `HubUrlInputs` does for `hub.url`, so
-// the executor can fix the platform path once and tests can point it at a
-// temp file; the writers below resolve the global path themselves because
-// only the CLI's `config set/unset` call them.
+// Reader and writers all take the file's path, like `HubUrlInputs` does for
+// `hub.url`: the executor and the CLI fix the platform path once
+// (`global_config_path`) and tests point every function at a temp file.
 // ---------------------------------------------------------------------------
 
-/// Reads `[providers.<provider>].api_key` from the config file at `path`;
-/// `Ok(None)` when the file, section, or key is absent.
+/// One setting a `[providers.<provider>]` section stores: the field the
+/// `strata config` surface names after the provider (`<provider>.api_key`,
+/// `<provider>.base_url`) and the inference runtime's settings read back.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProviderSetting {
+    /// The provider's API key (`api_key`). Stored as given.
+    ApiKey,
+    /// The base URL the provider is reached at instead of its public
+    /// endpoint (`base_url`). Must parse as an `http` or `https` URL.
+    BaseUrl,
+}
+
+impl ProviderSetting {
+    /// The TOML field name under `[providers.<provider>]`, which is also the
+    /// suffix of the `strata config` key.
+    #[must_use]
+    pub const fn field(self) -> &'static str {
+        match self {
+            Self::ApiKey => "api_key",
+            Self::BaseUrl => "base_url",
+        }
+    }
+
+    /// The value as it will be stored, or why it cannot be. A key is opaque
+    /// and stored as given. A base URL is checked here, at the one place it
+    /// is written, because a value that is not an `http(s)` URL reaches the
+    /// user only later, as a provider call that fails to connect — the wrong
+    /// moment and the wrong words for a typo. The `Url` parse is a check
+    /// only: the value is stored as typed, so `config get` shows what was
+    /// set rather than a normalized form with a trailing slash.
+    fn validated(self, provider: &str, value: &str) -> Result<String, HubUrlError> {
+        match self {
+            Self::ApiKey => Ok(value.to_owned()),
+            Self::BaseUrl => {
+                let malformed = |detail: String| HubUrlError::MalformedSource {
+                    source: format!("{provider}.base_url"),
+                    detail,
+                };
+                let parsed = Url::parse(value)
+                    .map_err(|error| malformed(format!("not a valid URL: {error}")))?;
+                match parsed.scheme() {
+                    "http" | "https" => Ok(value.to_owned()),
+                    scheme => Err(malformed(format!(
+                        "not an http or https URL (scheme is `{scheme}`)"
+                    ))),
+                }
+            }
+        }
+    }
+}
+
+/// Reads `[providers.<provider>].<setting>` from the config file at `path`;
+/// `Ok(None)` when the file, section, or field is absent.
 ///
 /// # Errors
 ///
-/// [`HubUrlError::MalformedSource`] when the file exists but is invalid.
-pub fn read_provider_key(path: &Path, provider: &str) -> Result<Option<String>, HubUrlError> {
+/// [`HubUrlError::MalformedSource`] when the file exists but is invalid, or
+/// the field is not a string.
+pub fn read_provider_setting(
+    path: &Path,
+    provider: &str,
+    setting: ProviderSetting,
+) -> Result<Option<String>, HubUrlError> {
     if !path.is_file() {
         return Ok(None);
     }
@@ -336,59 +391,64 @@ pub fn read_provider_key(path: &Path, provider: &str) -> Result<Option<String>, 
             source: source.clone(),
             detail: format!("malformed TOML: {error}"),
         })?;
-    let key = value
+    let field = setting.field();
+    let stored = value
         .get("providers")
         .and_then(|providers| providers.get(provider))
-        .and_then(|table| table.get("api_key"));
-    let Some(key) = key else {
+        .and_then(|table| table.get(field));
+    let Some(stored) = stored else {
         return Ok(None);
     };
-    let key = key.as_str().ok_or_else(|| HubUrlError::MalformedSource {
-        source,
-        detail: format!("[providers.{provider}].api_key is not a string"),
-    })?;
-    Ok(Some(key.to_owned()))
+    let stored = stored
+        .as_str()
+        .ok_or_else(|| HubUrlError::MalformedSource {
+            source,
+            detail: format!("[providers.{provider}].{field} is not a string"),
+        })?;
+    Ok(Some(stored.to_owned()))
 }
 
-/// Writes `[providers.<provider>].api_key` into the global config, preserving
-/// other keys and creating the file (`0600` on Unix) on first use. Returns the
-/// file path written.
+/// Writes `[providers.<provider>].<setting>` into the config file at `path`,
+/// preserving other keys and creating the file (`0600` on Unix) and its
+/// directory on first use.
 ///
 /// # Errors
 ///
-/// [`HubUrlError::MalformedSource`] when the config directory is unavailable or
+/// [`HubUrlError::MalformedSource`] when the value is not valid for the
+/// setting (a base URL that is not an `http(s)` URL — nothing is written) or
 /// the existing file is unreadable/unwritable.
-pub fn write_global_provider_key(provider: &str, api_key: &str) -> Result<PathBuf, HubUrlError> {
-    let path = global_config_path().ok_or_else(|| HubUrlError::MalformedSource {
-        source: "global config".to_owned(),
-        detail: "the platform exposes no user config directory".to_owned(),
-    })?;
-    edit_global_providers(&path, provider, |table| {
-        table.insert(
-            "api_key".to_owned(),
-            toml::Value::String(api_key.to_owned()),
-        );
-    })?;
-    Ok(path)
+pub fn write_provider_setting(
+    path: &Path,
+    provider: &str,
+    setting: ProviderSetting,
+    value: &str,
+) -> Result<(), HubUrlError> {
+    let value = setting.validated(provider, value)?;
+    edit_global_providers(path, provider, |table| {
+        table.insert(setting.field().to_owned(), toml::Value::String(value));
+    })
 }
 
-/// Removes `[providers.<provider>].api_key` from the global config. Returns the
-/// file path when the file existed.
+/// Removes `[providers.<provider>].<setting>` from the config file at `path`.
+/// `Ok(true)` when the file existed and was rewritten without the field;
+/// `Ok(false)` when there was no file, so nothing to remove and nothing is
+/// created.
 ///
 /// # Errors
 ///
 /// [`HubUrlError::MalformedSource`] on unreadable/unwritable state.
-pub fn unset_global_provider_key(provider: &str) -> Result<Option<PathBuf>, HubUrlError> {
-    let Some(path) = global_config_path() else {
-        return Ok(None);
-    };
+pub fn unset_provider_setting(
+    path: &Path,
+    provider: &str,
+    setting: ProviderSetting,
+) -> Result<bool, HubUrlError> {
     if !path.is_file() {
-        return Ok(None);
+        return Ok(false);
     }
-    edit_global_providers(&path, provider, |table| {
-        table.remove("api_key");
+    edit_global_providers(path, provider, |table| {
+        table.remove(setting.field());
     })?;
-    Ok(Some(path))
+    Ok(true)
 }
 
 /// Edits the `[providers.<provider>]` sub-table of the global config, reading,
@@ -483,4 +543,72 @@ fn edit_global_config(
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn refused(setting: ProviderSetting, value: &str) -> (String, String) {
+        match setting.validated("openai", value) {
+            Err(HubUrlError::MalformedSource { source, detail }) => (source, detail),
+            other => panic!("`{value}` must be refused, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_setting_names_its_field_which_is_the_config_key_suffix() {
+        assert_eq!(ProviderSetting::ApiKey.field(), "api_key");
+        assert_eq!(ProviderSetting::BaseUrl.field(), "base_url");
+    }
+
+    #[test]
+    fn a_key_is_stored_as_given() {
+        for value in ["sk-anything", "", "not a url at all"] {
+            assert_eq!(
+                ProviderSetting::ApiKey
+                    .validated("openai", value)
+                    .expect("a key is opaque"),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_url_is_stored_as_typed_when_it_is_an_http_url() {
+        // Stored as typed: no trailing slash appended, no normalization —
+        // `config get` shows what was set.
+        for value in [
+            "http://127.0.0.1:8000/v1",
+            "https://proxy.example/openai/v1",
+            "http://localhost:11434",
+            "https://proxy.example/",
+        ] {
+            assert_eq!(
+                ProviderSetting::BaseUrl
+                    .validated("openai", value)
+                    .expect("an http(s) URL"),
+                value
+            );
+        }
+    }
+
+    #[test]
+    fn a_base_url_without_a_scheme_or_with_another_scheme_is_refused_naming_the_key() {
+        // The likely typo — a host without a scheme — parses as a URL whose
+        // scheme is the host name, so the scheme check is what catches it.
+        let (source, detail) = refused(ProviderSetting::BaseUrl, "localhost:8000");
+        assert_eq!(source, "openai.base_url");
+        assert!(detail.contains("http or https"), "{detail}");
+
+        let (source, detail) = refused(ProviderSetting::BaseUrl, "ftp://proxy.example/v1");
+        assert_eq!(source, "openai.base_url");
+        assert!(detail.contains("`ftp`"), "{detail}");
+
+        let (source, _) = refused(ProviderSetting::BaseUrl, "not a url");
+        assert_eq!(source, "openai.base_url");
+
+        let (source, _) = refused(ProviderSetting::BaseUrl, "");
+        assert_eq!(source, "openai.base_url");
+    }
 }

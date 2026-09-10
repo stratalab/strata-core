@@ -11,20 +11,23 @@ use crate::wire::{
 };
 use crate::{GenerateRequest, GenerateResponse, InferenceError, StopReason};
 
-/// The API root every Anthropic endpoint hangs off.
-const API_BASE: &str = "https://api.anthropic.com/v1";
+/// The origin every Anthropic endpoint hangs off when nothing overrides it.
+/// The `/v1` segment belongs to the endpoint path, as in the Anthropic SDK,
+/// so an `ANTHROPIC_BASE_URL` written for the SDK works here unchanged.
+const API_BASE: &str = crate::settings::ANTHROPIC_BASE_URL;
 const API_VERSION: &str = "2023-06-01";
 
 /// The Messages endpoint under `api_base`.
 fn messages_url(api_base: &str) -> String {
-    format!("{api_base}/messages")
+    format!("{api_base}/v1/messages")
 }
 
 /// Anthropic cloud provider state.
 pub(crate) struct AnthropicProvider {
     api_key: String,
     model: String,
-    /// Where requests go; [`API_BASE`] outside tests.
+    /// Where requests go: [`API_BASE`], or the base URL the runtime's
+    /// settings override it with.
     api_base: String,
 }
 
@@ -57,11 +60,10 @@ impl AnthropicProvider {
         })
     }
 
-    /// Point requests at a local stand-in for the Anthropic API, so a test can
-    /// drive the real request path against a canned response.
-    #[cfg(test)]
-    pub(crate) fn with_api_base(mut self, api_base: &str) -> Self {
-        self.api_base = api_base.to_string();
+    /// Point requests at `base_url` instead of the public API: a proxy, or a
+    /// test's canned-response server. The `/v1/messages` path is appended.
+    pub(crate) fn with_base_url(mut self, base_url: &str) -> Self {
+        self.api_base = base_url.to_string();
         self
     }
 
@@ -1127,7 +1129,7 @@ mod tests {
     fn provider_at(server: &CannedResponse) -> AnthropicProvider {
         AnthropicProvider::new("sk-ant-test-key".into(), "claude-test".into())
             .expect("a valid provider")
-            .with_api_base(server.base_url())
+            .with_base_url(server.base_url())
     }
 
     fn short_request() -> GenerateRequest {
@@ -1154,8 +1156,8 @@ mod tests {
 
         let request = server.request().to_ascii_lowercase();
         assert!(
-            request.starts_with("post /messages "),
-            "the endpoint under the base: {request}"
+            request.starts_with("post /v1/messages "),
+            "the versioned endpoint under the origin: {request}"
         );
         assert!(
             request.contains("x-api-key: sk-ant-test-key"),
