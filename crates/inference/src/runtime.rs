@@ -1556,6 +1556,27 @@ mod tests {
         }
     }
 
+    /// A runtime dump names its settings and never a key they hold: the
+    /// injected source is opaque to `Debug` (Rule 31), so a runtime logged at
+    /// `trace` or in a panic message cannot leak what an application handed
+    /// it.
+    #[test]
+    fn a_runtime_dump_names_its_settings_and_never_a_key() {
+        let runtime = InferenceRuntime::with_settings(
+            InferenceRuntimeConfig::default(),
+            Arc::new(crate::testkit::FakeKeys),
+        );
+        let dumped = format!("{runtime:?}");
+        assert!(
+            !dumped.contains(crate::testkit::FAKE_KEY),
+            "a held key must not appear in a runtime dump: {dumped}"
+        );
+        assert!(
+            dumped.contains("settings: ProviderSettings"),
+            "the settings are named, not omitted: {dumped}"
+        );
+    }
+
     /// The truth table for what a model inherently supports (#3124).
     ///
     /// Observable regardless of which provider features are compiled in, which
