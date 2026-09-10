@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
 use crate::error::RegistryFailure;
-use crate::resolve::{Availability, ModelSource, ModelUse, ResolvedModel};
+use crate::resolve::{Availability, AvailabilityKind, ModelSource, ModelUse, ResolvedModel};
 use crate::{
     generation_provider_feature_enabled, GenerateRequest, GenerateResponse, InferenceError,
     ModelInfo, ModelRegistry, ModelTask, ProviderKind, UnsupportedKind,
@@ -149,6 +149,21 @@ pub struct InferenceCapability {
     pub provider: ProviderKind,
     /// Model name or path after provider parsing.
     pub model: String,
+    /// Whether the model can be used right now, and if not, the one reason
+    /// why — the same answer a refusal carries in its `details`, given here
+    /// before anything is attempted (#3226). Capability *locates* the model:
+    /// a cloud model is `ready` from here even without its key (`status`
+    /// reports keys), and a local model reports `not_downloaded` or
+    /// `not_in_catalog` on the same basis a `pull` or a load would.
+    pub availability: AvailabilityKind,
+    /// The spec `strata inference models pull` takes to fetch the model.
+    /// Present only when `availability` is `not_downloaded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_spec: Option<String>,
+    /// The download size in bytes. Present only when `availability` is
+    /// `not_downloaded`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
     /// Whether **this binary** can generate with this model right now.
     ///
     /// False when the provider's feature is compiled out, even for a model
@@ -466,6 +481,9 @@ impl InferenceRuntime {
         // missing files too, with nothing claimed for them.
         let resolved = self.resolve(model_spec, None)?;
         let provider = resolved.provider;
+        // The one answer a refusal would carry, reported here instead: the
+        // availability and, when a download would fix it, what to pull.
+        let details = resolved.details();
         // The resolver's own name resolution, so an alias or a quant suffix
         // reports the same entry it would load.
         let entry = match resolved.source {
@@ -479,6 +497,9 @@ impl InferenceRuntime {
         Ok(InferenceCapability {
             provider,
             model: resolved.name,
+            availability: details.availability,
+            pull_spec: details.pull_spec,
+            size_bytes: details.size_bytes,
             // #3124: `can_*` answers "can THIS BINARY do this, now" — not
             // "does the model support it". The two diverge whenever a provider
             // feature is compiled out, and a released binary has `local` off:
@@ -1582,6 +1603,48 @@ mod tests {
         assert_eq!(capability.provider_feature_enabled, cfg!(feature = "local"));
         assert!(!capability.requires_api_key);
         assert_eq!(capability.embedding_dim, 384);
+    }
+
+    /// `capability` answers the same locate a refusal would carry, so a
+    /// caller can learn what a model needs *before* trying it: a catalogued
+    /// model that is not on disk reports `not_downloaded` beside the exact
+    /// `pull` spec and the download size (#3226). A cloud model is located,
+    /// never reached, so it is `ready` with no pull fields — the key and
+    /// network checks belong to a run, and `status` reports the key.
+    #[test]
+    fn capability_reports_availability_and_what_a_pull_needs() {
+        let models_dir = tempfile::tempdir().expect("tempdir");
+        let runtime = InferenceRuntime::new(InferenceRuntimeConfig {
+            models_dir: Some(models_dir.path().to_path_buf()),
+            network_enabled: false,
+        });
+
+        let capability = runtime.capability("miniLM").expect("capability");
+        assert_eq!(capability.availability, AvailabilityKind::NotDownloaded);
+        assert_eq!(capability.pull_spec.as_deref(), Some("miniLM"));
+        assert!(
+            capability.size_bytes.is_some_and(|bytes| bytes > 0),
+            "{:?}",
+            capability.size_bytes
+        );
+
+        // A non-default quant pulls by its full name.
+        let capability = runtime.capability("phi3.5:q8_0").expect("capability");
+        assert_eq!(capability.availability, AvailabilityKind::NotDownloaded);
+        assert_eq!(capability.pull_spec.as_deref(), Some("phi3.5:q8_0"));
+
+        let capability = runtime
+            .capability("openai:text-embedding-3-small")
+            .expect("capability");
+        assert_eq!(capability.availability, AvailabilityKind::Ready);
+        assert_eq!(capability.pull_spec, None);
+        assert_eq!(capability.size_bytes, None);
+
+        // Not in the catalog: located, with nothing to pull.
+        let capability = runtime.capability("nope").expect("capability");
+        assert_eq!(capability.availability, AvailabilityKind::NotInCatalog);
+        assert_eq!(capability.pull_spec, None);
+        assert_eq!(capability.size_bytes, None);
     }
 
     #[test]

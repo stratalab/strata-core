@@ -1,8 +1,62 @@
 {
   "$defs": {
+    "AvailabilityKind": {
+      "description": "[`Availability`] without its payload: the one word a caller branches on.\n\nSerializes as the snake_case variant name (`not_downloaded`), which is the\nvalue of `details.availability` on every inference refusal.",
+      "oneOf": [
+        {
+          "const": "ready",
+          "description": "[`Availability::Ready`].",
+          "type": "string"
+        },
+        {
+          "const": "not_in_catalog",
+          "description": "[`Availability::NotInCatalog`].",
+          "type": "string"
+        },
+        {
+          "const": "path_missing",
+          "description": "[`Availability::PathMissing`].",
+          "type": "string"
+        },
+        {
+          "const": "task_not_supported",
+          "description": "[`Availability::TaskNotSupported`].",
+          "type": "string"
+        },
+        {
+          "const": "local_execution_not_built",
+          "description": "[`Availability::LocalExecutionNotBuilt`].",
+          "type": "string"
+        },
+        {
+          "const": "provider_not_built",
+          "description": "[`Availability::ProviderNotBuilt`].",
+          "type": "string"
+        },
+        {
+          "const": "network_disabled",
+          "description": "[`Availability::NetworkDisabled`].",
+          "type": "string"
+        },
+        {
+          "const": "key_missing",
+          "description": "[`Availability::KeyMissing`].",
+          "type": "string"
+        },
+        {
+          "const": "not_downloaded",
+          "description": "[`Availability::NotDownloaded`].",
+          "type": "string"
+        }
+      ]
+    },
     "InferenceCapability": {
       "description": "Provider/model capability facts.",
       "properties": {
+        "availability": {
+          "$ref": "#/$defs/AvailabilityKind",
+          "description": "Whether the model can be used right now, and if not, the one reason\nwhy — the same answer a refusal carries in its `details`, given here\nbefore anything is attempted (#3226). Capability *locates* the model:\na cloud model is `ready` from here even without its key (`status`\nreports keys), and a local model reports `not_downloaded` or\n`not_in_catalog` on the same basis a `pull` or a load would."
+        },
         "can_embed": {
           "description": "Whether **this binary** can embed with this model right now.",
           "type": "boolean"
@@ -41,6 +95,13 @@
           "description": "Whether this binary was compiled with the provider feature needed for execution.",
           "type": "boolean"
         },
+        "pull_spec": {
+          "description": "The spec `strata inference models pull` takes to fetch the model.\nPresent only when `availability` is `not_downloaded`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "requires_api_key": {
           "description": "Whether the provider requires an API key.",
           "type": "boolean"
@@ -48,6 +109,15 @@
         "requires_network": {
           "description": "Whether the operation requires network access.",
           "type": "boolean"
+        },
+        "size_bytes": {
+          "description": "The download size in bytes. Present only when `availability` is\n`not_downloaded`.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "supports_json_object": {
           "description": "Whether `response_format: json_object` is honored.",
@@ -69,6 +139,7 @@
       "required": [
         "provider",
         "model",
+        "availability",
         "can_generate",
         "can_tokenize",
         "can_embed",

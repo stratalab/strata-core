@@ -108,6 +108,9 @@ fn inference_outputs_round_trip_through_json() {
     let capability = InferenceCapability {
         provider: strata_inference::ProviderKind::OpenAI,
         model: "gpt-4o-mini".to_owned(),
+        availability: strata_inference::AvailabilityKind::Ready,
+        pull_spec: None,
+        size_bytes: None,
         can_generate: true,
         can_tokenize: false,
         can_embed: false,

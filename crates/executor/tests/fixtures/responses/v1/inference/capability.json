@@ -1,5 +1,6 @@
 {
   "data": {
+    "availability": "ready",
     "can_embed": true,
     "can_generate": true,
     "can_rank": true,

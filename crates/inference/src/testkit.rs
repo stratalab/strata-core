@@ -394,6 +394,9 @@ impl crate::InferenceService for FakeInferenceService {
         Ok(crate::InferenceCapability {
             provider: crate::ProviderKind::Local,
             model: model_spec.to_owned(),
+            availability: crate::AvailabilityKind::Ready,
+            pull_spec: None,
+            size_bytes: None,
             can_generate: true,
             can_tokenize: true,
             can_embed: true,
