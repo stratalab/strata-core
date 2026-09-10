@@ -411,20 +411,11 @@ fn handle_connection(
         if std::mem::take(&mut awaiting_first_frame) && protocol::frame_is_hello(&frame) {
             match serve_hello(&frame) {
                 Ok(outcome) => {
-                    if wire::write_frame(&mut writer, outcome.response.as_bytes()).is_err() {
+                    if accept_hello(&connected, &mut writer, &outcome).is_err() {
                         break;
                     }
                     correlated = true;
                     access = outcome.access;
-                    // The hello introduced this connection: upgrade its
-                    // anonymous registry entry so `ipc_status` can name it.
-                    connected.introduce(crate::IpcClientEntry {
-                        name: outcome.client.as_ref().map(|c| c.name.clone()),
-                        version: outcome.client.as_ref().and_then(|c| c.version.clone()),
-                        pid: outcome.client.as_ref().and_then(|c| c.pid).map(u64::from),
-                        access: outcome.access,
-                        protocol: protocol::PROTOCOL_VERSION,
-                    });
                     continue;
                 }
                 Err(refusal) => {
@@ -554,6 +545,37 @@ struct HelloOutcome {
     response: String,
     access: SessionAccess,
     client: Option<protocol::ClientIdentity>,
+}
+
+impl HelloOutcome {
+    /// The registry entry this hello introduced.
+    fn entry(&self) -> crate::IpcClientEntry {
+        crate::IpcClientEntry {
+            name: self.client.as_ref().map(|c| c.name.clone()),
+            version: self.client.as_ref().and_then(|c| c.version.clone()),
+            pid: self.client.as_ref().and_then(|c| c.pid).map(u64::from),
+            access: self.access,
+            protocol: protocol::PROTOCOL_VERSION,
+        }
+    }
+}
+
+/// Accept a hello: upgrade the connection's anonymous registry entry so
+/// `ipc_status` can name it, then answer.
+///
+/// The order is the contract. A client that has read the response may ask
+/// the owner for `ipc_status` on its next frame, or a status bar may poll
+/// the owner the instant the client's open returns; introducing first means
+/// the response's arrival implies the identity's visibility. Answering
+/// first left a window in which the owner still reported the protocol-1
+/// placeholder registered at accept (#3287).
+fn accept_hello(
+    connected: &ConnectionGuard,
+    writer: &mut impl io::Write,
+    outcome: &HelloOutcome,
+) -> io::Result<()> {
+    connected.introduce(outcome.entry());
+    wire::write_frame(writer, outcome.response.as_bytes())
 }
 
 /// Serve a hello first frame: strict parse, protocol check, capability grant.
@@ -824,6 +846,69 @@ mod tests {
         wire::write_frame(&mut writer, &payload).expect("write");
         let response = wire::read_frame(&mut reader).expect("read");
         serde_json::from_slice(&response).expect("decode response")
+    }
+
+    /// A writer that records what the client registry held at the moment
+    /// the first byte of the hello response went out: exactly what a client
+    /// can observe by reading the response and then asking the owner.
+    struct RegistryAtFirstWrite<'a> {
+        clients: &'a crate::IpcClientRegistry,
+        seen: Option<Vec<crate::IpcClientEntry>>,
+    }
+
+    impl std::io::Write for RegistryAtFirstWrite<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            if self.seen.is_none() {
+                self.seen = Some(self.clients.snapshot());
+            }
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_accepted_hello_is_introduced_before_it_is_answered() {
+        // A client that has read the hello response may ask the owner for
+        // `ipc_status` on its very next frame — or a status bar may poll
+        // the owner the instant the client's open returns. Either must find
+        // the identity the hello declared, never the anonymous protocol-1
+        // placeholder registered at accept (#3287). The ordering inside
+        // `accept_hello` is the whole contract, so observe the registry at
+        // the write itself rather than racing a handler thread for it.
+        let clients = crate::IpcClientRegistry::new();
+        let connected = super::ConnectionGuard::enter(clients.clone());
+        let outcome = super::HelloOutcome {
+            response: "{\"ok\":true}".to_owned(),
+            access: SessionAccess::Read,
+            client: Some(crate::ipc::protocol::ClientIdentity {
+                name: "strata-vscode".to_owned(),
+                version: Some("0.1.0".to_owned()),
+                pid: Some(4242),
+            }),
+        };
+        let mut writer = RegistryAtFirstWrite {
+            clients: &clients,
+            seen: None,
+        };
+
+        super::accept_hello(&connected, &mut writer, &outcome).expect("hello written");
+
+        let seen = writer.seen.expect("the response was written");
+        assert_eq!(seen.len(), 1, "one connection: {seen:?}");
+        let entry = &seen[0];
+        assert_eq!(entry.protocol, 2, "introduced before answered: {entry:?}");
+        assert_eq!(entry.access, SessionAccess::Read);
+        assert_eq!(entry.name.as_deref(), Some("strata-vscode"));
+        assert_eq!(entry.version.as_deref(), Some("0.1.0"));
+        assert_eq!(entry.pid, Some(4242));
+
+        // The guard still deregisters on drop; the upgrade did not leak a
+        // second key.
+        drop(connected);
+        assert!(clients.is_empty(), "guard drop forgets the connection");
     }
 
     #[test]
