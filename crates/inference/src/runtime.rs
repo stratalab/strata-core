@@ -336,7 +336,7 @@ impl InferenceRuntime {
     ///
     /// Goes through the resolver like every other verb (R6), so a pull answers
     /// the same questions in the same order as a load: a malformed spec is
-    /// `invalid_request`, an unknown name `missing_model`, a cloud model
+    /// `invalid_request`, an unknown name `unknown_model`, a cloud model
     /// `unsupported_operation` — not "requires network access" for all three
     /// (#3255). What pull does NOT ask is whether the model can *run* here:
     /// fetching a file needs no local execution and no particular task.

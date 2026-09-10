@@ -177,33 +177,55 @@ fn a_resolution_refusal_round_trips_with_its_details() {
 
 #[test]
 fn public_error_surfaces_redact_provider_secrets() {
-    let error = InferenceError::Provider(
-        "failed with key=sk-test-secret and url=/v1?key=AIzaabc123 and sk-ant-provider-token"
-            .to_owned(),
-    );
+    let secrets =
+        "failed with key=sk-test-secret and url=/v1?key=AIzaabc123 and sk-ant-provider-token";
+    // One string variant and every struct variant with a message: the struct
+    // variants serialize by derive, so each `message` field carries its own
+    // redaction attribute, and a dropped attribute would leak on the wire
+    // while the string variant still passed (rule 31).
+    let errors = [
+        InferenceError::Provider(secrets.to_owned()),
+        InferenceError::ProviderFailed {
+            kind: ProviderFailure::AuthFailed,
+            message: secrets.to_owned(),
+            details: None,
+        },
+        InferenceError::RegistryFailed {
+            kind: RegistryFailure::DownloadFailed,
+            message: secrets.to_owned(),
+            details: None,
+        },
+        InferenceError::Unsupported {
+            kind: strata_inference::UnsupportedKind::Provider,
+            message: secrets.to_owned(),
+            details: None,
+        },
+    ];
 
-    let display = error.to_string();
-    let debug = format!("{error:?}");
-    let public_message = error.public_message();
-    let serialized = serde_json::to_string(&error).expect("serializes");
+    for error in errors {
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        let public_message = error.public_message();
+        let serialized = serde_json::to_string(&error).expect("serializes");
 
-    for rendered in [display, debug, public_message, serialized] {
-        assert!(
-            !rendered.contains("sk-test-secret"),
-            "secret leaked through {rendered}"
-        );
-        assert!(
-            !rendered.contains("AIzaabc123"),
-            "secret leaked through {rendered}"
-        );
-        assert!(
-            !rendered.contains("sk-ant-provider-token"),
-            "secret leaked through {rendered}"
-        );
-        assert!(
-            rendered.contains("[REDACTED]"),
-            "redaction marker missing from {rendered}"
-        );
+        for rendered in [display, debug, public_message, serialized] {
+            assert!(
+                !rendered.contains("sk-test-secret"),
+                "secret leaked through {rendered}"
+            );
+            assert!(
+                !rendered.contains("AIzaabc123"),
+                "secret leaked through {rendered}"
+            );
+            assert!(
+                !rendered.contains("sk-ant-provider-token"),
+                "secret leaked through {rendered}"
+            );
+            assert!(
+                rendered.contains("[REDACTED]"),
+                "redaction marker missing from {rendered}"
+            );
+        }
     }
 }
 

@@ -202,6 +202,7 @@ pub enum AvailabilityKind {
 /// what to do about it (`pull_spec` for a download, `key_env_var` for a key).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[cfg_attr(feature = "wire-schemas", derive(schemars::JsonSchema))]
+#[non_exhaustive]
 pub struct AvailabilityDetails {
     /// The model name without its provider prefix, as [`ResolvedModel::name`].
     pub model: String,

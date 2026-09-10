@@ -484,6 +484,10 @@ impl ExecutorError {
 /// `strata.error.details.inference.v1`: the resolver's answer as flat
 /// details, keyed by the struct's own field names so the type is the
 /// definition and nothing here restates it.
+///
+/// Rendered verbatim, unlike the message: the answer is made of identifiers
+/// (the spec as typed, a provider, a variable's *name*, a config *path*) and
+/// never of provider text, so there is nothing for the redactor to find.
 #[cfg(feature = "inference")]
 fn availability_details(availability: &strata_inference::AvailabilityDetails) -> Vec<ErrorDetail> {
     let serde_json::Value::Object(fields) =

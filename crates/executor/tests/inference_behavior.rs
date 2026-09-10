@@ -350,6 +350,44 @@ fn test_inference_errors_carry_the_registry_retry_policy_and_suggested_fix() {
     );
 }
 
+/// The executor renders every field of the resolver's answer, including the
+/// one that is not a string: `size_bytes` lands as its decimal text, not as
+/// an absent or empty entry. Pinned on the real resolver's not-downloaded
+/// answer, the only availability that carries a number; the wire test's
+/// relation 4 mirrors the flattening and so cannot see this arm alone.
+#[test]
+fn a_not_downloaded_refusal_renders_its_size_as_decimal_text() {
+    let models = tempfile::tempdir().expect("models dir");
+    let runtime = InferenceRuntime::new(InferenceRuntimeConfig {
+        models_dir: Some(models.path().to_path_buf()),
+        network_enabled: true,
+    });
+    let resolved = runtime.resolve("miniLM", None).expect("well-formed spec");
+    let refusal = resolved.require_ready().expect_err("not downloaded");
+    let size_bytes = refusal
+        .availability()
+        .and_then(|details| details.size_bytes)
+        .expect("a catalogued model has a size");
+    assert!(size_bytes > 0, "the catalog records a real size");
+
+    let error = ExecutorError::from(refusal);
+    assert_eq!(error.code(), "inference.missing_model");
+    let details: std::collections::BTreeMap<&str, &str> = error
+        .status()
+        .details()
+        .iter()
+        .map(|detail| (detail.key(), detail.value()))
+        .collect();
+    assert_eq!(
+        details.get("size_bytes").copied(),
+        Some(size_bytes.to_string().as_str())
+    );
+    assert_eq!(details.get("availability").copied(), Some("not_downloaded"));
+    assert_eq!(details.get("pull_spec").copied(), Some("miniLM"));
+    // Nothing named a collection, so the refusal does not invent one.
+    assert_eq!(details.get("collection"), None);
+}
+
 /// One transport, one classifier, one error set: every cloud provider call
 /// goes through the same request path, so a command that reaches a provider
 /// can fail with any `ProviderFailure`. The IDL must therefore declare either

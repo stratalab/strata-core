@@ -260,8 +260,9 @@ impl Executor {
                 instruction: None,
             };
             // The spec came from the collection's record, not the command;
-            // a refusal names the collection so the caller knows where to
-            // look (#3226).
+            // a resolution refusal names the collection so the caller knows
+            // where to look (#3226). A failure past resolution carries no
+            // resolver answer and so no collection either.
             let response = self
                 .inference
                 .embeddings(model, &request)
