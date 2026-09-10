@@ -442,8 +442,6 @@ fn registry_code(message: &str) -> &'static str {
         "inference.download_verification_failed"
     } else if lower.contains("download") {
         "inference.download_failed"
-    } else if lower.contains("corrupt") {
-        "inference.registry_corrupt"
     } else {
         "inference.registry_corrupt"
     }

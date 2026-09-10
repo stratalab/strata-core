@@ -35,14 +35,12 @@ fn code_area(code: &str) -> &str {
 
 /// Whether a build that does (`has_fake`) or does not carry the replay lane's
 /// inference runtime can replay a case that raises `code`: everything but the
-/// `inference` area replays without it.
+/// `inference` area replays without it. Callers pass [`INFERENCE_REPLAYABLE`]
+/// directly rather than through a this-build wrapper: under the replay lane's
+/// features such a wrapper is `true` for every code, so pinning it to `true`
+/// would be an equivalent program there — a survivor no test can catch.
 fn replayable_with(has_fake: bool, code: &str) -> bool {
     has_fake || code_area(code) != "inference"
-}
-
-/// Whether this build can replay a case that raises `code`.
-fn code_replayable(code: &str) -> bool {
-    replayable_with(INFERENCE_REPLAYABLE, code)
 }
 
 /// Inference commands (ids under `inference.`) replay only against the testkit
@@ -129,7 +127,9 @@ pub(super) fn verify_fixtures(
         for (position, case) in entry.fixtures.error_cases.iter().enumerate() {
             // A case that reaches inference on a non-inference command
             // (`vector --text`) needs the fake as much as the commands above.
-            if pinned_code(repo_root, case)?.is_some_and(|code| !code_replayable(&code)) {
+            if pinned_code(repo_root, case)?
+                .is_some_and(|code| !replayable_with(INFERENCE_REPLAYABLE, &code))
+            {
                 continue;
             }
             let code = verify_error_case(repo_root, entry, case, position, update, &mut blessed)?;
@@ -146,7 +146,7 @@ pub(super) fn verify_fixtures(
             index,
             &replayed,
             &command_replays,
-            &code_replayable,
+            &|code| replayable_with(INFERENCE_REPLAYABLE, code),
         )?;
     }
     Ok(blessed)
@@ -447,13 +447,13 @@ mod tests {
 
         // This build's answer is the fake's presence applied to the same rule:
         // an engine code always replays; an inference code replays exactly
-        // when the fake is here. (Under the replay lane's features the second
-        // line is `true` either way, so a mutant that pins `code_replayable`
-        // to `true` is an equivalent program there — only a build without the
-        // fake tells them apart.)
-        assert!(code_replayable("not_found.engine.branch"));
+        // when the fake is here.
+        assert!(replayable_with(
+            INFERENCE_REPLAYABLE,
+            "not_found.engine.branch"
+        ));
         assert_eq!(
-            code_replayable("inference.unknown_model"),
+            replayable_with(INFERENCE_REPLAYABLE, "inference.unknown_model"),
             INFERENCE_REPLAYABLE
         );
     }
