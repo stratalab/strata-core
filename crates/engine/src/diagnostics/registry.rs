@@ -2,9 +2,9 @@
 //!
 //! Every engine error code is listed here exactly once, grouped by its stable
 //! [`EngineErrorClass`]. This is the single source of truth that keeps codes
-//! from drifting: a debug assertion in the error constructor validates that
-//! every constructed `(code, class)` pair is registered, and the tests below
-//! prove the registry stays complete and free of dead entries.
+//! from drifting: every `EngineError` resolves its row here (`registry_row`),
+//! a debug assertion rejects an unregistered code, and the tests below prove
+//! the registry stays complete and free of dead entries.
 
 use super::{CommitOutcomeStatus, EngineErrorClass, ErrorClass, RetryPolicy};
 
@@ -305,6 +305,27 @@ pub fn error_code_registry_entry(code: &str) -> Option<ErrorCodeRegistryEntry> {
         .map(|(legacy_class, registered)| registry_entry(legacy_class, registered))
 }
 
+/// The row a live `EngineError` for `code` carries, with the legacy class the
+/// code is grouped under. The registry is the single authority for a code's
+/// class, retry policy, commit outcome and suggested fix (#3280): every
+/// constructor resolves its code here and has no channel to override the row.
+///
+/// An unregistered code is a programming error: `every_source_code_is_registered`
+/// keeps one out of the engine tree (the named constructors are `pub`, but
+/// their only out-of-crate caller passes a registered literal), and debug
+/// builds fail here. A release build classifies it as an internal failure
+/// rather than panic inside a database.
+pub(crate) fn registry_row(code: &'static str) -> (EngineErrorClass, ErrorCodeRegistryEntry) {
+    let class = class_for_code(code);
+    debug_assert!(
+        class.is_some(),
+        "engine error code `{code}` is unregistered"
+    );
+    // Rationale: see above — unreachable for any code literal in the tree.
+    let class = class.unwrap_or(EngineErrorClass::Internal);
+    (class, registry_entry(class, code))
+}
+
 /// Returns every public engine error-code registry entry.
 pub fn error_code_registry_entries() -> impl Iterator<Item = ErrorCodeRegistryEntry> {
     GROUPS.iter().flat_map(|group| {
@@ -563,8 +584,9 @@ fn message_template_for_code(code: &str, class: EngineErrorClass) -> &'static st
 }
 
 /// The single authority for a code's remediation hint: what `strata agents
-/// errors` documents and what a live `EngineError` carries (#3237).
-pub(crate) fn suggested_fix_for_code(code: &str, class: EngineErrorClass) -> &'static str {
+/// errors` documents and what a live `EngineError` carries (#3237). Reached
+/// only through the row (`registry_entry`); no site calls it directly (#3280).
+fn suggested_fix_for_code(code: &str, class: EngineErrorClass) -> &'static str {
     if let Some(fix) = class_prefixed_suggested_fix(code) {
         return fix;
     }

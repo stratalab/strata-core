@@ -580,14 +580,16 @@ fn test_executor_errors_carry_the_whole_registry_row() {
     );
 }
 
-/// #3244, engine half of the boundary: an engine error crosses with the
-/// registry row for all four fields even when its construction site supplied
-/// its own `suggested_fix` (the persistence adapter does, and its text for a
-/// held writer lock differs from the row), while the site's `hints` — the one
-/// channel a site owns — survive. Driven through the wire on the held-lock
-/// open, the adapter arm that carries both.
+/// #3244 / #3280, engine half of the boundary: an engine error crosses with
+/// the registry row for all four fields, and the site-owned facts that cross
+/// with it are exactly what the site still owns. Driven through the wire on
+/// the held-lock open: the persistence adapter's `LowerLayer` arm carries the
+/// structured `layer`/`reason` details, and — since #3280 dropped the hint
+/// that only restated the row's fix (#3241) — no `hints` at all. The
+/// boundary's hint pass-through is pinned separately by
+/// `engine_error_status_re_derives_the_row_and_keeps_the_site_fields`.
 #[test]
-fn test_engine_site_fix_yields_to_the_row_while_site_hints_survive() {
+fn test_engine_error_crosses_with_the_row_and_only_its_site_facts() {
     let dir = tempfile::tempdir().expect("tmp");
     let root = dir.path().join("db");
     let holder = Executor::open_durable_local(&root).expect("first open holds the writer lock");
@@ -613,17 +615,15 @@ fn test_engine_site_fix_yields_to_the_row_while_site_hints_survive() {
         serde_json::to_value(entry.commit_outcome).expect("outcome serializes"),
         "held lock: {status}"
     );
-    let hints = status["hints"]
-        .as_array()
-        .expect("site hints survive the boundary");
+    // The adapter's only hint for this arm restated the row's fix, so it is
+    // gone (#3280): `hints` is omitted from the wire when empty, and nothing
+    // at the boundary invents one.
     assert!(
-        hints.iter().any(|hint| hint
-            .as_str()
-            .is_some_and(|hint| hint.contains("persistence layer"))),
-        "the adapter's site hint reaches the wire: {status}"
+        status.get("hints").is_none(),
+        "held lock carries no restating hint: {status}"
     );
     // The adapter's structured details (`layer`, `reason` for a lower-layer
-    // failure) are site-owned too and cross the boundary alongside the hints.
+    // failure) are site-owned and cross the boundary.
     let detail_keys: Vec<&str> = status["details"]
         .as_array()
         .expect("site details survive the boundary")

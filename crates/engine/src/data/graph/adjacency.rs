@@ -13,7 +13,7 @@
 
 use std::collections::HashMap;
 
-use crate::diagnostics::{EngineError, EngineErrorClass, EngineResult};
+use crate::diagnostics::{EngineError, EngineResult};
 
 use super::{GraphEdgeType, GraphName, GraphNodeId};
 
@@ -172,9 +172,7 @@ impl GraphAdjacencyIndex {
 
 fn budget_error(kind: &str, limit: usize) -> EngineError {
     EngineError::new(
-        EngineErrorClass::Unavailable,
         "resource_exhausted.engine.graph_analytics_budget",
-        false,
         format!("graph exceeds the analytics budget of {limit} {kind}; retry with a larger GraphAnalyticsBudget"),
     )
 }

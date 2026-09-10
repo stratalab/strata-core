@@ -25,10 +25,7 @@ use strata_storage::api::{
 
 use crate::branch::catalog::{DEFAULT_BRANCH_GENERATION, SYSTEM_BRANCH_ID};
 use crate::commit::CommitOutcome;
-use crate::diagnostics::{
-    CommitOutcomeStatus, EngineError, EngineErrorClass, EngineErrorStatus, EngineResult,
-    ErrorClass, ErrorDetail, RetryPolicy,
-};
+use crate::diagnostics::{EngineError, EngineResult, ErrorDetail};
 use crate::time_compat::{SystemTime, UNIX_EPOCH};
 
 use super::fault::FaultOp;
@@ -1199,186 +1196,104 @@ fn apply_memory_budget(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+/// Maps a storage failure onto its engine error.
+///
+/// The adapter chooses the code, the message, the structured details and the
+/// site hints; the row behind the code (class, retry policy, commit outcome,
+/// suggested fix) is the registry's, so `strata agents errors` and a live
+/// error cannot disagree (#3280).
 pub(crate) fn map_storage_error(error: StorageApiError) -> EngineError {
     let details = storage_error_details(&error);
-    let suggested_fix = persistence_suggested_fix(&error);
-    match &error {
-        StorageApiError::IncompatibleLayout { .. } => {
-            // V1 cutover (hard rule 42): pre-V1 database layouts surface a
-            // structured layout error, never a generic persistence failure.
-            return EngineError::with_status(
-                EngineErrorClass::IncompatibleLayout,
-                EngineErrorStatus::new(
-                    ErrorClass::FailedPrecondition,
-                    "failed_precondition.engine.layout_version",
-                    RetryPolicy::Never,
-                    CommitOutcomeStatus::NotApplicable,
-                    "this directory holds a database from a pre-V1 version of Strata",
-                    suggested_fix,
-                    details,
-                    vec![
-                        "Point Strata at an empty directory or an existing V1 database; pre-V1 databases are not migrated.".to_owned(),
-                    ],
-                ),
-                error,
-            );
-        }
-        StorageApiError::BranchGenerationMismatch { .. } => {
-            return EngineError::with_status(
-                EngineErrorClass::Conflict,
-                EngineErrorStatus::new(
-                    ErrorClass::Conflict,
-                    "conflict.engine.branch_generation",
-                    RetryPolicy::AfterStateChange,
-                    CommitOutcomeStatus::DefinitelyNotCommitted,
-                    "branch generation changed before the write could commit",
-                    suggested_fix,
-                    details,
-                    vec!["Reload the branch state before retrying this write.".to_owned()],
-                ),
-                error,
-            );
-        }
-        StorageApiError::RecoveryDegraded { .. } => {
-            return EngineError::with_status(
-                EngineErrorClass::Corruption,
-                EngineErrorStatus::new(
-                    ErrorClass::Corruption,
-                    "corruption.engine.persistence_recovery",
-                    RetryPolicy::Never,
-                    CommitOutcomeStatus::NotApplicable,
-                    "persistence recovery reported degraded state",
-                    suggested_fix,
-                    details,
-                    vec!["Inspect recovery diagnostics before resuming writes.".to_owned()],
-                ),
-                error,
-            );
-        }
-        StorageApiError::LowerLayer { .. } => {
-            return EngineError::with_status(
-                EngineErrorClass::Unavailable,
-                EngineErrorStatus::new(
-                    ErrorClass::Unavailable,
-                    "unavailable.engine.persistence",
-                    RetryPolicy::SameRequest,
-                    CommitOutcomeStatus::NotApplicable,
-                    "persistence lower layer is unavailable",
-                    suggested_fix,
-                    details,
-                    vec!["Retry after the local persistence layer is available.".to_owned()],
-                ),
-                error,
-            );
-        }
-        _ => {}
-    }
-    let (legacy_class, public_class, code, retry_policy, commit_outcome, message) =
-        match error.class() {
+    let hints = persistence_hints(&error);
+    let (code, message) = persistence_code(&error);
+    EngineError::with_context(code, message, details, hints, error)
+}
+
+const fn persistence_code(error: &StorageApiError) -> (&'static str, &'static str) {
+    match error {
+        // V1 cutover (hard rule 42): pre-V1 database layouts surface a
+        // structured layout error, never a generic persistence failure.
+        StorageApiError::IncompatibleLayout { .. } => (
+            "failed_precondition.engine.layout_version",
+            "this directory holds a database from a pre-V1 version of Strata",
+        ),
+        StorageApiError::BranchGenerationMismatch { .. } => (
+            "conflict.engine.branch_generation",
+            "branch generation changed before the write could commit",
+        ),
+        StorageApiError::RecoveryDegraded { .. } => (
+            "corruption.engine.persistence_recovery",
+            "persistence recovery reported degraded state",
+        ),
+        StorageApiError::LowerLayer { .. } => (
+            "unavailable.engine.persistence",
+            "persistence lower layer is unavailable",
+        ),
+        _ => match error.class() {
             StorageApiErrorClass::InvalidArgument => (
-                EngineErrorClass::InvalidInput,
-                ErrorClass::InvalidArgument,
                 "invalid_argument.engine.persistence",
-                RetryPolicy::Never,
-                CommitOutcomeStatus::NotStarted,
                 "persistence request was invalid",
             ),
             StorageApiErrorClass::NotFound => (
-                EngineErrorClass::NotFound,
-                ErrorClass::NotFound,
                 "not_found.engine.persistence",
-                RetryPolicy::Never,
-                CommitOutcomeStatus::NotApplicable,
                 "persistence target was not found",
             ),
             StorageApiErrorClass::AlreadyExists => (
-                EngineErrorClass::Conflict,
-                ErrorClass::AlreadyExists,
                 "already_exists.engine.persistence",
-                RetryPolicy::Never,
-                CommitOutcomeStatus::NotStarted,
                 "persistence target already exists",
             ),
             StorageApiErrorClass::Conflict => (
-                EngineErrorClass::Conflict,
-                ErrorClass::Conflict,
                 "conflict.engine.persistence",
-                RetryPolicy::AfterStateChange,
-                CommitOutcomeStatus::DefinitelyNotCommitted,
                 "persistence target conflicted with existing state",
             ),
             StorageApiErrorClass::Unsupported => (
-                EngineErrorClass::Unavailable,
-                ErrorClass::Unsupported,
                 "unsupported.engine.persistence_capability",
-                RetryPolicy::AfterStateChange,
-                CommitOutcomeStatus::NotApplicable,
                 "requested persistence capability is unavailable",
             ),
             StorageApiErrorClass::HistoryUnavailable => (
-                EngineErrorClass::NotFound,
-                ErrorClass::HistoryUnavailable,
                 "history_unavailable.engine.persistence_history",
-                RetryPolicy::AfterStateChange,
-                CommitOutcomeStatus::NotApplicable,
                 "requested persistence history is unavailable",
             ),
             StorageApiErrorClass::AmbiguousCommit => (
-                EngineErrorClass::AmbiguousCommit,
-                ErrorClass::AmbiguousCommit,
                 "ambiguous_commit.engine.persistence",
-                RetryPolicy::Unknown,
-                CommitOutcomeStatus::MaybeCommitted,
                 "persistence could not prove whether the commit succeeded",
             ),
             StorageApiErrorClass::FailedPrecondition => (
-                EngineErrorClass::Unavailable,
-                ErrorClass::FailedPrecondition,
                 "failed_precondition.engine.persistence",
-                RetryPolicy::AfterStateChange,
-                CommitOutcomeStatus::DefinitelyNotCommitted,
                 "persistence is temporarily unable to accept the request",
             ),
             StorageApiErrorClass::ResourceExhausted => (
-                EngineErrorClass::Unavailable,
-                ErrorClass::ResourceExhausted,
                 "resource_exhausted.engine.persistence_budget",
-                RetryPolicy::AfterStateChange,
-                CommitOutcomeStatus::DefinitelyNotCommitted,
                 "persistence resource budget is exhausted",
             ),
-            StorageApiErrorClass::Internal => (
-                EngineErrorClass::Internal,
-                ErrorClass::Internal,
+            // `LowerLayer` — the only Internal-class variant — is matched by
+            // name above; this arm exists solely because `StorageApiError`
+            // is `#[non_exhaustive]`.
+            _ => (
                 "internal.engine.persistence",
-                RetryPolicy::Unknown,
-                CommitOutcomeStatus::NotApplicable,
                 "persistence returned an internal failure",
             ),
-            _ => (
-                EngineErrorClass::Internal,
-                ErrorClass::Internal,
-                "internal.engine.persistence",
-                RetryPolicy::Unknown,
-                CommitOutcomeStatus::NotApplicable,
-                "persistence returned an unknown failure",
-            ),
-        };
-    EngineError::with_status(
-        legacy_class,
-        EngineErrorStatus::new(
-            public_class,
-            code,
-            retry_policy,
-            commit_outcome,
-            message,
-            suggested_fix,
-            details,
-            Vec::new(),
-        ),
-        error,
-    )
+        },
+    }
+}
+
+/// Site-level remediation the registry row cannot express: what to do about
+/// the specific storage condition, not the code. A hint that would only
+/// restate the row's `suggested_fix` is omitted.
+fn persistence_hints(error: &StorageApiError) -> Vec<String> {
+    let hint = match error {
+        StorageApiError::InvalidRuntimeState { .. }
+        | StorageApiError::MaintenanceRejected { .. }
+        | StorageApiError::StoragePressure { .. } => {
+            "Wait for the database to become ready, then retry."
+        }
+        StorageApiError::BranchNotFound { .. } => "Target an existing branch before retrying.",
+        StorageApiError::BranchGenerationMismatch { .. } => {
+            "Reload the branch state before retrying this write."
+        }
+        _ => return Vec::new(),
+    };
+    vec![hint.to_owned()]
 }
 
 fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
@@ -1476,72 +1391,6 @@ fn storage_error_details(error: &StorageApiError) -> Vec<ErrorDetail> {
     details
 }
 
-const fn persistence_suggested_fix(error: &StorageApiError) -> &'static str {
-    match error {
-        StorageApiError::InvalidArgument { .. } => "Correct the request input and retry.",
-        StorageApiError::UnsupportedCapability { .. } => {
-            "Use a supported database mode, backend, or capability."
-        }
-        StorageApiError::InvalidRuntimeState { .. }
-        | StorageApiError::MaintenanceRejected { .. }
-        | StorageApiError::StoragePressure { .. } => {
-            "Wait for the database to become ready, then retry."
-        }
-        StorageApiError::BranchNotFound { .. } => "Target an existing branch before retrying.",
-        StorageApiError::BranchAlreadyExists { .. } => {
-            "Use the existing branch or choose a new branch name."
-        }
-        StorageApiError::BranchGenerationMismatch { .. } | StorageApiError::Conflict { .. } => {
-            "Reload current state and retry against the latest version."
-        }
-        StorageApiError::RetainedHistoryUnavailable { .. }
-        | StorageApiError::TimestampHistoryUnavailable { .. } => {
-            "Request history inside the retained window."
-        }
-        StorageApiError::DurableUncertain { .. } => {
-            "Re-open or inspect the database state before assuming whether the write committed."
-        }
-        StorageApiError::RecoveryDegraded { .. } => {
-            "Stop writing and inspect recovery diagnostics before continuing."
-        }
-        StorageApiError::ResourceExhausted { .. } => {
-            "Reduce resource pressure or raise the configured limit, then retry."
-        }
-        StorageApiError::LowerLayer { .. } => {
-            "Retry after the local persistence layer is available."
-        }
-        StorageApiError::IncompatibleLayout { .. } => {
-            "Point Strata at an empty directory or an existing V1 database; pre-V1 databases are not migrated."
-        }
-        _ => persistence_suggested_fix_for_class(error.class()),
-    }
-}
-
-const fn persistence_suggested_fix_for_class(class: StorageApiErrorClass) -> &'static str {
-    match class {
-        StorageApiErrorClass::InvalidArgument => "Correct the request input and retry.",
-        StorageApiErrorClass::NotFound => "Check that the requested object exists before retrying.",
-        StorageApiErrorClass::AlreadyExists => "Use the existing object or choose a new name.",
-        StorageApiErrorClass::Conflict => {
-            "Reload current state and retry against the latest version."
-        }
-        StorageApiErrorClass::Unsupported => {
-            "Use a supported database mode, backend, or capability."
-        }
-        StorageApiErrorClass::HistoryUnavailable => "Request history inside the retained window.",
-        StorageApiErrorClass::AmbiguousCommit => {
-            "Re-open or inspect the database state before assuming whether the write committed."
-        }
-        StorageApiErrorClass::ResourceExhausted => {
-            "Reduce resource pressure or raise the configured limit, then retry."
-        }
-        StorageApiErrorClass::FailedPrecondition => {
-            "Change database state or wait for the database to become ready, then retry."
-        }
-        _ => "Capture diagnostics and report this as a Strata bug.",
-    }
-}
-
 pub(crate) fn close_summary_is_durable(summary: StorageCloseSummary) -> bool {
     summary.state() == StorageRuntimeState::Closed && summary.durable_synced()
 }
@@ -1556,8 +1405,253 @@ mod tests {
 
     use super::map_storage_error;
     use crate::diagnostics::{
-        CommitOutcomeStatus, EngineError, EngineErrorClass, ErrorClass, RetryPolicy,
+        error_code_registry_entry, CommitOutcomeStatus, EngineError, EngineErrorClass, ErrorClass,
+        RetryPolicy,
     };
+
+    fn branch() -> BranchId {
+        BranchId::from_bytes([0x11; BranchId::BYTE_LEN])
+    }
+
+    /// One adapter row: the storage variant, the code its mapping must land
+    /// on, and the hints the mapping owns — the variant-level remediation the
+    /// registry row cannot express. Everything else the adapter used to say
+    /// restated the row and is gone with the site's fix table (#3280, #3241).
+    type AdapterRow = (StorageApiError, &'static str, &'static [&'static str]);
+
+    const READY_HINT: &[&str] = &["Wait for the database to become ready, then retry."];
+
+    /// Every storage variant the adapter can be handed. Keep in sync with
+    /// `StorageApiError`: an added variant needs a row here and an arm in
+    /// `persistence_code`.
+    fn every_storage_error() -> Vec<AdapterRow> {
+        request_and_ready_state_errors()
+            .into_iter()
+            .chain(branch_errors())
+            .chain(history_commit_and_layout_errors())
+            .collect()
+    }
+
+    fn request_and_ready_state_errors() -> Vec<AdapterRow> {
+        vec![
+            (
+                StorageApiError::InvalidArgument {
+                    field: "test field",
+                    reason: "test reason",
+                },
+                "invalid_argument.engine.persistence",
+                &[],
+            ),
+            (
+                StorageApiError::UnsupportedCapability {
+                    capability: "test capability",
+                    reason: "test reason",
+                },
+                "unsupported.engine.persistence_capability",
+                &[],
+            ),
+            (
+                StorageApiError::InvalidRuntimeState {
+                    reason: "test runtime state",
+                },
+                "failed_precondition.engine.persistence",
+                READY_HINT,
+            ),
+            (
+                StorageApiError::MaintenanceRejected {
+                    reason: "test maintenance rejection",
+                },
+                "failed_precondition.engine.persistence",
+                READY_HINT,
+            ),
+            (
+                StorageApiError::StoragePressure {
+                    branch_id: branch(),
+                    severity: CommitAdmissionPressureSeverity::Blocking,
+                    pressure_reason: CommitAdmissionPressureReason::MaintenanceQueueBacklog,
+                    reason: "test pressure",
+                    retryable: true,
+                },
+                "failed_precondition.engine.persistence",
+                READY_HINT,
+            ),
+            (
+                StorageApiError::ResourceExhausted {
+                    resource: "memory",
+                    requested_bytes: 4096,
+                    used_bytes: 1024,
+                    limit_bytes: 2048,
+                    reason: "test budget exhaustion",
+                },
+                "resource_exhausted.engine.persistence_budget",
+                &[],
+            ),
+        ]
+    }
+
+    fn branch_errors() -> Vec<AdapterRow> {
+        vec![
+            (
+                StorageApiError::BranchNotFound {
+                    branch_id: branch(),
+                },
+                "not_found.engine.persistence",
+                &["Target an existing branch before retrying."],
+            ),
+            (
+                StorageApiError::BranchAlreadyExists {
+                    branch_id: branch(),
+                },
+                "already_exists.engine.persistence",
+                &[],
+            ),
+            (
+                StorageApiError::BranchGenerationMismatch {
+                    branch_id: branch(),
+                    expected: 1,
+                    actual: 2,
+                },
+                "conflict.engine.branch_generation",
+                &["Reload the branch state before retrying this write."],
+            ),
+            (
+                StorageApiError::Conflict {
+                    branch_id: branch(),
+                    storage_space: Some(1),
+                    key_fingerprint: Some(7),
+                    user_key_len: Some(3),
+                    reason: "test conflict",
+                },
+                "conflict.engine.persistence",
+                &[],
+            ),
+        ]
+    }
+
+    fn history_commit_and_layout_errors() -> Vec<AdapterRow> {
+        vec![
+            (
+                StorageApiError::RetainedHistoryUnavailable {
+                    branch_id: branch(),
+                    reason: "test retained history",
+                },
+                "history_unavailable.engine.persistence_history",
+                &[],
+            ),
+            (
+                StorageApiError::TimestampHistoryUnavailable {
+                    branch_id: branch(),
+                    reason: "test timestamp history",
+                },
+                "history_unavailable.engine.persistence_history",
+                &[],
+            ),
+            (
+                StorageApiError::durable_uncertain("test uncertainty"),
+                "ambiguous_commit.engine.persistence",
+                &[],
+            ),
+            (
+                StorageApiError::RecoveryDegraded {
+                    reason: "test recovery degradation",
+                },
+                "corruption.engine.persistence_recovery",
+                &[],
+            ),
+            (
+                StorageApiError::IncompatibleLayout {
+                    reason: "test pre-V1 layout",
+                },
+                "failed_precondition.engine.layout_version",
+                &[],
+            ),
+            (
+                StorageApiError::lower_layer_with(
+                    StorageApiLowerLayer::Service,
+                    "test lower layer",
+                    std::io::Error::other("test source"),
+                ),
+                "unavailable.engine.persistence",
+                &[],
+            ),
+        ]
+    }
+
+    /// The adapter is a construction site, not a second registry (#3280).
+    /// For every storage variant the mapping must land on its code and the
+    /// mapped status must carry that code's registry row — class, retry
+    /// policy, commit outcome, suggested fix — plus the site's own facts: the
+    /// message, the structured details, and only the hints the row cannot
+    /// express. This is the hint-parity lane #3241 found missing: a
+    /// variant-specific remedy reaches the wire as a hint, never by shadowing
+    /// the row's `suggested_fix`.
+    #[test]
+    fn every_storage_error_maps_to_its_registry_row() {
+        let mut violations = Vec::new();
+        for (error, expected_code, expected_hints) in every_storage_error() {
+            let label = format!("{error:?}");
+            let mapped = map_storage_error(error);
+            if mapped.code() != expected_code {
+                violations.push(format!(
+                    "{label}: code `{}` != `{expected_code}`",
+                    mapped.code()
+                ));
+                continue;
+            }
+            let row = error_code_registry_entry(expected_code)
+                .unwrap_or_else(|| panic!("{label}: code `{expected_code}` is unregistered"));
+            let mut mismatches = Vec::new();
+            if mapped.public_class() != row.class {
+                mismatches.push(format!(
+                    "class {:?} != {:?}",
+                    mapped.public_class(),
+                    row.class
+                ));
+            }
+            if mapped.retry_policy() != row.retry_policy {
+                mismatches.push(format!(
+                    "retry {:?} != {:?}",
+                    mapped.retry_policy(),
+                    row.retry_policy
+                ));
+            }
+            if mapped.commit_outcome() != row.commit_outcome {
+                mismatches.push(format!(
+                    "commit {:?} != {:?}",
+                    mapped.commit_outcome(),
+                    row.commit_outcome
+                ));
+            }
+            if mapped.suggested_fix() != row.suggested_fix {
+                mismatches.push(format!(
+                    "suggested_fix `{}` != row `{}`",
+                    mapped.suggested_fix(),
+                    row.suggested_fix
+                ));
+            }
+            if mapped.hints() != expected_hints {
+                mismatches.push(format!("hints {:?} != {expected_hints:?}", mapped.hints()));
+            }
+            if mapped.message().is_empty() {
+                mismatches.push("empty message".to_owned());
+            }
+            if mapped.source_arc().is_none() {
+                mismatches.push("storage source dropped".to_owned());
+            }
+            if !mismatches.is_empty() {
+                violations.push(format!(
+                    "{label} -> {}: {}",
+                    row.code,
+                    mismatches.join("; ")
+                ));
+            }
+        }
+        assert!(
+            violations.is_empty(),
+            "mapped storage errors diverge from the registry row:\n  {}",
+            violations.join("\n  ")
+        );
+    }
 
     fn assert_v1_status(
         error: &EngineError,
