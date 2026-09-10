@@ -1,0 +1,9 @@
+{
+  "type": "inference_generate",
+  "model": "miniLM",
+  "request": {
+    "prompt": "Write a haiku about databases.",
+    "max_tokens": 64,
+    "temperature": 0.0
+  }
+}

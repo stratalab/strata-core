@@ -58,8 +58,10 @@ serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 # Test-only: the command-examples.json generator (#3059) replays examples via
 # the executor's IDL tooling, then renders their output through this crate's
-# renderer. Dev-dep so `idl-tooling` never reaches the shipped binary.
-strata-executor = { path = "../executor", features = ["idl-tooling"] }
+# renderer; the download offer's tests drive the refuse → pull → retry loop
+# against the executor's fake inference runtime (`testkit`). Dev-dep so
+# neither reaches the shipped binary.
+strata-executor = { path = "../executor", features = ["idl-tooling", "testkit"] }
 
 [[bin]]
 name = "strata"

@@ -16,8 +16,11 @@ use std::path::PathBuf;
 ))]
 use std::sync::{Mutex, MutexGuard};
 
+// Only the build that cannot download raises `download_disabled` here; the
+// build that can lets the registry speak.
+#[cfg(not(feature = "download"))]
 use crate::error::RegistryFailure;
-use crate::resolve::{Availability, AvailabilityKind, ModelSource, ModelUse, ResolvedModel};
+use crate::resolve::{AvailabilityKind, ModelSource, ModelUse, PullAction, ResolvedModel};
 use crate::{
     generation_provider_feature_enabled, GenerateRequest, GenerateResponse, InferenceError,
     ModelInfo, ModelRegistry, ModelTask, ProviderKind, UnsupportedKind,
@@ -359,32 +362,13 @@ impl InferenceRuntime {
     /// D8: this is the one place that downloads; loading never does.
     pub fn pull_model(&self, model: &str) -> Result<PullModelOutput, InferenceError> {
         let resolved = self.resolve(model, None)?;
-        match (&resolved.source, &resolved.availability) {
-            (ModelSource::Cloud, _) => Err(InferenceError::Unsupported {
-                kind: UnsupportedKind::Operation,
-                message: format!(
-                    "`{}` is a cloud model; there is nothing to pull. Only local catalog \
-                     models are fetched to disk.",
-                    resolved.spec
-                ),
-                details: Some(Box::new(resolved.details())),
-            }),
+        match resolved.pull_action(self.config.network_enabled)? {
             // Already on disk: no network needed to say so.
-            (
-                ModelSource::Catalog { path, .. } | ModelSource::GgufPath(path),
-                Availability::Ready,
-            ) => Ok(PullModelOutput {
+            PullAction::Present(path) => Ok(PullModelOutput {
                 model: resolved.spec.clone(),
-                path: path.clone(),
+                path: path.to_path_buf(),
             }),
-            (ModelSource::Catalog { entry, variant, .. }, Availability::NotDownloaded { .. }) => {
-                if !self.config.network_enabled {
-                    return Err(InferenceError::RegistryFailed {
-                        kind: RegistryFailure::DownloadDisabled,
-                        message: "model download requires network access".to_owned(),
-                        details: Some(Box::new(resolved.details())),
-                    });
-                }
+            PullAction::Download { entry, variant } => {
                 #[cfg(feature = "download")]
                 {
                     let path = self.registry.pull_variant(entry, variant, |_, _| {})?;
@@ -414,13 +398,6 @@ impl InferenceRuntime {
                         details: Some(Box::new(resolved.details())),
                     })
                 }
-            }
-            _ => {
-                resolved.require_ready()?;
-                unreachable!(
-                    "`require_ready` refuses every availability a pull cannot act on: {:?}",
-                    resolved.availability
-                )
             }
         }
     }

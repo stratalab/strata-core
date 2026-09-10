@@ -28,8 +28,14 @@ fn every_stable_error_code_is_carried_through_serialization() {
             InferenceError::Provider("HTTP 400 bad request".to_owned()),
             "inference.invalid_request",
         ),
+        // A catalogued model that is not on disk. The kind decides the code;
+        // `Registry("unknown model …")` no longer classifies to it (S2b).
         (
-            InferenceError::Registry("unknown model miniLM".to_owned()),
+            InferenceError::RegistryFailed {
+                kind: RegistryFailure::MissingModel,
+                message: "Model `miniLM` is not downloaded.".to_owned(),
+                details: None,
+            },
             "inference.missing_model",
         ),
         (

@@ -1,0 +1,7 @@
+{
+  "type": "inference_embed",
+  "model": "openai:",
+  "request": {
+    "input": "hello world"
+  }
+}

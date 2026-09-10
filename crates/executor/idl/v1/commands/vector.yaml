@@ -131,6 +131,10 @@ commands:
             - requests/v1/vector/collection_create.json
           request: requests/v1/vector/upsert_neither.json
           expected_error: responses/v1/errors/vector/vector_input.json
+        - setup:
+            - requests/v1/vector/collection_create_unknown_model.json
+          request: requests/v1/vector/upsert_text_without_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
   - id: vector.get
     kind: read.get
     title: Get vector
@@ -324,6 +328,10 @@ commands:
             - requests/v1/vector/collection_create.json
           request: requests/v1/vector/query_vector_and_text.json
           expected_error: responses/v1/errors/vector/vector_input.json
+        - setup:
+            - requests/v1/vector/collection_create_unknown_model.json
+          request: requests/v1/vector/query_text_without_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
   - id: vector.index.query
     kind: read.diagnostics
     title: Query vector index

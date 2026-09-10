@@ -18,15 +18,43 @@ use super::{
 use crate::executor::Executor;
 use crate::Command;
 
+/// Whether this build carries the replay lane's inference runtime: the testkit
+/// fake, injected into every scratch executor by [`open_executor`]. Without
+/// it, what reaches inference is not replayed here — the `inference.*`
+/// commands, and any error case pinning an `inference.*` code (`vector
+/// --text` on a collection whose model the catalog does not know) — and the
+/// coverage ratchet does not judge those codes. The CI drift-gate lane builds
+/// both features and judges the whole corpus.
+const INFERENCE_REPLAYABLE: bool = cfg!(all(feature = "inference", feature = "testkit"));
+
+/// The area of an error code: `inference` for `inference.unknown_model`, the
+/// whole code when it has no `.` to split at.
+fn code_area(code: &str) -> &str {
+    code.split_once('.').map_or(code, |(area, _)| area)
+}
+
+/// Whether a build that does (`has_fake`) or does not carry the replay lane's
+/// inference runtime can replay a case that raises `code`: everything but the
+/// `inference` area replays without it.
+fn replayable_with(has_fake: bool, code: &str) -> bool {
+    has_fake || code_area(code) != "inference"
+}
+
+/// Whether this build can replay a case that raises `code`.
+fn code_replayable(code: &str) -> bool {
+    replayable_with(INFERENCE_REPLAYABLE, code)
+}
+
 /// Inference commands (ids under `inference.`) replay only against the testkit
 /// fake service, so their fixtures stay deterministic without a real model.
 fn is_inference_command(entry: &ResolvedCommand) -> bool {
     entry.id.starts_with("inference.")
 }
 
-/// Opens the scratch executor for replaying `entry`: inference commands get the
-/// deterministic testkit fake service injected; every other command uses a bare
-/// cache executor.
+/// Opens the scratch executor for replaying `entry`: a cache executor with the
+/// deterministic testkit fake as its inference runtime where the build has it,
+/// so everything that reaches inference — the `inference.*` commands and
+/// `vector --text` — replays against the same world.
 fn open_executor(entry: &ResolvedCommand) -> Result<Executor> {
     let executor = Executor::open_cache().map_err(|error| {
         invalid(format!(
@@ -35,12 +63,28 @@ fn open_executor(entry: &ResolvedCommand) -> Result<Executor> {
         ))
     })?;
     #[cfg(all(feature = "inference", feature = "testkit"))]
-    if is_inference_command(entry) {
-        return Ok(
-            executor.with_inference_runtime(strata_inference::testkit::FakeInferenceService::new())
-        );
-    }
+    let executor =
+        executor.with_inference_runtime(strata_inference::testkit::FakeInferenceService::new());
     Ok(executor)
+}
+
+/// The code an error case's fixture pins, or `None` when the fixture is not
+/// there yet (a first `--update` writes it).
+fn pinned_code(repo_root: &Path, case: &ErrorFixtureCase) -> Result<Option<String>> {
+    let path = fixture_path(repo_root, &case.expected_error);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => return Err(IdlError::Read { path, source }),
+    };
+    let expected: Value = serde_json::from_str(&text).map_err(|source| IdlError::Json {
+        path: path.clone(),
+        source,
+    })?;
+    Ok(expected
+        .get("code")
+        .and_then(Value::as_str)
+        .map(str::to_owned))
 }
 
 /// Executes every fixture pair; returns the list of blessed files when
@@ -65,9 +109,9 @@ pub(super) fn verify_fixtures(
         }
         // Inference commands replay only against the testkit fake service —
         // their fixtures are blessed to its deterministic output. Without the
-        // `testkit` feature there is no fake, so skip them; the same coverage
-        // runs in the testkit CI lane.
-        if is_inference_command(entry) && !cfg!(feature = "testkit") {
+        // fake there is nothing deterministic to replay them against, so skip
+        // them; the same coverage runs in the testkit CI lane.
+        if is_inference_command(entry) && !INFERENCE_REPLAYABLE {
             continue;
         }
         let primary = FixtureCase {
@@ -83,6 +127,11 @@ pub(super) fn verify_fixtures(
         }
         enforce_alternates_have_cases(entry)?;
         for (position, case) in entry.fixtures.error_cases.iter().enumerate() {
+            // A case that reaches inference on a non-inference command
+            // (`vector --text`) needs the fake as much as the commands above.
+            if pinned_code(repo_root, case)?.is_some_and(|code| !code_replayable(&code)) {
+                continue;
+            }
             let code = verify_error_case(repo_root, entry, case, position, update, &mut blessed)?;
             replayed.insert(code.clone());
             command_replays.push((entry.id.clone(), code));
@@ -92,7 +141,13 @@ pub(super) fn verify_fixtures(
     // once all error cases have executed. Skip it while blessing (`update`):
     // the envelopes being written may not yet match the declared error lists.
     if !update {
-        super::enforce_error_replay_coverage(repo_root, index, &replayed, &command_replays)?;
+        super::enforce_error_replay_coverage(
+            repo_root,
+            index,
+            &replayed,
+            &command_replays,
+            &code_replayable,
+        )?;
     }
     Ok(blessed)
 }
@@ -367,5 +422,27 @@ mod tests {
         assert_eq!(value["data"]["commit"]["version"], json!(1));
         assert_eq!(value["data"]["commit"]["timestamp"], json!(3));
         assert_eq!(value["data"]["items"][0]["index"], json!(0));
+    }
+
+    #[test]
+    fn only_the_inference_area_needs_the_fake_to_replay() {
+        // The area is what comes before the first `.`; a code with none is
+        // its own area.
+        assert_eq!(code_area("inference.unknown_model"), "inference");
+        assert_eq!(code_area("not_found.engine.branch"), "not_found");
+        assert_eq!(code_area("inference"), "inference");
+
+        // With the fake, everything replays. Without it, everything but the
+        // inference area does — whichever command raised the code.
+        for code in ["inference.unknown_model", "not_found.engine.branch"] {
+            assert!(replayable_with(true, code), "{code} replays with the fake");
+        }
+        assert!(!replayable_with(false, "inference.unknown_model"));
+        assert!(!replayable_with(false, "inference.missing_model"));
+        assert!(replayable_with(false, "not_found.engine.branch"));
+        assert!(replayable_with(
+            false,
+            "invalid_argument.engine.vector_dimension"
+        ));
     }
 }

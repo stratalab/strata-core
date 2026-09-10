@@ -1926,12 +1926,15 @@ fn validate_error_set_id(id: &str) -> Result<()> {
 /// * (A) coverage — every code any command declares in `errors[]` is either
 ///   replayed by an error case or listed in `unreplayed-error-codes.yaml`, and
 ///   the allowlist may only shrink (a now-replayed or no-longer-declared entry
-///   must be removed).
+///   must be removed). A code this build could not have replayed
+///   (`replayable` says no — the inference area without the testkit fake) is
+///   not judged; the build that can replay it does.
 pub(super) fn enforce_error_replay_coverage(
     repo_root: &Path,
     index: &CommandIndex,
     replayed: &BTreeSet<String>,
     command_replays: &[(String, String)],
+    replayable: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     let idl_root = repo_root.join(IDL_DIR);
     let allowlist: UnreplayedErrorCodesSource =
@@ -1954,7 +1957,7 @@ pub(super) fn enforce_error_replay_coverage(
 
     let replayed: BTreeSet<&str> = replayed.iter().map(String::as_str).collect();
     enforce_replay_declaration(&declared_by_command, command_replays)?;
-    enforce_replay_coverage_lists(&declared, &replayed, &allowlist.unreplayed)
+    enforce_replay_coverage_lists(&declared, &replayed, &allowlist.unreplayed, replayable)
 }
 
 /// (B) A replayed code proves its command can surface it, so the command's
@@ -1983,6 +1986,7 @@ fn enforce_replay_coverage_lists(
     declared: &BTreeSet<&str>,
     replayed: &BTreeSet<&str>,
     allowlist: &[String],
+    replayable: &dyn Fn(&str) -> bool,
 ) -> Result<()> {
     let mut listed = BTreeSet::new();
     for code in allowlist {
@@ -2004,7 +2008,7 @@ fn enforce_replay_coverage_lists(
     }
 
     for code in declared {
-        if !replayed.contains(code) && !listed.contains(code) {
+        if !replayed.contains(code) && !listed.contains(code) && replayable(code) {
             return Err(invalid(format!(
                 "declared error `{code}` is surfaced by a command but has no error-case replay fixture; add an `error_cases` entry that pins its envelope, or list it in unreplayed-error-codes.yaml"
             )));
@@ -2738,16 +2742,34 @@ mod tests {
         let declared = str_refs(&["a.b.c", "d.e.f", "g.h.i"]);
         let replayed = str_refs(&["a.b.c"]);
         let listed = vec!["d.e.f".to_owned(), "g.h.i".to_owned()];
-        assert!(enforce_replay_coverage_lists(&declared, &replayed, &listed).is_ok());
+        assert!(enforce_replay_coverage_lists(&declared, &replayed, &listed, &|_| true).is_ok());
     }
 
     #[test]
     fn replay_coverage_rejects_a_declared_code_neither_replayed_nor_listed() {
         let declared = str_refs(&["a.b.c", "d.e.f"]);
         let replayed = str_refs(&["a.b.c"]);
-        let error = enforce_replay_coverage_lists(&declared, &replayed, &[]).unwrap_err();
+        let error =
+            enforce_replay_coverage_lists(&declared, &replayed, &[], &|_| true).unwrap_err();
         assert!(error.to_string().contains("d.e.f"));
         assert!(error.to_string().contains("no error-case replay fixture"));
+    }
+
+    #[test]
+    fn replay_coverage_does_not_judge_what_this_build_could_not_replay() {
+        // `d.e.f` is neither replayed nor listed, but the build says it could
+        // not have replayed it — the build that can is the judge.
+        let declared = str_refs(&["a.b.c", "d.e.f"]);
+        let replayed = str_refs(&["a.b.c"]);
+        let unreplayable_d = |code: &str| code != "d.e.f";
+        assert!(enforce_replay_coverage_lists(&declared, &replayed, &[], &unreplayable_d).is_ok());
+        // The other two rules still hold for such a code: an allowlist entry
+        // for it must be declared, and must not be replayed.
+        let listed = vec!["d.e.f".to_owned()];
+        let replayed_d = str_refs(&["a.b.c", "d.e.f"]);
+        let error = enforce_replay_coverage_lists(&declared, &replayed_d, &listed, &unreplayable_d)
+            .unwrap_err();
+        assert!(error.to_string().contains("only shrink"));
     }
 
     #[test]
@@ -2755,7 +2777,8 @@ mod tests {
         let declared = str_refs(&["a.b.c"]);
         let replayed = str_refs(&["a.b.c"]);
         let listed = vec!["a.b.c".to_owned()];
-        let error = enforce_replay_coverage_lists(&declared, &replayed, &listed).unwrap_err();
+        let error =
+            enforce_replay_coverage_lists(&declared, &replayed, &listed, &|_| true).unwrap_err();
         assert!(error.to_string().contains("only shrink"));
     }
 
@@ -2764,7 +2787,8 @@ mod tests {
         let declared = str_refs(&["a.b.c"]);
         let replayed = str_refs(&[]);
         let listed = vec!["ghost.code.here".to_owned()];
-        let error = enforce_replay_coverage_lists(&declared, &replayed, &listed).unwrap_err();
+        let error =
+            enforce_replay_coverage_lists(&declared, &replayed, &listed, &|_| true).unwrap_err();
         assert!(error.to_string().contains("ghost.code.here"));
     }
 

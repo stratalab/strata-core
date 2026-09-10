@@ -1,0 +1,6 @@
+{
+  "type": "inference_tokenize",
+  "model": "nope",
+  "text": "hello world",
+  "add_special": false
+}

@@ -40,6 +40,11 @@ commands:
     fixtures:
       request: requests/v1/inference/models_pull.json
       response: responses/v1/inference/models_pull.json
+      error_cases:
+        - request: requests/v1/inference/models_pull_unknown_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
+        - request: requests/v1/inference/models_pull_cloud_model.json
+          expected_error: responses/v1/errors/inference/unsupported_operation.json
   - id: inference.capability
     kind: inference.runtime_op
     title: Report model capabilities
@@ -54,6 +59,9 @@ commands:
     fixtures:
       request: requests/v1/inference/capability.json
       response: responses/v1/inference/capability.json
+      error_cases:
+        - request: requests/v1/inference/capability_malformed_spec.json
+          expected_error: responses/v1/errors/inference/invalid_request.json
   - id: inference.generate
     kind: inference.runtime_op
     title: Generate text
@@ -67,6 +75,11 @@ commands:
     fixtures:
       request: requests/v1/inference/generate.json
       response: responses/v1/inference/generate.json
+      error_cases:
+        - request: requests/v1/inference/generate_unknown_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
+        - request: requests/v1/inference/generate_wrong_task.json
+          expected_error: responses/v1/errors/inference/unsupported_operation.json
   - id: inference.tokenize
     kind: inference.runtime_op
     title: Tokenize text
@@ -80,6 +93,9 @@ commands:
     fixtures:
       request: requests/v1/inference/tokenize.json
       response: responses/v1/inference/tokenize.json
+      error_cases:
+        - request: requests/v1/inference/tokenize_unknown_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
   - id: inference.detokenize
     kind: inference.runtime_op
     title: Detokenize token ids
@@ -106,6 +122,13 @@ commands:
     fixtures:
       request: requests/v1/inference/embed.json
       response: responses/v1/inference/embed.json
+      error_cases:
+        - request: requests/v1/inference/embed_unknown_model.json
+          expected_error: responses/v1/errors/inference/unknown_model.json
+        - request: requests/v1/inference/embed_malformed_spec.json
+          expected_error: responses/v1/errors/inference/invalid_request.json
+        - request: requests/v1/inference/embed_wrong_task.json
+          expected_error: responses/v1/errors/inference/unsupported_operation.json
   - id: inference.rank
     kind: inference.runtime_op
     title: Rank passages
@@ -119,6 +142,9 @@ commands:
     fixtures:
       request: requests/v1/inference/rank.json
       response: responses/v1/inference/rank.json
+      error_cases:
+        - request: requests/v1/inference/rank_wrong_task.json
+          expected_error: responses/v1/errors/inference/unsupported_operation.json
   - id: inference.unload
     kind: inference.runtime_op
     title: Unload cached models

@@ -296,6 +296,19 @@ fn a_not_downloaded_model_reports_missing_model_whatever_the_wording() {
     );
 }
 
+/// The other direction of the same bit. The string `Registry` variant is what
+/// the download path still raises, and no wording of it is a model that was
+/// not found: resolution decides `missing_model` and `unknown_model` at the
+/// site, so the old "unknown model" / "not found locally" matches are gone
+/// (S2b) and such a message is the registry fallback.
+#[test]
+fn a_registry_message_cannot_word_itself_into_a_missing_model() {
+    for message in ["unknown model miniLM", "Model `miniLM` not found locally"] {
+        let worded = InferenceError::Registry(message.to_owned());
+        assert_eq!(worded.code(), "inference.registry_corrupt", "{message}");
+    }
+}
+
 /// Every registry failure kind has its own code.
 #[test]
 fn every_registry_failure_kind_has_its_own_code() {
