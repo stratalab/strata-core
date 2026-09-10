@@ -720,7 +720,7 @@ column are **not** to be `/audit-fix`ed individually while this plan runs.
 | **S1** | R1 `resolve` / `ResolvedModel` / `Availability` / `require_ready`; R5 one registry; R6 pull through the resolver; the free loaders and `from_registry*` deleted — **done** (PR #3269), §5.3 | declarations only: `pull` gains `unsupported_operation` (cloud spec) and `invalid_request`; `tokenize` / `detokenize` / `rank` gain `invalid_request` | #3255, #3260, #3263 |
 | **S2** | R2 `unknown_model`; R3 `AvailabilityDetails` on the wire and in `capability`; D8 reads details; testkit fake composes the real resolver; replay fixtures for resolution-time codes; #3252 decided (Q4, wired) — **done** in two PRs: S2a (PR #3289: `unknown_model`, details on the wire) and S2b (`capability` fields, `io_failure` produced, fake composes the resolver, replay fixtures, D8 on details), §5.2 | **yes** — new code, new details, `capability` fields; release notes in both PR bodies | #3256, #3262, #3264, #3286 (S2a); #3226, #3252 (S2b) |
 | **S3** | Two PRs. **S3a — done**: R4 `ProviderSettings` (constructor-injected; executor composes env-then-config; CLI bridge deleted; `doctor` reads the executor's default runtime); R9 `OpenIntent::InferenceOneShot`; key dimension at executor level; docs drop `--cache`, §R4/§R9. **S3b — done**: `base_url` on `ProviderSettings` (SDK-convention env vars + `<provider>.base_url` config key, validated at write), `GenerationEngine::with_base_url` un-gated, `status` reports the effective URL and its source, the 21 `Expect::NeverRun` matrix cells run against a closed loopback port and the variant is deleted | S3a: `status` key-source field semantics (same values, produced by the runtime); one-shot inference verbs run without a target. S3b: `inference.status` provider rows gain `base_url`, `base_url_env_var`, `base_url_source` (additive) | S3a: #3221, #3233. S3b: #3270 |
-| **S4** | R7 one size formatter; R8 rule 14 rewrite, clap-parse guard over docs and hints, nightly catalog check, dead-entry decision; `STRATA_LOCAL_API_KEY` removed; `strata models pull` fixed | none | #3235, #3257, #3045 |
+| **S4** | Two PRs. **S4a — done**: R7 one size formatter (`format_size` re-exported by executor as `format_model_size`; the CLI's MiB copy deleted); `STRATA_LOCAL_API_KEY` deleted (`api_key_env_var` is `None` for local, and `requires_api_key` derives from it); R8 rule 14 and closing item 2 rewritten to the grammar plus a pointer at the matrix; clap-parse guard extended to `docs/design/inference*` sketches, every registry `suggested_fix` / `message_template`, and the D8 prompt as shown (it caught `vector add` in the DX design); `strata models …` fixed in `strata-v1-cli-sdk-experience.md` by hand (Q13). **S4b**: dead catalog entries removed (Q3: the two rerankers and `qwen3:1.7b:q4_k_m`, #3300); nightly `HEAD` check over `CATALOG` | none | S4a: #3235, #3257. S4b: #3045, #3300 |
 | **T** | Tooling lane: mutation-gate self-check (a diff that touches product code and yields zero viable mutants fails the gate); #3225 exit-3 precedence; #3227 `Result` alias; #3254 `local`-gated code in mixed files; #3258 non-`Default` enum arms; #3220 | none | #3225, #3227, #3254, #3258, #3220 |
 
 Sequencing: **T runs in parallel from the start** — every slice S1–S4 will
@@ -756,11 +756,11 @@ CLI, by test (R8).
 
 ## 8. Where we stand
 
-Verified against `main` at `98f8f324`; rows updated for S1 and S2 (S2a, S2b).
+Verified against `main` at `98f8f324`; rows updated through S4a.
 
 | Area | State | Gap |
 |---|---|---|
-| Parser | `parse_model_spec` correct after #3259; lenient on case and whitespace | rule 14 contradicts it (#3257) |
+| Parser | `parse_model_spec` correct after #3259; lenient on case and whitespace; **S4a**: rule 14 states the grammar and the leniency and points at the matrix for behaviour (#3257) | — |
 | Catalog / registry | sound predicates; case-insensitive lookup; one directory resolver; **S1**: one registry per runtime, `lookup` the only catalog question, loaders take a path | — |
 | Availability | **S1**: `resolve` → `ResolvedModel` / `Availability` for every verb, `require_ready` the only renderer; **S2**: `Availability` reaches the wire as `details` and `capability` as `availability` / `pull_spec` / `size_bytes` / `key_env_var` / `config_key` — one `AvailabilityDetails` type, both directions | — |
 | Error codes | typed kinds exist (#3217) but 6 of 8 variants are strings, ~240 of ~250 construction sites; substring classifiers load-bearing; **S2**: `unknown_model` split from `missing_model` (#3256); `io_failure` produced for a filesystem that cannot say whether a file is there (#3252, Q4) | substring classifiers (#3216 step 2, out of scope) |
@@ -769,7 +769,8 @@ Verified against `main` at `98f8f324`; rows updated for S1 and S2 (S2a, S2b).
 | Keys | `strata config set <provider>.api_key` stored 0600; env wins; **S3a**: the runtime learns keys from injected `ProviderSettings` — executor composes env-then-config, `status.key_source` reports the source that answered, `doctor` reads the same runtime | an unreadable or malformed config file logs a warning and counts as no key; `doctor` does not yet inspect the file (follow-up) |
 | Base URLs | **S3b**: `<provider>.base_url` config key (refused unless `http`/`https`) and `OPENAI_BASE_URL` / `ANTHROPIC_BASE_URL` / `GOOGLE_GEMINI_BASE_URL` with the SDKs' semantics; env wins per setting; `status` reports the effective URL, its env var and its source; the engines take the URL by constructor | a malformed URL from the **environment** is not validated until a call, where it surfaces as `provider_unavailable` rather than a configuration fault (follow-up: an `Availability` variant for it) |
 | No-database use | `install-local` intercepted pre-open; **S3a**: every one-shot inference verb with no target runs in an ephemeral cache session (`OpenIntent::InferenceOneShot`); README and `provider-api-keys.md` agree | stratadb.org still shows `strata --cache inference …` (site handoff after S3a) |
-| Sizes | one decimal formatter in inference | CLI has a second, mislabelled one (#3235) |
+| Commands named in prose | **S4a**: every fenced `strata …` line on README and `docs/inference`, every `strata`-headed sketch line in `docs/design/inference*`, every `strata …` span in a registry `suggested_fix` / `message_template`, and every command in the D8 prompt as shown parse under the real clap tree; `<placeholder>` words are arguments, not redirections | `strata-v1-cli-sdk-experience.md` is a design-era UX document, fixed by hand and not guarded (Q13) |
+| Sizes | **S4a**: one decimal formatter, the inference crate's, re-exported by executor as `format_model_size` and read by the CLI's `models list`; the refusal and the table agree by test (#3235) | — |
 | Test reach | parser pinned (`api_contract.rs`); capability honesty pinned; wire==registry pinned; **S0 matrix** (`resolution_matrix.rs`, `inference_resolution_wire.rs`) with `KNOWN_RED` as the bug inventory; **S2b**: resolution-time codes replayed from IDL error cases against the fake-composes-real-resolver world, D8's loop driven end to end against `with_undownloaded` | no CI lane builds `local`, so the local-lane cells run only on a developer machine; mutation gate blind to `local` arms (#3254/#3258) and to guards that are equivalent programs in every CI lane (#3267); cloud dispatch is observed only as far as the transport (a closed loopback port, S3b) — no test parses a provider's response body without a live key |
 
 ---
@@ -802,6 +803,8 @@ Verified against `main` at `98f8f324`; rows updated for S1 and S2 (S2a, S2b).
 | Q10 | What `pull` is | task-neutral, needs no execution build, resolves first: present catalogued file → `Ok` without network; path present → `Ok`; path absent → `unknown_model`; cloud → `unsupported_operation` (R6); downloads only for `NotDownloaded` |
 | Q11 | Cloud verb, network off, no key | `unsupported_operation` from a new `NetworkDisabled` availability, before the key is read — the refusal that does not change when the key is added |
 | Q12 | Zero-length file under `pull` | `NotDownloaded`; pull overwrites (same answer as the load verbs, §5.4) |
+| Q13 | `strata-v1-cli-sdk-experience.md` names `strata models …` | fix the lines, keep the document out of the guard: it is a design-era UX sketch (`strata init --local-ai`, SDK helpers that do not exist), not a reader surface — **decided** 2026-09-10 |
+| Q14 | `qwen3:1.7b:q4_k_m` is catalogued but its file is not published (#3300) | remove the variant in S4b, with Q3's rerankers — **decided** 2026-09-10 |
 
 Q9–Q12 were made by S0 because the matrix cannot hold a cell without an
 answer; they are recorded here so that S1 implements them rather than
@@ -833,11 +836,11 @@ table to the first or delete them.
 | spec grammar | rule 14, closing item 2, `inference.capability.md:6`, README examples | matrix is the authority; rule 14 points; IDL prose is the one list |
 | "why unavailable" | `error.code()` substring tables; D8 `is_missing_model` + `missing_model_spec`; `render.rs` status prose | `Availability` computed once, rendered everywhere |
 | 16-code embed set | `inference.embed`, `vector.upsert`, `vector.query` | named set (#3250) |
-| model size | `render.rs` MiB math + inference decimal | one formatter (R7) |
+| model size | `render.rs` MiB math + inference decimal | one formatter (R7, **done** in S4a) |
 | model directory | `ModelRegistry::new()` ×4 | one registry (R5) |
 | provider key | env read ×3 + CLI `set_var` bridge + CLI status relabel | one `ProviderSettings` (R4, **done** in S3a) |
 | provider base URL | a per-provider default string ×3, a `cfg(test)`-gated `with_api_base` | one `ProviderSettings::base_url` with SDK-convention env vars and one defaults table (R4, **done** in S3b) |
-| commands named in prose | README, `provider-api-keys.md`, `strata-v1-cli-sdk-experience.md`, registry hints, D8 prompt | clap-parse guard (R8) |
+| commands named in prose | README, `provider-api-keys.md`, `strata-v1-cli-sdk-experience.md`, registry hints, D8 prompt | clap-parse guard (R8, **done** in S4a for every surface but `strata-v1-cli-sdk-experience.md`, Q13) |
 | catalog repos | `catalog.rs` `hf_repo` strings | nightly HEAD check (R8) |
-| `STRATA_LOCAL_API_KEY` | `lib.rs:408` | delete |
+| `STRATA_LOCAL_API_KEY` | `lib.rs:408` | delete (**done** in S4a) |
 | `strata.error.details.inference.v1` | name on 20 rows, no definition | `AvailabilityDetails` is the definition (R3) |

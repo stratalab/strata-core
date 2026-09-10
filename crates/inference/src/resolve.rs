@@ -630,11 +630,15 @@ fn resolve_cloud(
         }
         Some(_) if !generation_provider_feature_enabled(provider) => Availability::ProviderNotBuilt,
         Some(_) if !network_enabled => Availability::NetworkDisabled,
-        Some(_) if !key_present(provider) => Availability::KeyMissing {
-            env_var: api_key_env_var(provider),
-            config_key: format!("{provider}.api_key"),
+        // A provider needs a key exactly when a variable names one — the
+        // table `status` reports `requires_api_key` from, so the two agree.
+        Some(_) => match api_key_env_var(provider) {
+            Some(env_var) if !key_present(provider) => Availability::KeyMissing {
+                env_var,
+                config_key: format!("{provider}.api_key"),
+            },
+            _ => Availability::Ready,
         },
-        Some(_) => Availability::Ready,
     };
     (ModelSource::Cloud, availability)
 }
@@ -1167,7 +1171,8 @@ mod tests {
                     Availability::NetworkDisabled
                 } else if !key {
                     Availability::KeyMissing {
-                        env_var: api_key_env_var(provider),
+                        env_var: api_key_env_var(provider)
+                            .expect("a cloud provider has a key variable"),
                         config_key: format!("{provider}.api_key"),
                     }
                 } else {

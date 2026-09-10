@@ -462,8 +462,10 @@ impl InferenceRuntime {
         .map(|provider| {
             let feature_enabled = generation_provider_feature_enabled(provider)
                 || embedding_provider_feature_enabled_for_capability(provider);
-            let requires_api_key = provider != ProviderKind::Local;
-            let key_env_var = requires_api_key.then(|| api_key_env_var(provider).to_owned());
+            // A provider requires a key exactly when a variable names one:
+            // the same table answers both, so they cannot disagree.
+            let key_env_var = api_key_env_var(provider).map(str::to_owned);
+            let requires_api_key = key_env_var.is_some();
             let key_source =
                 reported_key_source(requires_api_key, self.settings.0.key(provider).as_ref());
             let key_present = key_source.is_some();
@@ -546,7 +548,7 @@ impl InferenceRuntime {
                 && embedding_provider_feature_enabled_for_capability(provider),
             can_rank: abilities.rank && cfg!(feature = "local"),
             requires_network: provider != ProviderKind::Local,
-            requires_api_key: provider != ProviderKind::Local,
+            requires_api_key: api_key_env_var(provider).is_some(),
             provider_feature_enabled: generation_provider_feature_enabled(provider)
                 || embedding_provider_feature_enabled_for_capability(provider),
             network_enabled: self.config.network_enabled,
@@ -1104,21 +1106,18 @@ impl InferenceRuntime {
     /// in which the key disappears between the two reads.
     #[cfg(any(feature = "anthropic", feature = "openai", feature = "google"))]
     fn api_key(&self, provider: ProviderKind) -> Result<String, InferenceError> {
-        if provider == ProviderKind::Local {
+        let Some(env_var) = api_key_env_var(provider) else {
             return Err(InferenceError::Unsupported {
                 kind: UnsupportedKind::Provider,
                 message: "the local provider does not use API keys".to_owned(),
                 details: None,
             });
-        }
+        };
         self.settings.0.key(provider).map_or_else(
             || {
                 Err(InferenceError::ProviderFailed {
                     kind: ProviderFailure::MissingApiKey,
-                    message: crate::resolve::missing_api_key_message(
-                        provider,
-                        api_key_env_var(provider),
-                    ),
+                    message: crate::resolve::missing_api_key_message(provider, env_var),
                     details: None,
                 })
             },
@@ -1568,7 +1567,8 @@ mod tests {
             assert_eq!(
                 missing.availability,
                 Availability::KeyMissing {
-                    env_var: api_key_env_var(provider),
+                    env_var: api_key_env_var(provider)
+                        .expect("a cloud provider has a key variable"),
                     config_key: format!("{provider}.api_key"),
                 },
                 "{provider}"

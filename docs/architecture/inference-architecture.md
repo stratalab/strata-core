@@ -222,21 +222,31 @@ Current files and responsibilities:
     sandboxed agents, or CI with a native llama.cpp build.
 
 14. **V1 model specs use deterministic first-colon provider parsing.**
-    The stable V1 grammar is `provider:model`, where the provider prefix is
-    case-sensitive and is one of the registered provider names. A spec whose
-    first segment is not a registered provider name is a bare model name in
-    full — the registry's own catalog names are colon-shaped (`qwen3:1.7b`,
-    `tinyllama:q8_0`), so the parser cannot treat an unrecognised prefix as an
-    error (#3222). Bare model names resolve through the registry for the
-    requested task and default to the local provider when a local registry
-    match exists; otherwise they fail with `inference.missing_model` or
-    `inference.unsupported_provider` as appropriate. Leading or trailing
-    whitespace is invalid. Everything after the
-    first colon is provider-specific opaque text and may contain `/`, `-`, `.`,
-    additional `:`, or provider-defined characters. Task selection is not
-    encoded in the string; it comes from the operation path: generate, embed, or
-    rank. The post-V1 OpenAI-compatible endpoint grammar is reserved as
+    The stable V1 grammar is `provider:model`, split at the first colon.
+    The provider segment is one of the closed set of provider names
+    (`local`, `openai`, `anthropic`, `google`); the parser
+    (`parse_model_spec`) is lenient about how it is spelled — it trims the
+    spec and the segment and matches the name case-insensitively, so
+    `OpenAI:gpt-4o` and ` openai : gpt-4o ` name the same model. A spec
+    whose first segment is not a provider name is a local model name in
+    full — the catalog's own names are colon-shaped (`qwen3:1.7b`,
+    `tinyllama:q8_0`), so an unrecognised prefix is not an error (#3222).
+    Everything after the provider's colon is the model name: provider-opaque
+    text that may contain `/`, `-`, `.`, further `:`, or provider-defined
+    characters, passed through as written (an empty name, or an empty spec,
+    is `inference.invalid_request`). Task selection is not encoded in the
+    string; it comes from the operation path: generate, embed, or rank.
+    The post-V1 OpenAI-compatible endpoint grammar is reserved as
     `openai-compatible:<endpoint-id>:<model>`.
+
+    This rule states the grammar and nothing about how a parsed spec
+    resolves. What each spec form yields — which availability, which error
+    code, in which build and environment — is decided by the resolver and
+    proven cell by cell by `crates/inference/tests/resolution_matrix.rs`,
+    the authoritative statement of resolution behaviour; this rule does not
+    restate its cells (#3257). The user-facing list of spec forms is the one
+    in `crates/executor/idl/v1/prose/commands/inference.capability.md`, from
+    which the generated reference derives.
 
 15. **Embedding and ranking get explicit operation DTOs.**
     V1 should add `EmbedRequest`, `EmbedResponse`, `RankRequest`, and
@@ -775,8 +785,10 @@ The first-pass draft closes these choices:
 
 1. Provider runtimes are explicit features; the lower inference crate default
    is minimal.
-2. V1 model specs use case-sensitive first-colon `provider:model` parsing,
-   with bare names resolved through the local task registry.
+2. V1 model specs use first-colon `provider:model` parsing with a
+   case-insensitive, whitespace-tolerant provider segment; a spec without a
+   provider prefix is a local model name in full (rule 14). Resolution
+   outcomes are the resolution matrix's to state, not this document's.
 3. Embedding and ranking get explicit request/response DTOs with item-level
    outcomes.
 4. Explicit unsupported request knobs are rejected or surfaced as hard

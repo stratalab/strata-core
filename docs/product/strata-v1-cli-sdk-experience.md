@@ -369,8 +369,8 @@ Local AI setup can happen through the CLI:
 
 ```sh
 strata init --local-ai
-strata models list
-strata models pull qwen3-embedding
+strata inference models list
+strata inference models pull qwen3-embedding
 ```
 
 or through SDK helper APIs:
@@ -389,7 +389,7 @@ Using local AI without the required model should fail with a direct fix:
 Local model qwen3-embedding is not installed.
 
 Install it with:
-  strata models pull qwen3-embedding
+  strata inference models pull qwen3-embedding
 ```
 
 Local AI rules:
@@ -480,7 +480,7 @@ db = strata.open_cache()
 Local AI:
 
 ```sh
-strata models pull qwen3-embedding
+strata inference models pull qwen3-embedding
 ```
 
 ## V1 Pathway Coverage
@@ -514,7 +514,7 @@ cache, CLI, SDK, REPL, scripting, or capability-error story.
 | 20. Use query expansion and reranking | Expansion and reranking must be explicit inference-backed recipe stages. They may use local or cloud AI, but database open must not trigger network calls or model downloads. |
 | 21. Ask retrieval-backed questions | Question-answering commands should be explicit AI/retrieval commands with clear provider/model selection, grounding diagnostics, and no hidden provider calls. |
 | 22. Configure auto-embedding and indexing | Users should enable, inspect, repair, and reindex derived state through safe command groups. The UX should not expose low-level flush or compaction as normal maintenance. |
-| 23. Manage models and inference configuration | `strata models ...`, `strata init --local-ai`, SDK local-AI helpers, and provider configuration cover model listing, pulling, local availability, and cloud-provider setup. |
+| 23. Manage models and inference configuration | `strata inference models ...`, `strata init --local-ai`, SDK local-AI helpers, and provider configuration cover model listing, pulling, local availability, and cloud-provider setup. |
 | 24. Generate, tokenize, and detokenize text | Inference utility commands should be explicit CLI/SDK calls and must work independently of database creation when no database context is required. |
 | 25. Create and manage branch workspaces | Branch create/list/delete/select/inspect commands should be available through CLI, REPL context, SDK namespaces, and agent JSON output. |
 | 26. Inspect record history | History commands should work across supported primitives and expose versions, timestamps, values, and deletion markers through CLI, SDK, and JSON output. |

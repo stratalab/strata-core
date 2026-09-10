@@ -69,7 +69,7 @@ mod provider;
 mod generate;
 
 pub use error::{InferenceError, ProviderFailure, RegistryFailure, UnsupportedKind};
-pub use registry::{ModelInfo, ModelRegistry, ModelTask};
+pub use registry::{format_size, ModelInfo, ModelRegistry, ModelTask};
 pub use resolve::{
     Availability, AvailabilityDetails, AvailabilityKind, ModelSource, ModelUse, ResolvedModel,
 };
@@ -403,18 +403,20 @@ pub fn parse_model_spec(spec: &str) -> Result<(ProviderKind, String), InferenceE
     Ok((provider, model.to_string()))
 }
 
-/// Environment variable name for a provider's API key.
+/// Environment variable name for a provider's API key. `None` for the local
+/// provider, which has no key: a variable nothing reads is not a fact to
+/// report, so it has no name here (#3261).
 ///
 /// Not gated on the cloud features: `status` reports every provider, including
 /// the ones this build cannot call, and naming the variable is exactly how it
 /// says what a caller would need to set. A pure name mapping with no
 /// dependencies, so there is nothing to gate.
-pub(crate) const fn api_key_env_var(provider: ProviderKind) -> &'static str {
+pub(crate) const fn api_key_env_var(provider: ProviderKind) -> Option<&'static str> {
     match provider {
-        ProviderKind::Anthropic => "ANTHROPIC_API_KEY",
-        ProviderKind::OpenAI => "OPENAI_API_KEY",
-        ProviderKind::Google => "GOOGLE_API_KEY",
-        ProviderKind::Local => "STRATA_LOCAL_API_KEY", // unused, but complete
+        ProviderKind::Anthropic => Some("ANTHROPIC_API_KEY"),
+        ProviderKind::OpenAI => Some("OPENAI_API_KEY"),
+        ProviderKind::Google => Some("GOOGLE_API_KEY"),
+        ProviderKind::Local => None,
     }
 }
 
@@ -445,31 +447,31 @@ pub struct ProviderKeyInfo {
 pub const CLOUD_PROVIDER_KEYS: &[ProviderKeyInfo] = &[
     ProviderKeyInfo {
         provider: "openai",
-        env_var: api_key_env_var(ProviderKind::OpenAI),
+        env_var: cloud_variable(api_key_env_var(ProviderKind::OpenAI)),
         base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::OpenAI)),
         acquisition_url: "https://platform.openai.com/api-keys",
     },
     ProviderKeyInfo {
         provider: "anthropic",
-        env_var: api_key_env_var(ProviderKind::Anthropic),
+        env_var: cloud_variable(api_key_env_var(ProviderKind::Anthropic)),
         base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::Anthropic)),
         acquisition_url: "https://console.anthropic.com/settings/keys",
     },
     ProviderKeyInfo {
         provider: "google",
-        env_var: api_key_env_var(ProviderKind::Google),
+        env_var: cloud_variable(api_key_env_var(ProviderKind::Google)),
         base_url_env_var: cloud_variable(base_url_env_var(ProviderKind::Google)),
         acquisition_url: "https://aistudio.google.com/apikey",
     },
 ];
 
 /// Unwraps a cloud provider's variable name at compile time: every entry of
-/// [`CLOUD_PROVIDER_KEYS`] is a cloud provider, and each has one, so the
-/// panic is a build error and never a runtime path.
+/// [`CLOUD_PROVIDER_KEYS`] is a cloud provider, and each has both variables,
+/// so the panic is a build error and never a runtime path.
 const fn cloud_variable(variable: Option<&'static str>) -> &'static str {
     match variable {
         Some(variable) => variable,
-        None => panic!("every cloud provider has a base URL variable"),
+        None => panic!("every cloud provider has a key variable and a base URL variable"),
     }
 }
 
@@ -922,6 +924,9 @@ string ::= "\"" [a-zA-Z]+ "\""
             ("openai:gpt-4o-mini", ProviderKind::OpenAI, "gpt-4o-mini"),
             // Whitespace after the provider's colon is not part of the model name.
             ("openai: gpt-4o-mini", ProviderKind::OpenAI, "gpt-4o-mini"),
+            // Nor is whitespace around the spec or the provider segment (the
+            // example architecture rule 14 gives).
+            (" OpenAI : gpt-4o ", ProviderKind::OpenAI, "gpt-4o"),
             (
                 "Anthropic:claude-sonnet-4-6",
                 ProviderKind::Anthropic,
@@ -1031,7 +1036,7 @@ string ::= "\"" [a-zA-Z]+ "\""
             let kind: ProviderKind = info.provider.parse().expect("a canonical provider name");
             assert_ne!(kind, ProviderKind::Local, "{}", info.provider);
             assert_eq!(kind.to_string(), info.provider, "canonical spelling");
-            assert_eq!(info.env_var, api_key_env_var(kind));
+            assert_eq!(Some(info.env_var), api_key_env_var(kind));
             assert_eq!(Some(info.base_url_env_var), base_url_env_var(kind));
             assert!(
                 info.acquisition_url.starts_with("https://"),

@@ -124,6 +124,7 @@ fn render_human(value: &Value, out: &mut String) -> Result<(), CliError> {
             "inference_token_ids" => print_token_ids(data, out),
             "inference_embeddings" => print_embeddings_summary(data, out),
             "inference_ranking" => print_ranking(data, out),
+            #[cfg(feature = "inference")]
             "inference_models" => print_inference_models(data, out),
             "inference_status" => print_inference_status(data, out),
             "inference_model_pulled" => print_model_pulled(data, out),
@@ -409,8 +410,12 @@ fn print_ranking(data: &Value, out: &mut String) {
     }
 }
 
+/// The `inference_models` tag exists only with the feature (the executor's
+/// `Output::InferenceModels` is gated on it), and so does the size formatter
+/// the row reads — the inference crate's, the one the download offer's
+/// refusal quotes (#3235).
+#[cfg(feature = "inference")]
 fn print_inference_models(data: &Value, out: &mut String) {
-    const MIB: u64 = 1_048_576;
     let Some(items) = data.get("items").and_then(Value::as_array) else {
         line!(out, "(nil)");
         return;
@@ -441,10 +446,10 @@ fn print_inference_models(data: &Value, out: &mut String) {
             (true, true) => "ready",
             (true, false) => "not downloaded",
         };
-        let size = item.get("size_bytes").and_then(Value::as_u64).map_or_else(
-            || "-".to_owned(),
-            |bytes| format!("{}.{} MB", bytes / MIB, (bytes % MIB) * 10 / MIB),
-        );
+        let size = item
+            .get("size_bytes")
+            .and_then(Value::as_u64)
+            .map_or_else(|| "-".to_owned(), strata_executor::format_model_size);
         line!(
             out,
             "{}\t{}\t{}\t{}\t{}\t{}",
@@ -1616,6 +1621,7 @@ mod tests {
         assert_eq!(human(&value), "0\t0.900000\n1\t0.500000\nfailed: bad\n");
     }
 
+    #[cfg(feature = "inference")]
     #[test]
     fn human_inference_models_list_none_and_nil() {
         let list = json!({
@@ -1626,15 +1632,44 @@ mod tests {
                 "size_bytes": 1_048_576
             }] }
         });
-        assert_eq!(human(&list), "m\tchat\tllama\tq4\tready\t1.0 MB\n");
+        assert_eq!(human(&list), "m\tchat\tllama\tq4\tready\t1 MB\n");
         let none = json!({ "type": "inference_models", "data": { "items": [] } });
         assert_eq!(human(&none), "(none)\n");
         let nil = json!({ "type": "inference_models", "data": {} });
         assert_eq!(human(&nil), "(nil)\n");
     }
 
+    /// #3235: the table's size column is the inference crate's formatter —
+    /// decimal units, the same text the download offer's refusal quotes — not
+    /// a binary-unit rendering of its own.
+    #[cfg(feature = "inference")]
+    #[test]
+    fn human_inference_models_sizes_in_the_units_the_refusal_uses() {
+        let row = |size_bytes: u64| {
+            human(&json!({
+                "type": "inference_models",
+                "data": { "items": [{
+                    "name": "m", "task": "chat", "architecture": "llama",
+                    "default_quant": "q4", "is_local": true, "runnable": true,
+                    "size_bytes": size_bytes
+                }] }
+            }))
+        };
+        assert_eq!(row(1_100_000_000), "m\tchat\tllama\tq4\tready\t1.1 GB\n");
+        assert_eq!(row(45_000_000), "m\tchat\tllama\tq4\tready\t45 MB\n");
+        assert_eq!(row(999_999), "m\tchat\tllama\tq4\tready\t999999 bytes\n");
+        assert_eq!(
+            row(1_100_000_000).trim_end(),
+            format!(
+                "m\tchat\tllama\tq4\tready\t{}",
+                strata_executor::format_model_size(1_100_000_000)
+            )
+        );
+    }
+
     /// #3124: a released binary lists models it cannot load. The row must say
     /// so, and the footer must name both ways forward.
+    #[cfg(feature = "inference")]
     #[test]
     fn human_inference_models_marks_what_this_build_cannot_run() {
         let list = json!({
@@ -1655,7 +1690,7 @@ mod tests {
         let rendered = human(&list);
         // The file being present must not read as "usable".
         assert!(
-            rendered.contains("miniLM\tembed\tbert\tf16\tunavailable\t1.0 MB"),
+            rendered.contains("miniLM\tembed\tbert\tf16\tunavailable\t1 MB"),
             "a downloaded but unrunnable model must still read unavailable: {rendered}"
         );
         assert!(rendered.contains("2 model(s) unavailable"));
@@ -1668,6 +1703,7 @@ mod tests {
 
     /// A build that can run local models says nothing about unavailability, and
     /// distinguishes downloaded from not.
+    #[cfg(feature = "inference")]
     #[test]
     fn human_inference_models_separates_ready_from_not_downloaded() {
         let list = json!({
@@ -1686,8 +1722,8 @@ mod tests {
             ] }
         });
         let rendered = human(&list);
-        assert!(rendered.contains("here\tembed\tbert\tf16\tready\t1.0 MB"));
-        assert!(rendered.contains("absent\tembed\tbert\tf16\tnot downloaded\t1.0 MB"));
+        assert!(rendered.contains("here\tembed\tbert\tf16\tready\t1 MB"));
+        assert!(rendered.contains("absent\tembed\tbert\tf16\tnot downloaded\t1 MB"));
         assert!(
             !rendered.contains("unavailable"),
             "nothing is unavailable in a build that can run them: {rendered}"

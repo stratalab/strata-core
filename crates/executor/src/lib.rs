@@ -67,7 +67,8 @@ pub use strata_engine::{
 pub use strata_inference::testkit::FakeInferenceService;
 #[cfg(feature = "inference")]
 pub use strata_inference::{
-    provider_key_info as inference_provider_key_info, ProviderKeyInfo as InferenceProviderKeyInfo,
+    format_size as format_model_size, provider_key_info as inference_provider_key_info,
+    ProviderKeyInfo as InferenceProviderKeyInfo,
     CLOUD_PROVIDER_KEYS as INFERENCE_CLOUD_PROVIDER_KEYS,
 };
 #[cfg(feature = "inference")]

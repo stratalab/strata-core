@@ -407,7 +407,11 @@ impl Default for ModelRegistry {
     }
 }
 
-/// Format bytes as a human-readable string (e.g., "4.7 GB").
+/// Format a model size as a human-readable string (e.g., "4.7 GB").
+///
+/// The one formatter for model sizes: the download offer's refusal and the
+/// CLI's `models list` table both read it, so a size is the same text
+/// wherever it is quoted (#3235).
 pub fn format_size(bytes: u64) -> String {
     const GB: u64 = 1_000_000_000;
     const MB: u64 = 1_000_000;
