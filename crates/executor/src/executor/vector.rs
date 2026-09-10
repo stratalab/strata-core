@@ -224,7 +224,7 @@ impl Executor {
                 None => service.recorded_embedding_model(collection)?,
             }
         };
-        self.embed_text_with(model.as_str(), text, purpose)
+        self.embed_text_with(collection, model.as_str(), text, purpose)
     }
 
     // One function with a feature-split body rather than two `#[cfg]`
@@ -238,6 +238,7 @@ impl Executor {
     )]
     fn embed_text_with(
         &mut self,
+        collection: &EngineVectorCollectionName,
         model: &str,
         text: String,
         purpose: EmbedPurpose,
@@ -258,7 +259,16 @@ impl Executor {
                 input_type: Some(purpose.input_type()),
                 instruction: None,
             };
-            let response = self.inference.embeddings(model, &request)?;
+            // The spec came from the collection's record, not the command;
+            // a resolution refusal names the collection so the caller knows
+            // where to look (#3226). A failure past resolution carries no
+            // resolver answer and so no collection either.
+            let response = self
+                .inference
+                .embeddings(model, &request)
+                .map_err(|error| {
+                    ExecutorError::from_inference(&error, Some(collection.as_str()))
+                })?;
             let item = response.data.into_iter().next().ok_or_else(|| {
                 ExecutorError::new(
                     "inference.provider_malformed_response",
@@ -271,7 +281,7 @@ impl Executor {
         {
             // The parameters exist so both builds have one signature; without
             // an inference runtime there is nothing to hand them to.
-            let _ = (model, text, purpose);
+            let _ = (collection, model, text, purpose);
             Err(ExecutorError::new(
                 "inference.unsupported_operation",
                 "this build has no inference support, so `text` cannot be \

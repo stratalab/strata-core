@@ -3,30 +3,36 @@ use std::fmt;
 
 use serde::ser::Serializer;
 
+use crate::resolve::AvailabilityDetails;
+
 /// Errors that can occur during inference operations.
+///
+/// Serializes externally tagged (`{"RegistryFailed": {"kind": …, "message":
+/// …}}`) with every message redacted on the way out; `details` appears only
+/// when present.
 #[non_exhaustive]
-#[derive(Clone, PartialEq, Eq, serde::Deserialize)]
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum InferenceError {
     /// Local llama.cpp runtime failure.
-    LlamaCpp(String),
+    LlamaCpp(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// Cloud provider failure.
-    Provider(String),
+    Provider(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// Model registry or model download failure.
-    Registry(String),
+    Registry(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// Filesystem or process IO failure.
-    Io(String),
+    Io(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// Requested provider, model, or operation is unavailable.
-    NotSupported(String),
+    NotSupported(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// The model spec itself is malformed (empty, or a provider prefix with
     /// no model name after it) — caller input error, not a provider outage.
     /// A prefix that is not a provider name is not malformed: the spec is a
     /// local model name and the registry decides whether it exists (#3222).
-    InvalidSpec(String),
+    InvalidSpec(#[serde(serialize_with = "serialize_redacted")] String),
 
     /// A model-registry failure whose classification was decided **where the
     /// failure happened**.
@@ -40,7 +46,12 @@ pub enum InferenceError {
         /// What went wrong, decided at the raise site.
         kind: RegistryFailure,
         /// Human-readable detail. Carries no classification weight.
+        #[serde(serialize_with = "serialize_redacted")]
         message: String,
+        /// The resolver's answer, when this refusal came from resolution.
+        /// Boxed so the payload of one arm does not widen every `Result`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Box<AvailabilityDetails>>,
     },
 
     /// A cloud provider failure whose classification was decided **where the
@@ -59,7 +70,12 @@ pub enum InferenceError {
         /// What went wrong, decided at the raise site.
         kind: ProviderFailure,
         /// Human-readable detail. Carries no classification weight.
+        #[serde(serialize_with = "serialize_redacted")]
         message: String,
+        /// The resolver's answer, when this refusal came from resolution.
+        /// Boxed so the payload of one arm does not widen every `Result`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Box<AvailabilityDetails>>,
     },
 
     /// A refusal whose classification was decided **where it was raised**.
@@ -74,8 +90,19 @@ pub enum InferenceError {
         /// What is unsupported, decided at the raise site.
         kind: UnsupportedKind,
         /// Human-readable detail. Carries no classification weight.
+        #[serde(serialize_with = "serialize_redacted")]
         message: String,
+        /// The resolver's answer, when this refusal came from resolution.
+        /// Boxed so the payload of one arm does not widen every `Result`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        details: Option<Box<AvailabilityDetails>>,
     },
+}
+
+/// Redacts a message on its way to the wire, so a provider's error text
+/// cannot carry a key out in a serialized error (Rule 31).
+fn serialize_redacted<S: Serializer>(message: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&redact_secrets(message))
 }
 
 /// What a typed refusal is about, as known at the point of refusal.
@@ -106,7 +133,12 @@ impl UnsupportedKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RegistryFailure {
-    /// The model is catalogued but its artifact is not on disk.
+    /// The name is not in the catalog, or the path has no file: nothing to
+    /// pull, nothing to load. The other half of what `MissingModel` used to
+    /// mean (#3256).
+    UnknownModel,
+    /// The model is catalogued but its artifact is not on disk — a `pull`
+    /// away from ready.
     MissingModel,
     /// This build cannot download, or the runtime forbids network access.
     DownloadDisabled,
@@ -123,6 +155,7 @@ impl RegistryFailure {
     #[must_use]
     pub const fn code(self) -> &'static str {
         match self {
+            Self::UnknownModel => "inference.unknown_model",
             Self::MissingModel => "inference.missing_model",
             Self::DownloadDisabled => "inference.download_disabled",
             Self::DownloadFailed => "inference.download_failed",
@@ -231,20 +264,35 @@ impl fmt::Debug for InferenceError {
                 .debug_tuple("InvalidSpec")
                 .field(&redact_secrets(message))
                 .finish(),
-            Self::RegistryFailed { kind, message } => formatter
+            Self::RegistryFailed {
+                kind,
+                message,
+                details,
+            } => formatter
                 .debug_struct("RegistryFailed")
                 .field("kind", kind)
                 .field("message", &redact_secrets(message))
+                .field("details", details)
                 .finish(),
-            Self::ProviderFailed { kind, message } => formatter
+            Self::ProviderFailed {
+                kind,
+                message,
+                details,
+            } => formatter
                 .debug_struct("ProviderFailed")
                 .field("kind", kind)
                 .field("message", &redact_secrets(message))
+                .field("details", details)
                 .finish(),
-            Self::Unsupported { kind, message } => formatter
+            Self::Unsupported {
+                kind,
+                message,
+                details,
+            } => formatter
                 .debug_struct("Unsupported")
                 .field("kind", kind)
                 .field("message", &redact_secrets(message))
+                .field("details", details)
                 .finish(),
         }
     }
@@ -280,103 +328,7 @@ impl fmt::Display for InferenceError {
     }
 }
 
-impl serde::Serialize for InferenceError {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match self {
-            Self::LlamaCpp(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                0,
-                "LlamaCpp",
-                &redact_secrets(message),
-            ),
-            Self::Provider(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                1,
-                "Provider",
-                &redact_secrets(message),
-            ),
-            Self::Registry(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                2,
-                "Registry",
-                &redact_secrets(message),
-            ),
-            Self::Io(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                3,
-                "Io",
-                &redact_secrets(message),
-            ),
-            Self::NotSupported(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                4,
-                "NotSupported",
-                &redact_secrets(message),
-            ),
-            Self::InvalidSpec(message) => serializer.serialize_newtype_variant(
-                "InferenceError",
-                5,
-                "InvalidSpec",
-                &redact_secrets(message),
-            ),
-            Self::RegistryFailed { kind, message } => {
-                use serde::ser::SerializeStructVariant as _;
-                let mut variant = serializer.serialize_struct_variant(
-                    "InferenceError",
-                    7,
-                    "RegistryFailed",
-                    2,
-                )?;
-                variant.serialize_field("kind", kind)?;
-                variant.serialize_field("message", &redact_secrets(message))?;
-                variant.end()
-            }
-            Self::ProviderFailed { kind, message } => {
-                use serde::ser::SerializeStructVariant as _;
-                let mut variant = serializer.serialize_struct_variant(
-                    "InferenceError",
-                    6,
-                    "ProviderFailed",
-                    2,
-                )?;
-                variant.serialize_field("kind", kind)?;
-                variant.serialize_field("message", &redact_secrets(message))?;
-                variant.end()
-            }
-            Self::Unsupported { kind, message } => {
-                use serde::ser::SerializeStructVariant as _;
-                let mut variant =
-                    serializer.serialize_struct_variant("InferenceError", 8, "Unsupported", 2)?;
-                variant.serialize_field("kind", kind)?;
-                variant.serialize_field("message", &redact_secrets(message))?;
-                variant.end()
-            }
-        }
-    }
-}
-
 impl Error for InferenceError {}
-
-/// Stable inference error class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InferenceErrorClass {
-    /// Caller supplied invalid input.
-    InvalidInput,
-    /// Requested model/provider is not available.
-    NotFound,
-    /// Required provider, model, or runtime is unavailable.
-    Unavailable,
-    /// Operation can be retried without changing user input.
-    Retryable,
-    /// Stored or downloaded model data is corrupt.
-    Corruption,
-    /// Internal runtime failure.
-    Internal,
-}
 
 impl From<std::io::Error> for InferenceError {
     fn from(e: std::io::Error) -> Self {
@@ -400,38 +352,29 @@ impl InferenceError {
         }
     }
 
-    /// Returns the stable public error class.
-    pub fn class(&self) -> InferenceErrorClass {
-        match self.code() {
-            "inference.invalid_request"
-            | "inference.unsupported_parameter"
-            | "inference.download_disabled" => InferenceErrorClass::InvalidInput,
-            "inference.missing_model"
-            | "inference.unsupported_provider"
-            | "inference.provider_model_not_found" => InferenceErrorClass::NotFound,
-            "inference.provider_rate_limited" | "inference.provider_timeout" => {
-                InferenceErrorClass::Retryable
-            }
-            "inference.download_verification_failed"
-            | "inference.registry_corrupt"
-            | "inference.provider_malformed_response" => InferenceErrorClass::Corruption,
-            "inference.local_runtime_failed" | "inference.io_failure" => {
-                InferenceErrorClass::Internal
-            }
-            _ => InferenceErrorClass::Unavailable,
+    /// The resolver's answer this error carries, when it came from
+    /// resolution: which model, who serves it, and why it cannot be used.
+    ///
+    /// The code says what class of thing went wrong; this says what to do
+    /// about it. `None` for errors raised past resolution (a provider call
+    /// that failed, a file that would not load) and for the string variants.
+    ///
+    /// The code's class and retry policy are not here on purpose: they are
+    /// facts of the executor's error registry, which this crate cannot read
+    /// (Rule 3), so a copy here could only drift from it (#3286).
+    #[must_use]
+    pub fn availability(&self) -> Option<&AvailabilityDetails> {
+        match self {
+            Self::RegistryFailed { details, .. }
+            | Self::ProviderFailed { details, .. }
+            | Self::Unsupported { details, .. } => details.as_deref(),
+            Self::LlamaCpp(_)
+            | Self::Provider(_)
+            | Self::Registry(_)
+            | Self::Io(_)
+            | Self::NotSupported(_)
+            | Self::InvalidSpec(_) => None,
         }
-    }
-
-    /// Returns whether retrying without changing input may succeed.
-    pub fn retryable(&self) -> bool {
-        matches!(
-            self.code(),
-            "inference.provider_rate_limited"
-                | "inference.provider_timeout"
-                | "inference.provider_unavailable"
-                | "inference.download_failed"
-                | "inference.io_failure"
-        )
     }
 
     /// Returns the public redacted message.

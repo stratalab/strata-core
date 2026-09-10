@@ -546,6 +546,7 @@ The global V1 registry should reserve these starter inference codes:
 | Code | Class | Retry policy |
 | --- | --- | --- |
 | `inference.invalid_request` | `invalid_argument` | `never` |
+| `inference.unknown_model` | `not_found` | `never` |
 | `inference.missing_model` | `failed_precondition` | `after_state_change` |
 | `inference.model_load_failed` | `failed_precondition` | `after_state_change` |
 | `inference.unsupported_provider` | `unsupported` | `never` |
@@ -565,6 +566,19 @@ The global V1 registry should reserve these starter inference codes:
 | `inference.local_runtime_failed` | `unavailable` | `unknown` |
 | `inference.registry_corrupt` | `corruption` | `never` |
 | `inference.io_failure` | `io` | `unknown` |
+
+A refusal raised at model resolution carries the resolver's answer as data.
+`strata_inference::AvailabilityDetails` is the definition of
+`strata.error.details.inference.v1`: the executor flattens it into the
+envelope's `details`, one entry per field keyed by the field's own name, and
+adds `collection` when the spec came from a vector collection's record. An
+inference error raised past resolution (a provider response, a corrupt
+registry, an I/O failure) carries no such details. A client acts on
+`details.availability` and `details.pull_spec`, never on the message and never
+on a code that could mean two things (`inference.unknown_model` is "not a model
+this binary knows"; `inference.missing_model` is "catalogued, not downloaded").
+The executor's `inference_resolution_wire` test pins the pass-through for every
+resolution cell.
 
 Raw provider response bodies, raw llama.cpp messages, native pointer details,
 and full prompt or document content are diagnostics context only. They must not

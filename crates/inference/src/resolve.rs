@@ -144,7 +144,134 @@ pub enum Availability {
     },
 }
 
+impl Availability {
+    /// The variant alone, for the wire.
+    #[must_use]
+    pub const fn kind(&self) -> AvailabilityKind {
+        match self {
+            Self::Ready => AvailabilityKind::Ready,
+            Self::NotInCatalog => AvailabilityKind::NotInCatalog,
+            Self::PathMissing => AvailabilityKind::PathMissing,
+            Self::TaskNotSupported { .. } => AvailabilityKind::TaskNotSupported,
+            Self::LocalExecutionNotBuilt => AvailabilityKind::LocalExecutionNotBuilt,
+            Self::ProviderNotBuilt => AvailabilityKind::ProviderNotBuilt,
+            Self::NetworkDisabled => AvailabilityKind::NetworkDisabled,
+            Self::KeyMissing { .. } => AvailabilityKind::KeyMissing,
+            Self::NotDownloaded { .. } => AvailabilityKind::NotDownloaded,
+        }
+    }
+}
+
+/// [`Availability`] without its payload: the one word a caller branches on.
+///
+/// Serializes as the snake_case variant name (`not_downloaded`), which is the
+/// value of `details.availability` on every inference refusal.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "wire-schemas", derive(schemars::JsonSchema))]
+#[serde(rename_all = "snake_case")]
+pub enum AvailabilityKind {
+    /// [`Availability::Ready`].
+    Ready,
+    /// [`Availability::NotInCatalog`].
+    NotInCatalog,
+    /// [`Availability::PathMissing`].
+    PathMissing,
+    /// [`Availability::TaskNotSupported`].
+    TaskNotSupported,
+    /// [`Availability::LocalExecutionNotBuilt`].
+    LocalExecutionNotBuilt,
+    /// [`Availability::ProviderNotBuilt`].
+    ProviderNotBuilt,
+    /// [`Availability::NetworkDisabled`].
+    NetworkDisabled,
+    /// [`Availability::KeyMissing`].
+    KeyMissing,
+    /// [`Availability::NotDownloaded`].
+    NotDownloaded,
+}
+
+/// The wire shape of a [`ResolvedModel`]'s answer. This type *is* the
+/// definition of `strata.error.details.inference.v1`: every inference
+/// refusal that came from resolution carries one, flattened by the executor
+/// into the envelope's `details` with these field names as keys, and only
+/// the fields that are `Some` appear.
+///
+/// A caller that wants to act on a refusal reads `availability` here, never
+/// the error code: the code says what class of thing went wrong, this says
+/// what to do about it (`pull_spec` for a download, `key_env_var` for a key).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[cfg_attr(feature = "wire-schemas", derive(schemars::JsonSchema))]
+#[non_exhaustive]
+pub struct AvailabilityDetails {
+    /// The model name without its provider prefix, as [`ResolvedModel::name`].
+    pub model: String,
+    /// Who serves it.
+    pub provider: ProviderKind,
+    /// Whether it can be used right now, and if not, the one reason why.
+    pub availability: AvailabilityKind,
+    /// The spec `strata inference models pull` takes to fetch it. Present
+    /// only for [`AvailabilityKind::NotDownloaded`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_spec: Option<String>,
+    /// The download size in bytes. Present only for
+    /// [`AvailabilityKind::NotDownloaded`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    /// The environment variable that would hold the provider key. Present
+    /// only for [`AvailabilityKind::KeyMissing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_env_var: Option<String>,
+    /// The `strata config` key that would hold the provider key. Present
+    /// only for [`AvailabilityKind::KeyMissing`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_key: Option<String>,
+    /// Set by the executor when the spec came from a collection record, so
+    /// the refusal says which record named the model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub collection: Option<String>,
+}
+
 impl ResolvedModel {
+    /// This answer as data, for an error to carry or `capability` to report.
+    #[must_use]
+    pub fn details(&self) -> AvailabilityDetails {
+        let mut details = AvailabilityDetails {
+            model: self.name.clone(),
+            provider: self.provider,
+            availability: self.availability.kind(),
+            pull_spec: None,
+            size_bytes: None,
+            key_env_var: None,
+            config_key: None,
+            collection: None,
+        };
+        match &self.availability {
+            Availability::KeyMissing {
+                env_var,
+                config_key,
+            } => {
+                details.key_env_var = Some((*env_var).to_owned());
+                details.config_key = Some(config_key.clone());
+            }
+            Availability::NotDownloaded {
+                pull_spec,
+                size_bytes,
+            } => {
+                details.pull_spec = Some(pull_spec.clone());
+                details.size_bytes = Some(*size_bytes);
+            }
+            Availability::Ready
+            | Availability::NotInCatalog
+            | Availability::PathMissing
+            | Availability::TaskNotSupported { .. }
+            | Availability::LocalExecutionNotBuilt
+            | Availability::ProviderNotBuilt
+            | Availability::NetworkDisabled => {}
+        }
+        details
+    }
+
     /// The one place an [`Availability`] becomes an error.
     ///
     /// Total over the enum on purpose: a new variant does not compile until
@@ -152,25 +279,32 @@ impl ResolvedModel {
     /// no wording below is load-bearing — which is what lets the messages
     /// name the spec the caller typed without a stray "provider" or
     /// "download" in it reclassifying the refusal (#3216).
+    ///
+    /// Every refusal carries [`Self::details`], so the caller gets the same
+    /// answer `capability` would have given, with the code beside it.
     pub fn require_ready(&self) -> Result<(), InferenceError> {
         let spec = &self.spec;
+        let details = Some(Box::new(self.details()));
         match &self.availability {
             Availability::Ready => Ok(()),
             Availability::NotInCatalog => Err(InferenceError::RegistryFailed {
-                kind: RegistryFailure::MissingModel,
+                kind: RegistryFailure::UnknownModel,
                 message: self.not_in_catalog_message(),
+                details,
             }),
             Availability::PathMissing => Err(InferenceError::RegistryFailed {
-                kind: RegistryFailure::MissingModel,
+                kind: RegistryFailure::UnknownModel,
                 message: format!(
                     "No model file at `{}`. Pass the path of a GGUF file, or a catalog \
                      name from `strata inference models list`.",
                     self.name
                 ),
+                details,
             }),
             Availability::TaskNotSupported { requested } => Err(InferenceError::Unsupported {
                 kind: UnsupportedKind::Operation,
                 message: self.task_not_supported_message(*requested),
+                details,
             }),
             Availability::LocalExecutionNotBuilt => Err(InferenceError::Unsupported {
                 kind: UnsupportedKind::Operation,
@@ -179,6 +313,7 @@ impl ResolvedModel {
                      execution: {LOCAL_UNAVAILABLE_REMEDY} `strata inference status` shows \
                      which of those are ready."
                 ),
+                details,
             }),
             Availability::ProviderNotBuilt => Err(InferenceError::Unsupported {
                 kind: UnsupportedKind::Provider,
@@ -186,6 +321,7 @@ impl ResolvedModel {
                     "the {} provider is not built into this binary",
                     self.provider
                 ),
+                details,
             }),
             Availability::NetworkDisabled => Err(InferenceError::Unsupported {
                 kind: UnsupportedKind::Operation,
@@ -193,10 +329,12 @@ impl ResolvedModel {
                     "`{spec}` is a cloud model, and network access is disabled for this \
                      runtime"
                 ),
+                details,
             }),
             Availability::KeyMissing { env_var, .. } => Err(InferenceError::ProviderFailed {
                 kind: ProviderFailure::MissingApiKey,
                 message: missing_api_key_message(self.provider, env_var),
+                details,
             }),
             Availability::NotDownloaded {
                 pull_spec,
@@ -204,6 +342,7 @@ impl ResolvedModel {
             } => Err(InferenceError::RegistryFailed {
                 kind: RegistryFailure::MissingModel,
                 message: self.not_downloaded_message(pull_spec, *size_bytes),
+                details,
             }),
         }
     }
@@ -542,7 +681,7 @@ mod tests {
                 ModelSource::Uncatalogued { entry: None }
             ));
             let err = resolved.require_ready().expect_err("not ready");
-            assert_eq!(err.code(), "inference.missing_model");
+            assert_eq!(err.code(), "inference.unknown_model");
             let message = err.to_string();
             assert!(message.contains("Unknown model"), "{message}");
             assert!(
@@ -562,7 +701,7 @@ mod tests {
         };
         assert_eq!(entry.name, "tinyllama");
         let err = resolved.require_ready().expect_err("not ready");
-        assert_eq!(err.code(), "inference.missing_model");
+        assert_eq!(err.code(), "inference.unknown_model");
         let message = err.to_string();
         assert!(message.contains("Unknown quant"), "{message}");
         assert!(message.contains("q4_k_m"), "{message}");
@@ -579,7 +718,7 @@ mod tests {
             assert_eq!(resolved.availability, Availability::PathMissing, "{use_:?}");
             assert_eq!(resolved.local_path(), Some(absent.as_path()));
             let err = resolved.require_ready().expect_err("not ready");
-            assert_eq!(err.code(), "inference.missing_model");
+            assert_eq!(err.code(), "inference.unknown_model");
         }
         // A directory at the path is not a model file either.
         let spec = dir.path().to_string_lossy().into_owned();
@@ -994,6 +1133,163 @@ mod tests {
                 "{spec}"
             );
         }
+    }
+
+    // --- details ----------------------------------------------------------------
+
+    /// One `ResolvedModel` per `Availability` variant. `NotDownloaded` is a
+    /// real catalogued resolution (its message reads the catalog entry); the
+    /// rest are stamped onto a real cloud resolution so `spec`/`provider`/
+    /// `name` are the resolver's own.
+    fn one_of_each_availability(registry: &ModelRegistry) -> Vec<ResolvedModel> {
+        let base = resolve_in(registry, true, true, "openai:m", None);
+        let mut models: Vec<ResolvedModel> = [
+            Availability::Ready,
+            Availability::NotInCatalog,
+            Availability::PathMissing,
+            Availability::TaskNotSupported {
+                requested: ModelUse::Tokenize,
+            },
+            Availability::LocalExecutionNotBuilt,
+            Availability::ProviderNotBuilt,
+            Availability::NetworkDisabled,
+            Availability::KeyMissing {
+                env_var: "OPENAI_API_KEY",
+                config_key: "openai.api_key".to_owned(),
+            },
+        ]
+        .into_iter()
+        .map(|availability| ResolvedModel {
+            availability,
+            ..base.clone()
+        })
+        .collect();
+        let not_downloaded = resolve_in(registry, true, true, "miniLM", None);
+        assert!(matches!(
+            not_downloaded.availability,
+            Availability::NotDownloaded { .. }
+        ));
+        models.push(not_downloaded);
+        models
+    }
+
+    /// The key set `strata.error.details.inference.v1` promises per
+    /// availability: the three constant keys, plus the payload keys of the
+    /// variants that have one. This is the schema's only definition, so the
+    /// table is spelled out rather than derived.
+    #[test]
+    fn details_serialize_to_the_promised_key_set_for_every_availability() {
+        let (_dir, registry) = registry();
+        let models = one_of_each_availability(&registry);
+        let mut seen = std::collections::HashSet::new();
+        for resolved in &models {
+            let value = serde_json::to_value(resolved.details()).expect("serializable");
+            let object = value.as_object().expect("a JSON object");
+            let mut keys: Vec<&str> = object.keys().map(String::as_str).collect();
+            keys.sort_unstable();
+            let mut expected = vec!["availability", "model", "provider"];
+            match &resolved.availability {
+                Availability::KeyMissing { .. } => expected.extend(["config_key", "key_env_var"]),
+                Availability::NotDownloaded { .. } => expected.extend(["pull_spec", "size_bytes"]),
+                _ => {}
+            }
+            expected.sort_unstable();
+            assert_eq!(keys, expected, "{:?}", resolved.availability);
+            assert_eq!(object["model"], resolved.name.as_str());
+            assert_eq!(object["provider"], resolved.provider.to_string());
+            seen.insert(object["availability"].clone());
+        }
+        // Every variant has its own wire word, and the set covers the enum.
+        assert_eq!(seen.len(), models.len());
+        assert!(seen.contains(&serde_json::json!("not_downloaded")));
+        assert!(seen.contains(&serde_json::json!("key_missing")));
+    }
+
+    #[test]
+    fn details_carry_the_payload_of_the_variants_that_have_one() {
+        let (_dir, registry) = registry();
+        for resolved in one_of_each_availability(&registry) {
+            let details = resolved.details();
+            assert_eq!(details.availability, resolved.availability.kind());
+            match &resolved.availability {
+                Availability::KeyMissing {
+                    env_var,
+                    config_key,
+                } => {
+                    assert_eq!(details.key_env_var.as_deref(), Some(*env_var));
+                    assert_eq!(details.config_key.as_deref(), Some(config_key.as_str()));
+                    assert_eq!(details.pull_spec, None);
+                    assert_eq!(details.size_bytes, None);
+                }
+                Availability::NotDownloaded {
+                    pull_spec,
+                    size_bytes,
+                } => {
+                    assert_eq!(details.pull_spec.as_deref(), Some(pull_spec.as_str()));
+                    assert_eq!(details.size_bytes, Some(*size_bytes));
+                    assert_eq!(details.key_env_var, None);
+                    assert_eq!(details.config_key, None);
+                }
+                _ => {
+                    assert_eq!(details.pull_spec, None);
+                    assert_eq!(details.size_bytes, None);
+                    assert_eq!(details.key_env_var, None);
+                    assert_eq!(details.config_key, None);
+                }
+            }
+            // The executor sets this; the resolver never knows a collection.
+            assert_eq!(details.collection, None);
+        }
+    }
+
+    #[test]
+    fn every_refusal_carries_the_same_details_capability_would_report() {
+        let (_dir, registry) = registry();
+        for resolved in one_of_each_availability(&registry) {
+            match resolved.require_ready() {
+                Ok(()) => assert_eq!(resolved.availability, Availability::Ready),
+                Err(err) => assert_eq!(
+                    err.availability(),
+                    Some(&resolved.details()),
+                    "{:?}",
+                    resolved.availability
+                ),
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_and_not_downloaded_are_different_codes() {
+        // The two halves of what used to be one `missing_model` (#3256): a
+        // name the catalog does not know can never be pulled, a catalogued
+        // model that is not on disk can.
+        let (dir, registry) = registry();
+        let absent = dir
+            .path()
+            .join("absent.gguf")
+            .to_string_lossy()
+            .into_owned();
+        let unknown = [
+            resolve_in(&registry, true, true, "nope", None),
+            resolve_in(&registry, true, true, "tinyllama:q99", None),
+            resolve_in(&registry, true, true, &absent, None),
+        ];
+        for resolved in &unknown {
+            let err = resolved.require_ready().expect_err("not ready");
+            assert_eq!(err.code(), "inference.unknown_model", "{}", resolved.spec);
+            let details = err.availability().expect("carried");
+            assert_eq!(
+                details.pull_spec, None,
+                "nothing to pull for {}",
+                resolved.spec
+            );
+        }
+        let not_downloaded = resolve_in(&registry, true, true, "miniLM", None);
+        let err = not_downloaded.require_ready().expect_err("not ready");
+        assert_eq!(err.code(), "inference.missing_model");
+        let details = err.availability().expect("carried");
+        assert_eq!(details.availability, AvailabilityKind::NotDownloaded);
+        assert_eq!(details.pull_spec.as_deref(), Some("miniLM"));
     }
 
     // --- helpers --------------------------------------------------------------

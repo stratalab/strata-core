@@ -336,7 +336,7 @@ impl InferenceRuntime {
     ///
     /// Goes through the resolver like every other verb (R6), so a pull answers
     /// the same questions in the same order as a load: a malformed spec is
-    /// `invalid_request`, an unknown name `missing_model`, a cloud model
+    /// `invalid_request`, an unknown name `unknown_model`, a cloud model
     /// `unsupported_operation` — not "requires network access" for all three
     /// (#3255). What pull does NOT ask is whether the model can *run* here:
     /// fetching a file needs no local execution and no particular task.
@@ -352,6 +352,7 @@ impl InferenceRuntime {
                      models are fetched to disk.",
                     resolved.spec
                 ),
+                details: Some(Box::new(resolved.details())),
             }),
             // Already on disk: no network needed to say so.
             (
@@ -366,6 +367,7 @@ impl InferenceRuntime {
                     return Err(InferenceError::RegistryFailed {
                         kind: RegistryFailure::DownloadDisabled,
                         message: "model download requires network access".to_owned(),
+                        details: Some(Box::new(resolved.details())),
                     });
                 }
                 #[cfg(feature = "download")]
@@ -394,6 +396,7 @@ impl InferenceRuntime {
                             file = variant.hf_file,
                             repo = entry.hf_repo,
                         ),
+                        details: Some(Box::new(resolved.details())),
                     })
                 }
             }
@@ -1154,12 +1157,14 @@ fn api_key(provider: ProviderKind) -> Result<String, InferenceError> {
         return Err(InferenceError::Unsupported {
             kind: UnsupportedKind::Provider,
             message: "the local provider does not use API keys".to_owned(),
+            details: None,
         });
     }
     let env_var = api_key_env_var(provider);
     std::env::var(env_var).map_err(|_| InferenceError::ProviderFailed {
         kind: ProviderFailure::MissingApiKey,
         message: crate::resolve::missing_api_key_message(provider, env_var),
+        details: None,
     })
 }
 

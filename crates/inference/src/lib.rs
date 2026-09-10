@@ -67,11 +67,11 @@ mod provider;
 ))]
 mod generate;
 
-pub use error::{
-    InferenceError, InferenceErrorClass, ProviderFailure, RegistryFailure, UnsupportedKind,
-};
+pub use error::{InferenceError, ProviderFailure, RegistryFailure, UnsupportedKind};
 pub use registry::{ModelInfo, ModelRegistry, ModelTask};
-pub use resolve::{Availability, ModelSource, ModelUse, ResolvedModel};
+pub use resolve::{
+    Availability, AvailabilityDetails, AvailabilityKind, ModelSource, ModelUse, ResolvedModel,
+};
 pub use runtime::{
     EmbedRequest, EmbedResponse, EmbedRuntimeOutcome, InferenceCapability, InferenceRuntime,
     InferenceRuntimeConfig, InferenceStatus, ModelCacheStatus, ProviderStatus, PullModelOutput,

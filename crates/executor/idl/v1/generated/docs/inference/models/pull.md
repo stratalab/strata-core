@@ -25,6 +25,7 @@ Resolves a catalog name or model spec and downloads the model artifact into the 
 - [`inference.unsupported_operation`](https://stratadb.org/e/inference.unsupported_operation)
 - [`inference.download_disabled`](https://stratadb.org/e/inference.download_disabled)
 - [`inference.missing_model`](https://stratadb.org/e/inference.missing_model)
+- [`inference.unknown_model`](https://stratadb.org/e/inference.unknown_model)
 - [`inference.download_failed`](https://stratadb.org/e/inference.download_failed)
 - [`inference.download_verification_failed`](https://stratadb.org/e/inference.download_verification_failed)
 - [`inference.io_failure`](https://stratadb.org/e/inference.io_failure)

@@ -122,6 +122,7 @@ errors:
   - unavailable.executor.hub_transport
   - inference.unsupported_operation
   - inference.missing_model
+  - inference.unknown_model
   - inference.model_load_failed
   - inference.local_runtime_failed
   - inference.missing_api_key

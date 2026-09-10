@@ -32,6 +32,7 @@ commands:
       - inference.unsupported_operation
       - inference.download_disabled
       - inference.missing_model
+      - inference.unknown_model
       - inference.download_failed
       - inference.download_verification_failed
       - inference.io_failure

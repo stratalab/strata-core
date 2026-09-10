@@ -26,6 +26,7 @@ Scores each candidate passage against a query with a ranking model and returns o
 - [`inference.invalid_request`](https://stratadb.org/e/inference.invalid_request)
 - [`inference.unsupported_operation`](https://stratadb.org/e/inference.unsupported_operation)
 - [`inference.missing_model`](https://stratadb.org/e/inference.missing_model)
+- [`inference.unknown_model`](https://stratadb.org/e/inference.unknown_model)
 - [`inference.model_load_failed`](https://stratadb.org/e/inference.model_load_failed)
 - [`inference.local_runtime_failed`](https://stratadb.org/e/inference.local_runtime_failed)
 - [`inference.registry_corrupt`](https://stratadb.org/e/inference.registry_corrupt)
